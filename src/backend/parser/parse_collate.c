@@ -520,7 +520,14 @@ assign_collations_walker(Node *node, assign_collations_context *context)
 
 				collation = exprCollation((Node *) tent->expr);
 				/* collation doesn't change if it's converted to array */
-				strength = COLLATE_IMPLICIT;
+				if(IsA(tent->expr, CollateExpr))
+				{
+					strength = COLLATE_EXPLICIT;
+				}
+				else
+				{
+					strength = COLLATE_IMPLICIT;
+				}
 				location = exprLocation((Node *) tent->expr);
 			}
 			break;
