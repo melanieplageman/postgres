@@ -3661,6 +3661,23 @@ eval_const_expressions_mutator(Node *node,
 													  context);
 			}
 			break;
+		case T_SubLink:
+		{
+			SubLink *sublink = (SubLink *) node;
+			OpExpr *testexpr = (OpExpr *)sublink->testexpr;
+			/* if testexpr has an arg that is a const and the const is null, */
+			/* then simplify it and remove the entire sublink check if sublink */
+			/* is type ANY */
+			if (testexpr && sublink->subLinkType == ANY_SUBLINK)
+			{
+				/* try to simplify, same as would with opexpr, if it comes back */
+				/* as a lone const, then return the testexpression */
+				OpExpr *temp = copyObject(testexpr);
+				Node *simple = eval_const_expressions_mutator(temp, context);
+				if (simple->type == T_Const)
+					return simple;
+			}
+		}
 		default:
 			break;
 	}
