@@ -1146,6 +1146,16 @@ preprocess_qual_conditions(PlannerInfo *root, Node *jtnode)
 		foreach(l, f->fromlist)
 			preprocess_qual_conditions(root, lfirst(l));
 
+		if (f->quals && IsA(f->quals, SubLink))
+		{
+			SubLink *sublink = (SubLink *)f->quals;
+			if (sublink->subLinkType == ANY_SUBLINK)
+			{
+				Node *simple = eval_const_expressions(root, sublink->testexpr);
+				if (IsA(simple, Const))
+					f->quals = simple;
+			}
+		}
 		f->quals = preprocess_expression(root, f->quals, EXPRKIND_QUAL);
 	}
 	else if (IsA(jtnode, JoinExpr))
