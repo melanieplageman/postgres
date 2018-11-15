@@ -2285,6 +2285,28 @@ rowcomparesel(PlannerInfo *root,
 	return s1;
 }
 
+// big comment to put back
+/*
+ * We do not have MCV lists for both sides.  Estimate the join
+ * selectivity as MIN(1/nd1,1/nd2)*(1-nullfrac1)*(1-nullfrac2). This
+ * is plausible if we assume that the join operator is strict and the
+ * non-null values are about equally distributed: a given non-null
+ * tuple of rel1 will join to either zero or N2*(1-nullfrac2)/nd2 rows
+ * of rel2, so total join rows are at most
+ * N1*(1-nullfrac1)*N2*(1-nullfrac2)/nd2 giving a join selectivity of
+ * not more than (1-nullfrac1)*(1-nullfrac2)/nd2. By the same logic it
+ * is not more than (1-nullfrac1)*(1-nullfrac2)/nd1, so the expression
+ * with MIN() is an upper bound.  Using the MIN() means we estimate
+ * from the point of view of the relation with smaller nd (since the
+ * larger nd is determining the MIN).  It is reasonable to assume that
+ * most tuples in this rel will have join partners, so the bound is
+ * probably reasonably tight and should be taken as-is.
+ *
+ * XXX Can we be smarter if we have an MCV list for just one side? It
+ * seems that if we assume equal distribution for the other side, we
+ * end up with the same answer anyway.
+ */
+
 /*
  *		eqjoinsel		- Join selectivity of "="
  */
@@ -2305,6 +2327,8 @@ eqjoinsel(PG_FUNCTION_ARGS)
 	VariableStatData vardata2;
 	double		nd1;
 	double		nd2;
+	double		nullfrac1;
+	double		nullfrac2;
 	bool		isdefault1;
 	bool		isdefault2;
 	Oid			opfuncoid;
@@ -2317,45 +2341,65 @@ eqjoinsel(PG_FUNCTION_ARGS)
 	bool		join_is_reversed;
 	RelOptInfo *inner_rel;
 
+	/* get var info and set statstuple for later obtaining nullfrac, MCVs, and NDVs */
 	get_join_variables(root, args, sjinfo,
 					   &vardata1, &vardata2, &join_is_reversed);
 
+	/* get NDVs from vardata->statsTuple */
 	nd1 = get_variable_numdistinct(&vardata1, &isdefault1);
 	nd2 = get_variable_numdistinct(&vardata2, &isdefault2);
+
+	if (HeapTupleIsValid(vardata1.statsTuple))
+	{
+		stats1 = (Form_pg_statistic) GETSTRUCT(vardata1.statsTuple);
+	}
+	if (HeapTupleIsValid(vardata2.statsTuple))
+	{
+		stats2 = (Form_pg_statistic) GETSTRUCT(vardata2.statsTuple);
+	}
+
+	/* note we allow use of nullfrac regardless of security check */
+	nullfrac1 = stats1 ? stats1->stanullfrac : 0.0;
+	nullfrac2 = stats2 ? stats2->stanullfrac : 0.0;
 
 	opfuncoid = get_opcode(operator);
 
 	memset(&sslot1, 0, sizeof(sslot1));
 	memset(&sslot2, 0, sizeof(sslot2));
 
-	if (HeapTupleIsValid(vardata1.statsTuple))
-	{
-		/* note we allow use of nullfrac regardless of security check */
-		stats1 = (Form_pg_statistic) GETSTRUCT(vardata1.statsTuple);
-		if (statistic_proc_security_check(&vardata1, opfuncoid))
+	/* get the MCVs */
+	if (stats1 && statistic_proc_security_check(&vardata1, opfuncoid))
 			have_mcvs1 = get_attstatsslot(&sslot1, vardata1.statsTuple,
 										  STATISTIC_KIND_MCV, InvalidOid,
 										  ATTSTATSSLOT_VALUES | ATTSTATSSLOT_NUMBERS);
-	}
 
-	if (HeapTupleIsValid(vardata2.statsTuple))
-	{
-		/* note we allow use of nullfrac regardless of security check */
-		stats2 = (Form_pg_statistic) GETSTRUCT(vardata2.statsTuple);
-		if (statistic_proc_security_check(&vardata2, opfuncoid))
+	if (stats2 && statistic_proc_security_check(&vardata2, opfuncoid))
 			have_mcvs2 = get_attstatsslot(&sslot2, vardata2.statsTuple,
 										  STATISTIC_KIND_MCV, InvalidOid,
 										  ATTSTATSSLOT_VALUES | ATTSTATSSLOT_NUMBERS);
-	}
 
-	/* We need to compute the inner-join selectivity in all cases */
-	selec_inner = eqjoinsel_inner(opfuncoid,
-								  &vardata1, &vardata2,
-								  nd1, nd2,
-								  isdefault1, isdefault2,
-								  &sslot1, &sslot2,
-								  stats1, stats2,
-								  have_mcvs1, have_mcvs2);
+	/* set the default selectivity which we won't use if we get MCVs */
+	double default_selec;
+	default_selec = (1.0 - nullfrac1) * (1.0 - nullfrac2);
+	if (nd1 > nd2)
+		default_selec /= nd1;
+	else
+		default_selec /= nd2;
+
+	/* compute the selectivity */
+	if (have_mcvs1 && have_mcvs2)
+	{
+		/* We need to compute the inner-join selectivity in all cases */
+		selec_inner = eqjoinsel_inner(opfuncoid,
+									  &vardata1, &vardata2,
+									  nd1, nd2,
+									  isdefault1, isdefault2,
+									  &sslot1, &sslot2,
+									  stats1, stats2,
+									  have_mcvs1, have_mcvs2);
+	}
+	else
+		selec_inner = default_selec;
 
 	switch (sjinfo->jointype)
 	{
@@ -2446,7 +2490,12 @@ eqjoinsel_inner(Oid opfuncoid,
 {
 	double		selec;
 
-	if (have_mcvs1 && have_mcvs2)
+	if (!have_mcvs1 || !have_mcvs2)
+	{
+		elog(ERROR, "must have mcvs");
+		return 0;
+	}
+	else
 	{
 		/*
 		 * We have most-common-value lists for both relations.  Run through
@@ -2572,40 +2621,10 @@ eqjoinsel_inner(Oid opfuncoid,
 		 * the relation with smaller nd.
 		 */
 		selec = (totalsel1 < totalsel2) ? totalsel1 : totalsel2;
-	}
-	else
-	{
-		/*
-		 * We do not have MCV lists for both sides.  Estimate the join
-		 * selectivity as MIN(1/nd1,1/nd2)*(1-nullfrac1)*(1-nullfrac2). This
-		 * is plausible if we assume that the join operator is strict and the
-		 * non-null values are about equally distributed: a given non-null
-		 * tuple of rel1 will join to either zero or N2*(1-nullfrac2)/nd2 rows
-		 * of rel2, so total join rows are at most
-		 * N1*(1-nullfrac1)*N2*(1-nullfrac2)/nd2 giving a join selectivity of
-		 * not more than (1-nullfrac1)*(1-nullfrac2)/nd2. By the same logic it
-		 * is not more than (1-nullfrac1)*(1-nullfrac2)/nd1, so the expression
-		 * with MIN() is an upper bound.  Using the MIN() means we estimate
-		 * from the point of view of the relation with smaller nd (since the
-		 * larger nd is determining the MIN).  It is reasonable to assume that
-		 * most tuples in this rel will have join partners, so the bound is
-		 * probably reasonably tight and should be taken as-is.
-		 *
-		 * XXX Can we be smarter if we have an MCV list for just one side? It
-		 * seems that if we assume equal distribution for the other side, we
-		 * end up with the same answer anyway.
-		 */
-		double		nullfrac1 = stats1 ? stats1->stanullfrac : 0.0;
-		double		nullfrac2 = stats2 ? stats2->stanullfrac : 0.0;
-
-		selec = (1.0 - nullfrac1) * (1.0 - nullfrac2);
-		if (nd1 > nd2)
-			selec /= nd1;
-		else
-			selec /= nd2;
+		return selec;
 	}
 
-	return selec;
+
 }
 
 /*
