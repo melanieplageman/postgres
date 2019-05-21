@@ -2336,6 +2336,20 @@ eval_const_expressions_mutator(Node *node,
 		return NULL;
 	switch (nodeTag(node))
 	{
+		case T_SubLink:
+		{
+			SubLink *sublink = (SubLink *)node;
+			if (sublink->subLinkType == ANY_SUBLINK)
+			{
+				Assert(sublink->testexpr);
+				Node *simple = eval_const_expressions_mutator(sublink->testexpr, context);
+				if (IsA(simple, Const))
+				{
+					if(((Const *)simple)->constisnull)
+						return simple;
+				}
+			}
+		}
 		case T_Param:
 			{
 				Param	   *param = (Param *) node;
