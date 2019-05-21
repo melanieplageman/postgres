@@ -1222,6 +1222,8 @@ convert_ANY_sublink_to_join(PlannerInfo *root, SubLink *sublink,
 	List	   *subquery_vars;
 	Node	   *quals;
 	ParseState *pstate;
+	ListCell   *arg;
+	bool has_const;
 
 	Assert(sublink->subLinkType == ANY_SUBLINK);
 
@@ -1237,14 +1239,29 @@ convert_ANY_sublink_to_join(PlannerInfo *root, SubLink *sublink,
 	 * it's not gonna be a join.  (Note that it won't have Vars referring to
 	 * the subquery, rather Params.)
 	 */
+	has_const = false;
 	upper_varnos = pull_varnos(sublink->testexpr);
 	if (bms_is_empty(upper_varnos))
-		return NULL;
+	{
+		if (IsA(sublink->testexpr, OpExpr))
+		{
+			OpExpr *temp = (OpExpr *)sublink->testexpr;
+			foreach(arg, temp->args)
+			{
+				if (IsA(lfirst(arg), Const))
+					has_const = true;
+			}
+			if (!has_const)
+				return NULL;
+		}
+		else
+			return NULL;
+	}
 
 	/*
 	 * However, it can't refer to anything outside available_rels.
 	 */
-	if (!bms_is_subset(upper_varnos, available_rels))
+	if (!bms_is_subset(upper_varnos, available_rels) && !has_const)
 		return NULL;
 
 	/*
