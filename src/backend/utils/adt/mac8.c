@@ -21,10 +21,14 @@
 
 #include "postgres.h"
 
+#include "lib/hyperloglog.h"
 #include "libpq/pqformat.h"
+#include "port/pg_bswap.h"
 #include "utils/builtins.h"
+#include "utils/guc.h"
 #include "utils/hashutils.h"
 #include "utils/inet.h"
+#include "utils/sortsupport.h"
 
 /*
  *	Utility macros used for sorting and comparing:
@@ -48,6 +52,20 @@ static const signed char hexlookup[128] = {
 	-1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1,
 };
 
+/* sortsupport for macaddr8 */
+typedef struct
+{
+	int64		input_count;	/* number of non-null values seen */
+	bool		estimating;		/* true if estimating cardinality */
+
+	hyperLogLogState abbr_card; /* cardinality estimator */
+} macaddr8_sortsupport_state;
+
+static int32 macaddr8_cmp_internal(macaddr8 *a1, macaddr8 *a2);
+static int	macaddr8_fast_cmp(Datum x, Datum y, SortSupport ssup);
+static int	macaddr8_cmp_abbrev(Datum x, Datum y, SortSupport ssup);
+static bool macaddr8_abbrev_abort(int memtupcount, SortSupport ssup);
+static Datum macaddr8_abbrev_convert(Datum original, SortSupport ssup);
 /*
  * hex2_to_uchar - convert 2 hex digits to a byte (unsigned char)
  *
@@ -574,4 +592,189 @@ macaddr8tomacaddr(PG_FUNCTION_ARGS)
 	result->f = addr->h;
 
 	PG_RETURN_MACADDR_P(result);
+}
+
+/*
+ * SortSupport strategy function. Populates a SortSupport struct with the
+ * information necessary to use comparison by abbreviated keys.
+ */
+Datum
+macaddr8_sortsupport(PG_FUNCTION_ARGS)
+{
+	SortSupport ssup = (SortSupport) PG_GETARG_POINTER(0);
+
+	ssup->comparator = macaddr8_fast_cmp;
+	ssup->ssup_extra = NULL;
+
+	if (ssup->abbreviate)
+	{
+		macaddr8_sortsupport_state *uss;
+		MemoryContext oldcontext;
+
+		oldcontext = MemoryContextSwitchTo(ssup->ssup_cxt);
+
+		uss = palloc(sizeof(macaddr8_sortsupport_state));
+		uss->input_count = 0;
+		uss->estimating = true;
+		initHyperLogLog(&uss->abbr_card, 10);
+
+		ssup->ssup_extra = uss;
+
+		ssup->comparator = macaddr8_cmp_abbrev;
+		ssup->abbrev_converter = macaddr8_abbrev_convert;
+		ssup->abbrev_abort = macaddr8_abbrev_abort;
+		ssup->abbrev_full_comparator = macaddr8_fast_cmp;
+
+		MemoryContextSwitchTo(oldcontext);
+	}
+
+	PG_RETURN_VOID();
+}
+
+/*
+ * SortSupport "traditional" comparison function. Pulls two 8-byte MAC
+ * addresses from the heap and runs a standard comparison on them.
+ */
+static int
+macaddr8_fast_cmp(Datum x, Datum y, SortSupport ssup)
+{
+	macaddr8    *arg1 = DatumGetMacaddr8P(x);
+	macaddr8    *arg2 = DatumGetMacaddr8P(y);
+
+	return macaddr8_cmp_internal(arg1, arg2);
+}
+
+/*
+ * SortSupport abbreviated key comparison function. Compares two 8-byte MAC
+ * addresses quickly by treating them like integers, and without having to go
+ * to the heap.
+ */
+static int
+macaddr8_cmp_abbrev(Datum x, Datum y, SortSupport ssup)
+{
+	if (x > y)
+		return 1;
+	else if (x == y)
+		return 0;
+	else
+		return -1;
+}
+
+/*
+ * Callback for estimating effectiveness of abbreviated key optimization.
+ *
+ * We pay no attention to the cardinality of the non-abbreviated data, because
+ * there is no equality fast-path within authoritative macaddr8 comparator.
+ */
+static bool
+macaddr8_abbrev_abort(int memtupcount, SortSupport ssup)
+{
+	macaddr8_sortsupport_state *uss = ssup->ssup_extra;
+	double		abbr_card;
+
+	if (memtupcount < 10000 || uss->input_count < 10000 || !uss->estimating)
+		return false;
+
+	abbr_card = estimateHyperLogLog(&uss->abbr_card);
+
+	/*
+	 * If we have >100k distinct values, then even if we were sorting many
+	 * billion rows we'd likely still break even, and the penalty of undoing
+	 * that many rows of abbrevs would probably not be worth it. At this point
+	 * we stop counting because we know that we're now fully committed.
+	 */
+	if (abbr_card > 100000.0)
+	{
+#ifdef TRACE_SORT
+		if (trace_sort)
+			elog(LOG,
+				 "macaddr8_abbrev: estimation ends at cardinality %f"
+				 " after " INT64_FORMAT " values (%d rows)",
+				 abbr_card, uss->input_count, memtupcount);
+#endif
+		uss->estimating = false;
+		return false;
+	}
+
+	/*
+	 * Target minimum cardinality is 1 per ~2k of non-null inputs. 0.5 row
+	 * fudge factor allows us to abort earlier on genuinely pathological data
+	 * where we've had exactly one abbreviated value in the first 2k
+	 * (non-null) rows.
+	 */
+	if (abbr_card < uss->input_count / 2000.0 + 0.5)
+	{
+#ifdef TRACE_SORT
+		if (trace_sort)
+			elog(LOG,
+				 "macaddr8_abbrev: aborting abbreviation at cardinality %f"
+				 " below threshold %f after " INT64_FORMAT " values (%d rows)",
+				 abbr_card, uss->input_count / 2000.0 + 0.5, uss->input_count,
+				 memtupcount);
+#endif
+		return true;
+	}
+
+#ifdef TRACE_SORT
+	if (trace_sort)
+		elog(LOG,
+			 "macaddr8_abbrev: cardinality %f after " INT64_FORMAT
+			 " values (%d rows)", abbr_card, uss->input_count, memtupcount);
+#endif
+
+	return false;
+}
+
+/*
+ * SortSupport conversion routine. Converts original macaddr8 representation
+ * to abbreviated key representation.
+ *
+ * Packs the bytes of a 8-byte MAC address into a Datum and treats it as an
+ * unsigned integer for purposes of comparison. The integer is converted to
+ * native endianness to facilitate easy comparison.
+ */
+static Datum
+macaddr8_abbrev_convert(Datum original, SortSupport ssup)
+{
+	macaddr8_sortsupport_state *uss = ssup->ssup_extra;
+	macaddr8    *authoritative = DatumGetMacaddr8P(original);
+	Datum		res;
+
+#if SIZEOF_DATUM == 8
+	memset(&res, 0, SIZEOF_DATUM);
+	memcpy(&res, authoritative, sizeof(macaddr8));
+#else							/* SIZEOF_DATUM != 8 */
+	memcpy(&res, authoritative, SIZEOF_DATUM);
+#endif
+	uss->input_count += 1;
+
+	/*
+	 * Cardinality estimation. The estimate uses uint32, so on a 64-bit
+	 * architecture, XOR the two 32-bit halves together to produce slightly
+	 * more entropy.
+	 */
+	if (uss->estimating)
+	{
+		uint32		tmp;
+
+#if SIZEOF_DATUM == 8
+		tmp = (uint32) res ^ (uint32) ((uint64) res >> 32);
+#else							/* SIZEOF_DATUM != 8 */
+		tmp = (uint32) res;
+#endif
+
+		addHyperLogLog(&uss->abbr_card, DatumGetUInt32(hash_uint32(tmp)));
+	}
+
+	/*
+	 * Byteswap on little-endian machines.
+	 *
+	 * This is needed so that macaddr8_cmp_abbrev() (an unsigned integer 3-way
+	 * comparator) works correctly on all platforms. Without this, the
+	 * comparator would have to call memcmp() with a pair of pointers to the
+	 * first byte of each abbreviated key, which is slower.
+	 */
+	res = DatumBigEndianToNative(res);
+
+	return res;
 }

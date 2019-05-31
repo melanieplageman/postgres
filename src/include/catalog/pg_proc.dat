@@ -3865,6 +3865,9 @@
 { oid => '4125', descr => 'set 7th bit in macaddr8',
   proname => 'macaddr8_set7bit', prorettype => 'macaddr8',
   proargtypes => 'macaddr8', prosrc => 'macaddr8_set7bit' },
+{ oid => '4142', descr => 'sort support',
+  proname => 'macaddr8_sortsupport', prorettype => 'void',
+  proargtypes => 'internal', prosrc => 'macaddr8_sortsupport' },
 
 # for inet type support
 { oid => '910', descr => 'I/O',
