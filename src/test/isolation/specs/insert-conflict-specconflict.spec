@@ -30,6 +30,8 @@ setup
     RETURN $1;
     END;$$;
 
+    CREATE OR REPLACE FUNCTION ctoast_large_val() RETURNS TEXT LANGUAGE SQL AS 'select array_agg(md5(g::text))::text from generate_series(1, 256) g';
+
     CREATE TABLE upserttest(key text, data text);
 
     CREATE UNIQUE INDEX upserttest_key_uniq_idx ON upserttest((blurt_and_lock(key)));
@@ -55,6 +57,7 @@ step "controller_unlock_2_3" { SELECT pg_advisory_unlock(2, 3); }
 step "controller_lock_2_4" { SELECT pg_advisory_lock(2, 4); }
 step "controller_unlock_2_4" { SELECT pg_advisory_unlock(2, 4); }
 step "controller_show" {SELECT * FROM upserttest; }
+step "controller_show_count" {SELECT COUNT(*) FROM upserttest; }
 step "controller_print_speculative_locks" { SELECT locktype,classid,objid,mode,granted FROM pg_locks WHERE locktype='speculative
 token' ORDER BY granted; }
 
@@ -68,6 +71,7 @@ step "s1_begin"  { BEGIN; }
 step "s1_create_non_unique_index" { CREATE INDEX upserttest_key_idx ON upserttest((blurt_and_lock2(key))); }
 step "s1_confirm_index_order" { SELECT 'upserttest_key_uniq_idx'::regclass::int8 < 'upserttest_key_idx'::regclass::int8; }
 step "s1_upsert" { INSERT INTO upserttest(key, data) VALUES('k1', 'inserted s1') ON CONFLICT (blurt_and_lock(key)) DO UPDATE SET data = upserttest.data || ' with conflict update s1'; }
+step "s1_insert_toast" { INSERT INTO upserttest VALUES('k2', ctoast_large_val()) ON CONFLICT DO NOTHING; }
 step "s1_commit"  { COMMIT; }
 
 session "s2"
@@ -78,6 +82,7 @@ setup
 }
 step "s2_begin"  { BEGIN; }
 step "s2_upsert" { INSERT INTO upserttest(key, data) VALUES('k1', 'inserted s2') ON CONFLICT (blurt_and_lock(key)) DO UPDATE SET data = upserttest.data || ' with conflict update s2'; }
+step "s2_insert_toast" { INSERT INTO upserttest VALUES('k2', ctoast_large_val()) ON CONFLICT DO NOTHING; }
 step "s2_commit"  { COMMIT; }
 
 # Test that speculative locks are correctly acquired and released, s2
@@ -129,6 +134,31 @@ permutation
    "controller_unlock_2_2"
    # This should now show a successful UPSERT
    "controller_show"
+
+# Test that speculatively inserted toast rows do not cause conflicts.
+# s1 inserts successfully, s2 does not.
+permutation
+   # acquire a number of locks, to control execution flow - the
+   # blurt_and_lock function acquires advisory locks that allow us to
+   # continue after a) the optimistic conflict probe b) after the
+   # insertion of the speculative tuple.
+   "controller_locks"
+   "controller_show"
+   "s1_insert_toast" "s2_insert_toast"
+   "controller_show"
+   # Switch both sessions to wait on the other lock next time (the speculative insertion)
+   "controller_unlock_1_1" "controller_unlock_2_1"
+   # Allow both sessions to continue
+   "controller_unlock_1_3" "controller_unlock_2_3"
+   "controller_show"
+   # Allow the first session to finish insertion
+   "controller_unlock_1_2"
+   # This should now show that 1 additional tuple was inserted successfully
+   "controller_show_count"
+   # Allow the second session to finish insertion and kill the speculatively inserted tuple
+   "controller_unlock_2_2"
+   # This should show the same number of tuples as before s2 inserted
+   "controller_show_count"
 
 # Test that speculative locks are correctly acquired and released, s2
 # inserts, s1 updates.  With the added complication that transactions
