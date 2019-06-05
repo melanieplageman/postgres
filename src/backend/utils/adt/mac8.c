@@ -105,7 +105,11 @@ macaddr8_in(PG_FUNCTION_ARGS)
 {
 	const unsigned char *str = (unsigned char *) PG_GETARG_CSTRING(0);
 	const unsigned char *ptr = str;
-	macaddr8   *result;
+#if SIZEOF_DATUM == 8
+	uint64_t result = 0;
+#else /* SIZEOF_DATUM != 8 */
+	macaddr8 *result;
+#endif
 	unsigned char a = 0,
 				b = 0,
 				c = 0,
@@ -221,6 +225,18 @@ macaddr8_in(PG_FUNCTION_ARGS)
 				 errmsg("invalid input syntax for type %s: \"%s\"", "macaddr8",
 						str)));
 
+#if SIZEOF_DATUM == 8
+	result = a;
+	result = (result << 8) | b;
+	result = (result << 8) | c;
+	result = (result << 8) | d;
+	result = (result << 8) | e;
+	result = (result << 8) | f;
+	result = (result << 8) | g;
+	result = (result << 8) | h;
+
+	PG_RETURN_MACADDR8(result);
+#else
 	result = (macaddr8 *) palloc0(sizeof(macaddr8));
 
 	result->a = a;
@@ -233,6 +249,7 @@ macaddr8_in(PG_FUNCTION_ARGS)
 	result->h = h;
 
 	PG_RETURN_MACADDR8_P(result);
+#endif
 }
 
 /*
@@ -241,15 +258,31 @@ macaddr8_in(PG_FUNCTION_ARGS)
 Datum
 macaddr8_out(PG_FUNCTION_ARGS)
 {
-	macaddr8   *addr = PG_GETARG_MACADDR8_P(0);
 	char	   *result;
 
 	result = (char *) palloc(32);
+#if SIZEOF_DATUM == 8
+	uint64_t addr = PG_GETARG_MACADDR8(0);
+	unsigned char h = (addr >> 0) & 0xFF;
+	unsigned char g = (addr >> 8) & 0xFF;
+	unsigned char f = (addr >> 16) & 0xFF;
+	unsigned char e = (addr >> 24) & 0xFF;
+	unsigned char d = (addr >> 32) & 0xFF;
+	unsigned char c = (addr >> 40) & 0xFF;
+	unsigned char b = (addr >> 48) & 0xFF;
+	unsigned char a = (addr >> 56) & 0xFF;
+
+	snprintf(result, 32, "%02x:%02x:%02x:%02x:%02x:%02x:%02x:%02x",
+			a,b,c,d,e,f,g,h);
+
+#else
+	macaddr8   *addr = PG_GETARG_MACADDR8_P(0);
 
 	snprintf(result, 32, "%02x:%02x:%02x:%02x:%02x:%02x:%02x:%02x",
 			 addr->a, addr->b, addr->c, addr->d,
 			 addr->e, addr->f, addr->g, addr->h);
 
+#endif
 	PG_RETURN_CSTRING(result);
 }
 

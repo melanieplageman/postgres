@@ -139,6 +139,12 @@ typedef struct macaddr8
 #define PG_GETARG_MACADDR8_P(n) DatumGetMacaddr8P(PG_GETARG_DATUM(n))
 #define PG_RETURN_MACADDR8_P(x) return Macaddr8PGetDatum(x)
 
+/* TODO(MP): macaddr8 is a fixed-length pass-by-value datatype */
+#define DatumGetMacaddr8(X)		DatumGetUInt64(X)
+#define Macaddr8GetDatum(X)		UInt64GetDatum(X)
+#define PG_GETARG_MACADDR8(n)	DatumGetMacaddr8(PG_GETARG_DATUM(n))
+#define PG_RETURN_MACADDR8(x)	return Macaddr8GetDatum(x)
+
 /*
  * Support functions in network.c
  */
