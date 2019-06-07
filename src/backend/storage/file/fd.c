@@ -1720,6 +1720,7 @@ FileClose(File file)
 			   file, VfdCache[file].fileName));
 
 	vfdP = &VfdCache[file];
+	vfdP->fdstate &= ~FD_DELETE_AT_CLOSE;
 
 	if (!FileIsNotOpen(file))
 	{
