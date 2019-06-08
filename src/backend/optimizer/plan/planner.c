@@ -37,6 +37,7 @@
 #include "lib/knapsack.h"
 #include "nodes/makefuncs.h"
 #include "nodes/nodeFuncs.h"
+#include "nodes/pg_list.h"
 #ifdef OPTIMIZER_DEBUG
 #include "nodes/print.h"
 #endif
@@ -559,6 +560,33 @@ standard_planner(Query *parse, int cursorOptions, ParamListInfo boundParams)
 
 	if (glob->partition_directory != NULL)
 		DestroyPartitionDirectory(glob->partition_directory);
+// (gdb) p *(Var *)(((PathTarget *)(((RelOptInfo *) root->simple_rel_array[2])->reltarget))->exprs)->head->data.ptr_value
+//$54 = {xpr = {type = T_Var}, varno = 2, varattno = 1, vartype = 23, vartypmod = -1, varcollid = 0, varlevelsup = 0, varnoold = 2, varoattno = 1, location = 38}
+	RelOptInfo **rels = root->simple_rel_array;
+	result->query_col_set = palloc(sizeof(bool *) * root->simple_rel_array_size + 1);
+	for (size_t i = 1; i < root->simple_rel_array_size; i++)
+	{
+		RelOptInfo *rel = rels[i];
+		/*
+		 * simple_rel_array will only contain non-NULL RelOptInfos for baserels
+		 */
+		if (rel == NULL)
+			continue;
+		PathTarget *target = rel->reltarget;
+		bool *a_rel_cols = palloc(sizeof(bool) * rel->max_attr + 1);
+		ListCell *cell;
+		foreach(cell, target->exprs)
+		{
+			Expr *expr = lfirst(cell);
+			if (IsA(expr, Var))
+			{
+				Var *col = (Var *)expr;
+				Assert(col->varattno <= rel->max_attr);
+				a_rel_cols[col->varattno] = true;
+			}
+		}
+		result->query_col_set[i] = a_rel_cols;
+	}
 
 	return result;
 }
