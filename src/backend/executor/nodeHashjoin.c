@@ -127,6 +127,7 @@
 #define HJ_FILL_OUTER_TUPLE		4
 #define HJ_FILL_INNER_TUPLES	5
 #define HJ_NEED_NEW_BATCH		6
+#define HJ_ADAPTIVE_EMIT_UNMATCHED 7
 
 /* Returns true if doing null-fill on outer relation */
 #define HJ_FILL_OUTER(hjstate)	((hjstate)->hj_NullInnerTupleSlot != NULL)
@@ -143,10 +144,13 @@ static TupleTableSlot *ExecHashJoinGetSavedTuple(HashJoinState *hjstate,
 												 BufFile *file,
 												 uint32 *hashvalue,
 												 TupleTableSlot *tupleSlot);
-static bool ExecHashJoinNewBatch(HashJoinState *hjstate);
+static bool ExecHashJoinAdvanceBatch(HashJoinState *hjstate);
 static bool ExecParallelHashJoinNewBatch(HashJoinState *hjstate);
 static void ExecParallelHashJoinPartitionOuter(HashJoinState *node);
+static bool LoadInnerBatch(HashJoinState *hjstate);
+static TupleTableSlot *ExecHashJoinGetOuterTupleAtOffset(HashJoinState *hjstate, off_t offset);
 
+static	OuterOffsetMatchStatus *cursor = NULL;
 
 /* ----------------------------------------------------------------
  *		ExecHashJoinImpl
@@ -176,6 +180,7 @@ ExecHashJoinImpl(PlanState *pstate, bool parallel)
 	int			batchno;
 	ParallelHashJoinState *parallel_state;
 
+
 	/*
 	 * get information from HashJoin node
 	 */
@@ -198,6 +203,7 @@ ExecHashJoinImpl(PlanState *pstate, bool parallel)
 	 */
 	for (;;)
 	{
+
 		/*
 		 * It's possible to iterate this loop many times before returning a
 		 * tuple, in some pathological cases such as needing to move much of
@@ -368,9 +374,13 @@ ExecHashJoinImpl(PlanState *pstate, bool parallel)
 						node->hj_JoinState = HJ_NEED_NEW_BATCH;
 					continue;
 				}
-
+				/*
+				 * only initialize this to false during the first chunk --
+				 * otherwise, we will be resetting a tuple that had a match to false
+				 */
+				if (node->first_chunk || hashtable->curbatch == 0)
+					node->hj_MatchedOuter = false;
 				econtext->ecxt_outertuple = outerTupleSlot;
-				node->hj_MatchedOuter = false;
 
 				/*
 				 * Find the corresponding bucket for this tuple in the main
@@ -408,6 +418,47 @@ ExecHashJoinImpl(PlanState *pstate, bool parallel)
 
 					/* Loop around, staying in HJ_NEED_NEW_OUTER state */
 					continue;
+				}
+
+				/*
+				 * We need to construct the linked list of match statuses on the first chunk.
+				 * Note that node->first_chunk isn't true until HJ_NEED_NEW_BATCH
+				 * so this means that we don't construct this list on batch 0.
+				 */
+				if (node->first_chunk)
+				{
+					BufFile *outerFile = hashtable->outerBatchFile[batchno];
+
+					if (outerFile != NULL)
+					{
+						OuterOffsetMatchStatus *outerOffsetMatchStatus = NULL;
+
+						outerOffsetMatchStatus = palloc(sizeof(struct OuterOffsetMatchStatus));
+						outerOffsetMatchStatus->match_status = false;
+						outerOffsetMatchStatus->outer_tuple_start_offset = 0L;
+						outerOffsetMatchStatus->next = NULL;
+
+						if (node->first_outer_offset_match_status != NULL)
+						{
+							node->current_outer_offset_match_status->next = outerOffsetMatchStatus;
+							node->current_outer_offset_match_status = outerOffsetMatchStatus;
+						}
+						else
+						{
+							node->first_outer_offset_match_status = outerOffsetMatchStatus;
+							node->current_outer_offset_match_status = node->first_outer_offset_match_status;
+						}
+
+						outerOffsetMatchStatus->outer_tuple_val = DatumGetInt32(outerTupleSlot->tts_values[0]);
+						outerOffsetMatchStatus->outer_tuple_start_offset = node->HJ_NEED_NEW_OUTER_tup_start;
+					}
+				}
+				else if (node->hj_HashTable->curbatch > 0)
+				{
+					if (node->current_outer_offset_match_status == NULL)
+						node->current_outer_offset_match_status = node->first_outer_offset_match_status;
+					else
+						node->current_outer_offset_match_status = node->current_outer_offset_match_status->next;
 				}
 
 				/* OK, let's scan the bucket for matches */
@@ -455,6 +506,8 @@ ExecHashJoinImpl(PlanState *pstate, bool parallel)
 				{
 					node->hj_MatchedOuter = true;
 					HeapTupleHeaderSetMatch(HJTUPLE_MINTUPLE(node->hj_CurTuple));
+					if (node->current_outer_offset_match_status)
+						node->current_outer_offset_match_status->match_status = true;
 
 					/* In an antijoin, we never return a matched tuple */
 					if (node->js.jointype == JOIN_ANTI)
@@ -492,6 +545,8 @@ ExecHashJoinImpl(PlanState *pstate, bool parallel)
 				if (!node->hj_MatchedOuter &&
 					HJ_FILL_OUTER(node))
 				{
+					if (node->current_outer_offset_match_status)
+						break;
 					/*
 					 * Generate a fake join tuple with nulls for the inner
 					 * tuple, and return it if it passes the non-join quals.
@@ -543,10 +598,54 @@ ExecHashJoinImpl(PlanState *pstate, bool parallel)
 				}
 				else
 				{
-					if (!ExecHashJoinNewBatch(node))
-						return NULL;	/* end of parallel-oblivious join */
+					if (node->inner_page_offset == 0L)
+					{
+						/*
+						 * This case is entered on two separate conditions:
+						 * when we need to load the first batch ever in this hash join;
+						 * or when we've exhausted the outer side of the current batch.
+						 */
+						if (node->first_outer_offset_match_status && HJ_FILL_OUTER(node))
+						{
+							node->hj_JoinState = HJ_ADAPTIVE_EMIT_UNMATCHED;
+							cursor = node->first_outer_offset_match_status;
+							break;
+						}
+
+						if (!ExecHashJoinAdvanceBatch(node))
+							return NULL;    /* end of parallel-oblivious join */
+					}
+					LoadInnerBatch(node);
+
+					if (node->first_chunk)
+						node->first_outer_offset_match_status = NULL;
+					node->current_outer_offset_match_status = NULL;
 				}
 				node->hj_JoinState = HJ_NEED_NEW_OUTER;
+				break;
+
+			case HJ_ADAPTIVE_EMIT_UNMATCHED:
+				while (cursor)
+				{
+					TupleTableSlot *outer_unmatched_tup;
+					if (cursor->match_status == true)
+					{
+						cursor = cursor->next;
+						continue;
+					}
+					/*
+					 * if it is not a match, go to the offset in the page that it specifies
+					 * and emit it NULL-extended
+					 */
+					outer_unmatched_tup = ExecHashJoinGetOuterTupleAtOffset(node, cursor->outer_tuple_start_offset);
+					econtext->ecxt_outertuple = outer_unmatched_tup;
+					econtext->ecxt_innertuple = node->hj_NullInnerTupleSlot;
+					cursor = cursor->next;
+					return ExecProject(node->js.ps.ps_ProjInfo);
+				}
+
+				node->hj_JoinState = HJ_NEED_NEW_BATCH;
+				node->first_outer_offset_match_status = NULL;
 				break;
 
 			default:
@@ -628,6 +727,11 @@ ExecInitHashJoin(HashJoin *node, EState *estate, int eflags)
 	hjstate->js.ps.ExecProcNode = ExecHashJoin;
 	hjstate->js.jointype = node->join.jointype;
 
+	hjstate->inner_page_offset = 0L;
+	hjstate->HJ_NEED_NEW_OUTER_tup_start = 0L;
+	hjstate->HJ_NEED_NEW_OUTER_tup_end = 0L;
+	hjstate->current_outer_offset_match_status = NULL;
+	hjstate->first_outer_offset_match_status = NULL;
 	/*
 	 * Miscellaneous initialization
 	 *
@@ -805,6 +909,28 @@ ExecEndHashJoin(HashJoinState *node)
 	ExecEndNode(innerPlanState(node));
 }
 
+static TupleTableSlot *
+ExecHashJoinGetOuterTupleAtOffset(HashJoinState *hjstate, off_t offset)
+{
+	HashJoinTable hashtable = hjstate->hj_HashTable;
+	int curbatch = hashtable->curbatch;
+	TupleTableSlot *slot;
+	uint32 hashvalue;
+
+	BufFile    *file = hashtable->outerBatchFile[curbatch];
+	/* ? should fileno always be 0? */
+	if (BufFileSeek(file, 0, offset, SEEK_SET))
+		ereport(ERROR,
+				(errcode_for_file_access(),
+						errmsg("could not rewind hash-join temporary file: %m")));
+
+	slot = ExecHashJoinGetSavedTuple(hjstate,
+									 file,
+									 &hashvalue,
+									 hjstate->hj_OuterTupleSlot);
+	return slot;
+}
+
 /*
  * ExecHashJoinOuterGetTuple
  *
@@ -951,20 +1077,17 @@ ExecParallelHashJoinOuterGetTuple(PlanState *outerNode,
 }
 
 /*
- * ExecHashJoinNewBatch
+ * ExecHashJoinAdvanceBatch
  *		switch to a new hashjoin batch
  *
  * Returns true if successful, false if there are no more batches.
  */
 static bool
-ExecHashJoinNewBatch(HashJoinState *hjstate)
+ExecHashJoinAdvanceBatch(HashJoinState *hjstate)
 {
 	HashJoinTable hashtable = hjstate->hj_HashTable;
 	int			nbatch;
 	int			curbatch;
-	BufFile    *innerFile;
-	TupleTableSlot *slot;
-	uint32		hashvalue;
 
 	nbatch = hashtable->nbatch;
 	curbatch = hashtable->curbatch;
@@ -1039,10 +1162,31 @@ ExecHashJoinNewBatch(HashJoinState *hjstate)
 		curbatch++;
 	}
 
+	hjstate->inner_page_offset = 0L;
+	hjstate->first_chunk = true;
 	if (curbatch >= nbatch)
 		return false;			/* no more batches */
 
 	hashtable->curbatch = curbatch;
+	return true;
+}
+
+/*
+ * Returns true if there are more chunks left, false otherwise
+ */
+static bool LoadInnerBatch(HashJoinState *hjstate)
+{
+	HashJoinTable hashtable = hjstate->hj_HashTable;
+	int curbatch = hashtable->curbatch;
+	BufFile    *innerFile;
+	TupleTableSlot *slot;
+	uint32		hashvalue;
+
+	off_t tup_start_offset;
+	off_t chunk_start_offset;
+	off_t tup_end_offset;
+	int64 current_saved_size;
+	int current_fileno;
 
 	/*
 	 * Reload the hash table with the new inner batch (which could be empty)
@@ -1051,27 +1195,60 @@ ExecHashJoinNewBatch(HashJoinState *hjstate)
 
 	innerFile = hashtable->innerBatchFile[curbatch];
 
+	/*
+	 * Reset this even if the innerfile is not null
+	 */
+	hjstate->first_chunk = hjstate->inner_page_offset == 0L;
+
 	if (innerFile != NULL)
 	{
-		if (BufFileSeek(innerFile, 0, 0L, SEEK_SET))
+		/* should fileno always be 0? */
+		if (BufFileSeek(innerFile, 0, hjstate->inner_page_offset, SEEK_SET))
 			ereport(ERROR,
 					(errcode_for_file_access(),
 					 errmsg("could not rewind hash-join temporary file: %m")));
 
+		chunk_start_offset = hjstate->inner_page_offset;
+		tup_end_offset = hjstate->inner_page_offset;
 		while ((slot = ExecHashJoinGetSavedTuple(hjstate,
 												 innerFile,
 												 &hashvalue,
 												 hjstate->hj_HashTupleSlot)))
 		{
+			/* next tuple's start is last tuple's end */
+			tup_start_offset = tup_end_offset;
+			/* after we got the tuple, figure out what the offset is */
+			BufFileTell(innerFile, &current_fileno, &tup_end_offset);
+			current_saved_size = tup_end_offset - chunk_start_offset;
+			if (current_saved_size > work_mem)
+			{
+				hjstate->inner_page_offset = tup_start_offset;
+				/*
+				 * Rewind outer batch file (if present), so that we can start reading it.
+				 */
+				if (hashtable->outerBatchFile[curbatch] != NULL)
+				{
+					if (BufFileSeek(hashtable->outerBatchFile[curbatch], 0, 0L, SEEK_SET))
+						ereport(ERROR,
+								(errcode_for_file_access(),
+										errmsg("could not rewind hash-join temporary file: %m")));
+				}
+				return true;
+			}
+			hjstate->inner_page_offset = tup_end_offset;
 			/*
-			 * NOTE: some tuples may be sent to future batches.  Also, it is
-			 * possible for hashtable->nbatch to be increased here!
+			 * NOTE: some tuples may be sent to future batches.
+			 * With current hashloop patch, however, it is not possible
+			 * for hashtable->nbatch to be increased here
 			 */
 			ExecHashTableInsert(hashtable, slot, hashvalue);
 		}
 
+		// this is the end of the file
+		hjstate->inner_page_offset = 0L;
+
 		/*
-		 * after we build the hash table, the inner batch file is no longer
+		 * after we processed all chunks, the inner batch file is no longer
 		 * needed
 		 */
 		BufFileClose(innerFile);
@@ -1088,8 +1265,7 @@ ExecHashJoinNewBatch(HashJoinState *hjstate)
 					(errcode_for_file_access(),
 					 errmsg("could not rewind hash-join temporary file: %m")));
 	}
-
-	return true;
+	return false;
 }
 
 /*
@@ -1270,6 +1446,8 @@ ExecHashJoinGetSavedTuple(HashJoinState *hjstate,
 	uint32		header[2];
 	size_t		nread;
 	MinimalTuple tuple;
+	int dummy_fileno;
+
 
 	/*
 	 * We check for interrupts here because this is typically taken as an
@@ -1278,6 +1456,7 @@ ExecHashJoinGetSavedTuple(HashJoinState *hjstate,
 	 */
 	CHECK_FOR_INTERRUPTS();
 
+	BufFileTell(file, &dummy_fileno, &hjstate->HJ_NEED_NEW_OUTER_tup_start);
 	/*
 	 * Since both the hash value and the MinimalTuple length word are uint32,
 	 * we can read them both in one BufFileRead() call without any type
@@ -1304,6 +1483,7 @@ ExecHashJoinGetSavedTuple(HashJoinState *hjstate,
 				(errcode_for_file_access(),
 				 errmsg("could not read from hash-join temporary file: %m")));
 	ExecForceStoreMinimalTuple(tuple, tupleSlot, true);
+	BufFileTell(file, &dummy_fileno, &hjstate->HJ_NEED_NEW_OUTER_tup_end);
 	return tupleSlot;
 }
 
