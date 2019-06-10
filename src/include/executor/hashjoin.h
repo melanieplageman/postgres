@@ -59,6 +59,16 @@
  * if so, we just dump them out to the correct batch file.
  * ----------------------------------------------------------------
  */
+struct OuterOffsetMatchStatus;
+typedef struct OuterOffsetMatchStatus OuterOffsetMatchStatus;
+
+struct OuterOffsetMatchStatus
+{
+	bool match_status;
+	off_t outer_tuple_start_offset;
+	int32 outer_tuple_val;
+	struct OuterOffsetMatchStatus *next;
+};
 
 /* these are in nodes/execnodes.h: */
 /* typedef struct HashJoinTupleData *HashJoinTuple; */
