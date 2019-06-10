@@ -1899,6 +1899,8 @@ typedef struct HashJoinState
 	int			hj_JoinState;
 	bool		hj_MatchedOuter;
 	bool		hj_OuterNotEmpty;
+
+	off_t inner_page_offset;
 } HashJoinState;
 
 

@@ -143,9 +143,10 @@ static TupleTableSlot *ExecHashJoinGetSavedTuple(HashJoinState *hjstate,
 												 BufFile *file,
 												 uint32 *hashvalue,
 												 TupleTableSlot *tupleSlot);
-static bool ExecHashJoinNewBatch(HashJoinState *hjstate);
+static bool ExecHashJoinAdvanceBatch(HashJoinState *hjstate);
 static bool ExecParallelHashJoinNewBatch(HashJoinState *hjstate);
 static void ExecParallelHashJoinPartitionOuter(HashJoinState *node);
+static void LoadInnerBatch(HashJoinState *hjstate);
 
 
 /* ----------------------------------------------------------------
@@ -543,8 +544,12 @@ ExecHashJoinImpl(PlanState *pstate, bool parallel)
 				}
 				else
 				{
-					if (!ExecHashJoinNewBatch(node))
-						return NULL;	/* end of parallel-oblivious join */
+					if (node->inner_page_offset == 0L) // if it has been reset or is first time
+					{
+						if (!ExecHashJoinAdvanceBatch(node)) // this only advances the batch now
+							return NULL;    /* end of parallel-oblivious join */
+					}
+					LoadInnerBatch(node);
 				}
 				node->hj_JoinState = HJ_NEED_NEW_OUTER;
 				break;
@@ -628,6 +633,7 @@ ExecInitHashJoin(HashJoin *node, EState *estate, int eflags)
 	hjstate->js.ps.ExecProcNode = ExecHashJoin;
 	hjstate->js.jointype = node->join.jointype;
 
+	hjstate->inner_page_offset = 0L;
 	/*
 	 * Miscellaneous initialization
 	 *
@@ -951,20 +957,17 @@ ExecParallelHashJoinOuterGetTuple(PlanState *outerNode,
 }
 
 /*
- * ExecHashJoinNewBatch
+ * ExecHashJoinAdvanceBatch
  *		switch to a new hashjoin batch
  *
  * Returns true if successful, false if there are no more batches.
  */
 static bool
-ExecHashJoinNewBatch(HashJoinState *hjstate)
+ExecHashJoinAdvanceBatch(HashJoinState *hjstate)
 {
 	HashJoinTable hashtable = hjstate->hj_HashTable;
 	int			nbatch;
 	int			curbatch;
-	BufFile    *innerFile;
-	TupleTableSlot *slot;
-	uint32		hashvalue;
 
 	nbatch = hashtable->nbatch;
 	curbatch = hashtable->curbatch;
@@ -1043,6 +1046,23 @@ ExecHashJoinNewBatch(HashJoinState *hjstate)
 		return false;			/* no more batches */
 
 	hashtable->curbatch = curbatch;
+	return true;
+}
+
+static void LoadInnerBatch(HashJoinState *hjstate)
+{
+	HashJoinTable hashtable = hjstate->hj_HashTable;
+	BufFile    *innerFile;
+	int			curbatch;
+	TupleTableSlot *slot;
+	uint32		hashvalue;
+	curbatch = hashtable->curbatch;
+
+	off_t tup_start_offset;
+	off_t chunk_start_offset;
+	off_t tup_end_offset;
+	int64 current_saved_size;
+	int current_fileno;
 
 	/*
 	 * Reload the hash table with the new inner batch (which could be empty)
@@ -1053,25 +1073,52 @@ ExecHashJoinNewBatch(HashJoinState *hjstate)
 
 	if (innerFile != NULL)
 	{
-		if (BufFileSeek(innerFile, 0, 0L, SEEK_SET))
+		if (BufFileSeek(innerFile, 0, hjstate->inner_page_offset, SEEK_SET)) // should fileno always be 0?
 			ereport(ERROR,
 					(errcode_for_file_access(),
 					 errmsg("could not rewind hash-join temporary file: %m")));
 
+		chunk_start_offset = hjstate->inner_page_offset;
+		tup_end_offset = hjstate->inner_page_offset;
 		while ((slot = ExecHashJoinGetSavedTuple(hjstate,
 												 innerFile,
 												 &hashvalue,
 												 hjstate->hj_HashTupleSlot)))
 		{
+			// next tuple's start is last tuple's end
+			tup_start_offset = tup_end_offset;
+			// after we got the tuple, figure out what the offset is
+			BufFileTell(innerFile, &current_fileno, &tup_end_offset);
+			current_saved_size = tup_end_offset - chunk_start_offset;
+			if (current_saved_size > work_mem)
+			{
+				hjstate->inner_page_offset = tup_start_offset;
+				/*
+				 * Rewind outer batch file (if present), so that we can start reading it.
+				*/
+				if (hashtable->outerBatchFile[curbatch] != NULL)
+				{
+					if (BufFileSeek(hashtable->outerBatchFile[curbatch], 0, 0L, SEEK_SET))
+						ereport(ERROR,
+								(errcode_for_file_access(),
+										errmsg("could not rewind hash-join temporary file: %m")));
+				}
+				return;
+			}
+			hjstate->inner_page_offset = tup_end_offset;
 			/*
-			 * NOTE: some tuples may be sent to future batches.  Also, it is
-			 * possible for hashtable->nbatch to be increased here!
+			 * NOTE: some tuples may be sent to future batches.
+			 * With current hashloop patch, it is not possible
+			 * for hashtable->nbatch to be increased here
 			 */
 			ExecHashTableInsert(hashtable, slot, hashvalue);
 		}
 
+		// this is the end of the file
+		hjstate->inner_page_offset = 0L;
+
 		/*
-		 * after we build the hash table, the inner batch file is no longer
+		 * after we processed all chunks, the inner batch file is no longer
 		 * needed
 		 */
 		BufFileClose(innerFile);
@@ -1088,8 +1135,6 @@ ExecHashJoinNewBatch(HashJoinState *hjstate)
 					(errcode_for_file_access(),
 					 errmsg("could not rewind hash-join temporary file: %m")));
 	}
-
-	return true;
 }
 
 /*
