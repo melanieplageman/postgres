@@ -91,6 +91,7 @@ test: subselect
 test: union
 test: case
 test: join
+test: adaptive_hj
 test: aggregates
 test: transactions
 ignore: random
