@@ -203,6 +203,9 @@ BufFileCreateTemp(bool interXact)
 	file = makeBufFile(pfile);
 	file->isInterXact = interXact;
 
+	if (file->files[0] == 0)
+		elog(NOTICE, "file is 0");
+
 	return file;
 }
 
@@ -737,6 +740,18 @@ BufFileTell(BufFile *file, int *fileno, off_t *offset)
 	*offset = file->curOffset + file->pos;
 }
 
+int
+BufFileTellPos(BufFile *file)
+{
+	return file->pos;
+}
+
+off_t
+BufFileTellOffset(BufFile *file)
+{
+	return file->curOffset;
+}
+
 /*
  * BufFileSeekBlock --- block-oriented seek
  *
@@ -799,6 +814,16 @@ BufFileSize(BufFile *file)
 
 	return ((file->numFiles - 1) * (int64) MAX_PHYSICAL_FILESIZE) +
 		lastFileSize;
+}
+
+int64
+BufFileBytesUsed(BufFile *file)
+{
+	int64 lastFileSize = FileSize(file->files[file->numFiles - 1]);
+	if (lastFileSize >= 0)
+		return lastFileSize;
+	else
+		return 0;
 }
 
 /*
