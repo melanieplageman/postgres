@@ -128,6 +128,8 @@
 #define HJ_FILL_INNER_TUPLES	5
 #define HJ_NEED_NEW_BATCH		6
 #define HJ_ADAPTIVE_EMIT_UNMATCHED 7
+#define HJ_NEED_NEW_INNER_CHUNK 8
+#define HJ_OUTER_BATCH_EXHAUSTED 9
 
 /* Returns true if doing null-fill on outer relation */
 #define HJ_FILL_OUTER(hjstate)	((hjstate)->hj_NullInnerTupleSlot != NULL)
@@ -364,15 +366,8 @@ ExecHashJoinImpl(PlanState *pstate, bool parallel)
 				if (TupIsNull(outerTupleSlot))
 				{
 					/* end of batch, or maybe whole join */
-					if (HJ_FILL_INNER(node))
-					{
-						/* set up to scan for unmatched inner tuples */
-						ExecPrepHashTableForUnmatched(node);
-						node->hj_JoinState = HJ_FILL_INNER_TUPLES;
-					}
-					else
-						node->hj_JoinState = HJ_NEED_NEW_BATCH;
-					continue;
+					node->hj_JoinState = HJ_OUTER_BATCH_EXHAUSTED;
+					break;
 				}
 				/*
 				 * only initialize this to false during the first chunk --
@@ -443,7 +438,7 @@ ExecHashJoinImpl(PlanState *pstate, bool parallel)
 							node->current_outer_offset_match_status->next = outerOffsetMatchStatus;
 							node->current_outer_offset_match_status = outerOffsetMatchStatus;
 						}
-						else
+						else // node->first_outer_offset_match_status == NULL
 						{
 							node->first_outer_offset_match_status = outerOffsetMatchStatus;
 							node->current_outer_offset_match_status = node->first_outer_offset_match_status;
@@ -617,6 +612,21 @@ ExecHashJoinImpl(PlanState *pstate, bool parallel)
 					}
 					LoadInnerBatch(node);
 
+					/*
+					 * If we just loaded the first chunk of a new inner batch,
+					 * we should reset head of the list of outer tuple match statuses
+					 * so we can construct a new list for the new corresponding outer batch file
+					 * Doing it here works because we have not created any of the structs
+					 * of match statuses for the outer tuples until HJ_NEED_NEW_OUTER
+					 *
+					 * Even if we are not at the beginning of a new inner batch, we need
+					 * to reset the pointer to the current match status object for the current
+					 * outer tuple before transitioning to HJ_NEED_NEW_OUTER as a way of
+					 * rewinding the list.
+					 * we use the status of current -- NULL or non-NULL to determine in
+					 * HJ_NEED_NEW_OUTER if we should advance to the next item in the list or
+					 * "rewind" by setting head to current.
+					 */
 					if (node->first_chunk)
 						node->first_outer_offset_match_status = NULL;
 					node->current_outer_offset_match_status = NULL;
@@ -645,8 +655,42 @@ ExecHashJoinImpl(PlanState *pstate, bool parallel)
 				}
 
 				node->hj_JoinState = HJ_NEED_NEW_BATCH;
+				/*
+				 * this only happens at the end of a batch now, but we got here because in
+				 * HJ_NEED_NEW_BATCH/HJ_NEED_NEW_INNER_CHUNK, we specifically break
+				 * before having a chance to reset it -- need some refactor fix here
+				 */
 				node->first_outer_offset_match_status = NULL;
 				break;
+
+			case HJ_NEED_NEW_INNER_CHUNK:
+				if (node->inner_page_offset == 0L)
+				{
+					/*
+					 * This case is entered on two separate conditions:
+					 * when we need to load the first batch ever in this hash join;
+					 * or when we've exhausted the outer side of the current batch.
+					 */
+					if (node->first_outer_offset_match_status &&
+						HJ_FILL_OUTER(node))
+					{
+						node->hj_JoinState = HJ_ADAPTIVE_EMIT_UNMATCHED;
+						cursor = node->first_outer_offset_match_status;
+						break;
+					}
+				}
+				node->hj_JoinState = HJ_NEED_NEW_BATCH;
+				break;
+			case HJ_OUTER_BATCH_EXHAUSTED:
+				if (HJ_FILL_INNER(node))
+				{
+					/* set up to scan for unmatched inner tuples */
+					ExecPrepHashTableForUnmatched(node);
+					node->hj_JoinState = HJ_FILL_INNER_TUPLES;
+				}
+				else
+					node->hj_JoinState = HJ_NEED_NEW_INNER_CHUNK;
+				continue;
 
 			default:
 				elog(ERROR, "unrecognized hashjoin state: %d",
@@ -1244,7 +1288,7 @@ static bool LoadInnerBatch(HashJoinState *hjstate)
 			ExecHashTableInsert(hashtable, slot, hashvalue);
 		}
 
-		// this is the end of the file
+		/* this is the end of the file */
 		hjstate->inner_page_offset = 0L;
 
 		/*
