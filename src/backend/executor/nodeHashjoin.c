@@ -575,6 +575,8 @@ ExecHashJoinImpl(PlanState *pstate, bool parallel)
 						 */
 						if (node->first_outer_offset_match_status && HJ_FILL_OUTER(node))
 						{
+							// TODO: why is inlining this giving wrong results
+							// it should be semantically the same
 							node->hj_JoinState = HJ_ADAPTIVE_EMIT_UNMATCHED;
 							cursor = node->first_outer_offset_match_status;
 							node->first_outer_offset_match_status = NULL;
