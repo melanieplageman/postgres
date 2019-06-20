@@ -125,11 +125,10 @@
 #define HJ_NEED_NEW_OUTER		2
 #define HJ_SCAN_BUCKET			3
 #define HJ_FILL_OUTER_TUPLE		4
-#define HJ_FILL_INNER_TUPLES	5
-#define HJ_NEED_NEW_BATCH		6
-#define HJ_ADAPTIVE_EMIT_UNMATCHED 7
-#define HJ_NEED_NEW_INNER_CHUNK 8
-#define HJ_OUTER_BATCH_EXHAUSTED 9
+#define HJ_NEED_NEW_BATCH		5
+#define HJ_ADAPTIVE_EMIT_UNMATCHED 6
+#define HJ_NEED_NEW_INNER_CHUNK 7
+#define HJ_OUTER_BATCH_EXHAUSTED 8
 
 /* Returns true if doing null-fill on outer relation */
 #define HJ_FILL_OUTER(hjstate)	((hjstate)->hj_NullInnerTupleSlot != NULL)
@@ -555,32 +554,6 @@ ExecHashJoinImpl(PlanState *pstate, bool parallel)
 				}
 				break;
 
-			case HJ_FILL_INNER_TUPLES:
-
-				/*
-				 * We have finished a batch, but we are doing right/full join,
-				 * so any unmatched inner tuples in the hashtable have to be
-				 * emitted before we continue to the next batch.
-				 */
-				if (!ExecScanHashTableForUnmatched(node, econtext))
-				{
-					/* no more unmatched tuples */
-					node->hj_JoinState = HJ_NEED_NEW_BATCH;
-					continue;
-				}
-
-				/*
-				 * Generate a fake join tuple with nulls for the outer tuple,
-				 * and return it if it passes the non-join quals.
-				 */
-				econtext->ecxt_outertuple = node->hj_NullOuterTupleSlot;
-
-				if (otherqual == NULL || ExecQual(otherqual, econtext))
-					return ExecProject(node->js.ps.ps_ProjInfo);
-				else
-					InstrCountFiltered2(node, 1);
-				break;
-
 			case HJ_NEED_NEW_BATCH:
 
 				/*
@@ -664,7 +637,7 @@ ExecHashJoinImpl(PlanState *pstate, bool parallel)
 				break;
 
 			case HJ_NEED_NEW_INNER_CHUNK:
-				if (node->inner_page_offset == 0L)
+				if (node->inner_page_offset == 0L) // inner batch is exhausted
 				{
 					/*
 					 * This case is entered on two separate conditions:
@@ -686,7 +659,30 @@ ExecHashJoinImpl(PlanState *pstate, bool parallel)
 				{
 					/* set up to scan for unmatched inner tuples */
 					ExecPrepHashTableForUnmatched(node);
-					node->hj_JoinState = HJ_FILL_INNER_TUPLES;
+
+					/*
+				 * We have finished a batch, but we are doing right/full join,
+				 * so any unmatched inner tuples in the hashtable have to be
+				 * emitted before we continue to the next batch.
+				 */
+					if (!ExecScanHashTableForUnmatched(node, econtext))
+					{
+						/* no more unmatched tuples */
+						node->hj_JoinState = HJ_NEED_NEW_BATCH;
+						continue;
+					}
+
+					/*
+					 * Generate a fake join tuple with nulls for the outer tuple,
+					 * and return it if it passes the non-join quals.
+					 */
+					econtext->ecxt_outertuple = node->hj_NullOuterTupleSlot;
+
+					if (otherqual == NULL || ExecQual(otherqual, econtext))
+						return ExecProject(node->js.ps.ps_ProjInfo);
+					else
+						InstrCountFiltered2(node, 1);
+					break;
 				}
 				else
 					node->hj_JoinState = HJ_NEED_NEW_INNER_CHUNK;
