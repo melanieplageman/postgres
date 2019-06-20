@@ -676,8 +676,7 @@ ExecHashJoinImpl(PlanState *pstate, bool parallel)
 						InstrCountFiltered2(node, 1);
 					break;
 				}
-				else
-					node->hj_JoinState = HJ_NEED_NEW_INNER_CHUNK;
+				node->hj_JoinState = HJ_NEED_NEW_INNER_CHUNK;
 				continue;
 
 			default:
