@@ -577,6 +577,7 @@ ExecHashJoinImpl(PlanState *pstate, bool parallel)
 						{
 							node->hj_JoinState = HJ_ADAPTIVE_EMIT_UNMATCHED;
 							cursor = node->first_outer_offset_match_status;
+							node->first_outer_offset_match_status = NULL;
 							break;
 						}
 
@@ -628,12 +629,6 @@ ExecHashJoinImpl(PlanState *pstate, bool parallel)
 				}
 
 				node->hj_JoinState = HJ_NEED_NEW_BATCH;
-				/*
-				 * this only happens at the end of a batch now, but we got here because in
-				 * HJ_NEED_NEW_BATCH/HJ_NEED_NEW_INNER_CHUNK, we specifically break
-				 * before having a chance to reset it -- need some refactor fix here
-				 */
-				node->first_outer_offset_match_status = NULL;
 				break;
 
 			case HJ_NEED_NEW_INNER_CHUNK:
@@ -649,6 +644,8 @@ ExecHashJoinImpl(PlanState *pstate, bool parallel)
 					{
 						node->hj_JoinState = HJ_ADAPTIVE_EMIT_UNMATCHED;
 						cursor = node->first_outer_offset_match_status;
+						node->first_outer_offset_match_status = NULL;
+
 						break;
 					}
 				}
