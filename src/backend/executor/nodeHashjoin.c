@@ -639,17 +639,12 @@ ExecHashJoinImpl(PlanState *pstate, bool parallel)
 					 * when we need to load the first batch ever in this hash join;
 					 * or when we've exhausted the outer side of the current batch.
 					 */
-					if (node->first_outer_offset_match_status &&
-						HJ_FILL_OUTER(node))
-					{
-						node->hj_JoinState = HJ_ADAPTIVE_EMIT_UNMATCHED;
-						cursor = node->first_outer_offset_match_status;
-						node->first_outer_offset_match_status = NULL;
-
-						break;
-					}
+					node->hj_JoinState = HJ_NEED_NEW_BATCH;
+					break;
 				}
-				node->hj_JoinState = HJ_NEED_NEW_BATCH;
+				node->hj_JoinState = HJ_NEED_NEW_OUTER;
+				LoadInnerBatch(node);
+				node->current_outer_offset_match_status = NULL;
 				break;
 			case HJ_OUTER_BATCH_EXHAUSTED:
 				if (HJ_FILL_INNER(node))
