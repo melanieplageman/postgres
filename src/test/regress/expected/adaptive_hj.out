@@ -5,7 +5,7 @@ NOTICE:  table "t2" does not exist, skipping
 create table t1(a int);
 create table t2(b int);
 insert into t1 values(1),(2);
-insert into t2 values(2),(3);
+insert into t2 values(2),(3),(11);
 insert into t1 select i from generate_series(1,10)i;
 insert into t2 select i from generate_series(2,10)i;
 insert into t1 select 2 from generate_series(1,5)i;
@@ -166,6 +166,83 @@ select count(*) from t1, t2 where a = b;
     65
 (1 row)
 
+select * from t1 right outer join t2 on a = b order by b;
+ a  | b  
+----+----
+  2 |  2
+  2 |  2
+  2 |  2
+  2 |  2
+  2 |  2
+  2 |  2
+  2 |  2
+  2 |  2
+  2 |  2
+  2 |  2
+  2 |  2
+  2 |  2
+  2 |  2
+  2 |  2
+  2 |  2
+  2 |  2
+  2 |  2
+  2 |  2
+  2 |  2
+  2 |  2
+  2 |  2
+  2 |  2
+  2 |  2
+  2 |  2
+  2 |  2
+  2 |  2
+  2 |  2
+  2 |  2
+  2 |  2
+  2 |  2
+  2 |  2
+  2 |  2
+  2 |  2
+  2 |  2
+  2 |  2
+  2 |  2
+  2 |  2
+  2 |  2
+  2 |  2
+  2 |  2
+  2 |  2
+  2 |  2
+  2 |  2
+  2 |  2
+  2 |  2
+  2 |  2
+  2 |  2
+  2 |  2
+  2 |  2
+  2 |  2
+  2 |  2
+  2 |  2
+  2 |  2
+  2 |  2
+  2 |  2
+  2 |  2
+  3 |  3
+  3 |  3
+  4 |  4
+  5 |  5
+  6 |  6
+  7 |  7
+  8 |  8
+  9 |  9
+ 10 | 10
+    | 11
+(66 rows)
+
+select count(*) from t1 right outer join t2 on a = b;
+ count 
+-------
+    66
+(1 row)
+
 truncate table t1;
 insert into t1 values (1),(2),(2),(3);
 truncate table t2;
@@ -205,5 +282,23 @@ select count(*) from t1, t2 where a = b;
  count 
 -------
      6
+(1 row)
+
+select * from t1 right outer join t2 on a = b order by b;
+ a | b 
+---+---
+ 2 | 2
+ 2 | 2
+ 2 | 2
+ 2 | 2
+ 3 | 3
+ 3 | 3
+   | 4
+(7 rows)
+
+select count(*) from t1 right outer join t2 on a = b;
+ count 
+-------
+     7
 (1 row)
 
