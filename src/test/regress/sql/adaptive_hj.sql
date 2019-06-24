@@ -18,6 +18,8 @@ select * from t1, t2 where a = b;
 select count(*) from t1, t2 where a = b;
 select * from t1 right outer join t2 on a = b order by b;
 select count(*) from t1 right outer join t2 on a = b;
+select * from t1 full outer join t2 on a = b order by b;
+select count(*) from t1 full outer join t2 on a = b;
 
 truncate table t1;
 insert into t1 values (1),(2),(2),(3);
@@ -33,3 +35,5 @@ select * from t1, t2 where a = b;
 select count(*) from t1, t2 where a = b;
 select * from t1 right outer join t2 on a = b order by b;
 select count(*) from t1 right outer join t2 on a = b;
+select * from t1 full outer join t2 on a = b order by b;
+select count(*) from t1 full outer join t2 on a = b;

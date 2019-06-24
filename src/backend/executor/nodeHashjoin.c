@@ -129,6 +129,7 @@
 #define HJ_ADAPTIVE_EMIT_UNMATCHED 6
 #define HJ_NEED_NEW_INNER_CHUNK 7
 #define HJ_OUTER_BATCH_EXHAUSTED 8
+#define HJ_FILL_INNER_TUPLE 9
 
 /* Returns true if doing null-fill on outer relation */
 #define HJ_FILL_OUTER(hjstate)	((hjstate)->hj_NullInnerTupleSlot != NULL)
@@ -199,6 +200,29 @@ ExecHashJoinImpl(PlanState *pstate, bool parallel)
 	 * storage allocated in the previous tuple cycle.
 	 */
 	ResetExprContext(econtext);
+
+	switch (node->hj_JoinState)
+	{
+		case HJ_BUILD_HASHTABLE:
+			elog(NOTICE, "HJ_BUILD_HASHTABLE"); break;
+		case HJ_NEED_NEW_OUTER:
+			elog(NOTICE, "HJ_NEED_NEW_OUTER"); break;
+		case HJ_SCAN_BUCKET:
+			elog(NOTICE, "HJ_SCAN_BUCKET"); break;
+		case HJ_FILL_OUTER_TUPLE:
+			elog(NOTICE, "HJ_FILL_OUTER_TUPLE"); break;
+		case HJ_NEED_NEW_BATCH:
+			elog(NOTICE, "HJ_NEED_NEW_BATCH"); break;
+		case HJ_ADAPTIVE_EMIT_UNMATCHED:
+			elog(NOTICE, "HJ_ADAPTIVE_EMIT_UNMATCHED"); break;
+		case HJ_NEED_NEW_INNER_CHUNK:
+			elog(NOTICE, "HJ_NEED_NEW_INNER_CHUNK"); break;
+		case HJ_OUTER_BATCH_EXHAUSTED:
+			elog(NOTICE, "HJ_OUTER_BATCH_EXHAUSTED"); break;
+		case HJ_FILL_INNER_TUPLE:
+			elog(NOTICE, "HJ_FILL_INNER_TUPLE"); break;
+
+	}
 
 	/*
 	 * run the hash join state machine
@@ -655,35 +679,38 @@ ExecHashJoinImpl(PlanState *pstate, bool parallel)
 			case HJ_OUTER_BATCH_EXHAUSTED:
 				if (HJ_FILL_INNER(node))
 				{
-					/* set up to scan for unmatched inner tuples */
-					ExecPrepHashTableForUnmatched(node);
+					node->hj_JoinState = HJ_FILL_INNER_TUPLE;
+					break;
+				}
+				node->hj_JoinState = HJ_NEED_NEW_INNER_CHUNK;
+				continue;
+			case HJ_FILL_INNER_TUPLE:
+				/* set up to scan for unmatched inner tuples */
+				ExecPrepHashTableForUnmatched(node);
 
 				/*
 				 * We have finished a batch, but we are doing right/full join,
 				 * so any unmatched inner tuples in the hashtable have to be
 				 * emitted before we continue to the next batch.
 				 */
-					if (!ExecScanHashTableForUnmatched(node, econtext))
-					{
-						/* no more unmatched tuples */
-						node->hj_JoinState = HJ_NEED_NEW_INNER_CHUNK;
-						continue;
-					}
-
-					/*
-					 * Generate a fake join tuple with nulls for the outer tuple,
-					 * and return it if it passes the non-join quals.
-					 */
-					econtext->ecxt_outertuple = node->hj_NullOuterTupleSlot;
-
-					if (otherqual == NULL || ExecQual(otherqual, econtext))
-						return ExecProject(node->js.ps.ps_ProjInfo);
-					else
-						InstrCountFiltered2(node, 1);
-					break;
+				if (!ExecScanHashTableForUnmatched(node, econtext))
+				{
+					/* no more unmatched tuples */
+					node->hj_JoinState = HJ_NEED_NEW_INNER_CHUNK;
+					continue;
 				}
-				node->hj_JoinState = HJ_NEED_NEW_INNER_CHUNK;
-				continue;
+
+				/*
+				 * Generate a fake join tuple with nulls for the outer tuple,
+				 * and return it if it passes the non-join quals.
+				 */
+				econtext->ecxt_outertuple = node->hj_NullOuterTupleSlot;
+
+				if (otherqual == NULL || ExecQual(otherqual, econtext))
+					return ExecProject(node->js.ps.ps_ProjInfo);
+				else
+					InstrCountFiltered2(node, 1);
+				break;
 
 			default:
 				elog(ERROR, "unrecognized hashjoin state: %d",
