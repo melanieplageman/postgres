@@ -666,7 +666,7 @@ ExecHashJoinImpl(PlanState *pstate, bool parallel)
 					if (!ExecScanHashTableForUnmatched(node, econtext))
 					{
 						/* no more unmatched tuples */
-						node->hj_JoinState = HJ_NEED_NEW_BATCH;
+						node->hj_JoinState = HJ_NEED_NEW_INNER_CHUNK;
 						continue;
 					}
 
