@@ -148,8 +148,9 @@ static TupleTableSlot *ExecHashJoinGetSavedTuple(HashJoinState *hjstate,
 static bool ExecHashJoinAdvanceBatch(HashJoinState *hjstate);
 static bool ExecParallelHashJoinNewBatch(HashJoinState *hjstate);
 static void ExecParallelHashJoinPartitionOuter(HashJoinState *node);
-static bool LoadInnerBatch(HashJoinState *hjstate);
+static bool LoadInner(HashJoinState *hjstate);
 static TupleTableSlot *ExecHashJoinGetOuterTupleAtOffset(HashJoinState *hjstate, off_t offset);
+static void rewindOuter(BufFile *bufFile);
 
 static	OuterOffsetMatchStatus *cursor = NULL;
 
@@ -575,7 +576,6 @@ ExecHashJoinImpl(PlanState *pstate, bool parallel)
 						 */
 						if (node->first_outer_offset_match_status && HJ_FILL_OUTER(node))
 						{
-							// it should be semantically the same
 							node->hj_JoinState = HJ_ADAPTIVE_EMIT_UNMATCHED;
 							cursor = node->first_outer_offset_match_status;
 							node->first_outer_offset_match_status = NULL;
@@ -585,7 +585,8 @@ ExecHashJoinImpl(PlanState *pstate, bool parallel)
 						if (!ExecHashJoinAdvanceBatch(node))
 							return NULL;    /* end of parallel-oblivious join */
 					}
-					LoadInnerBatch(node);
+					rewindOuter(node->hj_HashTable->outerBatchFile[node->hj_HashTable->curbatch]);
+					LoadInner(node);
 
 					/*
 					 * If we just loaded the first chunk of a new inner batch,
@@ -644,7 +645,11 @@ ExecHashJoinImpl(PlanState *pstate, bool parallel)
 					break;
 				}
 				node->hj_JoinState = HJ_NEED_NEW_OUTER;
-				LoadInnerBatch(node);
+				/*
+				 * Rewind outer batch file (if present), so that we can start reading it.
+				 */
+				rewindOuter(node->hj_HashTable->outerBatchFile[node->hj_HashTable->curbatch]);
+				LoadInner(node);
 				node->current_outer_offset_match_status = NULL;
 				break;
 			case HJ_OUTER_BATCH_EXHAUSTED:
@@ -653,7 +658,7 @@ ExecHashJoinImpl(PlanState *pstate, bool parallel)
 					/* set up to scan for unmatched inner tuples */
 					ExecPrepHashTableForUnmatched(node);
 
-					/*
+				/*
 				 * We have finished a batch, but we are doing right/full join,
 				 * so any unmatched inner tuples in the hashtable have to be
 				 * emitted before we continue to the next batch.
@@ -963,6 +968,16 @@ ExecHashJoinGetOuterTupleAtOffset(HashJoinState *hjstate, off_t offset)
 	return slot;
 }
 
+static void rewindOuter(BufFile *bufFile)
+{
+	if (bufFile != NULL)
+	{
+		if (BufFileSeek(bufFile, 0, 0L, SEEK_SET))
+			ereport(ERROR,
+				(errcode_for_file_access(),
+					errmsg("could not rewind hash-join temporary file: %m")));
+	}
+}
 /*
  * ExecHashJoinOuterGetTuple
  *
@@ -1206,7 +1221,7 @@ ExecHashJoinAdvanceBatch(HashJoinState *hjstate)
 /*
  * Returns true if there are more chunks left, false otherwise
  */
-static bool LoadInnerBatch(HashJoinState *hjstate)
+static bool LoadInner(HashJoinState *hjstate)
 {
 	HashJoinTable hashtable = hjstate->hj_HashTable;
 	int curbatch = hashtable->curbatch;
@@ -1255,16 +1270,6 @@ static bool LoadInnerBatch(HashJoinState *hjstate)
 			if (current_saved_size > work_mem)
 			{
 				hjstate->inner_page_offset = tup_start_offset;
-				/*
-				 * Rewind outer batch file (if present), so that we can start reading it.
-				 */
-				if (hashtable->outerBatchFile[curbatch] != NULL)
-				{
-					if (BufFileSeek(hashtable->outerBatchFile[curbatch], 0, 0L, SEEK_SET))
-						ereport(ERROR,
-								(errcode_for_file_access(),
-										errmsg("could not rewind hash-join temporary file: %m")));
-				}
 				return true;
 			}
 			hjstate->inner_page_offset = tup_end_offset;
@@ -1287,16 +1292,6 @@ static bool LoadInnerBatch(HashJoinState *hjstate)
 		hashtable->innerBatchFile[curbatch] = NULL;
 	}
 
-	/*
-	 * Rewind outer batch file (if present), so that we can start reading it.
-	 */
-	if (hashtable->outerBatchFile[curbatch] != NULL)
-	{
-		if (BufFileSeek(hashtable->outerBatchFile[curbatch], 0, 0L, SEEK_SET))
-			ereport(ERROR,
-					(errcode_for_file_access(),
-					 errmsg("could not rewind hash-join temporary file: %m")));
-	}
 	return false;
 }
 
