@@ -482,7 +482,10 @@ ExecHashJoinImpl(PlanState *pstate, bool parallel)
 					if (!ExecScanHashBucket(node, econtext))
 					{
 						/* out of matches; check for possible outer-join fill */
-						node->hj_JoinState = HJ_FILL_OUTER_TUPLE;
+						if (node->hj_HashTable->curbatch == 0)
+							node->hj_JoinState = HJ_FILL_OUTER_TUPLE;
+						else
+							node->hj_JoinState = HJ_NEED_NEW_OUTER;
 						continue;
 					}
 				}
@@ -531,6 +534,7 @@ ExecHashJoinImpl(PlanState *pstate, bool parallel)
 				break;
 
 			case HJ_FILL_OUTER_TUPLE:
+
 				elog(LOG, "HJ_FILL_OUTER_TUPLE");
 				/*
 				 * The current outer tuple has run out of matches, so check
@@ -542,10 +546,6 @@ ExecHashJoinImpl(PlanState *pstate, bool parallel)
 				if (!node->hj_MatchedOuter &&
 					HJ_FILL_OUTER(node))
 				{
-					// TODO: this is a hack -- move this logic up so we go to the right place initially
-					// also, probably don't need to go all the way back to need new outer?
-					if (node->current_outer_offset_match_status)
-						break;
 					/*
 					 * Generate a fake join tuple with nulls for the inner
 					 * tuple, and return it if it passes the non-join quals.
@@ -571,12 +571,6 @@ ExecHashJoinImpl(PlanState *pstate, bool parallel)
 				}
 				else
 				{
-					/*
-					 * This case is entered on two separate conditions:
-					 * when we need to load the first batch ever in this hash join;
-					 * or when we've exhausted the outer side of the current batch.
-					 */
-					// TODO: I think that if this is batch 0, we need to go to fill outer tuple to make sure we emit those
 					if (node->first_outer_offset_match_status && HJ_FILL_OUTER(node))
 					{
 						node->hj_JoinState = HJ_ADAPTIVE_EMIT_UNMATCHED;
