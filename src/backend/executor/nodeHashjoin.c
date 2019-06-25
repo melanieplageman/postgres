@@ -666,6 +666,8 @@ ExecHashJoinImpl(PlanState *pstate, bool parallel)
 				elog(NOTICE, "HJ_OUTER_BATCH_EXHAUSTED");
 				if (HJ_FILL_INNER(node))
 				{
+					/* set up to scan for unmatched inner tuples */
+					ExecPrepHashTableForUnmatched(node);
 					node->hj_JoinState = HJ_FILL_INNER_TUPLE;
 					break;
 				}
@@ -673,8 +675,6 @@ ExecHashJoinImpl(PlanState *pstate, bool parallel)
 				continue;
 
 			case HJ_FILL_INNER_TUPLE:
-				/* set up to scan for unmatched inner tuples */
-				ExecPrepHashTableForUnmatched(node);
 
 				elog(NOTICE, "HJ_FILL_INNER_TUPLE");
 				/*
