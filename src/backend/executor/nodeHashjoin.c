@@ -571,25 +571,23 @@ ExecHashJoinImpl(PlanState *pstate, bool parallel)
 				}
 				else
 				{
-					if (node->inner_page_offset == 0L)
+					/*
+					 * This case is entered on two separate conditions:
+					 * when we need to load the first batch ever in this hash join;
+					 * or when we've exhausted the outer side of the current batch.
+					 */
+					// TODO: I think that if this is batch 0, we need to go to fill outer tuple to make sure we emit those
+					if (node->first_outer_offset_match_status && HJ_FILL_OUTER(node))
 					{
-						/*
-						 * This case is entered on two separate conditions:
-						 * when we need to load the first batch ever in this hash join;
-						 * or when we've exhausted the outer side of the current batch.
-						 */
-						// TODO: I think that if this is batch 0, we need to go to fill outer tuple to make sure we emit those
-						if (node->first_outer_offset_match_status && HJ_FILL_OUTER(node))
-						{
-							node->hj_JoinState = HJ_ADAPTIVE_EMIT_UNMATCHED;
-							cursor = node->first_outer_offset_match_status;
-							node->first_outer_offset_match_status = NULL;
-							break;
-						}
-
-						if (!ExecHashJoinAdvanceBatch(node))
-							return NULL;    /* end of parallel-oblivious join */
+						node->hj_JoinState = HJ_ADAPTIVE_EMIT_UNMATCHED;
+						cursor = node->first_outer_offset_match_status;
+						node->first_outer_offset_match_status = NULL;
+						break;
 					}
+
+					if (!ExecHashJoinAdvanceBatch(node))
+						return NULL;    /* end of parallel-oblivious join */
+
 					rewindOuter(node->hj_HashTable->outerBatchFile[node->hj_HashTable->curbatch]);
 					LoadInner(node);
 
@@ -635,7 +633,9 @@ ExecHashJoinImpl(PlanState *pstate, bool parallel)
 					cursor = cursor->next;
 					return ExecProject(node->js.ps.ps_ProjInfo);
 				}
-
+				/*
+				 * came here from HJ_NEED_NEW_BATCH, so go back there
+				 */
 				node->hj_JoinState = HJ_NEED_NEW_BATCH;
 				break;
 
@@ -650,9 +650,8 @@ ExecHashJoinImpl(PlanState *pstate, bool parallel)
 				if (node->inner_page_offset == 0L || node->hj_HashTable->curbatch == 0) // inner batch is exhausted
 				{
 					/*
-					 * This case is entered on two separate conditions:
-					 * when we need to load the first batch ever in this hash join;
-					 * or when we've exhausted the outer side of the current batch.
+					 * no more chunks, so load next batch
+					 * or, there are no chunks because this is batch 0
 					 */
 					node->hj_JoinState = HJ_NEED_NEW_BATCH;
 					break;
