@@ -218,7 +218,7 @@ ExecHashJoinImpl(PlanState *pstate, bool parallel)
 		switch (node->hj_JoinState)
 		{
 			case HJ_BUILD_HASHTABLE:
-				elog(NOTICE, "HJ_BUILD_HASHTABLE");
+				elog(LOG, "HJ_BUILD_HASHTABLE");
 				/*
 				 * First time through: build hash table for inner relation.
 				 */
@@ -352,7 +352,7 @@ ExecHashJoinImpl(PlanState *pstate, bool parallel)
 				/* FALL THRU */
 
 			case HJ_NEED_NEW_OUTER:
-				elog(NOTICE, "HJ_NEED_NEW_OUTER");
+				elog(LOG, "HJ_NEED_NEW_OUTER");
 				/*
 				 * We don't have an outer tuple, try to get the next one
 				 */
@@ -370,7 +370,7 @@ ExecHashJoinImpl(PlanState *pstate, bool parallel)
 					node->hj_JoinState = HJ_OUTER_BATCH_EXHAUSTED;
 					break;
 				}
-				elog(NOTICE, "outer tuple is %i", DatumGetInt32(outerTupleSlot->tts_values[0]));
+				elog(LOG, "outer tuple is %i", DatumGetInt32(outerTupleSlot->tts_values[0]));
 				/*
 				 * only initialize this to false during the first chunk --
 				 * otherwise, we will be resetting a tuple that had a match to false
@@ -464,7 +464,7 @@ ExecHashJoinImpl(PlanState *pstate, bool parallel)
 				/* FALL THRU */
 
 			case HJ_SCAN_BUCKET:
-				elog(NOTICE, "HJ_SCAN_BUCKET");
+				elog(LOG, "HJ_SCAN_BUCKET");
 				/*
 				 * Scan the selected hash bucket for matches to current outer
 				 */
@@ -531,7 +531,7 @@ ExecHashJoinImpl(PlanState *pstate, bool parallel)
 				break;
 
 			case HJ_FILL_OUTER_TUPLE:
-				elog(NOTICE, "HJ_FILL_OUTER_TUPLE");
+				elog(LOG, "HJ_FILL_OUTER_TUPLE");
 				/*
 				 * The current outer tuple has run out of matches, so check
 				 * whether to emit a dummy outer-join tuple.  Whether we emit
@@ -560,7 +560,7 @@ ExecHashJoinImpl(PlanState *pstate, bool parallel)
 				break;
 
 			case HJ_NEED_NEW_BATCH:
-				elog(NOTICE, "HJ_NEED_NEW_BATCH");
+				elog(LOG, "HJ_NEED_NEW_BATCH");
 				/*
 				 * Try to advance to next batch.  Done if there are no more.
 				 */
@@ -616,7 +616,7 @@ ExecHashJoinImpl(PlanState *pstate, bool parallel)
 				break;
 
 			case HJ_ADAPTIVE_EMIT_UNMATCHED:
-				elog(NOTICE, "HJ_ADAPTIVE_EMIT_UNMATCHED");
+				elog(LOG, "HJ_ADAPTIVE_EMIT_UNMATCHED");
 				while (cursor)
 				{
 					TupleTableSlot *outer_unmatched_tup;
@@ -641,7 +641,7 @@ ExecHashJoinImpl(PlanState *pstate, bool parallel)
 
 			case HJ_NEED_NEW_INNER_CHUNK:
 
-				elog(NOTICE, "HJ_NEED_NEW_INNER_CHUNK");
+				elog(LOG, "HJ_NEED_NEW_INNER_CHUNK");
 
 				// TODO: check if this logic is right -- I think that after the build phase
 				// we need to emit any unmatched inner tups (if relevant)
@@ -668,7 +668,7 @@ ExecHashJoinImpl(PlanState *pstate, bool parallel)
 
 			case HJ_OUTER_BATCH_EXHAUSTED:
 
-				elog(NOTICE, "HJ_OUTER_BATCH_EXHAUSTED");
+				elog(LOG, "HJ_OUTER_BATCH_EXHAUSTED");
 				if (HJ_FILL_INNER(node))
 				{
 					/* set up to scan for unmatched inner tuples */
@@ -681,7 +681,7 @@ ExecHashJoinImpl(PlanState *pstate, bool parallel)
 
 			case HJ_FILL_INNER_TUPLE:
 
-				elog(NOTICE, "HJ_FILL_INNER_TUPLE");
+				elog(LOG, "HJ_FILL_INNER_TUPLE");
 				/*
 				 * We have finished a batch, but we are doing right/full join,
 				 * so any unmatched inner tuples in the hashtable have to be
