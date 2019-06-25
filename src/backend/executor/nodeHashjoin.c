@@ -642,7 +642,12 @@ ExecHashJoinImpl(PlanState *pstate, bool parallel)
 			case HJ_NEED_NEW_INNER_CHUNK:
 
 				elog(NOTICE, "HJ_NEED_NEW_INNER_CHUNK");
-				if (node->inner_page_offset == 0L) // inner batch is exhausted
+
+				// TODO: check if this logic is right -- I think that after the build phase
+				// we need to emit any unmatched inner tups (if relevant)
+				// then proceed to load the next batch right away (i.e. no chunks exist)
+				// however, I'm not sure if inner page offset will ever != 0 when it is batch 0
+				if (node->inner_page_offset == 0L || node->hj_HashTable->curbatch == 0) // inner batch is exhausted
 				{
 					/*
 					 * This case is entered on two separate conditions:
