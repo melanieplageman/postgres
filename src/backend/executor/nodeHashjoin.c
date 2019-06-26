@@ -776,6 +776,7 @@ ExecInitHashJoin(HashJoin *node, EState *estate, int eflags)
 	hjstate->js.jointype = node->join.jointype;
 
 	hjstate->inner_page_offset = 0L;
+	hjstate->first_chunk = false;
 	hjstate->HJ_NEED_NEW_OUTER_tup_start = 0L;
 	hjstate->HJ_NEED_NEW_OUTER_tup_end = 0L;
 	hjstate->current_outer_offset_match_status = NULL;
