@@ -491,7 +491,7 @@ ExecHashJoinImpl(PlanState *pstate, bool parallel)
 					if (!ExecScanHashBucket(node, econtext))
 					{
 						/* out of matches; check for possible outer-join fill */
-						// TODO: make a sideboard for the non-hashloop case
+						// TODO: make a sideboard for the non-hashloop case (bad-batch)
 						if (node->hj_HashTable->curbatch == 0)
 							node->hj_JoinState = HJ_FILL_OUTER_TUPLE;
 						else
@@ -546,7 +546,7 @@ ExecHashJoinImpl(PlanState *pstate, bool parallel)
 			case HJ_FILL_OUTER_TUPLE:
 
 				elog(LOG, "HJ_FILL_OUTER_TUPLE");
-				// TODO: need to make it use this logic more naturally whenever it is not hashloop (marking bad batches)
+				// TODO: need to make it use this logic more natural whenever it is not hashloop (marking bad batches)
 				if (node->hj_HashTable->curbatch == 0 || parallel)
 				{
 					/*
@@ -556,9 +556,7 @@ ExecHashJoinImpl(PlanState *pstate, bool parallel)
 					 */
 					node->hj_JoinState = HJ_NEED_NEW_OUTER;
 
-					// TODO: is this check necessary? it seems like we would only come here if this were true
-					if (!node->hj_MatchedOuter &&
-						HJ_FILL_OUTER(node))
+					if (!node->hj_MatchedOuter && HJ_FILL_OUTER(node)) // ?? why not have caller do this check?
 					{
 						/*
 						 * Generate a fake join tuple with nulls for the inner
@@ -652,9 +650,7 @@ ExecHashJoinImpl(PlanState *pstate, bool parallel)
 
 				elog(LOG, "HJ_NEED_NEW_INNER_CHUNK");
 
-				// TODO: check if this logic is right -- I think that after the build phase
-				// we need to load the next batch (after emitting unmatched inner) because no chunks exist
-				// however, I'm not sure if inner page offset will ever != 0 when it is batch 0
+				// ?? Will inner_page_offset != 0 ever when curbatch == 0 ?
 				if (node->inner_page_offset == 0L || node->hj_HashTable->curbatch == 0) // inner batch is exhausted
 				{
 					/*
