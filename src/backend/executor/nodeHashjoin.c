@@ -775,6 +775,7 @@ ExecInitHashJoin(HashJoin *node, EState *estate, int eflags)
 	hjstate->js.ps.ExecProcNode = ExecHashJoin;
 	hjstate->js.jointype = node->join.jointype;
 
+	hjstate->hashloop_fallback = false;
 	hjstate->inner_page_offset = 0L;
 	hjstate->first_chunk = false;
 	hjstate->HJ_NEED_NEW_OUTER_tup_start = 0L;

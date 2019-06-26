@@ -1902,6 +1902,7 @@ typedef struct HashJoinState
 	bool		hj_MatchedOuter;
 	bool		hj_OuterNotEmpty;
 
+	bool hashloop_fallback;
 	off_t inner_page_offset;
 	bool first_chunk;
 	struct OuterOffsetMatchStatus *first_outer_offset_match_status;
