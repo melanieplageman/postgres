@@ -128,6 +128,7 @@
 #define HJ_NEED_NEW_BATCH		5
 #define HJ_NEED_NEW_INNER_CHUNK 6
 #define HJ_FILL_INNER_TUPLES 7
+#define HJ_ADAPTIVE_EMIT_UNMATCHED_OUTER 8
 
 /* Returns true if doing null-fill on outer relation */
 #define HJ_FILL_OUTER(hjstate)	((hjstate)->hj_NullInnerTupleSlot != NULL)
@@ -547,55 +548,51 @@ ExecHashJoinImpl(PlanState *pstate, bool parallel)
 
 				elog(LOG, "HJ_FILL_OUTER_TUPLE");
 				// TODO: need to make it use this logic more natural whenever it is not hashloop (marking bad batches)
-				if (node->hj_HashTable->curbatch == 0 || parallel)
-				{
-					/*
-					 * The current outer tuple has run out of matches, so check
-					 * whether to emit a dummy outer-join tuple.  Whether we emit
-					 * one or not, the next state is NEED_NEW_OUTER.
-					 */
-					node->hj_JoinState = HJ_NEED_NEW_OUTER;
+				/*
+				 * The current outer tuple has run out of matches, so check
+				 * whether to emit a dummy outer-join tuple.  Whether we emit
+				 * one or not, the next state is NEED_NEW_OUTER.
+				 */
+				node->hj_JoinState = HJ_NEED_NEW_OUTER;
 
-					if (!node->hj_MatchedOuter && HJ_FILL_OUTER(node)) // ?? why not have caller do this check?
-					{
-						/*
-						 * Generate a fake join tuple with nulls for the inner
-						 * tuple, and return it if it passes the non-join quals.
-						 */
-						econtext->ecxt_innertuple = node->hj_NullInnerTupleSlot;
+				if (node->hj_MatchedOuter || !HJ_FILL_OUTER(node)) // ?? why not have caller do this check?
+					break;
 
-						if (otherqual == NULL || ExecQual(otherqual, econtext))
-							return ExecProject(node->js.ps.ps_ProjInfo);
-						else
-							InstrCountFiltered2(node, 1);
-					}
+				/*
+				 * Generate a fake join tuple with nulls for the inner
+				 * tuple, and return it if it passes the non-join quals.
+				 */
+				econtext->ecxt_innertuple = node->hj_NullInnerTupleSlot;
 
-				}
+				if (otherqual == NULL || ExecQual(otherqual, econtext))
+					return ExecProject(node->js.ps.ps_ProjInfo);
 				else
+					InstrCountFiltered2(node, 1);
+				break;
+
+			case HJ_ADAPTIVE_EMIT_UNMATCHED_OUTER:
+				while (cursor)
 				{
-					while (cursor)
+					TupleTableSlot *outer_unmatched_tup;
+					if (cursor->match_status == true)
 					{
-						TupleTableSlot *outer_unmatched_tup;
-						if (cursor->match_status == true)
-						{
-							cursor = cursor->next;
-							continue;
-						}
-						/*
-						 * if it is not a match, go to the offset in the page that it specifies
-						 * and emit it NULL-extended
-						 */
-						outer_unmatched_tup = ExecHashJoinGetOuterTupleAtOffset(node, cursor->outer_tuple_start_offset);
-						econtext->ecxt_outertuple = outer_unmatched_tup;
-						econtext->ecxt_innertuple = node->hj_NullInnerTupleSlot;
 						cursor = cursor->next;
-						return ExecProject(node->js.ps.ps_ProjInfo);
+						continue;
 					}
 					/*
-					 * came here from HJ_NEED_NEW_BATCH, so go back there
+					 * if it is not a match, go to the offset in the page that it specifies
+					 * and emit it NULL-extended
 					 */
-					node->hj_JoinState = HJ_NEED_NEW_BATCH;
+					outer_unmatched_tup = ExecHashJoinGetOuterTupleAtOffset(node, cursor->outer_tuple_start_offset);
+					econtext->ecxt_outertuple = outer_unmatched_tup;
+					econtext->ecxt_innertuple = node->hj_NullInnerTupleSlot;
+					cursor = cursor->next;
+					return ExecProject(node->js.ps.ps_ProjInfo);
 				}
+				/*
+				 * came here from HJ_NEED_NEW_BATCH, so go back there
+				 */
+				node->hj_JoinState = HJ_NEED_NEW_BATCH;
 				break;
 
 			case HJ_NEED_NEW_BATCH:
@@ -612,7 +609,7 @@ ExecHashJoinImpl(PlanState *pstate, bool parallel)
 				{
 					if (node->first_outer_offset_match_status && HJ_FILL_OUTER(node))
 					{
-						node->hj_JoinState = HJ_FILL_OUTER_TUPLE;
+						node->hj_JoinState = HJ_ADAPTIVE_EMIT_UNMATCHED_OUTER;
 						cursor = node->first_outer_offset_match_status;
 						node->first_outer_offset_match_status = NULL;
 						break;
