@@ -152,6 +152,8 @@ static bool LoadInner(HashJoinState *hjstate);
 static TupleTableSlot *ExecHashJoinGetOuterTupleAtOffset(HashJoinState *hjstate, off_t offset);
 static void rewindOuter(BufFile *bufFile);
 
+static TupleTableSlot *
+emitUnmatchedOuterTuple(ExprState *otherqual, ExprContext *econtext, HashJoinState *hjstate);
 static	OuterOffsetMatchStatus *cursor = NULL;
 
 /* ----------------------------------------------------------------
@@ -984,6 +986,19 @@ static void rewindOuter(BufFile *bufFile)
 			ereport(ERROR,
 				(errcode_for_file_access(),
 					errmsg("could not rewind hash-join temporary file: %m")));
+	}
+}
+static TupleTableSlot *
+emitUnmatchedOuterTuple(ExprState *otherqual, ExprContext *econtext, HashJoinState *hjstate)
+{
+	econtext->ecxt_innertuple = hjstate->hj_NullInnerTupleSlot;
+
+	if (otherqual == NULL || ExecQual(otherqual, econtext))
+		return ExecProject(hjstate->js.ps.ps_ProjInfo);
+	else
+	{
+		InstrCountFiltered2(hjstate, 1);
+		return NULL;
 	}
 }
 /*
