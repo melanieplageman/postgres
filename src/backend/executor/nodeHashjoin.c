@@ -573,7 +573,6 @@ ExecHashJoinImpl(PlanState *pstate, bool parallel)
 			case HJ_ADAPTIVE_EMIT_UNMATCHED_OUTER:
 				while (cursor)
 				{
-					TupleTableSlot *outer_unmatched_tup;
 					if (cursor->match_status == true)
 					{
 						cursor = cursor->next;
@@ -583,8 +582,7 @@ ExecHashJoinImpl(PlanState *pstate, bool parallel)
 					 * if it is not a match, go to the offset in the page that it specifies
 					 * and emit it NULL-extended
 					 */
-					outer_unmatched_tup = ExecHashJoinGetOuterTupleAtOffset(node, cursor->outer_tuple_start_offset);
-					econtext->ecxt_outertuple = outer_unmatched_tup;
+					econtext->ecxt_outertuple = ExecHashJoinGetOuterTupleAtOffset(node, cursor->outer_tuple_start_offset);;
 					econtext->ecxt_innertuple = node->hj_NullInnerTupleSlot;
 					cursor = cursor->next;
 					return ExecProject(node->js.ps.ps_ProjInfo);
