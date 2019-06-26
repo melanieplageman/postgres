@@ -128,7 +128,7 @@
 #define HJ_NEED_NEW_BATCH		5
 #define HJ_NEED_NEW_INNER_CHUNK 6
 #define HJ_OUTER_BATCH_EXHAUSTED 7
-#define HJ_FILL_INNER_TUPLE 8
+#define HJ_FILL_INNER_TUPLES 8
 
 /* Returns true if doing null-fill on outer relation */
 #define HJ_FILL_OUTER(hjstate)	((hjstate)->hj_NullInnerTupleSlot != NULL)
@@ -421,6 +421,7 @@ ExecHashJoinImpl(PlanState *pstate, bool parallel)
 				 * Note that node->first_chunk isn't true until HJ_NEED_NEW_BATCH
 				 * so this means that we don't construct this list on batch 0.
 				 */
+				// TODO: only build this when it is hashloop case/bad batch
 				if (node->first_chunk)
 				{
 					BufFile *outerFile = hashtable->outerBatchFile[batchno];
@@ -481,6 +482,7 @@ ExecHashJoinImpl(PlanState *pstate, bool parallel)
 					if (!ExecScanHashBucket(node, econtext))
 					{
 						/* out of matches; check for possible outer-join fill */
+						// TODO: make a sideboard for the non-hashloop case
 						if (node->hj_HashTable->curbatch == 0)
 							node->hj_JoinState = HJ_FILL_OUTER_TUPLE;
 						else
@@ -545,6 +547,7 @@ ExecHashJoinImpl(PlanState *pstate, bool parallel)
 					 */
 					node->hj_JoinState = HJ_NEED_NEW_OUTER;
 
+					// TODO: is this check necessary? it seems like we would only come here if this were true
 					if (!node->hj_MatchedOuter &&
 						HJ_FILL_OUTER(node))
 					{
@@ -641,8 +644,7 @@ ExecHashJoinImpl(PlanState *pstate, bool parallel)
 				elog(LOG, "HJ_NEED_NEW_INNER_CHUNK");
 
 				// TODO: check if this logic is right -- I think that after the build phase
-				// we need to emit any unmatched inner tups (if relevant)
-				// then proceed to load the next batch right away (i.e. no chunks exist)
+				// we need to load the next batch (after emitting unmatched inner) because no chunks exist
 				// however, I'm not sure if inner page offset will ever != 0 when it is batch 0
 				if (node->inner_page_offset == 0L || node->hj_HashTable->curbatch == 0) // inner batch is exhausted
 				{
@@ -669,15 +671,15 @@ ExecHashJoinImpl(PlanState *pstate, bool parallel)
 				{
 					/* set up to scan for unmatched inner tuples */
 					ExecPrepHashTableForUnmatched(node);
-					node->hj_JoinState = HJ_FILL_INNER_TUPLE;
+					node->hj_JoinState = HJ_FILL_INNER_TUPLES;
 					break;
 				}
 				node->hj_JoinState = HJ_NEED_NEW_INNER_CHUNK;
 				continue;
 
-			case HJ_FILL_INNER_TUPLE:
+			case HJ_FILL_INNER_TUPLES:
 
-				elog(LOG, "HJ_FILL_INNER_TUPLE");
+				elog(LOG, "HJ_FILL_INNER_TUPLES");
 				/*
 				 * We have finished a batch, but we are doing right/full join,
 				 * so any unmatched inner tuples in the hashtable have to be
