@@ -127,8 +127,7 @@
 #define HJ_FILL_OUTER_TUPLE		4
 #define HJ_NEED_NEW_BATCH		5
 #define HJ_NEED_NEW_INNER_CHUNK 6
-#define HJ_OUTER_BATCH_EXHAUSTED 7
-#define HJ_FILL_INNER_TUPLES 8
+#define HJ_FILL_INNER_TUPLES 7
 
 /* Returns true if doing null-fill on outer relation */
 #define HJ_FILL_OUTER(hjstate)	((hjstate)->hj_NullInnerTupleSlot != NULL)
@@ -366,7 +365,17 @@ ExecHashJoinImpl(PlanState *pstate, bool parallel)
 				if (TupIsNull(outerTupleSlot))
 				{
 					/* end of batch, or maybe whole join */
-					node->hj_JoinState = HJ_OUTER_BATCH_EXHAUSTED;
+					/*
+					 * for hashloop, all we know is outer batch is exhausted
+					 */
+					if (HJ_FILL_INNER(node))
+					{
+						/* set up to scan for unmatched inner tuples */
+						ExecPrepHashTableForUnmatched(node);
+						node->hj_JoinState = HJ_FILL_INNER_TUPLES;
+						break;
+					}
+					node->hj_JoinState = HJ_NEED_NEW_INNER_CHUNK;
 					break;
 				}
 				elog(LOG, "outer tuple is %i", DatumGetInt32(outerTupleSlot->tts_values[0]));
@@ -663,19 +672,6 @@ ExecHashJoinImpl(PlanState *pstate, bool parallel)
 				LoadInner(node);
 				node->current_outer_offset_match_status = NULL;
 				break;
-
-			case HJ_OUTER_BATCH_EXHAUSTED:
-
-				elog(LOG, "HJ_OUTER_BATCH_EXHAUSTED");
-				if (HJ_FILL_INNER(node))
-				{
-					/* set up to scan for unmatched inner tuples */
-					ExecPrepHashTableForUnmatched(node);
-					node->hj_JoinState = HJ_FILL_INNER_TUPLES;
-					break;
-				}
-				node->hj_JoinState = HJ_NEED_NEW_INNER_CHUNK;
-				continue;
 
 			case HJ_FILL_INNER_TUPLES:
 
