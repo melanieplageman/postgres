@@ -495,8 +495,7 @@ ExecHashJoinImpl(PlanState *pstate, bool parallel)
 					{
 						/* out of matches; check for possible outer-join fill */
 						// TODO: make a sideboard for the non-hashloop case (bad-batch)
-						if (node->hj_HashTable->curbatch == 0 ||
-								(node->hj_HashTable->curbatch > 0 && node->hashloop_fallback == false && node->first_chunk == false))
+						if (node->hj_HashTable->curbatch == 0)
 							node->hj_JoinState = HJ_FILL_OUTER_TUPLE;
 						else
 							node->hj_JoinState = HJ_NEED_NEW_OUTER;
@@ -1294,7 +1293,6 @@ static bool LoadInner(HashJoinState *hjstate)
 			if (current_saved_size > work_mem)
 			{
 				hjstate->inner_page_offset = tup_start_offset;
-				hjstate->hashloop_fallback = true;
 				return true;
 			}
 			hjstate->inner_page_offset = tup_end_offset;
@@ -1313,7 +1311,6 @@ static bool LoadInner(HashJoinState *hjstate)
 		 * after we processed all chunks, the inner batch file is no longer
 		 * needed
 		 */
-		hjstate->hashloop_fallback = false;
 		BufFileClose(innerFile);
 		hashtable->innerBatchFile[curbatch] = NULL;
 	}
