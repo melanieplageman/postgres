@@ -219,7 +219,7 @@ ExecHashJoinImpl(PlanState *pstate, bool parallel)
 		switch (node->hj_JoinState)
 		{
 			case HJ_BUILD_HASHTABLE:
-				elog(LOG, "HJ_BUILD_HASHTABLE");
+				elog(DEBUG1, "HJ_BUILD_HASHTABLE");
 				/*
 				 * First time through: build hash table for inner relation.
 				 */
@@ -353,7 +353,7 @@ ExecHashJoinImpl(PlanState *pstate, bool parallel)
 				/* FALL THRU */
 
 			case HJ_NEED_NEW_OUTER:
-				elog(LOG, "HJ_NEED_NEW_OUTER");
+				elog(DEBUG1, "HJ_NEED_NEW_OUTER");
 				/*
 				 * We don't have an outer tuple, try to get the next one
 				 */
@@ -381,7 +381,6 @@ ExecHashJoinImpl(PlanState *pstate, bool parallel)
 					node->hj_JoinState = HJ_NEED_NEW_INNER_CHUNK;
 					break;
 				}
-				elog(LOG, "outer tuple is %i", DatumGetInt32(outerTupleSlot->tts_values[0]));
 				/*
 				 * only initialize this to false during the first chunk --
 				 * otherwise, we will be resetting a tuple that had a match to false
@@ -427,6 +426,7 @@ ExecHashJoinImpl(PlanState *pstate, bool parallel)
 					/* Loop around, staying in HJ_NEED_NEW_OUTER state */
 					continue;
 				}
+				elog(DEBUG1, "outer tuple is %i. its batch is %i", DatumGetInt32(outerTupleSlot->tts_values[0]), batchno);
 
 				/*
 				 * We need to construct the linked list of match statuses on the first chunk.
@@ -434,7 +434,7 @@ ExecHashJoinImpl(PlanState *pstate, bool parallel)
 				 * so this means that we don't construct this list on batch 0.
 				 */
 				// TODO: only build this when it is hashloop case/bad batch
-				if (node->first_chunk)
+				if (node->first_chunk && hashtable->outerBatchFile)
 				{
 					BufFile *outerFile = hashtable->outerBatchFile[batchno];
 
@@ -476,7 +476,7 @@ ExecHashJoinImpl(PlanState *pstate, bool parallel)
 				/* FALL THRU */
 
 			case HJ_SCAN_BUCKET:
-				elog(LOG, "HJ_SCAN_BUCKET");
+				elog(DEBUG1, "HJ_SCAN_BUCKET");
 				/*
 				 * Scan the selected hash bucket for matches to current outer
 				 */
@@ -548,7 +548,7 @@ ExecHashJoinImpl(PlanState *pstate, bool parallel)
 
 			case HJ_FILL_OUTER_TUPLE:
 
-				elog(LOG, "HJ_FILL_OUTER_TUPLE");
+				elog(DEBUG1, "HJ_FILL_OUTER_TUPLE");
 				// TODO: need to make it use this logic more natural whenever it is not hashloop (marking bad batches)
 				/*
 				 * The current outer tuple has run out of matches, so check
@@ -596,7 +596,7 @@ ExecHashJoinImpl(PlanState *pstate, bool parallel)
 				break;
 
 			case HJ_NEED_NEW_BATCH:
-				elog(LOG, "HJ_NEED_NEW_BATCH");
+				elog(DEBUG1, "HJ_NEED_NEW_BATCH");
 				/*
 				 * Try to advance to next batch.  Done if there are no more.
 				 */
@@ -645,7 +645,7 @@ ExecHashJoinImpl(PlanState *pstate, bool parallel)
 
 			case HJ_NEED_NEW_INNER_CHUNK:
 
-				elog(LOG, "HJ_NEED_NEW_INNER_CHUNK");
+				elog(DEBUG1, "HJ_NEED_NEW_INNER_CHUNK");
 
 				// ?? Will inner_page_offset != 0 ever when curbatch == 0 ?
 				if (node->inner_page_offset == 0L || node->hj_HashTable->curbatch == 0) // inner batch is exhausted
@@ -668,7 +668,7 @@ ExecHashJoinImpl(PlanState *pstate, bool parallel)
 
 			case HJ_FILL_INNER_TUPLES:
 
-				elog(LOG, "HJ_FILL_INNER_TUPLES");
+				elog(DEBUG1, "HJ_FILL_INNER_TUPLES");
 				/*
 				 * We have finished a batch, but we are doing right/full join,
 				 * so any unmatched inner tuples in the hashtable have to be
