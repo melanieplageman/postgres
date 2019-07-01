@@ -124,12 +124,11 @@
 #define HJ_BUILD_HASHTABLE		1
 #define HJ_NEED_NEW_OUTER		2
 #define HJ_SCAN_BUCKET			3
-#define HJ_FILL_OUTER_TUPLE		4
-#define HJ_NEED_NEW_BATCH		5
-#define HJ_NEED_NEW_INNER_CHUNK 6
-#define HJ_FILL_INNER_TUPLES 7
-#define HJ_ADAPTIVE_EMIT_UNMATCHED_OUTER 8
-#define HJ_ADAPTIVE_EMIT_UNMATCHED_OUTER_INIT 9
+#define HJ_NEED_NEW_BATCH		4
+#define HJ_NEED_NEW_INNER_CHUNK 5
+#define HJ_FILL_INNER_TUPLES 6
+#define HJ_ADAPTIVE_EMIT_UNMATCHED_OUTER 7
+#define HJ_ADAPTIVE_EMIT_UNMATCHED_OUTER_INIT 8
 
 /* Returns true if doing null-fill on outer relation */
 #define HJ_FILL_OUTER(hjstate)	((hjstate)->hj_NullInnerTupleSlot != NULL)
@@ -480,29 +479,26 @@ ExecHashJoinImpl(PlanState *pstate, bool parallel)
 				/*
 				 * Scan the selected hash bucket for matches to current outer
 				 */
-				if (parallel)
-				{
-					if (!ExecParallelScanHashBucket(node, econtext))
-					{
-						/* out of matches; check for possible outer-join fill */
-						node->hj_JoinState = HJ_FILL_OUTER_TUPLE;
-						continue;
-					}
-				}
+				bool done = false;
+				if (parallel) // maybe use function pointer instead?
+					done = !ExecParallelScanHashBucket(node, econtext);
 				else
-				{
-					if (!ExecScanHashBucket(node, econtext))
-					{
-						/* out of matches; check for possible outer-join fill */
-						// TODO: make a sideboard for the non-hashloop case (bad-batch)
-						if (node->hj_HashTable->curbatch == 0)
-							node->hj_JoinState = HJ_FILL_OUTER_TUPLE;
-						else
-							node->hj_JoinState = HJ_NEED_NEW_OUTER;
-						continue;
-					}
-				}
+					done = !ExecScanHashBucket(node, econtext);
 
+				// TODO: make a sideboard for the non-hashloop case (bad-batch)
+				if (done)
+				{
+					/* out of matches; check for possible outer-join fill */
+					node->hj_JoinState = HJ_NEED_NEW_OUTER;
+
+					if (node->hj_HashTable->curbatch == 0)
+					{
+						TupleTableSlot *slot = emitUnmatchedOuterTuple(otherqual, econtext, node);
+						if (slot != NULL)
+							return slot;
+					}
+					continue;
+				}
 				/*
 				 * We've got a match, but still need to test non-hashed quals.
 				 * ExecScanHashBucket already set up all the state needed to
@@ -544,32 +540,6 @@ ExecHashJoinImpl(PlanState *pstate, bool parallel)
 				}
 				else
 					InstrCountFiltered1(node, 1);
-				break;
-
-			case HJ_FILL_OUTER_TUPLE:
-
-				elog(DEBUG1, "HJ_FILL_OUTER_TUPLE");
-				// TODO: need to make it use this logic more natural whenever it is not hashloop (marking bad batches)
-				/*
-				 * The current outer tuple has run out of matches, so check
-				 * whether to emit a dummy outer-join tuple.  Whether we emit
-				 * one or not, the next state is NEED_NEW_OUTER.
-				 */
-				node->hj_JoinState = HJ_NEED_NEW_OUTER;
-
-				if (node->hj_MatchedOuter || !HJ_FILL_OUTER(node)) // ?? why not have caller do this check?
-					break;
-
-				/*
-				 * Generate a fake join tuple with nulls for the inner
-				 * tuple, and return it if it passes the non-join quals.
-				 */
-				econtext->ecxt_innertuple = node->hj_NullInnerTupleSlot;
-
-				if (otherqual == NULL || ExecQual(otherqual, econtext))
-					return ExecProject(node->js.ps.ps_ProjInfo);
-				else
-					InstrCountFiltered2(node, 1);
 				break;
 
 			case HJ_ADAPTIVE_EMIT_UNMATCHED_OUTER_INIT:
@@ -995,18 +965,32 @@ static void rewindOuter(BufFile *bufFile)
 					errmsg("could not rewind hash-join temporary file: %m")));
 	}
 }
+// TODO: need to make it use this logic more natural whenever it is not hashloop (marking bad batches)
+/*
+ * The current outer tuple has run out of matches, so check
+ * whether to emit a dummy outer-join tuple.  Whether we emit
+ * one or not, the next state is NEED_NEW_OUTER.
+ */
 static TupleTableSlot *
 emitUnmatchedOuterTuple(ExprState *otherqual, ExprContext *econtext, HashJoinState *hjstate)
 {
+	if (hjstate->hj_MatchedOuter)
+		return NULL;
+
+	if (!HJ_FILL_OUTER(hjstate))
+		return NULL;
+
 	econtext->ecxt_innertuple = hjstate->hj_NullInnerTupleSlot;
 
+	/*
+ * Generate a fake join tuple with nulls for the inner
+ * tuple, and return it if it passes the non-join quals.
+ */
 	if (otherqual == NULL || ExecQual(otherqual, econtext))
 		return ExecProject(hjstate->js.ps.ps_ProjInfo);
-	else
-	{
-		InstrCountFiltered2(hjstate, 1);
-		return NULL;
-	}
+
+	InstrCountFiltered2(hjstate, 1);
+	return NULL;
 }
 /*
  * ExecHashJoinOuterGetTuple
