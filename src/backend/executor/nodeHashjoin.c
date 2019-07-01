@@ -129,6 +129,7 @@
 #define HJ_NEED_NEW_INNER_CHUNK 6
 #define HJ_FILL_INNER_TUPLES 7
 #define HJ_ADAPTIVE_EMIT_UNMATCHED_OUTER 8
+#define HJ_ADAPTIVE_EMIT_UNMATCHED_OUTER_INIT 9
 
 /* Returns true if doing null-fill on outer relation */
 #define HJ_FILL_OUTER(hjstate)	((hjstate)->hj_NullInnerTupleSlot != NULL)
@@ -154,7 +155,6 @@ static void rewindOuter(BufFile *bufFile);
 
 static TupleTableSlot *
 emitUnmatchedOuterTuple(ExprState *otherqual, ExprContext *econtext, HashJoinState *hjstate);
-static	OuterOffsetMatchStatus *cursor = NULL;
 
 /* ----------------------------------------------------------------
  *		ExecHashJoinImpl
@@ -572,23 +572,30 @@ ExecHashJoinImpl(PlanState *pstate, bool parallel)
 					InstrCountFiltered2(node, 1);
 				break;
 
+			case HJ_ADAPTIVE_EMIT_UNMATCHED_OUTER_INIT:
+				node->cursor = node->first_outer_offset_match_status;
+				node->first_outer_offset_match_status = NULL;
+				node->hj_JoinState = HJ_ADAPTIVE_EMIT_UNMATCHED_OUTER;
+				/* fall through */
+
 			case HJ_ADAPTIVE_EMIT_UNMATCHED_OUTER:
-				while (cursor)
+				while (node->cursor)
 				{
-					if (cursor->match_status == true)
+					if (node->cursor->match_status == true)
 					{
-						cursor = cursor->next;
+						node->cursor = node->cursor->next;
 						continue;
 					}
 					/*
 					 * if it is not a match, go to the offset in the page that it specifies
 					 * and emit it NULL-extended
 					 */
-					econtext->ecxt_outertuple = ExecHashJoinGetOuterTupleAtOffset(node, cursor->outer_tuple_start_offset);;
+					econtext->ecxt_outertuple = ExecHashJoinGetOuterTupleAtOffset(node, node->cursor->outer_tuple_start_offset);
 					econtext->ecxt_innertuple = node->hj_NullInnerTupleSlot;
-					cursor = cursor->next;
+					node->cursor = node->cursor->next;
 					return ExecProject(node->js.ps.ps_ProjInfo);
 				}
+				node->cursor = NULL;
 				/*
 				 * came here from HJ_NEED_NEW_BATCH, so go back there
 				 */
@@ -609,9 +616,7 @@ ExecHashJoinImpl(PlanState *pstate, bool parallel)
 				{
 					if (node->first_outer_offset_match_status && HJ_FILL_OUTER(node))
 					{
-						node->hj_JoinState = HJ_ADAPTIVE_EMIT_UNMATCHED_OUTER;
-						cursor = node->first_outer_offset_match_status;
-						node->first_outer_offset_match_status = NULL;
+						node->hj_JoinState = HJ_ADAPTIVE_EMIT_UNMATCHED_OUTER_INIT;
 						break;
 					}
 
@@ -915,6 +920,8 @@ ExecInitHashJoin(HashJoin *node, EState *estate, int eflags)
 	hjstate->hj_JoinState = HJ_BUILD_HASHTABLE;
 	hjstate->hj_MatchedOuter = false;
 	hjstate->hj_OuterNotEmpty = false;
+
+	hjstate->cursor = NULL;
 
 	return hjstate;
 }
