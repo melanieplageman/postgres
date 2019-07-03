@@ -367,9 +367,10 @@ ExecHashJoinImpl(PlanState *pstate, bool parallel)
 
 				if (TupIsNull(outerTupleSlot))
 				{
-					/* end of batch, or maybe whole join */
 					/*
-					 * for hashloop, all we know is outer batch is exhausted
+					 * end of batch, or maybe whole join
+					 * for hashloop fallback, all we know is outer batch is exhausted
+					 * inner could have more chunks
 					 */
 					if (HJ_FILL_INNER(node))
 					{
@@ -383,7 +384,8 @@ ExecHashJoinImpl(PlanState *pstate, bool parallel)
 				}
 				/*
 				 * only initialize this to false during the first chunk --
-				 * otherwise, we will be resetting a tuple that had a match to false
+				 * otherwise, we will be resetting hj_MatchedOuter
+				 * to false for an outer tuple that has already matched an inner tuple
 				 */
 				if (node->first_chunk || hashtable->curbatch == 0)
 					node->hj_MatchedOuter = false;
@@ -480,7 +482,7 @@ ExecHashJoinImpl(PlanState *pstate, bool parallel)
 				/*
 				 * Scan the selected hash bucket for matches to current outer
 				 */
-				if (parallel) // maybe use function pointer instead?
+				if (parallel)
 					done = !ExecParallelScanHashBucket(node, econtext);
 				else
 					done = !ExecScanHashBucket(node, econtext);
