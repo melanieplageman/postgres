@@ -426,14 +426,12 @@ ExecHashJoinImpl(PlanState *pstate, bool parallel)
 					/* Loop around, staying in HJ_NEED_NEW_OUTER state */
 					continue;
 				}
-				elog(DEBUG1, "outer tuple is %i. its batch is %i", DatumGetInt32(outerTupleSlot->tts_values[0]), batchno);
 
 				/*
 				 * We need to construct the linked list of match statuses on the first chunk.
 				 * Note that node->first_chunk isn't true until HJ_NEED_NEW_BATCH
 				 * so this means that we don't construct this list on batch 0.
 				 * This list should also only be constructed for hashloop fallback
-				 * TODO: ensure this is not created in parallel non-fallback case
 				 */
 				if (node->first_chunk && hashtable->outerBatchFile && node->hashloop_fallback == true)
 				{
@@ -453,7 +451,7 @@ ExecHashJoinImpl(PlanState *pstate, bool parallel)
 							node->current_outer_offset_match_status->next = outerOffsetMatchStatus;
 							node->current_outer_offset_match_status = outerOffsetMatchStatus;
 						}
-						else // node->first_outer_offset_match_status == NULL
+						else /* node->first_outer_offset_match_status == NULL */
 						{
 							node->first_outer_offset_match_status = outerOffsetMatchStatus;
 							node->current_outer_offset_match_status = node->first_outer_offset_match_status;
@@ -487,14 +485,6 @@ ExecHashJoinImpl(PlanState *pstate, bool parallel)
 				else
 					done = !ExecScanHashBucket(node, econtext);
 
-				/*
-				 * TODO: Because fallback happens only when inserting into the hashtable
-				 * when loading batches after batch 0 when inserting another tuple from
-				 * the batch file would cause the hashtable to exceed work_mem, in the
-				 * current implementation, it is not possible to emit NULL-extended tuples
-				 * for a left join as they are encountered after batch 0, because, then,
-				 * if later it falls back to hashloop join, those tuples
-				 */
 				if (done)
 				{
 					/* out of matches; check for possible outer-join fill */
