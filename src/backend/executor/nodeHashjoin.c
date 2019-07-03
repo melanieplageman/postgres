@@ -206,6 +206,7 @@ ExecHashJoinImpl(PlanState *pstate, bool parallel)
 	 */
 	for (;;)
 	{
+		bool done = false;
 
 		/*
 		 * It's possible to iterate this loop many times before returning a
@@ -432,7 +433,6 @@ ExecHashJoinImpl(PlanState *pstate, bool parallel)
 				 * Note that node->first_chunk isn't true until HJ_NEED_NEW_BATCH
 				 * so this means that we don't construct this list on batch 0.
 				 */
-				// TODO: only build this when it is hashloop case/bad batch
 				if (node->first_chunk && hashtable->outerBatchFile)
 				{
 					BufFile *outerFile = hashtable->outerBatchFile[batchno];
@@ -475,23 +475,30 @@ ExecHashJoinImpl(PlanState *pstate, bool parallel)
 				/* FALL THRU */
 
 			case HJ_SCAN_BUCKET:
+
 				elog(DEBUG1, "HJ_SCAN_BUCKET");
 				/*
 				 * Scan the selected hash bucket for matches to current outer
 				 */
-				bool done = false;
 				if (parallel) // maybe use function pointer instead?
 					done = !ExecParallelScanHashBucket(node, econtext);
 				else
 					done = !ExecScanHashBucket(node, econtext);
 
-				// TODO: make a sideboard for the non-hashloop case (bad-batch)
+				/*
+				 * TODO: Because fallback happens only when inserting into the hashtable
+				 * when loading batches after batch 0 when inserting another tuple from
+				 * the batch file would cause the hashtable to exceed work_mem, in the
+				 * current implementation, it is not possible to emit NULL-extended tuples
+				 * for a left join as they are encountered after batch 0, because, then,
+				 * if later it falls back to hashloop join, those tuples
+				 */
 				if (done)
 				{
 					/* out of matches; check for possible outer-join fill */
 					node->hj_JoinState = HJ_NEED_NEW_OUTER;
 
-					if (node->hj_HashTable->curbatch == 0)
+					if (node->hj_HashTable->curbatch == 0 || node->hashloop_fallback == false)
 					{
 						TupleTableSlot *slot = emitUnmatchedOuterTuple(otherqual, econtext, node);
 						if (slot != NULL)
@@ -965,7 +972,6 @@ static void rewindOuter(BufFile *bufFile)
 					errmsg("could not rewind hash-join temporary file: %m")));
 	}
 }
-// TODO: need to make it use this logic more natural whenever it is not hashloop (marking bad batches)
 /*
  * The current outer tuple has run out of matches, so check
  * whether to emit a dummy outer-join tuple.  Whether we emit
@@ -1225,6 +1231,7 @@ ExecHashJoinAdvanceBatch(HashJoinState *hjstate)
 
 	hjstate->inner_page_offset = 0L;
 	hjstate->first_chunk = true;
+	hjstate->hashloop_fallback = false; /* new batch, so start it off false */
 	if (curbatch >= nbatch)
 		return false;			/* no more batches */
 
@@ -1284,6 +1291,7 @@ static bool LoadInner(HashJoinState *hjstate)
 			if (current_saved_size > work_mem)
 			{
 				hjstate->inner_page_offset = tup_start_offset;
+				hjstate->hashloop_fallback = true;
 				return true;
 			}
 			hjstate->inner_page_offset = tup_end_offset;
