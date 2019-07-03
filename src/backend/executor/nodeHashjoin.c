@@ -432,8 +432,10 @@ ExecHashJoinImpl(PlanState *pstate, bool parallel)
 				 * We need to construct the linked list of match statuses on the first chunk.
 				 * Note that node->first_chunk isn't true until HJ_NEED_NEW_BATCH
 				 * so this means that we don't construct this list on batch 0.
+				 * This list should also only be constructed for hashloop fallback
+				 * TODO: ensure this is not created in parallel non-fallback case
 				 */
-				if (node->first_chunk && hashtable->outerBatchFile)
+				if (node->first_chunk && hashtable->outerBatchFile && node->hashloop_fallback == true)
 				{
 					BufFile *outerFile = hashtable->outerBatchFile[batchno];
 
@@ -591,8 +593,14 @@ ExecHashJoinImpl(PlanState *pstate, bool parallel)
 				}
 				else
 				{
-					if (node->first_outer_offset_match_status && HJ_FILL_OUTER(node))
+					if (node->first_outer_offset_match_status && HJ_FILL_OUTER(node) && node->hashloop_fallback == true)
 					{
+						/*
+						 * For hashloop fallback, outer tuples are not emitted
+						 * until directly before advancing the batch (after all inner
+						 * chunks have been processed). node->hashloop_fallback should be
+						 * true because it is not reset to false until advancing the batches
+						 */
 						node->hj_JoinState = HJ_ADAPTIVE_EMIT_UNMATCHED_OUTER_INIT;
 						break;
 					}
@@ -633,8 +641,10 @@ ExecHashJoinImpl(PlanState *pstate, bool parallel)
 				if (node->inner_page_offset == 0L || node->hj_HashTable->curbatch == 0) // inner batch is exhausted
 				{
 					/*
-					 * no more chunks, so load next batch
-					 * or, there are no chunks because this is batch 0
+					 * either it is the fallback case and there are no more chunks
+					 * or, there were never chunks because this is the non-fallback case
+					 * or this is batch 0
+					 * in any of these cases, load next batch
 					 */
 					node->hj_JoinState = HJ_NEED_NEW_BATCH;
 					break;
