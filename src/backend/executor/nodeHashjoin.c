@@ -429,6 +429,7 @@ ExecHashJoinImpl(PlanState *pstate, bool parallel)
 				}
 
 				/*
+				 * Build Outer Tuple Match Status Bitmap Phase
 				 * We need to construct the linked list of match statuses on the first chunk.
 				 * Note that node->first_chunk isn't true until HJ_NEED_NEW_BATCH
 				 * so this means that we don't construct this list on batch 0.
@@ -436,7 +437,8 @@ ExecHashJoinImpl(PlanState *pstate, bool parallel)
 				 */
 				if (node->hashloop_fallback == true)
 				{
-					if (node->first_chunk && hashtable->outerBatchFile && node->hashloop_fallback == true) /* basically new batch, so build phase */
+					/* TODO: could we check batchno instead of first_chunk ? */
+					if (node->first_chunk && hashtable->outerBatchFile) /* basically new batch, so build phase */
 					{
 						BufFile *outerFile = hashtable->outerBatchFile[batchno];
 
@@ -449,12 +451,12 @@ ExecHashJoinImpl(PlanState *pstate, bool parallel)
 							outerOffsetMatchStatus->outer_tuple_start_offset = 0L;
 							outerOffsetMatchStatus->next = NULL;
 
-							if (node->first_outer_offset_match_status != NULL)
+							if (node->first_outer_offset_match_status != NULL) /* not first tuple of new batch */
 							{
 								node->current_outer_offset_match_status->next = outerOffsetMatchStatus;
 								node->current_outer_offset_match_status = outerOffsetMatchStatus;
 							}
-							else /* node->first_outer_offset_match_status == NULL */
+							else /* node->first_outer_offset_match_status == NULL; first tuple of new batch */
 							{
 								node->first_outer_offset_match_status = outerOffsetMatchStatus;
 								node->current_outer_offset_match_status = node->first_outer_offset_match_status;
@@ -466,34 +468,69 @@ ExecHashJoinImpl(PlanState *pstate, bool parallel)
 							/*
 							 * bitmap experiment
 							 */
-							node->hj_OuterTupleCounter++;
 							if (node->hj_OuterMatchStatuses == NULL) /* start of a new batch */
 							{
+								node->hj_NumOuterTuples = 1;
+								node->hj_CurrentOuterTuple = 1;
 								/* 1-index outer tuple list */
-								node->hj_OuterMatchStatuses = bms_make_singleton(node->hj_OuterTupleCounter);
+								//node->hj_OuterMatchStatuses = bms_make_singleton(node->hj_CurrentOuterTuple);
+								node->hj_OuterMatchStatuses = palloc(sizeof(int) * 1000); /* TODO: fixme I'm a constant */
+								node->hj_OuterMatchStatuses = memset(node->hj_OuterMatchStatuses, 0, 1000);
+								/* 1-indexed outer tuple list */
+								node->hj_OuterMatchStatuses[1] = -1;
 							}
-							else /* node->hj_OuterMatchStatuses != NULL so is not first outer tuple of this batch */
+							/*
+							 * first chunk
+							 */
+							node->hj_CurrentOuterTuple++;
+							node->hj_NumOuterTuples++;
+							int i = 0;
+							while(node->hj_OuterMatchStatuses[i] != -1)
 							{
-								node->hj_OuterMatchStatuses = bms_add_member(node->hj_OuterMatchStatuses, node->hj_OuterTupleCounter);
+								i++;
 							}
+							// got our i == -1
+							node->hj_OuterMatchStatuses[i] = 0;
+							node->hj_OuterMatchStatuses[++i] = -1;
+							//else /* node->hj_OuterMatchStatuses != NULL so is not first outer tuple of this batch */
+						//	{
+							//	node->hj_NumOuterTuples++;
+							//	node->hj_CurrentOuterTuple++;
+							//	node->hj_OuterMatchStatuses = bms_add_member(node->hj_OuterMatchStatuses, node->hj_CurrentOuterTuple);
+							//}
 						}
 					}
 						/*
+						 * Use Outer Tuple Match Status Bitmap Phase
 						 * advance the cursor or reset it to point to head
 						 * if it is a new chunk (after the first chunk), reset it (basically rewinding outer)
 						 * if it is just the next tuple in the same chunk, advance the cursor to next
 						 */
-					else if (node->hj_HashTable->curbatch > 0)
+					else if (node->hj_HashTable->curbatch > 0) /* new chunk, so use it phase */
 					{
-						/*
-						 * TODO: could this be hit when > batch 0 and not hashloop fallback? we shouldn't do this if it is not fallback
-						 * or does the check for first_chunk catch this? do we even need that check?
-						 * maybe put both of these in if hashloop_fallback
-						 */
-						if (node->current_outer_offset_match_status == NULL)
+						if (node->current_outer_offset_match_status == NULL) /* new chunk (though not first chunk) */
 							node->current_outer_offset_match_status = node->first_outer_offset_match_status;
-						else
+						else /* new tuple in same chunk */
 							node->current_outer_offset_match_status = node->current_outer_offset_match_status->next;
+						/*
+						 * bitmap experiment
+						 */
+
+
+						/*
+						 * >= 2 chunk
+						 * 1st tuple, reset counter
+						 */
+						if (node->hj_CurrentOuterTuple = node->hj_NumOuterTuples)
+							node->hj_CurrentOuterTuple = 1;
+						/*
+						 * new tuple in same chunk
+						 * >= 2 chunk
+						 * >= 2 tuple
+						 */
+						else
+							node->hj_CurrentOuterTuple++;
+
 					}
 				}
 
@@ -798,7 +835,8 @@ ExecInitHashJoin(HashJoin *node, EState *estate, int eflags)
 	hjstate->first_outer_offset_match_status = NULL;
 
 	hjstate->hj_OuterMatchStatuses = NULL;
-	hjstate->hj_OuterTupleCounter = 0;
+	hjstate->hj_CurrentOuterTuple  = 0;
+	hjstate->hj_NumOuterTuples     = 0;
 	/*
 	 * Miscellaneous initialization
 	 *
