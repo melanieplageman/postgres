@@ -434,41 +434,69 @@ ExecHashJoinImpl(PlanState *pstate, bool parallel)
 				 * so this means that we don't construct this list on batch 0.
 				 * This list should also only be constructed for hashloop fallback
 				 */
-				if (node->first_chunk && hashtable->outerBatchFile && node->hashloop_fallback == true)
+				if (node->hashloop_fallback == true)
 				{
-					BufFile *outerFile = hashtable->outerBatchFile[batchno];
-
-					if (outerFile != NULL)
+					if (node->first_chunk && hashtable->outerBatchFile && node->hashloop_fallback == true) /* basically new batch, so build phase */
 					{
-						OuterOffsetMatchStatus *outerOffsetMatchStatus = NULL;
+						BufFile *outerFile = hashtable->outerBatchFile[batchno];
 
-						outerOffsetMatchStatus = palloc(sizeof(struct OuterOffsetMatchStatus));
-						outerOffsetMatchStatus->match_status = false;
-						outerOffsetMatchStatus->outer_tuple_start_offset = 0L;
-						outerOffsetMatchStatus->next = NULL;
-
-						if (node->first_outer_offset_match_status != NULL)
+						if (outerFile != NULL)
 						{
-							node->current_outer_offset_match_status->next = outerOffsetMatchStatus;
-							node->current_outer_offset_match_status = outerOffsetMatchStatus;
+							OuterOffsetMatchStatus *outerOffsetMatchStatus = NULL;
+
+							outerOffsetMatchStatus = palloc(sizeof(struct OuterOffsetMatchStatus));
+							outerOffsetMatchStatus->match_status = false;
+							outerOffsetMatchStatus->outer_tuple_start_offset = 0L;
+							outerOffsetMatchStatus->next = NULL;
+
+							if (node->first_outer_offset_match_status != NULL)
+							{
+								node->current_outer_offset_match_status->next = outerOffsetMatchStatus;
+								node->current_outer_offset_match_status = outerOffsetMatchStatus;
+							}
+							else /* node->first_outer_offset_match_status == NULL */
+							{
+								node->first_outer_offset_match_status = outerOffsetMatchStatus;
+								node->current_outer_offset_match_status = node->first_outer_offset_match_status;
+							}
+
+							outerOffsetMatchStatus->outer_tuple_val = DatumGetInt32(outerTupleSlot->tts_values[0]);
+							outerOffsetMatchStatus->outer_tuple_start_offset = node->HJ_NEED_NEW_OUTER_tup_start;
+
+							/*
+							 * bitmap experiment
+							 */
+							node->hj_OuterTupleCounter++;
+							if (node->hj_OuterMatchStatuses == NULL) /* start of a new batch */
+							{
+								/* 1-index outer tuple list */
+								node->hj_OuterMatchStatuses = bms_make_singleton(node->hj_OuterTupleCounter);
+							}
+							else /* node->hj_OuterMatchStatuses != NULL so is not first outer tuple of this batch */
+							{
+								node->hj_OuterMatchStatuses = bms_add_member(node->hj_OuterMatchStatuses, node->hj_OuterTupleCounter);
+							}
 						}
-						else /* node->first_outer_offset_match_status == NULL */
-						{
-							node->first_outer_offset_match_status = outerOffsetMatchStatus;
+					}
+						/*
+						 * advance the cursor or reset it to point to head
+						 * if it is a new chunk (after the first chunk), reset it (basically rewinding outer)
+						 * if it is just the next tuple in the same chunk, advance the cursor to next
+						 */
+					else if (node->hj_HashTable->curbatch > 0)
+					{
+						/*
+						 * TODO: could this be hit when > batch 0 and not hashloop fallback? we shouldn't do this if it is not fallback
+						 * or does the check for first_chunk catch this? do we even need that check?
+						 * maybe put both of these in if hashloop_fallback
+						 */
+						if (node->current_outer_offset_match_status == NULL)
 							node->current_outer_offset_match_status = node->first_outer_offset_match_status;
-						}
-
-						outerOffsetMatchStatus->outer_tuple_val = DatumGetInt32(outerTupleSlot->tts_values[0]);
-						outerOffsetMatchStatus->outer_tuple_start_offset = node->HJ_NEED_NEW_OUTER_tup_start;
+						else
+							node->current_outer_offset_match_status = node->current_outer_offset_match_status->next;
 					}
 				}
-				else if (node->hj_HashTable->curbatch > 0)
-				{
-					if (node->current_outer_offset_match_status == NULL)
-						node->current_outer_offset_match_status = node->first_outer_offset_match_status;
-					else
-						node->current_outer_offset_match_status = node->current_outer_offset_match_status->next;
-				}
+
 
 				/* OK, let's scan the bucket for matches */
 				node->hj_JoinState = HJ_SCAN_BUCKET;
@@ -768,6 +796,9 @@ ExecInitHashJoin(HashJoin *node, EState *estate, int eflags)
 	hjstate->HJ_NEED_NEW_OUTER_tup_end = 0L;
 	hjstate->current_outer_offset_match_status = NULL;
 	hjstate->first_outer_offset_match_status = NULL;
+
+	hjstate->hj_OuterMatchStatuses = NULL;
+	hjstate->hj_OuterTupleCounter = 0;
 	/*
 	 * Miscellaneous initialization
 	 *

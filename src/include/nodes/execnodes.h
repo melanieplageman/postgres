@@ -1909,6 +1909,8 @@ typedef struct HashJoinState
 	struct OuterOffsetMatchStatus *current_outer_offset_match_status;
 	struct OuterOffsetMatchStatus *cursor;
 
+	Bitmapset *hj_OuterMatchStatuses;
+	int64 hj_OuterTupleCounter;
 	off_t HJ_NEED_NEW_OUTER_tup_start;
 	off_t HJ_NEED_NEW_OUTER_tup_end;
 } HashJoinState;
