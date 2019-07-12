@@ -435,6 +435,10 @@ ExecHashJoinImpl(PlanState *pstate, bool parallel)
 				 * so this means that we don't construct this list on batch 0.
 				 * This list should also only be constructed for hashloop fallback
 				 */
+
+				/*
+				 * could I just make the bitmap/array entry in scan bucket? TODO: check state machine
+				 */
 				if (node->hashloop_fallback == true)
 				{
 					/* TODO: could we check batchno instead of first_chunk ? */
@@ -442,8 +446,14 @@ ExecHashJoinImpl(PlanState *pstate, bool parallel)
 					{
 						BufFile *outerFile = hashtable->outerBatchFile[batchno];
 
+						/*
+						 * TODO: is this only NULL when no outer tuples for this batch?
+						 * if so, should we do something different here to make that more clear in the code/state machine
+						 */
 						if (outerFile != NULL)
 						{
+							int outerMatchStatusIdx; // for bitmap
+
 							OuterOffsetMatchStatus *outerOffsetMatchStatus = NULL;
 
 							outerOffsetMatchStatus = palloc(sizeof(struct OuterOffsetMatchStatus));
@@ -468,36 +478,34 @@ ExecHashJoinImpl(PlanState *pstate, bool parallel)
 							/*
 							 * bitmap experiment
 							 */
-							if (node->hj_OuterMatchStatuses == NULL) /* start of a new batch */
+
+							/* start of new batch */
+							if (node->hj_OuterMatchStatuses == NULL)
 							{
-								node->hj_NumOuterTuples = 1;
-								node->hj_CurrentOuterTuple = 1;
-								/* 1-index outer tuple list */
-								//node->hj_OuterMatchStatuses = bms_make_singleton(node->hj_CurrentOuterTuple);
+								node->hj_NumOuterTuples = 0;
+								node->hj_CurrentOuterTuple = 0;
+
 								node->hj_OuterMatchStatuses = palloc(sizeof(int) * 1000); /* TODO: fixme I'm a constant */
 								node->hj_OuterMatchStatuses = memset(node->hj_OuterMatchStatuses, 0, 1000);
+								node->hj_OuterMatchStatuses[0] = -1; /* for safety */
 								/* 1-indexed outer tuple list */
 								node->hj_OuterMatchStatuses[1] = -1;
 							}
 							/*
 							 * first chunk
 							 */
-							node->hj_CurrentOuterTuple++;
-							node->hj_NumOuterTuples++;
-							int i = 0;
-							while(node->hj_OuterMatchStatuses[i] != -1)
+
+							outerMatchStatusIdx = 1;
+							while(node->hj_OuterMatchStatuses[outerMatchStatusIdx] != -1)
 							{
-								i++;
+								outerMatchStatusIdx++;
 							}
 							// got our i == -1
-							node->hj_OuterMatchStatuses[i] = 0;
-							node->hj_OuterMatchStatuses[++i] = -1;
-							//else /* node->hj_OuterMatchStatuses != NULL so is not first outer tuple of this batch */
-						//	{
-							//	node->hj_NumOuterTuples++;
-							//	node->hj_CurrentOuterTuple++;
-							//	node->hj_OuterMatchStatuses = bms_add_member(node->hj_OuterMatchStatuses, node->hj_CurrentOuterTuple);
-							//}
+							node->hj_OuterMatchStatuses[outerMatchStatusIdx] = 0;
+							node->hj_OuterMatchStatuses[++outerMatchStatusIdx] = -1;
+
+							// increment total because we are in build phase
+							node->hj_NumOuterTuples++;
 						}
 					}
 						/*
@@ -505,33 +513,43 @@ ExecHashJoinImpl(PlanState *pstate, bool parallel)
 						 * advance the cursor or reset it to point to head
 						 * if it is a new chunk (after the first chunk), reset it (basically rewinding outer)
 						 * if it is just the next tuple in the same chunk, advance the cursor to next
+						 * use it phase
 						 */
-					else if (node->hj_HashTable->curbatch > 0) /* new chunk, so use it phase */
+					else if (node->hj_HashTable->curbatch > 0)
 					{
 						if (node->current_outer_offset_match_status == NULL) /* new chunk (though not first chunk) */
 							node->current_outer_offset_match_status = node->first_outer_offset_match_status;
 						else /* new tuple in same chunk */
 							node->current_outer_offset_match_status = node->current_outer_offset_match_status->next;
+
+
 						/*
 						 * bitmap experiment
 						 */
-
 
 						/*
 						 * >= 2 chunk
 						 * 1st tuple, reset counter
 						 */
-						if (node->hj_CurrentOuterTuple = node->hj_NumOuterTuples)
-							node->hj_CurrentOuterTuple = 1;
+
+						/*
+						 * TODO: there might be a better way to consolidate this with
+						 * new batch
+						 */
+						if (node->hj_CurrentOuterTuple == node->hj_NumOuterTuples)
+							node->hj_CurrentOuterTuple = 0;
 						/*
 						 * new tuple in same chunk
 						 * >= 2 chunk
 						 * >= 2 tuple
 						 */
-						else
-							node->hj_CurrentOuterTuple++;
-
 					}
+					/*
+					 * for fallback case, always increment current outer tuple
+					 * because we got a new tuple
+					 */
+					if (hashtable->outerBatchFile) /* TODO: find a better way to do this */
+						node->hj_CurrentOuterTuple++;
 				}
 
 
@@ -586,6 +604,16 @@ ExecHashJoinImpl(PlanState *pstate, bool parallel)
 					HeapTupleHeaderSetMatch(HJTUPLE_MINTUPLE(node->hj_CurTuple));
 					if (node->current_outer_offset_match_status)
 						node->current_outer_offset_match_status->match_status = true;
+
+					/*
+					 * bitmap experiment
+					 */
+
+					/*
+					 * TODO: might be able to check for fallback case instead here
+					 */
+					if (node->hj_OuterMatchStatuses != NULL)
+						node->hj_OuterMatchStatuses[node->hj_CurrentOuterTuple] = 1;
 
 					/* In an antijoin, we never return a matched tuple */
 					if (node->js.jointype == JOIN_ANTI)
@@ -720,6 +748,12 @@ ExecHashJoinImpl(PlanState *pstate, bool parallel)
 
 				node->cursor = node->first_outer_offset_match_status;
 				node->first_outer_offset_match_status = NULL;
+
+				/*
+				 * bitmap experiment
+				 */
+				node->hj_CurrentOuterTuple = 1;
+
 				node->hj_JoinState = HJ_ADAPTIVE_EMIT_UNMATCHED_OUTER;
 				/* fall through */
 
@@ -735,12 +769,50 @@ ExecHashJoinImpl(PlanState *pstate, bool parallel)
 					 * if it is not a match, go to the offset in the page that it specifies
 					 * and emit it NULL-extended
 					 */
+
 					econtext->ecxt_outertuple = ExecHashJoinGetOuterTupleAtOffset(node, node->cursor->outer_tuple_start_offset);
 					econtext->ecxt_innertuple = node->hj_NullInnerTupleSlot;
 					node->cursor = node->cursor->next;
 					return ExecProject(node->js.ps.ps_ProjInfo);
 				}
 				node->cursor = NULL;
+
+				/*
+				 * bitmap experiment
+				 */
+				/*
+				 * TODO: should I use the counter as loop condition or the NULL in the file?
+				 * TODO: do I need a cursor?
+				 */
+				BufFile    *outerFile = hashtable->outerBatchFile[node->hj_HashTable->curbatch];
+				if (outerFile == NULL) /* TODO: could this happen */
+				{
+					node->hj_JoinState = HJ_NEED_NEW_BATCH;
+					break;
+				}
+				rewindOuter(outerFile);
+				while (node->hj_CurrentOuterTuple > node->hj_NumOuterTuples)
+				{
+					uint32 unmatchedOuterHashvalue;
+					if (node->hj_OuterMatchStatuses[node->hj_CurrentOuterTuple] == 1)
+					{
+						node->hj_CurrentOuterTuple++;
+						continue;
+					}
+					/*
+					 * if it is not a match
+					 * emit it NULL-extended
+					 */
+
+					/*
+					 * TODO: should I use emitUnmatchedOuterTuple here?
+					 */
+					econtext->ecxt_outertuple = ExecHashJoinGetSavedTuple(node, outerFile, &unmatchedOuterHashvalue, node->hj_OuterTupleSlot);
+					econtext->ecxt_innertuple = node->hj_NullInnerTupleSlot;
+					node->hj_CurrentOuterTuple++;
+					return ExecProject(node->js.ps.ps_ProjInfo);
+				}
+
 				/*
 				 * came here from HJ_NEED_NEW_BATCH, so go back there
 				 */
