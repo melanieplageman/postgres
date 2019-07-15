@@ -496,20 +496,12 @@ ExecHashJoinImpl(PlanState *pstate, bool parallel)
 					{
 
 						/*
-						 * >= 2 chunk
-						 * 1st tuple, reset counter
+						 * TODO: there might be a better way to consolidate this with new batch
 						 */
-						/*
-						 * TODO: there might be a better way to consolidate this with
-						 * new batch
-						 */
+						/* >= 2 chunk, 1st tuple; reset counter */
 						if (node->hj_CurrentOuterTuple == node->hj_NumOuterTuples)
 							node->hj_CurrentOuterTuple = 0;
-						/*
-						 * new tuple in same chunk
-						 * >= 2 chunk
-						 * >= 2 tuple
-						 */
+
 					}
 					/*
 					 * for fallback case, always increment current outer tuple
@@ -569,12 +561,6 @@ ExecHashJoinImpl(PlanState *pstate, bool parallel)
 				{
 					node->hj_MatchedOuter = true;
 					HeapTupleHeaderSetMatch(HJTUPLE_MINTUPLE(node->hj_CurTuple));
-					if (node->current_outer_offset_match_status)
-						node->current_outer_offset_match_status->match_status = true;
-
-					/*
-					 * bitmap experiment
-					 */
 
 					/*
 					 * TODO: might be able to check for fallback case instead here
@@ -664,23 +650,6 @@ ExecHashJoinImpl(PlanState *pstate, bool parallel)
 
 					rewindOuter(node->hj_HashTable->outerBatchFile[node->hj_HashTable->curbatch]);
 					LoadInner(node);
-
-					/*
-					 * If we just loaded the first chunk of a new inner batch,
-					 * we should reset head of the list of outer tuple match statuses
-					 * so we can construct a new list for the new corresponding outer batch file
-					 * Doing it here works because we have not created any of the structs
-					 * of match statuses for the outer tuples until HJ_NEED_NEW_OUTER
-					 *
-					 * Even if we are not at the beginning of a new inner batch, we need
-					 * to reset the pointer to the current match status object for the current
-					 * outer tuple before transitioning to HJ_NEED_NEW_OUTER as a way of
-					 * rewinding the list.
-					 * we use the status of current -- NULL or non-NULL to determine in
-					 * HJ_NEED_NEW_OUTER if we should advance to the next item in the list or
-					 * "rewind" by setting head to current.
-					 */
-					
 				/*
 				 * TODO: where should I reset all the stuff for the bitmap method
 				 */
@@ -721,11 +690,7 @@ ExecHashJoinImpl(PlanState *pstate, bool parallel)
 				/* fall through */
 
 			case HJ_ADAPTIVE_EMIT_UNMATCHED_OUTER:
-				node->cursor = NULL;
 
-				/*
-				 * bitmap experiment
-				 */
 				/*
 				 * TODO: should I use the counter as loop condition or the NULL in the file?
 				 * TODO: do I need a cursor?
@@ -989,8 +954,6 @@ ExecInitHashJoin(HashJoin *node, EState *estate, int eflags)
 	hjstate->hj_JoinState = HJ_BUILD_HASHTABLE;
 	hjstate->hj_MatchedOuter = false;
 	hjstate->hj_OuterNotEmpty = false;
-
-	hjstate->cursor = NULL;
 
 	return hjstate;
 }
