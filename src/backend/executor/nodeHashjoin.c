@@ -145,6 +145,7 @@ static TupleTableSlot *ExecHashJoinGetSavedTuple(HashJoinState *hjstate,
 												 BufFile *file,
 												 uint32 *hashvalue,
 												 TupleTableSlot *tupleSlot);
+static BufFile *ExecHashJoinSaveOuterTupleMatchStatus(char status, BufFile **fileptr);
 static bool ExecHashJoinAdvanceBatch(HashJoinState *hjstate);
 static bool ExecParallelHashJoinNewBatch(HashJoinState *hjstate);
 static void ExecParallelHashJoinPartitionOuter(HashJoinState *node);
@@ -464,6 +465,7 @@ ExecHashJoinImpl(PlanState *pstate, bool parallel)
 								node->hj_CurrentOuterTuple = 0;
 
 								node->hj_OuterMatchStatuses = palloc0(sizeof(char) * 1000); /* TODO: fixme I'm a constant */
+								node->hj_OuterMatchStatusesFile = BufFileCreateTemp(false);
 								node->hj_OuterMatchStatuses[0] = '\0'; /* for safety */
 								/* 1-indexed outer tuple list */
 								node->hj_OuterMatchStatuses[1] = '\0';
@@ -480,6 +482,8 @@ ExecHashJoinImpl(PlanState *pstate, bool parallel)
 							// got our i == NUL
 							node->hj_OuterMatchStatuses[outerMatchStatusIdx] = 'f';
 							node->hj_OuterMatchStatuses[++outerMatchStatusIdx] = '\0';
+							char match_status = 'f';
+							BufFileWrite(node->hj_OuterMatchStatusesFile, &match_status, 1);
 
 							// increment total because we are in build phase
 							node->hj_NumOuterTuples++;
@@ -566,7 +570,12 @@ ExecHashJoinImpl(PlanState *pstate, bool parallel)
 					 * TODO: might be able to check for fallback case instead here
 					 */
 					if (node->hj_OuterMatchStatuses != NULL)
+					{
 						node->hj_OuterMatchStatuses[node->hj_CurrentOuterTuple] = 't';
+
+						char match_status = 't';
+						BufFileWrite(node->hj_OuterMatchStatusesFile, &match_status, 1);
+					}
 
 					/* In an antijoin, we never return a matched tuple */
 					if (node->js.jointype == JOIN_ANTI)
@@ -815,6 +824,7 @@ ExecInitHashJoin(HashJoin *node, EState *estate, int eflags)
 	hjstate->first_chunk = false;
 
 	hjstate->hj_OuterMatchStatuses = NULL;
+	hjstate->hj_OuterMatchStatusesFile = NULL;
 	hjstate->hj_CurrentOuterTuple  = 0;
 	hjstate->hj_NumOuterTuples     = 0;
 	hjstate->hj_InnerExhausted = false;
@@ -1530,6 +1540,27 @@ ExecHashJoinSaveTuple(MinimalTuple tuple, uint32 hashvalue,
 		ereport(ERROR,
 				(errcode_for_file_access(),
 				 errmsg("could not write to hash-join temporary file: %m")));
+}
+
+static BufFile *
+ExecHashJoinSaveOuterTupleMatchStatus(char status, BufFile **fileptr)
+{
+	BufFile    *file = *fileptr;
+	size_t		written;
+
+	if (file == NULL)
+	{
+		/* First write to this batch file, so open it. */
+		file = BufFileCreateTemp(false);
+		*fileptr = file;
+	}
+
+	written = BufFileWrite(file, &status, 1);
+	if (written != sizeof(char))
+		ereport(ERROR,
+		        (errcode_for_file_access(),
+			        errmsg("could not write to hash-join temporary file: %m")));
+	return file;
 }
 
 /*

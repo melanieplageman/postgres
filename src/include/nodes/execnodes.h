@@ -14,6 +14,7 @@
 #ifndef EXECNODES_H
 #define EXECNODES_H
 
+#include <storage/buffile.h>
 #include "access/tupconvert.h"
 #include "executor/instrument.h"
 #include "lib/pairingheap.h"
@@ -1909,6 +1910,8 @@ typedef struct HashJoinState
 	int64 hj_CurrentOuterTuple;
 	int64 hj_NumOuterTuples;
 	char   *hj_OuterMatchStatuses;
+	BufFile *hj_OuterMatchStatusesFile;
+
 	bool hj_InnerExhausted;
 } HashJoinState;
 
