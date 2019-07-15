@@ -183,6 +183,8 @@ ExecHashJoinImpl(PlanState *pstate, bool parallel)
 	int			batchno;
 	ParallelHashJoinState *parallel_state;
 
+	BufFile    *outerFileForAdaptiveRead;
+
 	/*
 	 * get information from HashJoin node
 	 */
@@ -452,32 +454,7 @@ ExecHashJoinImpl(PlanState *pstate, bool parallel)
 						 */
 						if (outerFile != NULL)
 						{
-							int outerMatchStatusIdx; // for bitmap
-
-							OuterOffsetMatchStatus *outerOffsetMatchStatus = NULL;
-
-							outerOffsetMatchStatus = palloc(sizeof(struct OuterOffsetMatchStatus));
-							outerOffsetMatchStatus->match_status = false;
-							outerOffsetMatchStatus->outer_tuple_start_offset = 0L;
-							outerOffsetMatchStatus->next = NULL;
-
-							if (node->first_outer_offset_match_status != NULL) /* not first tuple of new batch */
-							{
-								node->current_outer_offset_match_status->next = outerOffsetMatchStatus;
-								node->current_outer_offset_match_status = outerOffsetMatchStatus;
-							}
-							else /* node->first_outer_offset_match_status == NULL; first tuple of new batch */
-							{
-								node->first_outer_offset_match_status = outerOffsetMatchStatus;
-								node->current_outer_offset_match_status = node->first_outer_offset_match_status;
-							}
-
-							outerOffsetMatchStatus->outer_tuple_val = DatumGetInt32(outerTupleSlot->tts_values[0]);
-							outerOffsetMatchStatus->outer_tuple_start_offset = node->HJ_NEED_NEW_OUTER_tup_start;
-
-							/*
-							 * bitmap experiment
-							 */
+							int outerMatchStatusIdx;
 
 							/* start of new batch */
 							/* TODO: find better way to indicate this */
@@ -517,21 +494,11 @@ ExecHashJoinImpl(PlanState *pstate, bool parallel)
 						 */
 					else if (node->hj_HashTable->curbatch > 0)
 					{
-						if (node->current_outer_offset_match_status == NULL) /* new chunk (though not first chunk) */
-							node->current_outer_offset_match_status = node->first_outer_offset_match_status;
-						else /* new tuple in same chunk */
-							node->current_outer_offset_match_status = node->current_outer_offset_match_status->next;
-
-
-						/*
-						 * bitmap experiment
-						 */
 
 						/*
 						 * >= 2 chunk
 						 * 1st tuple, reset counter
 						 */
-
 						/*
 						 * TODO: there might be a better way to consolidate this with
 						 * new batch
@@ -679,7 +646,7 @@ ExecHashJoinImpl(PlanState *pstate, bool parallel)
 				}
 				else
 				{
-					if (node->first_outer_offset_match_status && HJ_FILL_OUTER(node) && node->hashloop_fallback == true)
+					if (node->hj_InnerExhausted == true && HJ_FILL_OUTER(node) && node->hashloop_fallback == true)
 					{
 						/*
 						 * For hashloop fallback, outer tuples are not emitted
@@ -687,6 +654,7 @@ ExecHashJoinImpl(PlanState *pstate, bool parallel)
 						 * chunks have been processed). node->hashloop_fallback should be
 						 * true because it is not reset to false until advancing the batches
 						 */
+						node->hj_InnerExhausted = false;
 						node->hj_JoinState = HJ_ADAPTIVE_EMIT_UNMATCHED_OUTER_INIT;
 						break;
 					}
@@ -712,15 +680,10 @@ ExecHashJoinImpl(PlanState *pstate, bool parallel)
 					 * HJ_NEED_NEW_OUTER if we should advance to the next item in the list or
 					 * "rewind" by setting head to current.
 					 */
-
-
-					if (node->first_chunk)
-						node->first_outer_offset_match_status = NULL;
-					node->current_outer_offset_match_status = NULL;
-
-					/*
-					 * I don't think I need to do this for bitmap case?
-					 */
+					
+				/*
+				 * TODO: where should I reset all the stuff for the bitmap method
+				 */
 				}
 				node->hj_JoinState = HJ_NEED_NEW_OUTER;
 				break;
@@ -738,6 +701,7 @@ ExecHashJoinImpl(PlanState *pstate, bool parallel)
 					 * or this is batch 0
 					 * in any of these cases, load next batch
 					 */
+					node->hj_InnerExhausted = true;
 					node->hj_JoinState = HJ_NEED_NEW_BATCH;
 					break;
 				}
@@ -747,40 +711,16 @@ ExecHashJoinImpl(PlanState *pstate, bool parallel)
 				 */
 				rewindOuter(node->hj_HashTable->outerBatchFile[node->hj_HashTable->curbatch]);
 				LoadInner(node);
-				node->current_outer_offset_match_status = NULL;
 				break;
 
 			case HJ_ADAPTIVE_EMIT_UNMATCHED_OUTER_INIT:
 
-				node->cursor = node->first_outer_offset_match_status;
-				node->first_outer_offset_match_status = NULL;
-
-				/*
-				 * bitmap experiment
-				 */
 				node->hj_CurrentOuterTuple = 1;
 
 				node->hj_JoinState = HJ_ADAPTIVE_EMIT_UNMATCHED_OUTER;
 				/* fall through */
 
 			case HJ_ADAPTIVE_EMIT_UNMATCHED_OUTER:
-				while (node->cursor)
-				{
-					if (node->cursor->match_status == true)
-					{
-						node->cursor = node->cursor->next;
-						continue;
-					}
-					/*
-					 * if it is not a match, go to the offset in the page that it specifies
-					 * and emit it NULL-extended
-					 */
-
-					econtext->ecxt_outertuple = ExecHashJoinGetOuterTupleAtOffset(node, node->cursor->outer_tuple_start_offset);
-					econtext->ecxt_innertuple = node->hj_NullInnerTupleSlot;
-					node->cursor = node->cursor->next;
-					return ExecProject(node->js.ps.ps_ProjInfo);
-				}
 				node->cursor = NULL;
 
 				/*
@@ -790,13 +730,13 @@ ExecHashJoinImpl(PlanState *pstate, bool parallel)
 				 * TODO: should I use the counter as loop condition or the NULL in the file?
 				 * TODO: do I need a cursor?
 				 */
-				BufFile    *outerFile = hashtable->outerBatchFile[node->hj_HashTable->curbatch];
-				if (outerFile == NULL) /* TODO: could this happen */
+				outerFileForAdaptiveRead = hashtable->outerBatchFile[node->hj_HashTable->curbatch];
+				if (outerFileForAdaptiveRead == NULL) /* TODO: could this happen */
 				{
 					node->hj_JoinState = HJ_NEED_NEW_BATCH;
 					break;
 				}
-				rewindOuter(outerFile);
+				rewindOuter(outerFileForAdaptiveRead);
 				while (node->hj_CurrentOuterTuple < node->hj_NumOuterTuples)
 				{
 					uint32 unmatchedOuterHashvalue;
@@ -813,9 +753,10 @@ ExecHashJoinImpl(PlanState *pstate, bool parallel)
 					/*
 					 * TODO: should I use emitUnmatchedOuterTuple here?
 					 */
-					econtext->ecxt_outertuple = ExecHashJoinGetSavedTuple(node, outerFile, &unmatchedOuterHashvalue, node->hj_OuterTupleSlot);
+					econtext->ecxt_outertuple = ExecHashJoinGetSavedTuple(node, outerFileForAdaptiveRead, &unmatchedOuterHashvalue, node->hj_OuterTupleSlot);
 					econtext->ecxt_innertuple = node->hj_NullInnerTupleSlot;
 					node->hj_CurrentOuterTuple++;
+
 					return ExecProject(node->js.ps.ps_ProjInfo);
 				}
 
@@ -907,14 +848,11 @@ ExecInitHashJoin(HashJoin *node, EState *estate, int eflags)
 	hjstate->hashloop_fallback = false;
 	hjstate->inner_page_offset = 0L;
 	hjstate->first_chunk = false;
-	hjstate->HJ_NEED_NEW_OUTER_tup_start = 0L;
-	hjstate->HJ_NEED_NEW_OUTER_tup_end = 0L;
-	hjstate->current_outer_offset_match_status = NULL;
-	hjstate->first_outer_offset_match_status = NULL;
 
 	hjstate->hj_OuterMatchStatuses = NULL;
 	hjstate->hj_CurrentOuterTuple  = 0;
 	hjstate->hj_NumOuterTuples     = 0;
+	hjstate->hj_InnerExhausted = false;
 	/*
 	 * Miscellaneous initialization
 	 *
@@ -1647,7 +1585,6 @@ ExecHashJoinGetSavedTuple(HashJoinState *hjstate,
 	uint32		header[2];
 	size_t		nread;
 	MinimalTuple tuple;
-	int dummy_fileno;
 
 
 	/*
@@ -1657,7 +1594,6 @@ ExecHashJoinGetSavedTuple(HashJoinState *hjstate,
 	 */
 	CHECK_FOR_INTERRUPTS();
 
-	BufFileTell(file, &dummy_fileno, &hjstate->HJ_NEED_NEW_OUTER_tup_start);
 	/*
 	 * Since both the hash value and the MinimalTuple length word are uint32,
 	 * we can read them both in one BufFileRead() call without any type
@@ -1684,7 +1620,6 @@ ExecHashJoinGetSavedTuple(HashJoinState *hjstate,
 				(errcode_for_file_access(),
 				 errmsg("could not read from hash-join temporary file: %m")));
 	ExecForceStoreMinimalTuple(tuple, tupleSlot, true);
-	BufFileTell(file, &dummy_fileno, &hjstate->HJ_NEED_NEW_OUTER_tup_end);
 	return tupleSlot;
 }
 
