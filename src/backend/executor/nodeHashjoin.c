@@ -480,13 +480,13 @@ ExecHashJoinImpl(PlanState *pstate, bool parallel)
 							 */
 
 							/* start of new batch */
+							/* TODO: find better way to indicate this */
 							if (node->hj_OuterMatchStatuses == NULL)
 							{
 								node->hj_NumOuterTuples = 0;
 								node->hj_CurrentOuterTuple = 0;
 
-								node->hj_OuterMatchStatuses = palloc(sizeof(int) * 1000); /* TODO: fixme I'm a constant */
-								node->hj_OuterMatchStatuses = memset(node->hj_OuterMatchStatuses, 0, 1000);
+								node->hj_OuterMatchStatuses = palloc0(sizeof(int) * 1000); /* TODO: fixme I'm a constant */
 								node->hj_OuterMatchStatuses[0] = -1; /* for safety */
 								/* 1-indexed outer tuple list */
 								node->hj_OuterMatchStatuses[1] = -1;
@@ -1375,6 +1375,9 @@ ExecHashJoinAdvanceBatch(HashJoinState *hjstate)
 	hjstate->inner_page_offset = 0L;
 	hjstate->first_chunk = true;
 	hjstate->hashloop_fallback = false; /* new batch, so start it off false */
+	if (hjstate->hj_OuterMatchStatuses)
+		pfree(hjstate->hj_OuterMatchStatuses);
+	hjstate->hj_OuterMatchStatuses = NULL; /* new batch so initialize to NULL */
 	if (curbatch >= nbatch)
 		return false;			/* no more batches */
 
