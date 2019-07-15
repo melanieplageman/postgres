@@ -797,7 +797,7 @@ ExecHashJoinImpl(PlanState *pstate, bool parallel)
 					break;
 				}
 				rewindOuter(outerFile);
-				while (node->hj_CurrentOuterTuple > node->hj_NumOuterTuples)
+				while (node->hj_CurrentOuterTuple < node->hj_NumOuterTuples)
 				{
 					uint32 unmatchedOuterHashvalue;
 					if (node->hj_OuterMatchStatuses[node->hj_CurrentOuterTuple] == 't')
