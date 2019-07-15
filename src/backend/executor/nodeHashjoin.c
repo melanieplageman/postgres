@@ -486,23 +486,23 @@ ExecHashJoinImpl(PlanState *pstate, bool parallel)
 								node->hj_NumOuterTuples = 0;
 								node->hj_CurrentOuterTuple = 0;
 
-								node->hj_OuterMatchStatuses = palloc0(sizeof(int) * 1000); /* TODO: fixme I'm a constant */
-								node->hj_OuterMatchStatuses[0] = -1; /* for safety */
+								node->hj_OuterMatchStatuses = palloc0(sizeof(char) * 1000); /* TODO: fixme I'm a constant */
+								node->hj_OuterMatchStatuses[0] = '\0'; /* for safety */
 								/* 1-indexed outer tuple list */
-								node->hj_OuterMatchStatuses[1] = -1;
+								node->hj_OuterMatchStatuses[1] = '\0';
 							}
 							/*
 							 * first chunk
 							 */
 
 							outerMatchStatusIdx = 1;
-							while(node->hj_OuterMatchStatuses[outerMatchStatusIdx] != -1)
+							while(node->hj_OuterMatchStatuses[outerMatchStatusIdx] != '\0')
 							{
 								outerMatchStatusIdx++;
 							}
-							// got our i == -1
-							node->hj_OuterMatchStatuses[outerMatchStatusIdx] = 0;
-							node->hj_OuterMatchStatuses[++outerMatchStatusIdx] = -1;
+							// got our i == NUL
+							node->hj_OuterMatchStatuses[outerMatchStatusIdx] = 'f';
+							node->hj_OuterMatchStatuses[++outerMatchStatusIdx] = '\0';
 
 							// increment total because we are in build phase
 							node->hj_NumOuterTuples++;
@@ -613,7 +613,7 @@ ExecHashJoinImpl(PlanState *pstate, bool parallel)
 					 * TODO: might be able to check for fallback case instead here
 					 */
 					if (node->hj_OuterMatchStatuses != NULL)
-						node->hj_OuterMatchStatuses[node->hj_CurrentOuterTuple] = 1;
+						node->hj_OuterMatchStatuses[node->hj_CurrentOuterTuple] = 't';
 
 					/* In an antijoin, we never return a matched tuple */
 					if (node->js.jointype == JOIN_ANTI)
@@ -712,9 +712,15 @@ ExecHashJoinImpl(PlanState *pstate, bool parallel)
 					 * HJ_NEED_NEW_OUTER if we should advance to the next item in the list or
 					 * "rewind" by setting head to current.
 					 */
+
+
 					if (node->first_chunk)
 						node->first_outer_offset_match_status = NULL;
 					node->current_outer_offset_match_status = NULL;
+
+					/*
+					 * I don't think I need to do this for bitmap case?
+					 */
 				}
 				node->hj_JoinState = HJ_NEED_NEW_OUTER;
 				break;
@@ -794,7 +800,7 @@ ExecHashJoinImpl(PlanState *pstate, bool parallel)
 				while (node->hj_CurrentOuterTuple > node->hj_NumOuterTuples)
 				{
 					uint32 unmatchedOuterHashvalue;
-					if (node->hj_OuterMatchStatuses[node->hj_CurrentOuterTuple] == 1)
+					if (node->hj_OuterMatchStatuses[node->hj_CurrentOuterTuple] == 't')
 					{
 						node->hj_CurrentOuterTuple++;
 						continue;

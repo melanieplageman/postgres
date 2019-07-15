@@ -1912,7 +1912,7 @@ typedef struct HashJoinState
 //	Bitmapset *hj_OuterMatchStatuses;
 	int64 hj_CurrentOuterTuple;
 	int64 hj_NumOuterTuples;
-	int   *hj_OuterMatchStatuses;
+	char   *hj_OuterMatchStatuses;
 	off_t HJ_NEED_NEW_OUTER_tup_start;
 	off_t HJ_NEED_NEW_OUTER_tup_end;
 } HashJoinState;
