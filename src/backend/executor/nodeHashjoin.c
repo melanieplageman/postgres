@@ -459,7 +459,7 @@ ExecHashJoinImpl(PlanState *pstate, bool parallel)
 
 							/* start of new batch */
 							/* TODO: find better way to indicate this */
-							if (node->hj_OuterMatchStatuses == NULL)
+							if (node->hj_OuterMatchStatuses == NULL && node->hj_OuterMatchStatusesFile == NULL)
 							{
 								node->hj_NumOuterTuples = 0;
 								node->hj_CurrentOuterTuple = 0;
@@ -499,13 +499,15 @@ ExecHashJoinImpl(PlanState *pstate, bool parallel)
 					else if (node->hj_HashTable->curbatch > 0)
 					{
 
-						rewindOuter(node->hj_OuterMatchStatusesFile);
 						/*
 						 * TODO: there might be a better way to consolidate this with new batch
 						 */
 						/* >= 2 chunk, 1st tuple; reset counter */
 						if (node->hj_CurrentOuterTuple == node->hj_NumOuterTuples)
+						{
 							node->hj_CurrentOuterTuple = 0;
+							rewindOuter(node->hj_OuterMatchStatusesFile);
+						}
 
 					}
 					/*
@@ -574,8 +576,7 @@ ExecHashJoinImpl(PlanState *pstate, bool parallel)
 					{
 						node->hj_OuterMatchStatuses[node->hj_CurrentOuterTuple] = 't';
 
-						char match_status = 't';
-						BufFileWrite(node->hj_OuterMatchStatusesFile, &match_status, 1);
+
 					}
 
 					/* In an antijoin, we never return a matched tuple */
@@ -593,13 +594,25 @@ ExecHashJoinImpl(PlanState *pstate, bool parallel)
 					if (node->js.single_match)
 						node->hj_JoinState = HJ_NEED_NEW_OUTER;
 
+					if (node->hj_OuterMatchStatusesFile != NULL)
+					{
+						char match_status = 't';
+						BufFileWrite(node->hj_OuterMatchStatusesFile, &match_status, 1);
+					}
 					if (otherqual == NULL || ExecQual(otherqual, econtext))
 						return ExecProject(node->js.ps.ps_ProjInfo);
 					else
 						InstrCountFiltered2(node, 1);
 				}
 				else
-					InstrCountFiltered1(node, 1);
+				{
+					if (node->hj_OuterMatchStatusesFile != NULL)
+					{
+						char match_status = 'f';
+						BufFileWrite(node->hj_OuterMatchStatusesFile, &match_status, 1);
+						InstrCountFiltered1(node, 1);
+					}
+				}
 				break;
 
 			case HJ_FILL_INNER_TUPLES:
@@ -695,6 +708,7 @@ ExecHashJoinImpl(PlanState *pstate, bool parallel)
 			case HJ_ADAPTIVE_EMIT_UNMATCHED_OUTER_INIT:
 
 				node->hj_CurrentOuterTuple = 1;
+				rewindOuter(node->hj_OuterMatchStatusesFile);
 
 				node->hj_JoinState = HJ_ADAPTIVE_EMIT_UNMATCHED_OUTER;
 				/* fall through */
@@ -715,7 +729,9 @@ ExecHashJoinImpl(PlanState *pstate, bool parallel)
 				while (node->hj_CurrentOuterTuple < node->hj_NumOuterTuples)
 				{
 					uint32 unmatchedOuterHashvalue;
-					if (node->hj_OuterMatchStatuses[node->hj_CurrentOuterTuple] == 't')
+					char current_match_status;
+					BufFileRead(node->hj_OuterMatchStatusesFile, &current_match_status, 1);
+					if (current_match_status == 't')
 					{
 						node->hj_CurrentOuterTuple++;
 						continue;
@@ -1295,8 +1311,9 @@ ExecHashJoinAdvanceBatch(HashJoinState *hjstate)
 	hjstate->hashloop_fallback = false; /* new batch, so start it off false */
 	if (hjstate->hj_OuterMatchStatuses)
 		pfree(hjstate->hj_OuterMatchStatuses);
-	if (hjstate->hj_OuterMatchStatusesFile)
+	if (hjstate->hj_OuterMatchStatusesFile != NULL)
 		BufFileClose(hjstate->hj_OuterMatchStatusesFile);
+	hjstate->hj_OuterMatchStatusesFile = NULL;
 	hjstate->hj_OuterMatchStatuses = NULL; /* new batch so initialize to NULL */
 	if (curbatch >= nbatch)
 		return false;			/* no more batches */
