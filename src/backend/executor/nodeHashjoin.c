@@ -499,6 +499,7 @@ ExecHashJoinImpl(PlanState *pstate, bool parallel)
 					else if (node->hj_HashTable->curbatch > 0)
 					{
 
+						rewindOuter(node->hj_OuterMatchStatusesFile);
 						/*
 						 * TODO: there might be a better way to consolidate this with new batch
 						 */
@@ -1294,6 +1295,8 @@ ExecHashJoinAdvanceBatch(HashJoinState *hjstate)
 	hjstate->hashloop_fallback = false; /* new batch, so start it off false */
 	if (hjstate->hj_OuterMatchStatuses)
 		pfree(hjstate->hj_OuterMatchStatuses);
+	if (hjstate->hj_OuterMatchStatusesFile)
+		BufFileClose(hjstate->hj_OuterMatchStatusesFile);
 	hjstate->hj_OuterMatchStatuses = NULL; /* new batch so initialize to NULL */
 	if (curbatch >= nbatch)
 		return false;			/* no more batches */
