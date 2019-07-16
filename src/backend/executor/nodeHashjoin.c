@@ -185,6 +185,12 @@ ExecHashJoinImpl(PlanState *pstate, bool parallel)
 	ParallelHashJoinState *parallel_state;
 
 	BufFile    *outerFileForAdaptiveRead;
+	char read_match_status;
+	char write_match_status;
+	int dummy_fileno;
+	size_t num_read;
+	size_t num_written;
+
 
 	/*
 	 * get information from HashJoin node
@@ -456,6 +462,7 @@ ExecHashJoinImpl(PlanState *pstate, bool parallel)
 						if (outerFile != NULL)
 						{
 							int outerMatchStatusIdx;
+							char initial_match_status;
 
 							/* start of new batch */
 							/* TODO: find better way to indicate this */
@@ -482,8 +489,8 @@ ExecHashJoinImpl(PlanState *pstate, bool parallel)
 							// got our i == NUL
 							node->hj_OuterMatchStatuses[outerMatchStatusIdx] = 'f';
 							node->hj_OuterMatchStatuses[++outerMatchStatusIdx] = '\0';
-							char match_status = 'f';
-							BufFileWrite(node->hj_OuterMatchStatusesFile, &match_status, 1);
+							initial_match_status = 'f';
+							BufFileWrite(node->hj_OuterMatchStatusesFile, &initial_match_status, 1);
 
 							// increment total because we are in build phase
 							node->hj_NumOuterTuples++;
@@ -564,6 +571,24 @@ ExecHashJoinImpl(PlanState *pstate, bool parallel)
 				 * Only the joinquals determine tuple match status, but all
 				 * quals must pass to actually return the tuple.
 				 */
+
+				if (node->hj_OuterMatchStatusesFile != NULL)
+				{
+					off_t offset_before_read;
+					off_t offset_after_read;
+					BufFileTell(node->hj_OuterMatchStatusesFile, &dummy_fileno, &offset_before_read);
+					//elog(NOTICE, "offset before read is %li. file position is %i. cur_offset is %li", offset_before_read,
+					//	BufFileTellPos(node->hj_OuterMatchStatusesFile),
+					//	BufFileTellOffset(node->hj_OuterMatchStatusesFile));
+					num_read = BufFileRead(node->hj_OuterMatchStatusesFile, &read_match_status, 1);
+					BufFileTell(node->hj_OuterMatchStatusesFile, &dummy_fileno, &offset_after_read);
+					//elog(NOTICE, "offset after read is %li. file position is %i. cur_offset is %li. num read is %zu",
+					//	offset_after_read,
+					//	BufFileTellPos(node->hj_OuterMatchStatusesFile),
+					//	BufFileTellOffset(node->hj_OuterMatchStatusesFile),
+					//	num_read);
+					BufFileSeek(node->hj_OuterMatchStatusesFile, 0, offset_before_read, SEEK_SET);
+				}
 				if (joinqual == NULL || ExecQual(joinqual, econtext))
 				{
 					node->hj_MatchedOuter = true;
@@ -575,8 +600,6 @@ ExecHashJoinImpl(PlanState *pstate, bool parallel)
 					if (node->hj_OuterMatchStatuses != NULL)
 					{
 						node->hj_OuterMatchStatuses[node->hj_CurrentOuterTuple] = 't';
-
-
 					}
 
 					/* In an antijoin, we never return a matched tuple */
@@ -596,8 +619,9 @@ ExecHashJoinImpl(PlanState *pstate, bool parallel)
 
 					if (node->hj_OuterMatchStatusesFile != NULL)
 					{
-						char match_status = 't';
-						BufFileWrite(node->hj_OuterMatchStatusesFile, &match_status, 1);
+						write_match_status = 't';
+						num_written = BufFileWrite(node->hj_OuterMatchStatusesFile, &write_match_status, 1);
+					//	elog(NOTICE, "num written for true match status is %zu", num_written);
 					}
 					if (otherqual == NULL || ExecQual(otherqual, econtext))
 						return ExecProject(node->js.ps.ps_ProjInfo);
@@ -608,9 +632,14 @@ ExecHashJoinImpl(PlanState *pstate, bool parallel)
 				{
 					if (node->hj_OuterMatchStatusesFile != NULL)
 					{
-						char match_status = 'f';
-						BufFileWrite(node->hj_OuterMatchStatusesFile, &match_status, 1);
-						InstrCountFiltered1(node, 1);
+						if (read_match_status != 't')
+						{
+							write_match_status = 'f';
+							// TODO: do I even need this?
+							num_written = BufFileWrite(node->hj_OuterMatchStatusesFile, &write_match_status, 1);
+					//		elog(NOTICE, "num written for false match status is %zu", num_written);
+							InstrCountFiltered1(node, 1);
+						}
 					}
 				}
 				break;

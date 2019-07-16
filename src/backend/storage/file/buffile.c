@@ -737,6 +737,18 @@ BufFileTell(BufFile *file, int *fileno, off_t *offset)
 	*offset = file->curOffset + file->pos;
 }
 
+int
+BufFileTellPos(BufFile *file)
+{
+	return file->pos;
+}
+
+off_t
+BufFileTellOffset(BufFile *file)
+{
+	return file->curOffset;
+}
+
 /*
  * BufFileSeekBlock --- block-oriented seek
  *
