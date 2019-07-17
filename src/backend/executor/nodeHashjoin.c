@@ -490,7 +490,11 @@ ExecHashJoinImpl(PlanState *pstate, bool parallel)
 							node->hj_OuterMatchStatuses[outerMatchStatusIdx] = 'f';
 							node->hj_OuterMatchStatuses[++outerMatchStatusIdx] = '\0';
 							initial_match_status = 'f';
+							if (outerTupleSlot->tts_values[0] == 3)
+								elog(NOTICE, "about to write initial false to outer match status file for value 3. file pos is %i", BufFileTellPos(node->hj_OuterMatchStatusesFile));
 							BufFileWrite(node->hj_OuterMatchStatusesFile, &initial_match_status, 1);
+							if (outerTupleSlot->tts_values[0] == 3)
+								elog(NOTICE, "wrote initial false to outer match status file for value 3. file pos is %i", BufFileTellPos(node->hj_OuterMatchStatusesFile));
 
 							// increment total because we are in build phase
 							node->hj_NumOuterTuples++;
@@ -574,20 +578,32 @@ ExecHashJoinImpl(PlanState *pstate, bool parallel)
 
 				if (node->hj_OuterMatchStatusesFile != NULL)
 				{
-					off_t offset_before_read;
-					off_t offset_after_read;
-					BufFileTell(node->hj_OuterMatchStatusesFile, &dummy_fileno, &offset_before_read);
-					//elog(NOTICE, "offset before read is %li. file position is %i. cur_offset is %li", offset_before_read,
-					//	BufFileTellPos(node->hj_OuterMatchStatusesFile),
-					//	BufFileTellOffset(node->hj_OuterMatchStatusesFile));
+					if (node->hj_OuterTupleSlot->tts_values[0] == 3)
+						elog(NOTICE, "about to seek backward 1 for value 3. file pos is %i", BufFileTellPos(node->hj_OuterMatchStatusesFile));
+					if (BufFileSeek(node->hj_OuterMatchStatusesFile, 0, -1, SEEK_CUR) != 0)
+						elog(NOTICE, "at beginning of file");
+					if (node->hj_OuterTupleSlot->tts_values[0] == 3)
+						elog(NOTICE, "sought backwards for value 3. file pos is %i", BufFileTellPos(node->hj_OuterMatchStatusesFile));
+//					off_t offset_before_read;
+//					off_t offset_after_read;
+//					BufFileTell(node->hj_OuterMatchStatusesFile, &dummy_fileno, &offset_before_read);
+//					elog(NOTICE, "offset before read is %li. file position is %i. cur_offset is %li", offset_before_read,
+//						BufFileTellPos(node->hj_OuterMatchStatusesFile),
+//						BufFileTellOffset(node->hj_OuterMatchStatusesFile));
+					if (node->hj_OuterTupleSlot->tts_values[0] == 3)
+						elog(NOTICE, "about to read for value 3. file pos is %i", BufFileTellPos(node->hj_OuterMatchStatusesFile));
 					num_read = BufFileRead(node->hj_OuterMatchStatusesFile, &read_match_status, 1);
-					BufFileTell(node->hj_OuterMatchStatusesFile, &dummy_fileno, &offset_after_read);
-					//elog(NOTICE, "offset after read is %li. file position is %i. cur_offset is %li. num read is %zu",
-					//	offset_after_read,
-					//	BufFileTellPos(node->hj_OuterMatchStatusesFile),
-					//	BufFileTellOffset(node->hj_OuterMatchStatusesFile),
-					//	num_read);
-					BufFileSeek(node->hj_OuterMatchStatusesFile, 0, offset_before_read, SEEK_SET);
+					elog(NOTICE, "read_match_status is %c", read_match_status);
+					if (node->hj_OuterTupleSlot->tts_values[0] == 3)
+						elog(NOTICE, "read for value 3. file pos is %i", BufFileTellPos(node->hj_OuterMatchStatusesFile));
+
+//					BufFileTell(node->hj_OuterMatchStatusesFile, &dummy_fileno, &offset_after_read);
+//					elog(NOTICE, "offset after read is %li. file position is %i. cur_offset is %li. num read is %zu",
+//						offset_after_read,
+//						BufFileTellPos(node->hj_OuterMatchStatusesFile),
+//						BufFileTellOffset(node->hj_OuterMatchStatusesFile),
+//						num_read);
+//					BufFileSeek(node->hj_OuterMatchStatusesFile, 0, offset_before_read, SEEK_SET);
 				}
 				if (joinqual == NULL || ExecQual(joinqual, econtext))
 				{
@@ -619,8 +635,18 @@ ExecHashJoinImpl(PlanState *pstate, bool parallel)
 
 					if (node->hj_OuterMatchStatusesFile != NULL)
 					{
+						if (node->hj_OuterTupleSlot->tts_values[0] == 3)
+							elog(NOTICE, "about to seek backward 1 for value 3. file pos is %i", BufFileTellPos(node->hj_OuterMatchStatusesFile));
+						if (BufFileSeek(node->hj_OuterMatchStatusesFile, 0, -1, SEEK_CUR) != 0)
+							elog(NOTICE, "at beginning of file");
+						if (node->hj_OuterTupleSlot->tts_values[0] == 3)
+							elog(NOTICE, "sought backwards for value 3. file pos is %i", BufFileTellPos(node->hj_OuterMatchStatusesFile));
 						write_match_status = 't';
+						if (node->hj_OuterTupleSlot->tts_values[0] == 3)
+							elog(NOTICE, "about to write true for value 3. file pos is %i", BufFileTellPos(node->hj_OuterMatchStatusesFile));
 						num_written = BufFileWrite(node->hj_OuterMatchStatusesFile, &write_match_status, 1);
+						if (node->hj_OuterTupleSlot->tts_values[0] == 3)
+							elog(NOTICE, "wrote true for value 3. file pos is %i", BufFileTellPos(node->hj_OuterMatchStatusesFile));
 					//	elog(NOTICE, "num written for true match status is %zu", num_written);
 					}
 					if (otherqual == NULL || ExecQual(otherqual, econtext))
@@ -634,9 +660,19 @@ ExecHashJoinImpl(PlanState *pstate, bool parallel)
 					{
 						if (read_match_status != 't')
 						{
+							if (node->hj_OuterTupleSlot->tts_values[0] == 3)
+								elog(NOTICE, "about to seek backward 1 for value 3. file pos is %i", BufFileTellPos(node->hj_OuterMatchStatusesFile));
+							if (BufFileSeek(node->hj_OuterMatchStatusesFile, 0, -1, SEEK_CUR) != 0)
+								elog(NOTICE, "at beginning of file");
+							if (node->hj_OuterTupleSlot->tts_values[0] == 3)
+								elog(NOTICE, "sought backwards for value 3. file pos is %i", BufFileTellPos(node->hj_OuterMatchStatusesFile));
 							write_match_status = 'f';
 							// TODO: do I even need this?
+							if (node->hj_OuterTupleSlot->tts_values[0] == 3)
+								elog(NOTICE, "about to write false for value 3. file pos is %i", BufFileTellPos(node->hj_OuterMatchStatusesFile));
 							num_written = BufFileWrite(node->hj_OuterMatchStatusesFile, &write_match_status, 1);
+							if (node->hj_OuterTupleSlot->tts_values[0] == 3)
+								elog(NOTICE, "wrote false for value 3. file pos is %i", BufFileTellPos(node->hj_OuterMatchStatusesFile));
 					//		elog(NOTICE, "num written for false match status is %zu", num_written);
 							InstrCountFiltered1(node, 1);
 						}
@@ -760,23 +796,20 @@ ExecHashJoinImpl(PlanState *pstate, bool parallel)
 					uint32 unmatchedOuterHashvalue;
 					char current_match_status;
 					BufFileRead(node->hj_OuterMatchStatusesFile, &current_match_status, 1);
-					if (current_match_status == 't')
-					{
-						node->hj_CurrentOuterTuple++;
-						continue;
-					}
-					/*
-					 * if it is not a match
-					 * emit it NULL-extended
-					 */
 
 					/*
 					 * TODO: should I use emitUnmatchedOuterTuple here?
 					 */
-					econtext->ecxt_outertuple = ExecHashJoinGetSavedTuple(node, outerFileForAdaptiveRead, &unmatchedOuterHashvalue, node->hj_OuterTupleSlot);
-					econtext->ecxt_innertuple = node->hj_NullInnerTupleSlot;
+					TupleTableSlot *temp = ExecHashJoinGetSavedTuple(node, outerFileForAdaptiveRead, &unmatchedOuterHashvalue, node->hj_OuterTupleSlot);
 					node->hj_CurrentOuterTuple++;
-
+					if (current_match_status == 't')
+						continue;
+					/*
+					 * if it is not a match
+					 * emit it NULL-extended
+					 */
+					econtext->ecxt_outertuple = temp;
+					econtext->ecxt_innertuple = node->hj_NullInnerTupleSlot;
 					return ExecProject(node->js.ps.ps_ProjInfo);
 				}
 
