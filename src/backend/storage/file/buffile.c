@@ -203,6 +203,9 @@ BufFileCreateTemp(bool interXact)
 	file = makeBufFile(pfile);
 	file->isInterXact = interXact;
 
+	if (file->files[0] == 0)
+		elog(NOTICE, "file is 0");
+
 	return file;
 }
 

@@ -1909,7 +1909,6 @@ typedef struct HashJoinState
 
 	int64 hj_CurrentOuterTuple;
 	int64 hj_NumOuterTuples;
-	char   *hj_OuterMatchStatuses;
 	BufFile *hj_OuterMatchStatusesFile;
 
 	bool hj_InnerExhausted;

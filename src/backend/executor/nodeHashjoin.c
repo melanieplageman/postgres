@@ -156,6 +156,32 @@ static void rewindOuter(BufFile *bufFile);
 static TupleTableSlot *
 emitUnmatchedOuterTuple(ExprState *otherqual, ExprContext *econtext, HashJoinState *hjstate);
 
+static void DebugMatchStatusFile(BufFile *bufFile, int num_outer_tups)
+{
+	int original_fileno;
+	off_t original_offset;
+	BufFileTell(bufFile, &original_fileno, &original_offset);
+
+	elog(DEBUG1, "DebugMatchStatusFile(%p) with fileno = %i, offset = %lli",
+			bufFile, original_fileno, original_offset);
+
+	BufFileSeek(bufFile, 0, 0L, SEEK_SET);
+
+	int fileno;
+	off_t offset;
+	while (true)
+	{
+		BufFileTell(bufFile, &fileno, &offset);
+		int pos = BufFileTellPos(bufFile);
+		if (fileno == original_fileno && pos == num_outer_tups)
+			break;
+
+		char match_status;
+		BufFileRead(bufFile, &match_status, 1);
+		elog(DEBUG1, "match_status = %c", match_status);
+	}
+}
+
 /* ----------------------------------------------------------------
  *		ExecHashJoinImpl
  *
@@ -461,72 +487,50 @@ ExecHashJoinImpl(PlanState *pstate, bool parallel)
 						 */
 						if (outerFile != NULL)
 						{
-							int outerMatchStatusIdx;
 							char initial_match_status;
 
 							/* start of new batch */
 							/* TODO: find better way to indicate this */
-							if (node->hj_OuterMatchStatuses == NULL && node->hj_OuterMatchStatusesFile == NULL)
+							if (node->hj_OuterMatchStatusesFile == NULL)
 							{
 								node->hj_NumOuterTuples = 0;
 								node->hj_CurrentOuterTuple = 0;
 
-								node->hj_OuterMatchStatuses = palloc0(sizeof(char) * 1000); /* TODO: fixme I'm a constant */
 								node->hj_OuterMatchStatusesFile = BufFileCreateTemp(false);
-								node->hj_OuterMatchStatuses[0] = '\0'; /* for safety */
-								/* 1-indexed outer tuple list */
-								node->hj_OuterMatchStatuses[1] = '\0';
 							}
 							/*
 							 * first chunk
 							 */
 
-							outerMatchStatusIdx = 1;
-							while(node->hj_OuterMatchStatuses[outerMatchStatusIdx] != '\0')
-							{
-								outerMatchStatusIdx++;
-							}
-							// got our i == NUL
-							node->hj_OuterMatchStatuses[outerMatchStatusIdx] = 'f';
-							node->hj_OuterMatchStatuses[++outerMatchStatusIdx] = '\0';
 							initial_match_status = 'f';
-							if (outerTupleSlot->tts_values[0] == 3)
-								elog(NOTICE, "about to write initial false to outer match status file for value 3. file pos is %i", BufFileTellPos(node->hj_OuterMatchStatusesFile));
+						
 							BufFileWrite(node->hj_OuterMatchStatusesFile, &initial_match_status, 1);
-							if (outerTupleSlot->tts_values[0] == 3)
-								elog(NOTICE, "wrote initial false to outer match status file for value 3. file pos is %i", BufFileTellPos(node->hj_OuterMatchStatusesFile));
 
 							// increment total because we are in build phase
 							node->hj_NumOuterTuples++;
 						}
 					}
-						/*
-						 * Use Outer Tuple Match Status Bitmap Phase
-						 * advance the cursor or reset it to point to head
-						 * if it is a new chunk (after the first chunk), reset it (basically rewinding outer)
-						 * if it is just the next tuple in the same chunk, advance the cursor to next
-						 * use it phase
-						 */
-					else if (node->hj_HashTable->curbatch > 0)
-					{
 
-						/*
-						 * TODO: there might be a better way to consolidate this with new batch
-						 */
-						/* >= 2 chunk, 1st tuple; reset counter */
-						if (node->hj_CurrentOuterTuple == node->hj_NumOuterTuples)
-						{
-							node->hj_CurrentOuterTuple = 0;
-							rewindOuter(node->hj_OuterMatchStatusesFile);
-						}
-
-					}
 					/*
 					 * for fallback case, always increment current outer tuple
 					 * because we got a new tuple
 					 */
 					if (hashtable->outerBatchFile) /* TODO: find a better way to do this */
+					{
 						node->hj_CurrentOuterTuple++;
+						if (node->hj_OuterMatchStatusesFile != NULL)
+						{
+							// before, I did a seek backwards here, which seems necessary to read the right
+							// byte, but it was giving wrong results because when the buffer is dirty
+							// we flush it and reset the position to 0 in BufFileRead, so we were always
+							// overwriting the same value at the begininng of the file
+							// this doesn't seem like this will work out though if I am filling up
+							// the buffer
+							num_read = BufFileRead(node->hj_OuterMatchStatusesFile, &read_match_status, 1);
+						}
+
+					}
+
 				}
 
 
@@ -576,35 +580,6 @@ ExecHashJoinImpl(PlanState *pstate, bool parallel)
 				 * quals must pass to actually return the tuple.
 				 */
 
-				if (node->hj_OuterMatchStatusesFile != NULL)
-				{
-					if (node->hj_OuterTupleSlot->tts_values[0] == 3)
-						elog(NOTICE, "about to seek backward 1 for value 3. file pos is %i", BufFileTellPos(node->hj_OuterMatchStatusesFile));
-					if (BufFileSeek(node->hj_OuterMatchStatusesFile, 0, -1, SEEK_CUR) != 0)
-						elog(NOTICE, "at beginning of file");
-					if (node->hj_OuterTupleSlot->tts_values[0] == 3)
-						elog(NOTICE, "sought backwards for value 3. file pos is %i", BufFileTellPos(node->hj_OuterMatchStatusesFile));
-//					off_t offset_before_read;
-//					off_t offset_after_read;
-//					BufFileTell(node->hj_OuterMatchStatusesFile, &dummy_fileno, &offset_before_read);
-//					elog(NOTICE, "offset before read is %li. file position is %i. cur_offset is %li", offset_before_read,
-//						BufFileTellPos(node->hj_OuterMatchStatusesFile),
-//						BufFileTellOffset(node->hj_OuterMatchStatusesFile));
-					if (node->hj_OuterTupleSlot->tts_values[0] == 3)
-						elog(NOTICE, "about to read for value 3. file pos is %i", BufFileTellPos(node->hj_OuterMatchStatusesFile));
-					num_read = BufFileRead(node->hj_OuterMatchStatusesFile, &read_match_status, 1);
-					elog(NOTICE, "read_match_status is %c", read_match_status);
-					if (node->hj_OuterTupleSlot->tts_values[0] == 3)
-						elog(NOTICE, "read for value 3. file pos is %i", BufFileTellPos(node->hj_OuterMatchStatusesFile));
-
-//					BufFileTell(node->hj_OuterMatchStatusesFile, &dummy_fileno, &offset_after_read);
-//					elog(NOTICE, "offset after read is %li. file position is %i. cur_offset is %li. num read is %zu",
-//						offset_after_read,
-//						BufFileTellPos(node->hj_OuterMatchStatusesFile),
-//						BufFileTellOffset(node->hj_OuterMatchStatusesFile),
-//						num_read);
-//					BufFileSeek(node->hj_OuterMatchStatusesFile, 0, offset_before_read, SEEK_SET);
-				}
 				if (joinqual == NULL || ExecQual(joinqual, econtext))
 				{
 					node->hj_MatchedOuter = true;
@@ -613,10 +588,7 @@ ExecHashJoinImpl(PlanState *pstate, bool parallel)
 					/*
 					 * TODO: might be able to check for fallback case instead here
 					 */
-					if (node->hj_OuterMatchStatuses != NULL)
-					{
-						node->hj_OuterMatchStatuses[node->hj_CurrentOuterTuple] = 't';
-					}
+
 
 					/* In an antijoin, we never return a matched tuple */
 					if (node->js.jointype == JOIN_ANTI)
@@ -635,48 +607,26 @@ ExecHashJoinImpl(PlanState *pstate, bool parallel)
 
 					if (node->hj_OuterMatchStatusesFile != NULL)
 					{
-						if (node->hj_OuterTupleSlot->tts_values[0] == 3)
-							elog(NOTICE, "about to seek backward 1 for value 3. file pos is %i", BufFileTellPos(node->hj_OuterMatchStatusesFile));
 						if (BufFileSeek(node->hj_OuterMatchStatusesFile, 0, -1, SEEK_CUR) != 0)
-							elog(NOTICE, "at beginning of file");
-						if (node->hj_OuterTupleSlot->tts_values[0] == 3)
-							elog(NOTICE, "sought backwards for value 3. file pos is %i", BufFileTellPos(node->hj_OuterMatchStatusesFile));
+							elog(DEBUG1, "at beginning of file");
+
 						write_match_status = 't';
-						if (node->hj_OuterTupleSlot->tts_values[0] == 3)
-							elog(NOTICE, "about to write true for value 3. file pos is %i", BufFileTellPos(node->hj_OuterMatchStatusesFile));
+
 						num_written = BufFileWrite(node->hj_OuterMatchStatusesFile, &write_match_status, 1);
-						if (node->hj_OuterTupleSlot->tts_values[0] == 3)
-							elog(NOTICE, "wrote true for value 3. file pos is %i", BufFileTellPos(node->hj_OuterMatchStatusesFile));
-					//	elog(NOTICE, "num written for true match status is %zu", num_written);
+
 					}
 					if (otherqual == NULL || ExecQual(otherqual, econtext))
+					{
 						return ExecProject(node->js.ps.ps_ProjInfo);
+					}
 					else
+					{
 						InstrCountFiltered2(node, 1);
+					}
 				}
 				else
 				{
-					if (node->hj_OuterMatchStatusesFile != NULL)
-					{
-						if (read_match_status != 't')
-						{
-							if (node->hj_OuterTupleSlot->tts_values[0] == 3)
-								elog(NOTICE, "about to seek backward 1 for value 3. file pos is %i", BufFileTellPos(node->hj_OuterMatchStatusesFile));
-							if (BufFileSeek(node->hj_OuterMatchStatusesFile, 0, -1, SEEK_CUR) != 0)
-								elog(NOTICE, "at beginning of file");
-							if (node->hj_OuterTupleSlot->tts_values[0] == 3)
-								elog(NOTICE, "sought backwards for value 3. file pos is %i", BufFileTellPos(node->hj_OuterMatchStatusesFile));
-							write_match_status = 'f';
-							// TODO: do I even need this?
-							if (node->hj_OuterTupleSlot->tts_values[0] == 3)
-								elog(NOTICE, "about to write false for value 3. file pos is %i", BufFileTellPos(node->hj_OuterMatchStatusesFile));
-							num_written = BufFileWrite(node->hj_OuterMatchStatusesFile, &write_match_status, 1);
-							if (node->hj_OuterTupleSlot->tts_values[0] == 3)
-								elog(NOTICE, "wrote false for value 3. file pos is %i", BufFileTellPos(node->hj_OuterMatchStatusesFile));
-					//		elog(NOTICE, "num written for false match status is %zu", num_written);
-							InstrCountFiltered1(node, 1);
-						}
-					}
+					InstrCountFiltered1(node, 1);
 				}
 				break;
 
@@ -767,41 +717,62 @@ ExecHashJoinImpl(PlanState *pstate, bool parallel)
 				 * Rewind outer batch file (if present), so that we can start reading it.
 				 */
 				rewindOuter(node->hj_HashTable->outerBatchFile[node->hj_HashTable->curbatch]);
+
+				/*
+				 * Use Outer Tuple Match Status Bitmap Phase
+				 * advance the cursor or reset it to point to head
+				 * if it is a new chunk (after the first chunk), reset it (basically rewinding outer)
+				 * if it is just the next tuple in the same chunk, advance the cursor to next
+				 * use it phase
+				 */
+				if (node->hj_HashTable->curbatch > 0)
+				{
+					node->hj_CurrentOuterTuple = 0;
+					rewindOuter(node->hj_OuterMatchStatusesFile);
+				}
+
 				LoadInner(node);
 				break;
 
 			case HJ_ADAPTIVE_EMIT_UNMATCHED_OUTER_INIT:
-
-				node->hj_CurrentOuterTuple = 1;
+				node->hj_CurrentOuterTuple = 0;
 				rewindOuter(node->hj_OuterMatchStatusesFile);
-
-				node->hj_JoinState = HJ_ADAPTIVE_EMIT_UNMATCHED_OUTER;
-				/* fall through */
-
-			case HJ_ADAPTIVE_EMIT_UNMATCHED_OUTER:
 
 				/*
 				 * TODO: should I use the counter as loop condition or the NULL in the file?
 				 * TODO: do I need a cursor?
 				 */
-				outerFileForAdaptiveRead = hashtable->outerBatchFile[node->hj_HashTable->curbatch];
+				outerFileForAdaptiveRead = hashtable->outerBatchFile[hashtable->curbatch];
 				if (outerFileForAdaptiveRead == NULL) /* TODO: could this happen */
 				{
 					node->hj_JoinState = HJ_NEED_NEW_BATCH;
 					break;
 				}
 				rewindOuter(outerFileForAdaptiveRead);
-				while (node->hj_CurrentOuterTuple < node->hj_NumOuterTuples)
+
+				node->hj_JoinState = HJ_ADAPTIVE_EMIT_UNMATCHED_OUTER;
+				/* fall through */
+
+			case HJ_ADAPTIVE_EMIT_UNMATCHED_OUTER:
+				outerFileForAdaptiveRead = hashtable->outerBatchFile[hashtable->curbatch];
+
+				while (true)
 				{
 					uint32 unmatchedOuterHashvalue;
+					TupleTableSlot *temp = ExecHashJoinGetSavedTuple(node, outerFileForAdaptiveRead, &unmatchedOuterHashvalue, node->hj_OuterTupleSlot);
+					node->hj_CurrentOuterTuple++;
+
+					if (temp == NULL) {
+						node->hj_JoinState = HJ_NEED_NEW_BATCH;
+						break;
+					}
 					char current_match_status;
 					BufFileRead(node->hj_OuterMatchStatusesFile, &current_match_status, 1);
 
 					/*
 					 * TODO: should I use emitUnmatchedOuterTuple here?
 					 */
-					TupleTableSlot *temp = ExecHashJoinGetSavedTuple(node, outerFileForAdaptiveRead, &unmatchedOuterHashvalue, node->hj_OuterTupleSlot);
-					node->hj_CurrentOuterTuple++;
+
 					if (current_match_status == 't')
 						continue;
 					/*
@@ -902,7 +873,6 @@ ExecInitHashJoin(HashJoin *node, EState *estate, int eflags)
 	hjstate->inner_page_offset = 0L;
 	hjstate->first_chunk = false;
 
-	hjstate->hj_OuterMatchStatuses = NULL;
 	hjstate->hj_OuterMatchStatusesFile = NULL;
 	hjstate->hj_CurrentOuterTuple  = 0;
 	hjstate->hj_NumOuterTuples     = 0;
@@ -1371,12 +1341,9 @@ ExecHashJoinAdvanceBatch(HashJoinState *hjstate)
 	hjstate->inner_page_offset = 0L;
 	hjstate->first_chunk = true;
 	hjstate->hashloop_fallback = false; /* new batch, so start it off false */
-	if (hjstate->hj_OuterMatchStatuses)
-		pfree(hjstate->hj_OuterMatchStatuses);
 	if (hjstate->hj_OuterMatchStatusesFile != NULL)
 		BufFileClose(hjstate->hj_OuterMatchStatusesFile);
 	hjstate->hj_OuterMatchStatusesFile = NULL;
-	hjstate->hj_OuterMatchStatuses = NULL; /* new batch so initialize to NULL */
 	if (curbatch >= nbatch)
 		return false;			/* no more batches */
 
