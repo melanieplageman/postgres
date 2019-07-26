@@ -465,15 +465,11 @@ ExecHashJoinImpl(PlanState *pstate, bool parallel)
 
 				/*
 				 * Build Outer Tuple Match Status Bitmap Phase
-				 * We need to construct the linked list of match statuses on the first chunk.
 				 * Note that node->first_chunk isn't true until HJ_NEED_NEW_BATCH
 				 * so this means that we don't construct this list on batch 0.
 				 * This list should also only be constructed for hashloop fallback
 				 */
 
-				/*
-				 * could I just make the bitmap/array entry in scan bucket? TODO: check state machine
-				 */
 				if (hashtable->outerBatchFile == NULL)
 				{
 					node->hj_JoinState = HJ_SCAN_BUCKET;
@@ -485,27 +481,23 @@ ExecHashJoinImpl(PlanState *pstate, bool parallel)
 					node->hj_JoinState = HJ_SCAN_BUCKET;
 					break;
 				}
+
 				if (node->hashloop_fallback == true)
 				{
-					if (node->first_chunk) /* basically new batch, so build phase */
+					/* first tuple of new batch */
+					if (node->hj_OuterMatchStatusesFile == NULL)
 					{
-						char initial_match_status;
+						node->hj_NumOuterTuples = 0;
+						node->hj_CurrentOuterTuple = 0;
 
-						/* first tuple of new batch */
-						/* TODO: find better way to indicate this */
-						if (node->hj_OuterMatchStatusesFile == NULL)
-						{
-							node->hj_NumOuterTuples = 0;
-							node->hj_CurrentOuterTuple = 0;
-
-							node->hj_OuterMatchStatusesFile = BufFileCreateTemp(false);
-						}
-
-						initial_match_status = 'f';
-
+						node->hj_OuterMatchStatusesFile = BufFileCreateTemp(false);
+					}
+					if (node->first_chunk) /* first chunk of new batch, so build phase */
+					{
+						char initial_match_status = 'f';
 						BufFileWrite(node->hj_OuterMatchStatusesFile, &initial_match_status, 1);
 
-						// increment total because we are in build phase
+						/* increment total because we are in build phase */
 						node->hj_NumOuterTuples++;
 					}
 
@@ -513,20 +505,15 @@ ExecHashJoinImpl(PlanState *pstate, bool parallel)
 					 * for fallback case, always increment current outer tuple
 					 * because we got a new tuple
 					 */
-
 					node->hj_CurrentOuterTuple++;
-					if (node->hj_OuterMatchStatusesFile != NULL)
-					{
-						// before, I did a seek backwards here, which seems necessary to read the right
-						// byte, but it was giving wrong results because when the buffer is dirty
-						// we flush it and reset the position to 0 in BufFileRead, so we were always
-						// overwriting the same value at the begininng of the file
-						// this doesn't seem like this will work out though if I am filling up
-						// the buffer
-						num_read = BufFileRead(node->hj_OuterMatchStatusesFile, &read_match_status, 1);
-					}
+					// before, I did a seek backwards here, which seems necessary to read the right
+					// byte, but it was giving wrong results because when the buffer is dirty
+					// we flush it and reset the position to 0 in BufFileRead, so we were always
+					// overwriting the same value at the begininng of the file
+					// this doesn't seem like this will work out though if I am filling up
+					// the buffer
+					num_read = BufFileRead(node->hj_OuterMatchStatusesFile, &read_match_status, 1);
 				}
-
 
 				/* OK, let's scan the bucket for matches */
 				node->hj_JoinState = HJ_SCAN_BUCKET;
@@ -578,11 +565,6 @@ ExecHashJoinImpl(PlanState *pstate, bool parallel)
 				{
 					node->hj_MatchedOuter = true;
 					HeapTupleHeaderSetMatch(HJTUPLE_MINTUPLE(node->hj_CurTuple));
-
-					/*
-					 * TODO: might be able to check for fallback case instead here
-					 */
-
 
 					/* In an antijoin, we never return a matched tuple */
 					if (node->js.jointype == JOIN_ANTI)
@@ -682,9 +664,6 @@ ExecHashJoinImpl(PlanState *pstate, bool parallel)
 
 					rewindOuter(node->hj_HashTable->outerBatchFile[node->hj_HashTable->curbatch]);
 					LoadInner(node);
-				/*
-				 * TODO: where should I reset all the stuff for the bitmap method
-				 */
 				}
 				node->hj_JoinState = HJ_NEED_NEW_OUTER;
 				break;
@@ -732,10 +711,6 @@ ExecHashJoinImpl(PlanState *pstate, bool parallel)
 				node->hj_CurrentOuterTuple = 0;
 				rewindOuter(node->hj_OuterMatchStatusesFile);
 
-				/*
-				 * TODO: should I use the counter as loop condition or the NULL in the file?
-				 * TODO: do I need a cursor?
-				 */
 				outerFileForAdaptiveRead = hashtable->outerBatchFile[hashtable->curbatch];
 				if (outerFileForAdaptiveRead == NULL) /* TODO: could this happen */
 				{
@@ -762,10 +737,6 @@ ExecHashJoinImpl(PlanState *pstate, bool parallel)
 					}
 					char current_match_status;
 					BufFileRead(node->hj_OuterMatchStatusesFile, &current_match_status, 1);
-
-					/*
-					 * TODO: should I use emitUnmatchedOuterTuple here?
-					 */
 
 					if (current_match_status == 't')
 						continue;
