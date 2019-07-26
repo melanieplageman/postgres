@@ -474,63 +474,57 @@ ExecHashJoinImpl(PlanState *pstate, bool parallel)
 				/*
 				 * could I just make the bitmap/array entry in scan bucket? TODO: check state machine
 				 */
+				if (hashtable->outerBatchFile == NULL)
+				{
+					node->hj_JoinState = HJ_SCAN_BUCKET;
+					break;
+				}
+				BufFile *outerFile = hashtable->outerBatchFile[batchno];
+				if (outerFile == NULL)
+				{
+					node->hj_JoinState = HJ_SCAN_BUCKET;
+					break;
+				}
 				if (node->hashloop_fallback == true)
 				{
-					/* TODO: could we check batchno instead of first_chunk ? */
-					if (node->first_chunk && hashtable->outerBatchFile) /* basically new batch, so build phase */
+					if (node->first_chunk) /* basically new batch, so build phase */
 					{
-						BufFile *outerFile = hashtable->outerBatchFile[batchno];
+						char initial_match_status;
 
-						/*
-						 * TODO: is this only NULL when no outer tuples for this batch?
-						 * if so, should we do something different here to make that more clear in the code/state machine
-						 */
-						if (outerFile != NULL)
+						/* first tuple of new batch */
+						/* TODO: find better way to indicate this */
+						if (node->hj_OuterMatchStatusesFile == NULL)
 						{
-							char initial_match_status;
+							node->hj_NumOuterTuples = 0;
+							node->hj_CurrentOuterTuple = 0;
 
-							/* start of new batch */
-							/* TODO: find better way to indicate this */
-							if (node->hj_OuterMatchStatusesFile == NULL)
-							{
-								node->hj_NumOuterTuples = 0;
-								node->hj_CurrentOuterTuple = 0;
-
-								node->hj_OuterMatchStatusesFile = BufFileCreateTemp(false);
-							}
-							/*
-							 * first chunk
-							 */
-
-							initial_match_status = 'f';
-						
-							BufFileWrite(node->hj_OuterMatchStatusesFile, &initial_match_status, 1);
-
-							// increment total because we are in build phase
-							node->hj_NumOuterTuples++;
+							node->hj_OuterMatchStatusesFile = BufFileCreateTemp(false);
 						}
+
+						initial_match_status = 'f';
+
+						BufFileWrite(node->hj_OuterMatchStatusesFile, &initial_match_status, 1);
+
+						// increment total because we are in build phase
+						node->hj_NumOuterTuples++;
 					}
 
 					/*
 					 * for fallback case, always increment current outer tuple
 					 * because we got a new tuple
 					 */
-					if (hashtable->outerBatchFile) /* TODO: find a better way to do this */
+
+					node->hj_CurrentOuterTuple++;
+					if (node->hj_OuterMatchStatusesFile != NULL)
 					{
-						node->hj_CurrentOuterTuple++;
-						if (node->hj_OuterMatchStatusesFile != NULL)
-						{
-							// before, I did a seek backwards here, which seems necessary to read the right
-							// byte, but it was giving wrong results because when the buffer is dirty
-							// we flush it and reset the position to 0 in BufFileRead, so we were always
-							// overwriting the same value at the begininng of the file
-							// this doesn't seem like this will work out though if I am filling up
-							// the buffer
-							num_read = BufFileRead(node->hj_OuterMatchStatusesFile, &read_match_status, 1);
-						}
-
+						// before, I did a seek backwards here, which seems necessary to read the right
+						// byte, but it was giving wrong results because when the buffer is dirty
+						// we flush it and reset the position to 0 in BufFileRead, so we were always
+						// overwriting the same value at the begininng of the file
+						// this doesn't seem like this will work out though if I am filling up
+						// the buffer
+						num_read = BufFileRead(node->hj_OuterMatchStatusesFile, &read_match_status, 1);
 					}
-
 				}
 
 
