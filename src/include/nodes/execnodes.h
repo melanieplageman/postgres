@@ -1908,8 +1908,8 @@ typedef struct HashJoinState
 	bool first_chunk;
 
 	int64 hj_CurrentOuterTuple;
-	int64 hj_NumOuterTuples;
 	BufFile *hj_OuterMatchStatusesFile;
+	unsigned char current_byte;
 
 	bool hj_InnerExhausted;
 } HashJoinState;

@@ -326,8 +326,6 @@ truncate table t1;
 insert into t1 values (1),(2),(2),(3);
 truncate table t2;
 insert into t2 values(2),(2),(3),(3),(4);
-set work_mem=64;
-set enable_mergejoin to off;
 select * from t1 left outer join t2 on a = b order by b;
  a | b 
 ---+---
@@ -398,5 +396,289 @@ select count(*) from t1 full outer join t2 on a = b;
  count 
 -------
      8
+(1 row)
+
+truncate table t1;
+insert into t1 values(1);
+insert into t1 select i from generate_series(1,10)i;
+insert into t1 select 2 from generate_series(1,6)i;
+truncate table t2;
+insert into t2 values(3),(3);
+insert into t2 select i from generate_series(5,9)i;
+insert into t2 select 2 from generate_series(1,7)i;
+select * from t1 left outer join t2 on a = b order by b;
+ a  | b 
+----+---
+  2 | 2
+  2 | 2
+  2 | 2
+  2 | 2
+  2 | 2
+  2 | 2
+  2 | 2
+  2 | 2
+  2 | 2
+  2 | 2
+  2 | 2
+  2 | 2
+  2 | 2
+  2 | 2
+  2 | 2
+  2 | 2
+  2 | 2
+  2 | 2
+  2 | 2
+  2 | 2
+  2 | 2
+  2 | 2
+  2 | 2
+  2 | 2
+  2 | 2
+  2 | 2
+  2 | 2
+  2 | 2
+  2 | 2
+  2 | 2
+  2 | 2
+  2 | 2
+  2 | 2
+  2 | 2
+  2 | 2
+  2 | 2
+  2 | 2
+  2 | 2
+  2 | 2
+  2 | 2
+  2 | 2
+  2 | 2
+  2 | 2
+  2 | 2
+  2 | 2
+  2 | 2
+  2 | 2
+  2 | 2
+  2 | 2
+  3 | 3
+  3 | 3
+  5 | 5
+  6 | 6
+  7 | 7
+  8 | 8
+  9 | 9
+  4 |  
+ 10 |  
+  1 |  
+  1 |  
+(60 rows)
+
+select count(*) from t1 left outer join t2 on a = b;
+ count 
+-------
+    60
+(1 row)
+
+select * from t1, t2 where a = b;
+ a | b 
+---+---
+ 5 | 5
+ 3 | 3
+ 3 | 3
+ 7 | 7
+ 6 | 6
+ 9 | 9
+ 2 | 2
+ 8 | 8
+ 2 | 2
+ 2 | 2
+ 2 | 2
+ 2 | 2
+ 2 | 2
+ 2 | 2
+ 2 | 2
+ 2 | 2
+ 2 | 2
+ 2 | 2
+ 2 | 2
+ 2 | 2
+ 2 | 2
+ 2 | 2
+ 2 | 2
+ 2 | 2
+ 2 | 2
+ 2 | 2
+ 2 | 2
+ 2 | 2
+ 2 | 2
+ 2 | 2
+ 2 | 2
+ 2 | 2
+ 2 | 2
+ 2 | 2
+ 2 | 2
+ 2 | 2
+ 2 | 2
+ 2 | 2
+ 2 | 2
+ 2 | 2
+ 2 | 2
+ 2 | 2
+ 2 | 2
+ 2 | 2
+ 2 | 2
+ 2 | 2
+ 2 | 2
+ 2 | 2
+ 2 | 2
+ 2 | 2
+ 2 | 2
+ 2 | 2
+ 2 | 2
+ 2 | 2
+ 2 | 2
+ 2 | 2
+(56 rows)
+
+select count(*) from t1, t2 where a = b;
+ count 
+-------
+    56
+(1 row)
+
+select * from t1 right outer join t2 on a = b order by b;
+ a | b 
+---+---
+ 2 | 2
+ 2 | 2
+ 2 | 2
+ 2 | 2
+ 2 | 2
+ 2 | 2
+ 2 | 2
+ 2 | 2
+ 2 | 2
+ 2 | 2
+ 2 | 2
+ 2 | 2
+ 2 | 2
+ 2 | 2
+ 2 | 2
+ 2 | 2
+ 2 | 2
+ 2 | 2
+ 2 | 2
+ 2 | 2
+ 2 | 2
+ 2 | 2
+ 2 | 2
+ 2 | 2
+ 2 | 2
+ 2 | 2
+ 2 | 2
+ 2 | 2
+ 2 | 2
+ 2 | 2
+ 2 | 2
+ 2 | 2
+ 2 | 2
+ 2 | 2
+ 2 | 2
+ 2 | 2
+ 2 | 2
+ 2 | 2
+ 2 | 2
+ 2 | 2
+ 2 | 2
+ 2 | 2
+ 2 | 2
+ 2 | 2
+ 2 | 2
+ 2 | 2
+ 2 | 2
+ 2 | 2
+ 2 | 2
+ 3 | 3
+ 3 | 3
+ 5 | 5
+ 6 | 6
+ 7 | 7
+ 8 | 8
+ 9 | 9
+(56 rows)
+
+select count(*) from t1 right outer join t2 on a = b;
+ count 
+-------
+    56
+(1 row)
+
+select * from t1 full outer join t2 on a = b order by b;
+ a  | b 
+----+---
+  2 | 2
+  2 | 2
+  2 | 2
+  2 | 2
+  2 | 2
+  2 | 2
+  2 | 2
+  2 | 2
+  2 | 2
+  2 | 2
+  2 | 2
+  2 | 2
+  2 | 2
+  2 | 2
+  2 | 2
+  2 | 2
+  2 | 2
+  2 | 2
+  2 | 2
+  2 | 2
+  2 | 2
+  2 | 2
+  2 | 2
+  2 | 2
+  2 | 2
+  2 | 2
+  2 | 2
+  2 | 2
+  2 | 2
+  2 | 2
+  2 | 2
+  2 | 2
+  2 | 2
+  2 | 2
+  2 | 2
+  2 | 2
+  2 | 2
+  2 | 2
+  2 | 2
+  2 | 2
+  2 | 2
+  2 | 2
+  2 | 2
+  2 | 2
+  2 | 2
+  2 | 2
+  2 | 2
+  2 | 2
+  2 | 2
+  3 | 3
+  3 | 3
+  5 | 5
+  6 | 6
+  7 | 7
+  8 | 8
+  9 | 9
+  4 |  
+ 10 |  
+  1 |  
+  1 |  
+(60 rows)
+
+select count(*) from t1 full outer join t2 on a = b;
+ count 
+-------
+    60
 (1 row)
 

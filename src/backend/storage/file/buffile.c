@@ -816,6 +816,16 @@ BufFileSize(BufFile *file)
 		lastFileSize;
 }
 
+int64
+BufFileBytesUsed(BufFile *file)
+{
+	int64 lastFileSize = FileSize(file->files[file->numFiles - 1]);
+	if (lastFileSize >= 0)
+		return lastFileSize;
+	else
+		return 0;
+}
+
 /*
  * Append the contents of source file (managed within shared fileset) to
  * end of target file (managed within same shared fileset).

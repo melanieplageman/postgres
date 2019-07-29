@@ -162,23 +162,16 @@ static void DebugMatchStatusFile(BufFile *bufFile, int num_outer_tups)
 	off_t original_offset;
 	BufFileTell(bufFile, &original_fileno, &original_offset);
 
-	elog(DEBUG1, "DebugMatchStatusFile(%p) with fileno = %i, offset = %lli",
+	elog(NOTICE, "DebugMatchStatusFile(%p) with fileno = %i, offset = %lli",
 			bufFile, original_fileno, original_offset);
 
 	BufFileSeek(bufFile, 0, 0L, SEEK_SET);
 
-	int fileno;
-	off_t offset;
-	while (true)
+	char match_status;
+	for(int i = 0; i < num_outer_tups; i++)
 	{
-		BufFileTell(bufFile, &fileno, &offset);
-		int pos = BufFileTellPos(bufFile);
-		if (fileno == original_fileno && pos == num_outer_tups)
-			break;
-
-		char match_status;
 		BufFileRead(bufFile, &match_status, 1);
-		elog(DEBUG1, "match_status = %c", match_status);
+		elog(NOTICE, "match_status = %c", match_status);
 	}
 }
 
@@ -211,11 +204,9 @@ ExecHashJoinImpl(PlanState *pstate, bool parallel)
 	ParallelHashJoinState *parallel_state;
 
 	BufFile    *outerFileForAdaptiveRead;
-	char read_match_status;
-	char write_match_status;
-	int dummy_fileno;
-	size_t num_read;
 	size_t num_written;
+	int byte_to_set;
+	int bit_to_set_in_byte;
 
 
 	/*
@@ -487,18 +478,9 @@ ExecHashJoinImpl(PlanState *pstate, bool parallel)
 					/* first tuple of new batch */
 					if (node->hj_OuterMatchStatusesFile == NULL)
 					{
-						node->hj_NumOuterTuples = 0;
 						node->hj_CurrentOuterTuple = 0;
 
 						node->hj_OuterMatchStatusesFile = BufFileCreateTemp(false);
-					}
-					if (node->first_chunk) /* first chunk of new batch, so build phase */
-					{
-						char initial_match_status = 'f';
-						BufFileWrite(node->hj_OuterMatchStatusesFile, &initial_match_status, 1);
-
-						/* increment total because we are in build phase */
-						node->hj_NumOuterTuples++;
 					}
 
 					/*
@@ -506,13 +488,25 @@ ExecHashJoinImpl(PlanState *pstate, bool parallel)
 					 * because we got a new tuple
 					 */
 					node->hj_CurrentOuterTuple++;
-					// before, I did a seek backwards here, which seems necessary to read the right
-					// byte, but it was giving wrong results because when the buffer is dirty
-					// we flush it and reset the position to 0 in BufFileRead, so we were always
-					// overwriting the same value at the begininng of the file
-					// this doesn't seem like this will work out though if I am filling up
-					// the buffer
-					num_read = BufFileRead(node->hj_OuterMatchStatusesFile, &read_match_status, 1);
+
+					/* Use the next byte on every 8th tuple */
+					if ((node->hj_CurrentOuterTuple - 1) % 8 == 0)
+					{
+						if (node->first_chunk) /* first chunk of new batch, so build phase */
+						{
+							node->current_byte = 0;
+							BufFileWrite(node->hj_OuterMatchStatusesFile, &node->current_byte, 1);
+						}
+						else
+							BufFileRead(node->hj_OuterMatchStatusesFile, &node->current_byte, 1);
+					}
+
+					elog(DEBUG1,
+						 "in HJ_NEED_NEW_OUTER. batchno %i. val %i. read  byte %hhu. cur tup %li.",
+						 batchno,
+						 DatumGetInt32(outerTupleSlot->tts_values[0]),
+						 node->current_byte,
+						 node->hj_CurrentOuterTuple);
 				}
 
 				/* OK, let's scan the bucket for matches */
@@ -583,27 +577,31 @@ ExecHashJoinImpl(PlanState *pstate, bool parallel)
 
 					if (node->hj_OuterMatchStatusesFile != NULL)
 					{
-						if (BufFileSeek(node->hj_OuterMatchStatusesFile, 0, -1, SEEK_CUR) != 0)
+						byte_to_set = (node->hj_CurrentOuterTuple - 1) / 8;
+						bit_to_set_in_byte = (node->hj_CurrentOuterTuple - 1) % 8;
+
+						if (BufFileSeek(node->hj_OuterMatchStatusesFile, 0, byte_to_set, SEEK_SET) != 0)
 							elog(DEBUG1, "at beginning of file");
 
-						write_match_status = 't';
+						node->current_byte = node->current_byte | (1 << bit_to_set_in_byte);
 
-						num_written = BufFileWrite(node->hj_OuterMatchStatusesFile, &write_match_status, 1);
+						elog(DEBUG1, "in HJ_SCAN_BUCKET.    batchno %i. val %i. write byte %hhu. cur tup %li. bitnum %i. bytenum %i.",
+								node->hj_HashTable->curbatch,
+								DatumGetInt32(econtext->ecxt_outertuple->tts_values[0]),
+								node->current_byte,
+								DatumGetInt64(node->hj_CurrentOuterTuple),
+								bit_to_set_in_byte,
+								byte_to_set);
 
+						num_written = BufFileWrite(node->hj_OuterMatchStatusesFile, &node->current_byte, 1);
 					}
 					if (otherqual == NULL || ExecQual(otherqual, econtext))
-					{
 						return ExecProject(node->js.ps.ps_ProjInfo);
-					}
 					else
-					{
 						InstrCountFiltered2(node, 1);
-					}
 				}
 				else
-				{
 					InstrCountFiltered1(node, 1);
-				}
 				break;
 
 			case HJ_FILL_INNER_TUPLES:
@@ -735,10 +733,20 @@ ExecHashJoinImpl(PlanState *pstate, bool parallel)
 						node->hj_JoinState = HJ_NEED_NEW_BATCH;
 						break;
 					}
-					char current_match_status;
-					BufFileRead(node->hj_OuterMatchStatusesFile, &current_match_status, 1);
 
-					if (current_match_status == 't')
+
+					unsigned char bit = (node->hj_CurrentOuterTuple - 1) % 8;
+
+					if (bit == 0)
+						BufFileRead(node->hj_OuterMatchStatusesFile, &node->current_byte, 1);
+					/* if the match bit is set for this tuple, continue */
+					elog(DEBUG1, "in HJ_ADAPTIVE_EMIT_UNMATCHED_OUTER. batchno %i. val %i. num %li. bitnum %hhu. current byte %hhu.",
+						 node->hj_HashTable->curbatch,
+						 DatumGetInt32(temp->tts_values[0]),
+						 node->hj_CurrentOuterTuple,
+						 bit,
+						 node->current_byte);
+					if ((node->current_byte >> bit) & 1)
 						continue;
 					/*
 					 * if it is not a match
@@ -837,10 +845,10 @@ ExecInitHashJoin(HashJoin *node, EState *estate, int eflags)
 	hjstate->hashloop_fallback = false;
 	hjstate->inner_page_offset = 0L;
 	hjstate->first_chunk = false;
+	hjstate->current_byte = 0;
 
 	hjstate->hj_OuterMatchStatusesFile = NULL;
 	hjstate->hj_CurrentOuterTuple  = 0;
-	hjstate->hj_NumOuterTuples     = 0;
 	hjstate->hj_InnerExhausted = false;
 	/*
 	 * Miscellaneous initialization
