@@ -151,7 +151,7 @@ static bool ExecParallelHashJoinNewBatch(HashJoinState *hjstate);
 static void ExecParallelHashJoinPartitionOuter(HashJoinState *node);
 static bool LoadInner(HashJoinState *hjstate);
 static TupleTableSlot *ExecHashJoinGetOuterTupleAtOffset(HashJoinState *hjstate, off_t offset);
-static void rewindOuter(BufFile *bufFile);
+static BufFile * rewindOuter(BufFile *bufFile);
 
 static TupleTableSlot *
 emitUnmatchedOuterTuple(ExprState *otherqual, ExprContext *econtext, HashJoinState *hjstate);
@@ -204,10 +204,6 @@ ExecHashJoinImpl(PlanState *pstate, bool parallel)
 	ParallelHashJoinState *parallel_state;
 
 	BufFile    *outerFileForAdaptiveRead;
-	size_t num_written;
-	int byte_to_set;
-	int bit_to_set_in_byte;
-
 
 	/*
 	 * get information from HashJoin node
@@ -408,11 +404,15 @@ ExecHashJoinImpl(PlanState *pstate, bool parallel)
 					break;
 				}
 				/*
+				 * for the hashloop fallback case,
 				 * only initialize this to false during the first chunk --
 				 * otherwise, we will be resetting hj_MatchedOuter
 				 * to false for an outer tuple that has already matched an inner tuple
+				 * also, this should be set to false for batch 0 (no chunks for batch 0)
+				 * node->first_chunk isn't set to true until HJ_NEED_NEW_BATCH, so need to handle
+				 * batch 0 explicitly
 				 */
-				if (node->first_chunk || hashtable->curbatch == 0)
+				if (node->hashloop_fallback == false || node->first_chunk || hashtable->curbatch == 0)
 					node->hj_MatchedOuter = false;
 				econtext->ecxt_outertuple = outerTupleSlot;
 
@@ -454,18 +454,12 @@ ExecHashJoinImpl(PlanState *pstate, bool parallel)
 					continue;
 				}
 
-				/*
-				 * Build Outer Tuple Match Status Bitmap Phase
-				 * Note that node->first_chunk isn't true until HJ_NEED_NEW_BATCH
-				 * so this means that we don't construct this list on batch 0.
-				 * This list should also only be constructed for hashloop fallback
-				 */
-
 				if (hashtable->outerBatchFile == NULL)
 				{
 					node->hj_JoinState = HJ_SCAN_BUCKET;
 					break;
 				}
+
 				BufFile *outerFile = hashtable->outerBatchFile[batchno];
 				if (outerFile == NULL)
 				{
@@ -478,25 +472,26 @@ ExecHashJoinImpl(PlanState *pstate, bool parallel)
 					/* first tuple of new batch */
 					if (node->hj_OuterMatchStatusesFile == NULL)
 					{
-						node->hj_CurrentOuterTuple = 0;
-
+						node->hj_OuterTupleCount = 0;
 						node->hj_OuterMatchStatusesFile = BufFileCreateTemp(false);
 					}
 
-					/*
-					 * for fallback case, always increment current outer tuple
-					 * because we got a new tuple
-					 */
-					node->hj_CurrentOuterTuple++;
+					/* for fallback case, always increment tuple count */
+					node->hj_OuterTupleCount++;
 
 					/* Use the next byte on every 8th tuple */
-					if ((node->hj_CurrentOuterTuple - 1) % 8 == 0)
+					if ((node->hj_OuterTupleCount - 1) % 8 == 0)
 					{
-						if (node->first_chunk) /* first chunk of new batch, so build phase */
+						/*
+						 * first chunk of new batch, so write and initialize enough bytes in the
+						 * outer tuple match status file to capture all tuples' match statuses
+						 */
+						if (node->first_chunk)
 						{
 							node->current_byte = 0;
 							BufFileWrite(node->hj_OuterMatchStatusesFile, &node->current_byte, 1);
 						}
+						/* otherwise, just read the next byte */
 						else
 							BufFileRead(node->hj_OuterMatchStatusesFile, &node->current_byte, 1);
 					}
@@ -506,7 +501,7 @@ ExecHashJoinImpl(PlanState *pstate, bool parallel)
 						 batchno,
 						 DatumGetInt32(outerTupleSlot->tts_values[0]),
 						 node->current_byte,
-						 node->hj_CurrentOuterTuple);
+						 node->hj_OuterTupleCount);
 				}
 
 				/* OK, let's scan the bucket for matches */
@@ -575,10 +570,12 @@ ExecHashJoinImpl(PlanState *pstate, bool parallel)
 					if (node->js.single_match)
 						node->hj_JoinState = HJ_NEED_NEW_OUTER;
 
+					/* Set the match bit for this outer tuple in the match status file */
 					if (node->hj_OuterMatchStatusesFile != NULL)
 					{
-						byte_to_set = (node->hj_CurrentOuterTuple - 1) / 8;
-						bit_to_set_in_byte = (node->hj_CurrentOuterTuple - 1) % 8;
+						Assert(node->hashloop_fallback == true);
+						int byte_to_set = (node->hj_OuterTupleCount - 1) / 8;
+						int bit_to_set_in_byte = (node->hj_OuterTupleCount - 1) % 8;
 
 						if (BufFileSeek(node->hj_OuterMatchStatusesFile, 0, byte_to_set, SEEK_SET) != 0)
 							elog(DEBUG1, "at beginning of file");
@@ -589,11 +586,11 @@ ExecHashJoinImpl(PlanState *pstate, bool parallel)
 								node->hj_HashTable->curbatch,
 								DatumGetInt32(econtext->ecxt_outertuple->tts_values[0]),
 								node->current_byte,
-								DatumGetInt64(node->hj_CurrentOuterTuple),
+								node->hj_OuterTupleCount,
 								bit_to_set_in_byte,
 								byte_to_set);
 
-						num_written = BufFileWrite(node->hj_OuterMatchStatusesFile, &node->current_byte, 1);
+						BufFileWrite(node->hj_OuterMatchStatusesFile, &node->current_byte, 1);
 					}
 					if (otherqual == NULL || ExecQual(otherqual, econtext))
 						return ExecProject(node->js.ps.ps_ProjInfo);
@@ -644,7 +641,13 @@ ExecHashJoinImpl(PlanState *pstate, bool parallel)
 				}
 				else
 				{
-					if (node->hj_InnerExhausted == true && HJ_FILL_OUTER(node) && node->hashloop_fallback == true)
+					/*
+					 * for batches after batch 0 for which hashloop_fallback is true,
+					 * if inner is exhausted, need to consider emitting unmatched tuples
+					 * we should never get here when hashloop_fallback is false but hj_InnerExhausted
+					 * is true, however, it felt more clear to check for hashloop_fallback explicitly
+					 */
+					if (node->hashloop_fallback == true && HJ_FILL_OUTER(node) && node->hj_InnerExhausted == true)
 					{
 						/*
 						 * For hashloop fallback, outer tuples are not emitted
@@ -660,8 +663,8 @@ ExecHashJoinImpl(PlanState *pstate, bool parallel)
 					if (!ExecHashJoinAdvanceBatch(node))
 						return NULL;    /* end of parallel-oblivious join */
 
-					rewindOuter(node->hj_HashTable->outerBatchFile[node->hj_HashTable->curbatch]);
-					LoadInner(node);
+					if (rewindOuter(node->hj_HashTable->outerBatchFile[node->hj_HashTable->curbatch]) != NULL)
+						LoadInner(node); /* TODO: should I ever load inner when outer file is not present? */
 				}
 				node->hj_JoinState = HJ_NEED_NEW_OUTER;
 				break;
@@ -670,45 +673,58 @@ ExecHashJoinImpl(PlanState *pstate, bool parallel)
 
 				elog(DEBUG1, "HJ_NEED_NEW_INNER_CHUNK");
 
-				// ?? Will inner_page_offset != 0 ever when curbatch == 0 ?
-				if (node->inner_page_offset == 0L || node->hj_HashTable->curbatch == 0) // inner batch is exhausted
+				/*
+				 * there were never chunks because this is the normal case (not hashloop fallback)
+				 * or this is batch 0. batch 0 cannot have chunks.
+				 * hashloop_fallback should always be false when curbatch is 0 here.
+				 * proceed to HJ_NEED_NEW_BATCH to either advance to the next batch or complete the join
+				 */
+				if (node->hj_HashTable->curbatch == 0)
 				{
-					/*
-					 * either it is the fallback case and there are no more chunks
-					 * or, there were never chunks because this is the non-fallback case
-					 * or this is batch 0
-					 * in any of these cases, load next batch
-					 */
+					Assert(node->hashloop_fallback == false);
+					if(node->inner_page_offset != 0L)
+						elog(NOTICE, "inner_page_offset is not reset to 0 on batch 0");
+				}
+
+				if (node->hashloop_fallback == false)
+				{
+					node->hj_JoinState = HJ_NEED_NEW_BATCH;
+					break;
+				}
+
+				/*
+				 * it is the hashloop fallback case and there are no more chunks
+				 * inner is exhausted, so we must advance the batches
+				 */
+				if (node->inner_page_offset == 0L)
+				{
 					node->hj_InnerExhausted = true;
 					node->hj_JoinState = HJ_NEED_NEW_BATCH;
 					break;
 				}
+
+				/*
+				 * This is the hashloop fallback case and we have more chunks in inner
+				 * curbatch > 0
+				 * Rewind outer batch file (if present) so that we can start reading it.
+				 * Rewind outer match statuses file if present so that we can set match bits as needed
+				 * Reset the tuple count and load the next chunk of inner.
+				 * Then proceed to get a new outer tuple from our rewound outer batch file
+				 */
 				node->hj_JoinState = HJ_NEED_NEW_OUTER;
-				/*
-				 * Rewind outer batch file (if present), so that we can start reading it.
-				 */
-				rewindOuter(node->hj_HashTable->outerBatchFile[node->hj_HashTable->curbatch]);
 
-				/*
-				 * Use Outer Tuple Match Status Bitmap Phase
-				 * advance the cursor or reset it to point to head
-				 * if it is a new chunk (after the first chunk), reset it (basically rewinding outer)
-				 * if it is just the next tuple in the same chunk, advance the cursor to next
-				 * use it phase
-				 */
-				if (node->hj_HashTable->curbatch > 0)
-				{
-					node->hj_CurrentOuterTuple = 0;
-					rewindOuter(node->hj_OuterMatchStatusesFile);
-				}
-
+				if (rewindOuter(node->hj_HashTable->outerBatchFile[node->hj_HashTable->curbatch]) == NULL)
+					break; /* TODO: Is breaking here the right thing to do when outer file is not present? */
+				rewindOuter(node->hj_OuterMatchStatusesFile);
+				node->hj_OuterTupleCount = 0;
 				LoadInner(node);
 				break;
 
 			case HJ_ADAPTIVE_EMIT_UNMATCHED_OUTER_INIT:
-				node->hj_CurrentOuterTuple = 0;
+				node->hj_OuterTupleCount = 0;
 				rewindOuter(node->hj_OuterMatchStatusesFile);
 
+				/* TODO: is it okay to use the hashtable to get the outer batch file here? */
 				outerFileForAdaptiveRead = hashtable->outerBatchFile[hashtable->curbatch];
 				if (outerFileForAdaptiveRead == NULL) /* TODO: could this happen */
 				{
@@ -721,31 +737,35 @@ ExecHashJoinImpl(PlanState *pstate, bool parallel)
 				/* fall through */
 
 			case HJ_ADAPTIVE_EMIT_UNMATCHED_OUTER:
+
 				outerFileForAdaptiveRead = hashtable->outerBatchFile[hashtable->curbatch];
 
 				while (true)
 				{
 					uint32 unmatchedOuterHashvalue;
 					TupleTableSlot *temp = ExecHashJoinGetSavedTuple(node, outerFileForAdaptiveRead, &unmatchedOuterHashvalue, node->hj_OuterTupleSlot);
-					node->hj_CurrentOuterTuple++;
+					node->hj_OuterTupleCount++;
 
-					if (temp == NULL) {
+					if (temp == NULL)
+					{
 						node->hj_JoinState = HJ_NEED_NEW_BATCH;
 						break;
 					}
 
+					unsigned char bit = (node->hj_OuterTupleCount - 1) % 8;
 
-					unsigned char bit = (node->hj_CurrentOuterTuple - 1) % 8;
-
+					/* need to read the next byte */
 					if (bit == 0)
 						BufFileRead(node->hj_OuterMatchStatusesFile, &node->current_byte, 1);
-					/* if the match bit is set for this tuple, continue */
+
 					elog(DEBUG1, "in HJ_ADAPTIVE_EMIT_UNMATCHED_OUTER. batchno %i. val %i. num %li. bitnum %hhu. current byte %hhu.",
 						 node->hj_HashTable->curbatch,
 						 DatumGetInt32(temp->tts_values[0]),
-						 node->hj_CurrentOuterTuple,
+						 node->hj_OuterTupleCount,
 						 bit,
 						 node->current_byte);
+
+					/* if the match bit is set for this tuple, continue */
 					if ((node->current_byte >> bit) & 1)
 						continue;
 					/*
@@ -848,7 +868,7 @@ ExecInitHashJoin(HashJoin *node, EState *estate, int eflags)
 	hjstate->current_byte = 0;
 
 	hjstate->hj_OuterMatchStatusesFile = NULL;
-	hjstate->hj_CurrentOuterTuple  = 0;
+	hjstate->hj_OuterTupleCount  = 0;
 	hjstate->hj_InnerExhausted = false;
 	/*
 	 * Miscellaneous initialization
@@ -1049,7 +1069,7 @@ ExecHashJoinGetOuterTupleAtOffset(HashJoinState *hjstate, off_t offset)
 	return slot;
 }
 
-static void rewindOuter(BufFile *bufFile)
+static BufFile *rewindOuter(BufFile *bufFile)
 {
 	if (bufFile != NULL)
 	{
@@ -1057,7 +1077,9 @@ static void rewindOuter(BufFile *bufFile)
 			ereport(ERROR,
 				(errcode_for_file_access(),
 					errmsg("could not rewind hash-join temporary file: %m")));
+		return bufFile;
 	}
+	return NULL;
 }
 
 static TupleTableSlot *

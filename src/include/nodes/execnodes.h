@@ -1907,7 +1907,7 @@ typedef struct HashJoinState
 	off_t inner_page_offset;
 	bool first_chunk;
 
-	int64 hj_CurrentOuterTuple;
+	int64 hj_OuterTupleCount;
 	BufFile *hj_OuterMatchStatusesFile;
 	unsigned char current_byte;
 
