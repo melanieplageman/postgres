@@ -145,35 +145,16 @@ static TupleTableSlot *ExecHashJoinGetSavedTuple(HashJoinState *hjstate,
 												 BufFile *file,
 												 uint32 *hashvalue,
 												 TupleTableSlot *tupleSlot);
-static BufFile *ExecHashJoinSaveOuterTupleMatchStatus(char status, BufFile **fileptr);
+
 static bool ExecHashJoinAdvanceBatch(HashJoinState *hjstate);
 static bool ExecParallelHashJoinNewBatch(HashJoinState *hjstate);
 static void ExecParallelHashJoinPartitionOuter(HashJoinState *node);
 static bool LoadInner(HashJoinState *hjstate);
-static TupleTableSlot *ExecHashJoinGetOuterTupleAtOffset(HashJoinState *hjstate, off_t offset);
+
 static BufFile * rewindOuter(BufFile *bufFile);
 
 static TupleTableSlot *
 emitUnmatchedOuterTuple(ExprState *otherqual, ExprContext *econtext, HashJoinState *hjstate);
-
-static void DebugMatchStatusFile(BufFile *bufFile, int num_outer_tups)
-{
-	int original_fileno;
-	off_t original_offset;
-	BufFileTell(bufFile, &original_fileno, &original_offset);
-
-	elog(NOTICE, "DebugMatchStatusFile(%p) with fileno = %i, offset = %lli",
-			bufFile, original_fileno, original_offset);
-
-	BufFileSeek(bufFile, 0, 0L, SEEK_SET);
-
-	char match_status;
-	for(int i = 0; i < num_outer_tups; i++)
-	{
-		BufFileRead(bufFile, &match_status, 1);
-		elog(NOTICE, "match_status = %c", match_status);
-	}
-}
 
 /* ----------------------------------------------------------------
  *		ExecHashJoinImpl
@@ -1047,28 +1028,6 @@ ExecEndHashJoin(HashJoinState *node)
 	ExecEndNode(innerPlanState(node));
 }
 
-static TupleTableSlot *
-ExecHashJoinGetOuterTupleAtOffset(HashJoinState *hjstate, off_t offset)
-{
-	HashJoinTable hashtable = hjstate->hj_HashTable;
-	int curbatch = hashtable->curbatch;
-	TupleTableSlot *slot;
-	uint32 hashvalue;
-
-	BufFile    *file = hashtable->outerBatchFile[curbatch];
-	/* ? should fileno always be 0? */
-	if (BufFileSeek(file, 0, offset, SEEK_SET))
-		ereport(ERROR,
-				(errcode_for_file_access(),
-						errmsg("could not rewind hash-join temporary file: %m")));
-
-	slot = ExecHashJoinGetSavedTuple(hjstate,
-									 file,
-									 &hashvalue,
-									 hjstate->hj_OuterTupleSlot);
-	return slot;
-}
-
 static BufFile *rewindOuter(BufFile *bufFile)
 {
 	if (bufFile != NULL)
@@ -1584,27 +1543,6 @@ ExecHashJoinSaveTuple(MinimalTuple tuple, uint32 hashvalue,
 		ereport(ERROR,
 				(errcode_for_file_access(),
 				 errmsg("could not write to hash-join temporary file: %m")));
-}
-
-static BufFile *
-ExecHashJoinSaveOuterTupleMatchStatus(char status, BufFile **fileptr)
-{
-	BufFile    *file = *fileptr;
-	size_t		written;
-
-	if (file == NULL)
-	{
-		/* First write to this batch file, so open it. */
-		file = BufFileCreateTemp(false);
-		*fileptr = file;
-	}
-
-	written = BufFileWrite(file, &status, 1);
-	if (written != sizeof(char))
-		ereport(ERROR,
-		        (errcode_for_file_access(),
-			        errmsg("could not write to hash-join temporary file: %m")));
-	return file;
 }
 
 /*
