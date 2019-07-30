@@ -370,9 +370,9 @@ ExecHashJoinImpl(PlanState *pstate, bool parallel)
 				if (TupIsNull(outerTupleSlot))
 				{
 					/*
-					 * end of batch, or maybe whole join
-					 * for hashloop fallback, all we know is outer batch is exhausted
-					 * inner could have more chunks
+					 * end of batch, or maybe whole join.
+					 * for hashloop fallback, all we know is outer batch is
+					 * exhausted inner could have more chunks
 					 */
 					if (HJ_FILL_INNER(node))
 					{
@@ -387,11 +387,11 @@ ExecHashJoinImpl(PlanState *pstate, bool parallel)
 				/*
 				 * for the hashloop fallback case,
 				 * only initialize this to false during the first chunk --
-				 * otherwise, we will be resetting hj_MatchedOuter
-				 * to false for an outer tuple that has already matched an inner tuple
-				 * also, this should be set to false for batch 0 (no chunks for batch 0)
-				 * node->first_chunk isn't set to true until HJ_NEED_NEW_BATCH, so need to handle
-				 * batch 0 explicitly
+				 * otherwise, we will be resetting hj_MatchedOuter to false for
+				 * an outer tuple that has already matched an inner tuple
+				 * also, this should be set to false for batch 0 (therea are no
+				 * chunks for batch 0) node->first_chunk isn't set to true until
+				 * HJ_NEED_NEW_BATCH, so need to handle batch 0 explicitly
 				 */
 				if (node->hashloop_fallback == false || node->first_chunk || hashtable->curbatch == 0)
 					node->hj_MatchedOuter = false;
@@ -464,8 +464,9 @@ ExecHashJoinImpl(PlanState *pstate, bool parallel)
 					if ((node->hj_OuterTupleCount - 1) % 8 == 0)
 					{
 						/*
-						 * first chunk of new batch, so write and initialize enough bytes in the
-						 * outer tuple match status file to capture all tuples' match statuses
+						 * first chunk of new batch, so write and initialize
+						 * enough bytes in the outer tuple match status file to
+						 * capture all tuples' match statuses
 						 */
 						if (node->first_chunk)
 						{
@@ -551,7 +552,10 @@ ExecHashJoinImpl(PlanState *pstate, bool parallel)
 					if (node->js.single_match)
 						node->hj_JoinState = HJ_NEED_NEW_OUTER;
 
-					/* Set the match bit for this outer tuple in the match status file */
+					/*
+					 * Set the match bit for this outer tuple in the match
+					 * status file
+					 */
 					if (node->hj_OuterMatchStatusesFile != NULL)
 					{
 						Assert(node->hashloop_fallback == true);
@@ -563,7 +567,8 @@ ExecHashJoinImpl(PlanState *pstate, bool parallel)
 
 						node->current_byte = node->current_byte | (1 << bit_to_set_in_byte);
 
-						elog(DEBUG1, "in HJ_SCAN_BUCKET.    batchno %i. val %i. write byte %hhu. cur tup %li. bitnum %i. bytenum %i.",
+						elog(DEBUG1,
+								"in HJ_SCAN_BUCKET.    batchno %i. val %i. write byte %hhu. cur tup %li. bitnum %i. bytenum %i.",
 								node->hj_HashTable->curbatch,
 								DatumGetInt32(econtext->ecxt_outertuple->tts_values[0]),
 								node->current_byte,
@@ -623,18 +628,21 @@ ExecHashJoinImpl(PlanState *pstate, bool parallel)
 				else
 				{
 					/*
-					 * for batches after batch 0 for which hashloop_fallback is true,
-					 * if inner is exhausted, need to consider emitting unmatched tuples
-					 * we should never get here when hashloop_fallback is false but hj_InnerExhausted
-					 * is true, however, it felt more clear to check for hashloop_fallback explicitly
+					 * for batches after batch 0 for which hashloop_fallback is
+					 * true, if inner is exhausted, need to consider emitting
+					 * unmatched tuples we should never get here when
+					 * hashloop_fallback is false but hj_InnerExhausted is true,
+					 * however, it felt more clear to check for
+					 * hashloop_fallback explicitly
 					 */
 					if (node->hashloop_fallback == true && HJ_FILL_OUTER(node) && node->hj_InnerExhausted == true)
 					{
 						/*
 						 * For hashloop fallback, outer tuples are not emitted
-						 * until directly before advancing the batch (after all inner
-						 * chunks have been processed). node->hashloop_fallback should be
-						 * true because it is not reset to false until advancing the batches
+						 * until directly before advancing the batch (after all
+						 * inner chunks have been processed).
+						 * node->hashloop_fallback should be true because it is
+						 * not reset to false until advancing the batches
 						 */
 						node->hj_InnerExhausted = false;
 						node->hj_JoinState = HJ_ADAPTIVE_EMIT_UNMATCHED_OUTER_INIT;
@@ -655,10 +663,11 @@ ExecHashJoinImpl(PlanState *pstate, bool parallel)
 				elog(DEBUG1, "HJ_NEED_NEW_INNER_CHUNK");
 
 				/*
-				 * there were never chunks because this is the normal case (not hashloop fallback)
-				 * or this is batch 0. batch 0 cannot have chunks.
-				 * hashloop_fallback should always be false when curbatch is 0 here.
-				 * proceed to HJ_NEED_NEW_BATCH to either advance to the next batch or complete the join
+				 * there were never chunks because this is the normal case (not
+				 * hashloop fallback) or this is batch 0. batch 0 cannot have
+				 * chunks. hashloop_fallback should always be false when
+				 * curbatch is 0 here. proceed to HJ_NEED_NEW_BATCH to either
+				 * advance to the next batch or complete the join
 				 */
 				if (node->hj_HashTable->curbatch == 0)
 				{
@@ -685,12 +694,13 @@ ExecHashJoinImpl(PlanState *pstate, bool parallel)
 				}
 
 				/*
-				 * This is the hashloop fallback case and we have more chunks in inner
-				 * curbatch > 0
-				 * Rewind outer batch file (if present) so that we can start reading it.
-				 * Rewind outer match statuses file if present so that we can set match bits as needed
-				 * Reset the tuple count and load the next chunk of inner.
-				 * Then proceed to get a new outer tuple from our rewound outer batch file
+				 * This is the hashloop fallback case and we have more chunks in
+				 * inner. curbatch > 0. Rewind outer batch file (if present) so
+				 * that we can start reading it. Rewind outer match statuses
+				 * file if present so that we can set match bits as needed Reset
+				 * the tuple count and load the next chunk of inner. Then
+				 * proceed to get a new outer tuple from our rewound outer batch
+				 * file
 				 */
 				node->hj_JoinState = HJ_NEED_NEW_OUTER;
 
