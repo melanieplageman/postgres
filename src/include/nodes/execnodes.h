@@ -43,8 +43,6 @@ struct RangeTblEntry;			/* avoid including parsenodes.h here */
 struct ExprEvalStep;			/* avoid including execExpr.h everywhere */
 struct CopyMultiInsertBuffer;
 
-struct OuterOffsetMatchStatus;
-
 
 /* ----------------
  *		ExprState node
@@ -1903,15 +1901,17 @@ typedef struct HashJoinState
 	bool		hj_MatchedOuter;
 	bool		hj_OuterNotEmpty;
 
+	/* hashloop fallback */
 	bool hashloop_fallback;
-	off_t inner_page_offset;
-	bool first_chunk;
-
-	int64 hj_OuterTupleCount;
-	BufFile *hj_OuterMatchStatusesFile;
-	unsigned char current_byte;
-
+	/* hashloop fallback inner side */
+	bool hj_InnerFirstChunk;
 	bool hj_InnerExhausted;
+	off_t hj_InnerPageOffset;
+
+	/* hashloop fallback outer side */
+	unsigned char hj_OuterCurrentByte;
+	BufFile *hj_OuterMatchStatusesFile;
+	int64 hj_OuterTupleCount;
 } HashJoinState;
 
 
