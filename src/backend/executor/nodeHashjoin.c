@@ -1172,14 +1172,19 @@ ExecParallelHashJoinOuterGetTuple(PlanState *outerNode,
 	{
 		MinimalTuple tuple;
 
+		tupleMetadata metadata;
+		int tuplenum;
 		tuple = sts_parallel_scan_next(hashtable->batches[curbatch].outer_tuples,
-									   hashvalue);
+									   &metadata);
 		if (tuple != NULL)
 		{
+			*hashvalue = metadata.hashvalue;
+			tuplenum = metadata.tuplenum;
 			ExecForceStoreMinimalTuple(tuple,
 									   hjstate->hj_OuterTupleSlot,
 									   false);
 			slot = hjstate->hj_OuterTupleSlot;
+			elog(NOTICE, "tuplenum %i. tupleval %i.", tuplenum, DatumGetInt32(slot->tts_values[0]));
 			return slot;
 		}
 		else
@@ -1682,6 +1687,7 @@ ExecParallelHashJoinPartitionOuter(HashJoinState *hjstate)
 	/* Execute outer plan, writing all tuples to shared tuplestores. */
 	for (;;)
 	{
+		tupleMetadata metadata;
 		slot = ExecProcNode(outerState);
 		if (TupIsNull(slot))
 			break;
@@ -1699,8 +1705,9 @@ ExecParallelHashJoinPartitionOuter(HashJoinState *hjstate)
 
 			ExecHashGetBucketAndBatch(hashtable, hashvalue, &bucketno,
 									  &batchno);
+			metadata.hashvalue = hashvalue;
 			sts_puttuple(hashtable->batches[batchno].outer_tuples,
-						 &hashvalue, mintup);
+						 &metadata, mintup);
 
 			if (shouldFree)
 				heap_free_minimal_tuple(mintup);
