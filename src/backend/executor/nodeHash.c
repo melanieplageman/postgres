@@ -2964,7 +2964,7 @@ ExecParallelHashJoinSetUpBatches(HashJoinTable hashtable, int nbatch)
 													  pstate->nparticipants),
 						   pstate->nparticipants,
 						   ParallelWorkerNumber + 1,
-						   sizeof(uint32),
+						   sizeof(uint32) + sizeof(int),
 						   SHARED_TUPLESTORE_SINGLE_PASS,
 						   &pstate->fileset,
 						   name);
