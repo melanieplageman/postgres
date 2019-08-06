@@ -62,6 +62,7 @@ struct SharedTuplestore
 {
 	int			nparticipants;	/* Number of participants that can write. */
 	pg_atomic_uint32	tupleid_block;
+	pg_atomic_uint32 exact_tuplenum;
 	int			flags;			/* Flag bits from SHARED_TUPLESTORE_XXX */
 	size_t		meta_data_size; /* Size of per-tuple header. */
 	char		name[NAMEDATALEN];	/* A name for this tuplestore. */
@@ -144,6 +145,7 @@ sts_initialize(SharedTuplestore *sts, int participants,
 
 	sts->nparticipants = participants;
 	pg_atomic_init_u32(&sts->tupleid_block, 0);
+	pg_atomic_init_u32(&sts->exact_tuplenum, 0);
 	sts->meta_data_size = meta_data_size;
 	sts->flags = flags;
 
@@ -314,13 +316,14 @@ sts_puttuple(SharedTuplestoreAccessor *accessor, void *meta_data,
 			 MinimalTuple tuple)
 {
 	size_t		size;
+	//uint32 exact_tuplenum;
 
 	/* Do we have our own file yet? */
 	if (accessor->write_file == NULL)
 	{
 		SharedTuplestoreParticipant *participant;
 		char		name[MAXPGPATH];
-		uint32		tuplenumblock;
+		//uint32		tuplenumblock;
 
 		/* Create one.  Only this backend will write into it. */
 		sts_filename(name, accessor, accessor->participant);
@@ -329,9 +332,11 @@ sts_puttuple(SharedTuplestoreAccessor *accessor, void *meta_data,
 		/* Set up the shared state for this backend's file. */
 		participant = &accessor->sts->participants[accessor->participant];
 		participant->writing = true;	/* for assertions only */
-		tuplenumblock = pg_atomic_fetch_add_u32(&accessor->sts->tupleid_block, 1000);
-		accessor->tuplerange = tuplenumblock;
-		accessor->tuplenum = tuplenumblock;
+		//tuplenumblock = pg_atomic_fetch_add_u32(&accessor->sts->tupleid_block, 1000);
+		//accessor->tuplerange = tuplenumblock;
+		//accessor->tuplenum = tuplenumblock;
+		//((tupleMetadata *) meta_data)->tuplenum = accessor->tuplenum;
+		accessor->tuplenum = pg_atomic_fetch_add_u32(&accessor->sts->exact_tuplenum, 1);
 		((tupleMetadata *) meta_data)->tuplenum = accessor->tuplenum;
 	}
 
@@ -372,7 +377,7 @@ sts_puttuple(SharedTuplestoreAccessor *accessor, void *meta_data,
 			 */
 			Assert(accessor->write_pointer + accessor->sts->meta_data_size +
 				   sizeof(uint32) < accessor->write_end);
-			++accessor->tuplenum;
+			accessor->tuplenum = pg_atomic_fetch_add_u32(&accessor->sts->exact_tuplenum, 1);
 			((tupleMetadata *) meta_data)->tuplenum = accessor->tuplenum;
 			/* Write the meta-data as one chunk. */
 			if (accessor->sts->meta_data_size > 0)
@@ -419,7 +424,7 @@ sts_puttuple(SharedTuplestoreAccessor *accessor, void *meta_data,
 	if (accessor->sts->meta_data_size > 0)
 		memcpy(accessor->write_pointer, meta_data,
 			   accessor->sts->meta_data_size);
-	++accessor->tuplenum;
+	accessor->tuplenum = pg_atomic_fetch_add_u32(&accessor->sts->exact_tuplenum, 1);
 	((tupleMetadata *) meta_data)->tuplenum = accessor->tuplenum;
 	memcpy(accessor->write_pointer + accessor->sts->meta_data_size, tuple,
 		   tuple->t_len);
@@ -486,7 +491,7 @@ sts_read_tuple(SharedTuplestoreAccessor *accessor, void *meta_data)
 	remaining_size -= this_chunk_size;
 	destination += this_chunk_size;
 	++accessor->read_ntuples;
-	accessor->tuplenum++;
+	//accessor->tuplenum++;
 
 	/* Check if we need to read any overflow chunks. */
 	while (remaining_size > 0)
