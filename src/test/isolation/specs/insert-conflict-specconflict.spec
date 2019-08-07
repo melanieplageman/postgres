@@ -40,9 +40,11 @@ setup
     END;$$;
 
 
-    CREATE OR REPLACE FUNCTION blurt_and_lock2(text) RETURNS text IMMUTABLE LANGUAGE plpgsql AS $$
+    CREATE OR REPLACE FUNCTION blurt_and_lock_before_complete(text) RETURNS text IMMUTABLE LANGUAGE plpgsql AS $$
+	 DECLARE
+	     WAIT_ON_COMPLETE_SPECULATIVE_INSERT_LOCK INT := 4;
     BEGIN
-        RAISE NOTICE 'blurt_and_lock2() called for %', $1;
+        RAISE NOTICE 'blurt_and_lock_before_complete() called for %', $1;
         PERFORM pg_advisory_xact_lock(current_setting('spec.session')::int, 4);
     RETURN $1;
     END;$$;
@@ -85,7 +87,7 @@ setup
   SET spec.session = 1;
 }
 step "s1_begin"  { BEGIN; }
-step "s1_create_non_unique_index" { CREATE INDEX upserttest_key_idx ON upserttest((blurt_and_lock2(key))); }
+step "s1_create_non_unique_index" { CREATE INDEX upserttest_key_idx ON upserttest((blurt_and_lock_before_complete(key))); }
 step "s1_confirm_index_order" { SELECT 'upserttest_key_uniq_idx'::regclass::int8 < 'upserttest_key_idx'::regclass::int8; }
 step "s1_upsert" { INSERT INTO upserttest(key, data) VALUES('k1', 'inserted s1') ON CONFLICT (blurt_and_lock(key)) DO UPDATE SET data = upserttest.data || ' with conflict update s1'; }
 step "s1_insert_toast" { INSERT INTO upserttest VALUES('k2', ctoast_large_val()) ON CONFLICT DO NOTHING; }
@@ -221,7 +223,7 @@ permutation
    # blurt_and_lock function acquires advisory locks that allow us to
    # continue after a) the optimistic conflict probe and b) after the
    # insertion of the speculative tuple.
-   # blurt_and_lock2 acquires an advisory lock which allows us to pause
+   # blurt_and_lock_before_complete acquires an advisory lock which allows us to pause
    # execution c) before completing the speculative insertion
 
    # create the second index here to avoid affecting the other

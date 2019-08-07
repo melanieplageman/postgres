@@ -325,7 +325,7 @@ key            data
 k1             inserted s1 with conflict update s2
 
 starting permutation: s1_create_non_unique_index s1_confirm_index_order controller_init_locks controller_toggle_on_wait_condition controller_show s1_upsert s2_upsert controller_show controller_toggle_off_wait_condition controller_unlock_index_constraint_check_lock_s1 controller_unlock_index_constraint_check_lock_s2 controller_show controller_lock_2_4 controller_unlock_index_insert_lock_s2 controller_show controller_unlock_index_insert_lock_s1 controller_print_speculative_locks controller_unlock_2_4 controller_show
-step s1_create_non_unique_index: CREATE INDEX upserttest_key_idx ON upserttest((blurt_and_lock2(key)));
+step s1_create_non_unique_index: CREATE INDEX upserttest_key_idx ON upserttest((blurt_and_lock_before_complete(key)));
 step s1_confirm_index_order: SELECT 'upserttest_key_uniq_idx'::regclass::int8 < 'upserttest_key_idx'::regclass::int8;
 ?column?       
 
@@ -392,7 +392,7 @@ step controller_unlock_index_insert_lock_s2: SELECT pg_advisory_unlock(2, 2);
 pg_advisory_unlock
 
 t              
-s2: NOTICE:  blurt_and_lock2() called for k1
+s2: NOTICE:  blurt_and_lock_before_complete() called for k1
 step controller_show: SELECT * FROM upserttest;
 key            data           
 
@@ -400,7 +400,7 @@ step controller_unlock_index_insert_lock_s1: SELECT pg_advisory_unlock(1, 2);
 pg_advisory_unlock
 
 t              
-s1: NOTICE:  blurt_and_lock2() called for k1
+s1: NOTICE:  blurt_and_lock_before_complete() called for k1
 s1: NOTICE:  blurt_and_lock() called for k1
 s1: NOTICE:  blocking WAIT_ON_INDEX_INSERT_LOCK
 s1: NOTICE:  blurt_and_lock() called for k1
