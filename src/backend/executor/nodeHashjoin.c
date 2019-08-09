@@ -1184,7 +1184,7 @@ ExecParallelHashJoinOuterGetTuple(PlanState *outerNode,
 									   hjstate->hj_OuterTupleSlot,
 									   false);
 			slot = hjstate->hj_OuterTupleSlot;
-			elog(NOTICE, "tuplenum %i. tupleval %i.", tuplenum, DatumGetInt32(slot->tts_values[0]));
+			elog(NOTICE, "in ExecParallelHashJoinOuterGetTuple. tuplenum %i. tupleval %i.", tuplenum, DatumGetInt32(slot->tts_values[0]));
 			return slot;
 		}
 		else
