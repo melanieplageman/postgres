@@ -1317,7 +1317,7 @@ ExecParallelHashRepartitionFirst(HashJoinTable hashtable)
 				/* It belongs in a later batch. */
 				hashtable->batches[batchno].estimated_size += tuple_size;
 				sts_puttuple(hashtable->batches[batchno].inner_tuples,
-							 &hashTuple->hashvalue, tuple);
+							 &hashTuple->hashvalue, tuple, false);
 			}
 
 			/* Count this tuple. */
@@ -1385,7 +1385,7 @@ ExecParallelHashRepartitionRest(HashJoinTable hashtable)
 
 			/* Store the tuple its new batch. */
 			sts_puttuple(hashtable->batches[batchno].inner_tuples,
-						 &hashvalue, tuple);
+						 &hashvalue, tuple, false);
 
 			CHECK_FOR_INTERRUPTS();
 		}
@@ -1730,7 +1730,7 @@ retry:
 		Assert(hashtable->batches[batchno].preallocated >= tuple_size);
 		hashtable->batches[batchno].preallocated -= tuple_size;
 		sts_puttuple(hashtable->batches[batchno].inner_tuples, &hashvalue,
-					 tuple);
+					 tuple, false);
 	}
 	++hashtable->batches[batchno].ntuples;
 

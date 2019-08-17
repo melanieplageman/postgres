@@ -93,7 +93,6 @@ struct SharedTuplestoreAccessor
 	BlockNumber write_page;		/* The next page to write to. */
 	char	   *write_pointer;	/* Current write pointer within chunk. */
 	char	   *write_end;		/* One past the end of the current chunk. */
-	int 		tuplenum;
 };
 
 static void sts_filename(char *name, SharedTuplestoreAccessor *accessor,
@@ -305,8 +304,7 @@ sts_end_parallel_scan(SharedTuplestoreAccessor *accessor)
  * pointer to meta data of that size must be provided.
  */
 void
-sts_puttuple(SharedTuplestoreAccessor *accessor, void *meta_data,
-			 MinimalTuple tuple)
+sts_puttuple(SharedTuplestoreAccessor *accessor, void *meta_data, MinimalTuple tuple, bool count_tuples)
 {
 	size_t		size;
 
@@ -323,8 +321,11 @@ sts_puttuple(SharedTuplestoreAccessor *accessor, void *meta_data,
 		/* Set up the shared state for this backend's file. */
 		participant = &accessor->sts->participants[accessor->participant];
 		participant->writing = true;	/* for assertions only */
-		accessor->tuplenum = pg_atomic_fetch_add_u32(&accessor->sts->exact_tuplenum, 1);
-		((tupleMetadata *) meta_data)->tuplenum = accessor->tuplenum;
+		if (count_tuples == true)
+		{
+			((tupleMetadata *) meta_data)->tuplenum = pg_atomic_fetch_add_u32(&accessor->sts->exact_tuplenum, 1);
+			elog(NOTICE, "%i.%i.%s.%i.",((tupleMetadata *) meta_data)->tuplenum, accessor->participant, accessor->sts->name, MyProcPid);
+		}
 	}
 
 	/* Do we have space? */
@@ -364,8 +365,13 @@ sts_puttuple(SharedTuplestoreAccessor *accessor, void *meta_data,
 			 */
 			Assert(accessor->write_pointer + accessor->sts->meta_data_size +
 				   sizeof(uint32) < accessor->write_end);
-			accessor->tuplenum = pg_atomic_fetch_add_u32(&accessor->sts->exact_tuplenum, 1);
-			((tupleMetadata *) meta_data)->tuplenum = accessor->tuplenum;
+			if (count_tuples == true)
+			{
+				((tupleMetadata *) meta_data)->tuplenum = pg_atomic_fetch_add_u32(&accessor->sts->exact_tuplenum, 1);
+				elog(NOTICE, "%i.%i.%s.%i.",((tupleMetadata *) meta_data)->tuplenum, accessor->participant, accessor->sts->name, MyProcPid);
+			}
+
+
 			/* Write the meta-data as one chunk. */
 			if (accessor->sts->meta_data_size > 0)
 				memcpy(accessor->write_pointer, meta_data,
@@ -406,13 +412,17 @@ sts_puttuple(SharedTuplestoreAccessor *accessor, void *meta_data,
 			return;
 		}
 	}
+	if (count_tuples == true)
+	{
+		((tupleMetadata *) meta_data)->tuplenum = pg_atomic_fetch_add_u32(&accessor->sts->exact_tuplenum, 1);
+		elog(NOTICE, "%i.%i.%s.%i.", ((tupleMetadata *) meta_data)->tuplenum, accessor->participant, accessor->sts->name,MyProcPid);
+	}
 
 	/* Copy meta-data and tuple into buffer. */
 	if (accessor->sts->meta_data_size > 0)
 		memcpy(accessor->write_pointer, meta_data,
 			   accessor->sts->meta_data_size);
-	accessor->tuplenum = pg_atomic_fetch_add_u32(&accessor->sts->exact_tuplenum, 1);
-	((tupleMetadata *) meta_data)->tuplenum = accessor->tuplenum;
+
 	memcpy(accessor->write_pointer + accessor->sts->meta_data_size, tuple,
 		   tuple->t_len);
 	accessor->write_pointer += size;
@@ -600,7 +610,6 @@ sts_parallel_scan_next(SharedTuplestoreAccessor *accessor, void *meta_data)
 			}
 
 			accessor->read_ntuples = 0;
-			accessor->tuplenum = 0;
 			accessor->read_ntuples_available = chunk_header.ntuples;
 			accessor->read_bytes = STS_CHUNK_HEADER_SIZE;
 
