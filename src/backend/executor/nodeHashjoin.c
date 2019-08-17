@@ -1184,7 +1184,8 @@ ExecParallelHashJoinOuterGetTuple(PlanState *outerNode,
 									   hjstate->hj_OuterTupleSlot,
 									   false);
 			slot = hjstate->hj_OuterTupleSlot;
-			elog(NOTICE, "in ExecParallelHashJoinOuterGetTuple. tuplenum %i. tupleval %i.", tuplenum, DatumGetInt32(slot->tts_values[0]));
+			//volatile int mybp = 0; while (mybp == 0);
+			elog(NOTICE, "in ExecParallelHashJoinOuterGetTuple. tuplenum %i. curbatch %i. tupleval %i. pid %i.", tuplenum, curbatch, DatumGetInt32(slot->tts_values[0]), MyProcPid);
 			return slot;
 		}
 		else
@@ -1707,7 +1708,7 @@ ExecParallelHashJoinPartitionOuter(HashJoinState *hjstate)
 									  &batchno);
 			metadata.hashvalue = hashvalue;
 			sts_puttuple(hashtable->batches[batchno].outer_tuples,
-						 &metadata, mintup);
+						 &metadata, mintup, true);
 
 			if (shouldFree)
 				heap_free_minimal_tuple(mintup);
