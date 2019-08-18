@@ -156,9 +156,6 @@ static TupleTableSlot *emitUnmatchedOuterTuple(ExprState *otherqual,
 											   ExprContext *econtext,
 											   HashJoinState *hjstate);
 
-static void ExecParallelSaveCurrentByte(HashJoinState *hjstate, ExprContext *econtext);
-static void ExecParallelSetOuterMatchStatus(HashJoinState *hjstate);
-
 /* ----------------------------------------------------------------
  *		ExecHashJoinImpl
  *
@@ -1213,6 +1210,7 @@ ExecParallelHashJoinOuterGetTuple(PlanState *outerNode,
 		if (tuple != NULL)
 		{
 			SharedTuplestoreAccessor *outer_acc = hashtable->batches[curbatch].outer_tuples;
+			// TODO: when do I need to make the file now?
 			BufFile *parallel_outer_matchstatuses = sts_get_outerMatchStatuses(outer_acc);
 			if (parallel_outer_matchstatuses != NULL)
 			{
@@ -1412,44 +1410,6 @@ static bool ExecHashJoinLoadInnerBatch(HashJoinState *hjstate)
 	}
 
 	return false;
-}
-static void
-ExecParallelSaveCurrentByte(HashJoinState *hjstate, ExprContext *econtext)
-{
-
-}
-
-static void
-ExecParallelSetOuterMatchStatus(HashJoinState *hjstate)
-{
-	unsigned char *current_outer_byte;
-
-	HashJoinTable hashtable = hjstate->hj_HashTable;
-	int			curbatch = hashtable->curbatch;
-
-
-	SharedTuplestoreAccessor *outer_acc = hashtable->batches[curbatch].outer_tuples;
-	BufFile *parallel_outer_matchstatuses = sts_get_outerMatchStatuses(outer_acc);
-	uint32 tuplenum = sts_gettuplenum(outer_acc);
-	current_outer_byte = sts_get_current_outer_byte(outer_acc);
-
-	int byte_to_set = (tuplenum - 1) / 8;
-	int bit_to_set_in_byte = (tuplenum - 1) % 8;
-
-	if (BufFileSeek(parallel_outer_matchstatuses, 0, byte_to_set, SEEK_SET) != 0)
-		elog(DEBUG1, "at beginning of file");
-
-	(*current_outer_byte) = (*current_outer_byte) | (1 << bit_to_set_in_byte);
-
-	elog(NOTICE,
-		 "in HJ_SCAN_BUCKET for parallel hj.    batchno %i. write byte %hhu. cur tup %i. bitnum %i. bytenum %i.",
-		 hashtable->curbatch,
-		 (*current_outer_byte),
-		 tuplenum,
-		 bit_to_set_in_byte,
-		 byte_to_set);
-
-	BufFileWrite(parallel_outer_matchstatuses, current_outer_byte, 1);
 }
 
 /*

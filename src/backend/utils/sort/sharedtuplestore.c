@@ -92,7 +92,6 @@ struct SharedTuplestoreAccessor
 	BufFile    *write_file;		/* The current file to write to. */
 	BlockNumber write_page;		/* The next page to write to. */
 	BufFile    *outer_match_statuses;
-	unsigned char current_outer_byte;
 	char	   *write_pointer;	/* Current write pointer within chunk. */
 	char	   *write_end;		/* One past the end of the current chunk. */
 };
@@ -172,7 +171,6 @@ sts_initialize(SharedTuplestore *sts, int participants,
 	accessor->context = CurrentMemoryContext;
 	// TODO: should I initialize this here
 	accessor->outer_match_statuses = NULL;
-	accessor->current_outer_byte = 0;
 
 	return accessor;
 }
@@ -195,7 +193,8 @@ sts_attach(SharedTuplestore *sts,
 	accessor->sts = sts;
 	accessor->fileset = fileset;
 	accessor->context = CurrentMemoryContext;
-
+	// TODO: should I initialize this here
+	accessor->outer_match_statuses = NULL;
 	return accessor;
 }
 
@@ -237,7 +236,6 @@ sts_end_write(SharedTuplestoreAccessor *accessor)
 	{
 		BufFileClose(accessor->outer_match_statuses);
 		accessor->outer_match_statuses = NULL;
-		accessor->current_outer_byte = 0;
 	}
 }
 
@@ -315,29 +313,18 @@ uint32 sts_gettuplenum(SharedTuplestoreAccessor *accessor)
 	 return pg_atomic_read_u32(&accessor->sts->exact_tuplenum);
 }
 
-unsigned char *sts_get_current_outer_byte(SharedTuplestoreAccessor *accessor)
-{
-	return &(accessor->current_outer_byte);
-}
-
-void sts_set_current_outer_byte(SharedTuplestoreAccessor *accessor, unsigned char value)
-{
-	accessor->current_outer_byte = value;
-}
-
 BufFile *sts_get_outerMatchStatuses(SharedTuplestoreAccessor *accessor)
 {
 	if (accessor->outer_match_statuses == NULL)
 	{
 		accessor->outer_match_statuses = BufFileCreateTemp(false);
+		uint32 tuplenum = sts_gettuplenum(accessor);
+		unsigned char byteToWrite = 0;
+		BufFileWrite(accessor->outer_match_statuses, &byteToWrite, (tuplenum / 8));
 		if (BufFileSeek(accessor->outer_match_statuses, 0, 0L, SEEK_SET))
 			ereport(ERROR,
 					(errcode_for_file_access(),
 							errmsg("could not rewind hash-join temporary file: %m")));
-		uint32 tuplenum = sts_gettuplenum(accessor);
-		unsigned char byteToWrite = 0;
-		BufFileWrite(accessor->outer_match_statuses, &byteToWrite, (tuplenum / 8));
-		accessor->current_outer_byte = 0;
 	}
 	return accessor->outer_match_statuses;
 }
@@ -371,7 +358,6 @@ sts_puttuple(SharedTuplestoreAccessor *accessor, void *meta_data, MinimalTuple t
 			if (accessor->outer_match_statuses == NULL)
 			{
 				accessor->outer_match_statuses = BufFileCreateTemp(false);
-				accessor->current_outer_byte = 0;
 			}
 		}
 	}
