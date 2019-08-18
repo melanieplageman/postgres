@@ -691,6 +691,10 @@ StartBackgroundWorker(void)
 	/* Identify myself via ps */
 	init_ps_display(worker->bgw_name, "", "", "");
 
+
+	//sleep(20);
+
+
 	/*
 	 * If we're not supposed to have shared memory access, then detach from
 	 * shared memory.  If we didn't request shared memory access, the

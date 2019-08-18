@@ -156,6 +156,9 @@ static TupleTableSlot *emitUnmatchedOuterTuple(ExprState *otherqual,
 											   ExprContext *econtext,
 											   HashJoinState *hjstate);
 
+static void ExecParallelSaveCurrentByte(HashJoinState *hjstate, ExprContext *econtext);
+static void ExecParallelSetOuterMatchStatus(HashJoinState *hjstate);
+
 /* ----------------------------------------------------------------
  *		ExecHashJoinImpl
  *
@@ -251,6 +254,7 @@ ExecHashJoinImpl(PlanState *pstate, bool parallel)
 				 * from the outer plan node.  If we succeed, we have to stash
 				 * it away for later consumption by ExecHashJoinOuterGetTuple.
 				 */
+//				volatile int mybp = 0; while (mybp == 0);
 				if (HJ_FILL_INNER(node))
 				{
 					/* no chance to not build the hash table */
@@ -418,6 +422,7 @@ ExecHashJoinImpl(PlanState *pstate, bool parallel)
 				if (batchno != hashtable->curbatch &&
 					node->hj_CurSkewBucketNo == INVALID_SKEW_BUCKET_NO)
 				{
+					elog(NOTICE, "tuple in wrong batch. spill forward.");
 					bool		shouldFree;
 					MinimalTuple mintuple = ExecFetchSlotMinimalTuple(outerTupleSlot,
 																	  &shouldFree);
@@ -558,6 +563,35 @@ ExecHashJoinImpl(PlanState *pstate, bool parallel)
 					 * Set the match bit for this outer tuple in the match
 					 * status file
 					 */
+					if (parallel && batchno > 0)
+					{
+						// TODO: make this only when it is fallback case
+						unsigned char current_outer_byte;
+						uint32 tuplenum = econtext->ecxt_outertuple->tuplenum;
+						SharedTuplestoreAccessor *outer_acc = hashtable->batches[hashtable->curbatch].outer_tuples;
+						BufFile *parallel_outer_matchstatuses = sts_get_outerMatchStatuses(outer_acc);
+
+						if (BufFileSeek(parallel_outer_matchstatuses, 0, (tuplenum / 8), SEEK_SET) != 0)
+							elog(DEBUG1, "at beginning of file");
+						BufFileRead(parallel_outer_matchstatuses, &current_outer_byte, 1);
+
+						int bit_to_set_in_byte = (tuplenum) % 8;
+
+						current_outer_byte = current_outer_byte | (1 << bit_to_set_in_byte);
+
+						elog(NOTICE,
+							 "in HJ_SCAN_BUCKET for parallel hj.    batchno %i. write byte %hhu. cur tup %i. bitnum %i.",
+							 hashtable->curbatch,
+							 current_outer_byte,
+							 tuplenum,
+							 bit_to_set_in_byte);
+
+						if (BufFileSeek(parallel_outer_matchstatuses, 0, -1, SEEK_CUR) != 0)
+							elog(ERROR, "there is a problem.");
+
+						BufFileWrite(parallel_outer_matchstatuses, &current_outer_byte, 1);
+					}
+
 					if (node->hj_OuterMatchStatusesFile != NULL)
 					{
 						Assert(node->hashloop_fallback == true);
@@ -1178,11 +1212,20 @@ ExecParallelHashJoinOuterGetTuple(PlanState *outerNode,
 									   &metadata);
 		if (tuple != NULL)
 		{
+			SharedTuplestoreAccessor *outer_acc = hashtable->batches[curbatch].outer_tuples;
+			BufFile *parallel_outer_matchstatuses = sts_get_outerMatchStatuses(outer_acc);
+			if (parallel_outer_matchstatuses != NULL)
+			{
+				uint32 final_tuplenum = sts_gettuplenum(outer_acc);
+				elog(NOTICE, "final tuplenum is %i for batchno %i", final_tuplenum, curbatch);
+			}
+
 			*hashvalue = metadata.hashvalue;
 			tuplenum = metadata.tuplenum;
 			ExecForceStoreMinimalTuple(tuple,
 									   hjstate->hj_OuterTupleSlot,
 									   false);
+			hjstate->hj_OuterTupleSlot->tuplenum = tuplenum;
 			slot = hjstate->hj_OuterTupleSlot;
 			//volatile int mybp = 0; while (mybp == 0);
 			elog(NOTICE, "in ExecParallelHashJoinOuterGetTuple. tuplenum %i. curbatch %i. tupleval %i. pid %i.", tuplenum, curbatch, DatumGetInt32(slot->tts_values[0]), MyProcPid);
@@ -1369,6 +1412,44 @@ static bool ExecHashJoinLoadInnerBatch(HashJoinState *hjstate)
 	}
 
 	return false;
+}
+static void
+ExecParallelSaveCurrentByte(HashJoinState *hjstate, ExprContext *econtext)
+{
+
+}
+
+static void
+ExecParallelSetOuterMatchStatus(HashJoinState *hjstate)
+{
+	unsigned char *current_outer_byte;
+
+	HashJoinTable hashtable = hjstate->hj_HashTable;
+	int			curbatch = hashtable->curbatch;
+
+
+	SharedTuplestoreAccessor *outer_acc = hashtable->batches[curbatch].outer_tuples;
+	BufFile *parallel_outer_matchstatuses = sts_get_outerMatchStatuses(outer_acc);
+	uint32 tuplenum = sts_gettuplenum(outer_acc);
+	current_outer_byte = sts_get_current_outer_byte(outer_acc);
+
+	int byte_to_set = (tuplenum - 1) / 8;
+	int bit_to_set_in_byte = (tuplenum - 1) % 8;
+
+	if (BufFileSeek(parallel_outer_matchstatuses, 0, byte_to_set, SEEK_SET) != 0)
+		elog(DEBUG1, "at beginning of file");
+
+	(*current_outer_byte) = (*current_outer_byte) | (1 << bit_to_set_in_byte);
+
+	elog(NOTICE,
+		 "in HJ_SCAN_BUCKET for parallel hj.    batchno %i. write byte %hhu. cur tup %i. bitnum %i. bytenum %i.",
+		 hashtable->curbatch,
+		 (*current_outer_byte),
+		 tuplenum,
+		 bit_to_set_in_byte,
+		 byte_to_set);
+
+	BufFileWrite(parallel_outer_matchstatuses, current_outer_byte, 1);
 }
 
 /*

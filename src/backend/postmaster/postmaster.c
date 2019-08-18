@@ -5977,6 +5977,7 @@ maybe_start_bgworkers(void)
 	TimestampTz now = 0;
 	slist_mutable_iter iter;
 
+	elog(NOTICE, "being called.");
 	/*
 	 * During crash recovery, we have no need to be called until the state
 	 * transition out of recovery.
