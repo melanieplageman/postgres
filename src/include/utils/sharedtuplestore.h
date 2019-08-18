@@ -64,9 +64,6 @@ extern uint32 sts_gettuplenum(SharedTuplestoreAccessor *accessor);
 
 extern BufFile *sts_get_outerMatchStatuses(SharedTuplestoreAccessor *accessor);
 
-unsigned char *sts_get_current_outer_byte(SharedTuplestoreAccessor *accessor);
-void sts_set_current_outer_byte(SharedTuplestoreAccessor *accessor, unsigned char value);
-
 extern MinimalTuple sts_parallel_scan_next(SharedTuplestoreAccessor *accessor, void *meta_data);
 
 #endif							/* SHAREDTUPLESTORE_H */
