@@ -251,7 +251,7 @@ ExecHashJoinImpl(PlanState *pstate, bool parallel)
 				 * from the outer plan node.  If we succeed, we have to stash
 				 * it away for later consumption by ExecHashJoinOuterGetTuple.
 				 */
-//				volatile int mybp = 0; while (mybp == 0);
+				//volatile int mybp = 0; while (mybp == 0);
 				if (HJ_FILL_INNER(node))
 				{
 					/* no chance to not build the hash table */
@@ -419,7 +419,7 @@ ExecHashJoinImpl(PlanState *pstate, bool parallel)
 				if (batchno != hashtable->curbatch &&
 					node->hj_CurSkewBucketNo == INVALID_SKEW_BUCKET_NO)
 				{
-					elog(NOTICE, "tuple in wrong batch. spill forward.");
+					elog(DEBUG1, "tuple in wrong batch. spill forward.");
 					bool		shouldFree;
 					MinimalTuple mintuple = ExecFetchSlotMinimalTuple(outerTupleSlot,
 																	  &shouldFree);
@@ -567,29 +567,35 @@ ExecHashJoinImpl(PlanState *pstate, bool parallel)
 						uint32 tuplenum = econtext->ecxt_outertuple->tuplenum;
 						SharedTuplestoreAccessor *outer_acc = hashtable->batches[hashtable->curbatch].outer_tuples;
 						BufFile *parallel_outer_matchstatuses = sts_get_outerMatchStatuses(outer_acc);
+						if (parallel_outer_matchstatuses == NULL)
+						{
+							elog(ERROR, "in HJ_SCAN_BUCKET for batchno %i and match status file is unexpectedly NULL. pid %i.", batchno, MyProcPid);
+						}
 
 						if (BufFileSeek(parallel_outer_matchstatuses, 0, (tuplenum / 8), SEEK_SET) != 0)
-							elog(DEBUG1, "at beginning of file");
-						BufFileRead(parallel_outer_matchstatuses, &current_outer_byte, 1);
+							elog(DEBUG1, "in HJ_SCAN_BUCKET for batchno %i. at beginning of file. pid %i.", batchno, MyProcPid);
+						size_t nread = BufFileRead(parallel_outer_matchstatuses, &current_outer_byte, 1);
+						elog(DEBUG1, "in HJ_SCAN_BUCKET for batchno %i. nread is %zu. pid %i", batchno, nread, MyProcPid);
 
 						int bit_to_set_in_byte = (tuplenum) % 8;
 
 						current_outer_byte = current_outer_byte | (1 << bit_to_set_in_byte);
 
-						elog(NOTICE,
-							 "in HJ_SCAN_BUCKET for parallel hj.    batchno %i. write byte %hhu. cur tup %i. bitnum %i.",
+						elog(DEBUG1,
+							 "in HJ_SCAN_BUCKET for parallel hj. batchno %i. write byte %hhu. cur tup %i. bitnum %i. pid %i.",
 							 hashtable->curbatch,
 							 current_outer_byte,
 							 tuplenum,
-							 bit_to_set_in_byte);
+							 bit_to_set_in_byte,
+							 MyProcPid);
 
 						if (BufFileSeek(parallel_outer_matchstatuses, 0, -1, SEEK_CUR) != 0)
-							elog(ERROR, "there is a problem.");
+							elog(ERROR, "there is a problem with outer match status file. pid %i.", MyProcPid);
 
 						BufFileWrite(parallel_outer_matchstatuses, &current_outer_byte, 1);
 					}
 
-					if (node->hj_OuterMatchStatusesFile != NULL)
+					else if (node->hj_OuterMatchStatusesFile != NULL)
 					{
 						Assert(node->hashloop_fallback == true);
 						int byte_to_set = (node->hj_OuterTupleCount - 1) / 8;
@@ -706,7 +712,7 @@ ExecHashJoinImpl(PlanState *pstate, bool parallel)
 				{
 					Assert(node->hashloop_fallback == false);
 					if(node->hj_InnerPageOffset != 0L)
-						elog(NOTICE, "hj_InnerPageOffset is not reset to 0 on batch 0");
+						elog(DEBUG1, "hj_InnerPageOffset is not reset to 0 on batch 0");
 				}
 
 				if (node->hashloop_fallback == false)
@@ -1215,7 +1221,11 @@ ExecParallelHashJoinOuterGetTuple(PlanState *outerNode,
 			if (parallel_outer_matchstatuses != NULL)
 			{
 				uint32 final_tuplenum = sts_gettuplenum(outer_acc);
-				elog(NOTICE, "final tuplenum is %i for batchno %i", final_tuplenum, curbatch);
+				elog(DEBUG1, "final tuplenum is %i for batchno %i. pid %i.", final_tuplenum, curbatch, MyProcPid);
+			}
+			else
+			{
+				elog(DEBUG1, "in ExecParallelHashJoinOuterGetTuple and outer_match_statuses file is NULL. pid %i.", MyProcPid);
 			}
 
 			*hashvalue = metadata.hashvalue;
@@ -1226,7 +1236,7 @@ ExecParallelHashJoinOuterGetTuple(PlanState *outerNode,
 			hjstate->hj_OuterTupleSlot->tuplenum = tuplenum;
 			slot = hjstate->hj_OuterTupleSlot;
 			//volatile int mybp = 0; while (mybp == 0);
-			elog(NOTICE, "in ExecParallelHashJoinOuterGetTuple. tuplenum %i. curbatch %i. tupleval %i. pid %i.", tuplenum, curbatch, DatumGetInt32(slot->tts_values[0]), MyProcPid);
+			elog(DEBUG1, "in ExecParallelHashJoinOuterGetTuple. tuplenum %i. curbatch %i. tupleval %i. pid %i.", tuplenum, curbatch, DatumGetInt32(slot->tts_values[0]), MyProcPid);
 			return slot;
 		}
 		else
@@ -1520,6 +1530,7 @@ ExecParallelHashJoinNewBatch(HashJoinState *hjstate)
 					 * Already done.  Detach and go around again (if any
 					 * remain).
 					 */
+					elog(DEBUG1, "in PHJ_BATCH_DONE. done with batchno %i. process %i.", batchno, MyProcPid);
 					BarrierDetach(batch_barrier);
 					hashtable->batches[batchno].done = true;
 					hashtable->curbatch = -1;
@@ -1759,7 +1770,12 @@ ExecParallelHashJoinPartitionOuter(HashJoinState *hjstate)
 
 	/* Make sure all outer partitions are readable by any backend. */
 	for (i = 0; i < hashtable->nbatch; ++i)
+	{
 		sts_end_write(hashtable->batches[i].outer_tuples);
+		BufFile *parallel_outer_match_statuses = sts_make_outerMatchStatuses(hashtable->batches[i].outer_tuples); //TODO: don't make for batch 0
+		if (i == 7)
+			elog(DEBUG1, "in ExecParallelHashJoinPartitionOuter. parallel outer_match_statuses file %s exists for batchno %i. pid %i.", BufFileGetName(parallel_outer_match_statuses), i, MyProcPid);
+	}
 }
 
 void

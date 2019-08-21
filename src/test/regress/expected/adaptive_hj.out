@@ -958,3 +958,7 @@ select count(*) from t2 full outer join t1 on a = b;
     60
 (1 row)
 
+drop table t1;
+drop table t2;
+reset enable_mergejoin;
+reset work_mem;

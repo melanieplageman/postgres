@@ -1,3 +1,4 @@
+
 drop table if exists t1;
 drop table if exists t2;
 create table t1(a int);
@@ -62,3 +63,8 @@ select * from t2 right outer join t1 on a = b order by b;
 select count(*) from t2 right outer join t1 on a = b;
 select * from t2 full outer join t1 on a = b order by b;
 select count(*) from t2 full outer join t1 on a = b;
+drop table t1;
+drop table t2;
+
+reset enable_mergejoin;
+reset work_mem;

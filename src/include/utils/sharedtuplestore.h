@@ -63,7 +63,11 @@ extern void sts_puttuple(SharedTuplestoreAccessor *accessor, void *meta_data, Mi
 extern uint32 sts_gettuplenum(SharedTuplestoreAccessor *accessor);
 
 extern BufFile *sts_get_outerMatchStatuses(SharedTuplestoreAccessor *accessor);
+extern BufFile *sts_make_outerMatchStatuses(SharedTuplestoreAccessor *accessor);
+
 
 extern MinimalTuple sts_parallel_scan_next(SharedTuplestoreAccessor *accessor, void *meta_data);
+
+extern char *sts_cleanup_outer_match_status_files(SharedTuplestoreAccessor *accessor);
 
 #endif							/* SHAREDTUPLESTORE_H */

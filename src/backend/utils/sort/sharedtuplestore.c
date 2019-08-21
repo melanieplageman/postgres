@@ -232,11 +232,22 @@ sts_end_write(SharedTuplestoreAccessor *accessor)
 		accessor->write_file = NULL;
 		accessor->sts->participants[accessor->participant].writing = false;
 	}
+
+}
+
+char *sts_cleanup_outer_match_status_files(SharedTuplestoreAccessor *accessor)
+{
+	char *name = "";
+	// TODO: need to move this from here and put it only in calls to this that require closing the file
 	if (accessor->outer_match_statuses != NULL)
 	{
+		//BufFile *parallel_outer_match_statuses = ((BufFile *)accessor->outer_match_statuses);
+		//name = BufFileGetName(parallel_outer_match_statuses);
 		BufFileClose(accessor->outer_match_statuses);
+		//elog(DEBUG1, "closing outer_match_statuses file for sts %s. participant %i. pid %i", accessor->sts->name, accessor->participant, MyProcPid);
 		accessor->outer_match_statuses = NULL;
 	}
+	return name;
 }
 
 /*
@@ -315,12 +326,18 @@ uint32 sts_gettuplenum(SharedTuplestoreAccessor *accessor)
 
 BufFile *sts_get_outerMatchStatuses(SharedTuplestoreAccessor *accessor)
 {
+	return accessor->outer_match_statuses;
+}
+BufFile *sts_make_outerMatchStatuses(SharedTuplestoreAccessor *accessor)
+{
+	// TODO: should probably only make this on demand
 	if (accessor->outer_match_statuses == NULL)
 	{
 		accessor->outer_match_statuses = BufFileCreateTemp(false);
 		uint32 tuplenum = sts_gettuplenum(accessor);
+		uint32 num_to_write = (tuplenum / 8) + 1;
 		unsigned char byteToWrite = 0;
-		BufFileWrite(accessor->outer_match_statuses, &byteToWrite, (tuplenum / 8));
+		BufFileWrite(accessor->outer_match_statuses, &byteToWrite, num_to_write);
 		if (BufFileSeek(accessor->outer_match_statuses, 0, 0L, SEEK_SET))
 			ereport(ERROR,
 					(errcode_for_file_access(),
@@ -354,11 +371,7 @@ sts_puttuple(SharedTuplestoreAccessor *accessor, void *meta_data, MinimalTuple t
 		if (count_tuples == true)
 		{
 			((tupleMetadata *) meta_data)->tuplenum = pg_atomic_fetch_add_u32(&accessor->sts->exact_tuplenum, 1);
-			elog(NOTICE, "%i.%i.%s.%i.",((tupleMetadata *) meta_data)->tuplenum, accessor->participant, accessor->sts->name, MyProcPid);
-			if (accessor->outer_match_statuses == NULL)
-			{
-				accessor->outer_match_statuses = BufFileCreateTemp(false);
-			}
+			elog(DEBUG1, "%i.%i.%s.%i.",((tupleMetadata *) meta_data)->tuplenum, accessor->participant, accessor->sts->name, MyProcPid);
 		}
 	}
 
@@ -402,7 +415,7 @@ sts_puttuple(SharedTuplestoreAccessor *accessor, void *meta_data, MinimalTuple t
 			if (count_tuples == true)
 			{
 				((tupleMetadata *) meta_data)->tuplenum = pg_atomic_fetch_add_u32(&accessor->sts->exact_tuplenum, 1);
-				elog(NOTICE, "%i.%i.%s.%i.",((tupleMetadata *) meta_data)->tuplenum, accessor->participant, accessor->sts->name, MyProcPid);
+				elog(DEBUG1, "%i.%i.%s.%i.",((tupleMetadata *) meta_data)->tuplenum, accessor->participant, accessor->sts->name, MyProcPid);
 			}
 
 
@@ -449,7 +462,7 @@ sts_puttuple(SharedTuplestoreAccessor *accessor, void *meta_data, MinimalTuple t
 	if (count_tuples == true)
 	{
 		((tupleMetadata *) meta_data)->tuplenum = pg_atomic_fetch_add_u32(&accessor->sts->exact_tuplenum, 1);
-		elog(NOTICE, "%i.%i.%s.%i.", ((tupleMetadata *) meta_data)->tuplenum, accessor->participant, accessor->sts->name,MyProcPid);
+		elog(DEBUG1, "%i.%i.%s.%i.", ((tupleMetadata *) meta_data)->tuplenum, accessor->participant, accessor->sts->name,MyProcPid);
 	}
 
 	/* Copy meta-data and tuple into buffer. */

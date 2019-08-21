@@ -122,6 +122,24 @@ makeBufFileCommon(int nfiles)
 	return file;
 }
 
+char *
+BufFileGetName(BufFile *file)
+{
+	if (file->name)
+		return file->name;
+	else
+	{
+		File curfile;
+		for (int i = 0; i < file->numFiles; i++)
+		{
+			curfile = file->files[i];
+			if (curfile)
+				elog(DEBUG1, "fileno %i number %i of %i.", curfile, i + 1, file->numFiles);
+		}
+		return "";
+	}
+}
+
 /*
  * Create a BufFile given the first underlying physical file.
  * NOTE: caller must set isInterXact if appropriate.
@@ -204,7 +222,7 @@ BufFileCreateTemp(bool interXact)
 	file->isInterXact = interXact;
 
 	if (file->files[0] == 0)
-		elog(NOTICE, "file is 0");
+		elog(DEBUG1, "file is 0");
 
 	return file;
 }
