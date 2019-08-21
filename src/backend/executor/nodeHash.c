@@ -295,7 +295,9 @@ MultiExecParallelHash(HashState *node)
 			 * others before anyone tries to load them.
 			 */
 			for (i = 0; i < hashtable->nbatch; ++i)
+			{
 				sts_end_write(hashtable->batches[i].inner_tuples);
+			}
 
 			/*
 			 * Update shared counters.  We need an accurate total tuple count
@@ -2988,11 +2990,14 @@ ExecParallelHashCloseBatchAccessors(HashJoinTable hashtable)
 
 	for (i = 0; i < hashtable->nbatch; ++i)
 	{
+		char *outer_match_status_filename = "";
 		/* Make sure no files are left open. */
 		sts_end_write(hashtable->batches[i].inner_tuples);
 		sts_end_write(hashtable->batches[i].outer_tuples);
+		outer_match_status_filename = sts_cleanup_outer_match_status_files(hashtable->batches[i].outer_tuples);
 		sts_end_parallel_scan(hashtable->batches[i].inner_tuples);
 		sts_end_parallel_scan(hashtable->batches[i].outer_tuples);
+		elog(DEBUG1, "in ExecParallelHashCloseBatchAccessors. batchno %i. filename %s. pid %i.", i, outer_match_status_filename, MyProcPid);
 	}
 	pfree(hashtable->batches);
 	hashtable->batches = NULL;
@@ -3097,6 +3102,7 @@ ExecHashTableDetachBatch(HashJoinTable hashtable)
 		/* Make sure any temporary files are closed. */
 		sts_end_parallel_scan(hashtable->batches[curbatch].inner_tuples);
 		sts_end_parallel_scan(hashtable->batches[curbatch].outer_tuples);
+		elog(DEBUG1, "in ExecHashTableDetachBatch. batchno %i. pid %i", curbatch, MyProcPid);
 
 		/* Detach from the batch we were last working on. */
 		if (BarrierArriveAndDetach(&batch->batch_barrier))
@@ -3155,10 +3161,13 @@ ExecHashTableDetach(HashJoinTable hashtable)
 		{
 			for (i = 0; i < hashtable->nbatch; ++i)
 			{
+				char *outer_match_status_filename = "";
 				sts_end_write(hashtable->batches[i].inner_tuples);
 				sts_end_write(hashtable->batches[i].outer_tuples);
+				outer_match_status_filename = sts_cleanup_outer_match_status_files(hashtable->batches[i].outer_tuples);
 				sts_end_parallel_scan(hashtable->batches[i].inner_tuples);
 				sts_end_parallel_scan(hashtable->batches[i].outer_tuples);
+				elog(DEBUG1, "in ExecHashTableDetach. batchno %i. filename %s. pid %i.", i, outer_match_status_filename, MyProcPid);
 			}
 		}
 
