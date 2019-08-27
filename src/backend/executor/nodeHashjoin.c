@@ -1221,11 +1221,11 @@ ExecParallelHashJoinOuterGetTuple(PlanState *outerNode,
 			if (parallel_outer_matchstatuses != NULL)
 			{
 				uint32 final_tuplenum = sts_gettuplenum(outer_acc);
-				elog(DEBUG1, "final tuplenum is %i for batchno %i. pid %i.", final_tuplenum, curbatch, MyProcPid);
+				elog(NOTICE, "in ExecParallelHashJoinOuterGetTuple. total tuplenum is %i for batchno %i. pid %i.", final_tuplenum, curbatch, MyProcPid);
 			}
 			else
 			{
-				elog(DEBUG1, "in ExecParallelHashJoinOuterGetTuple and outer_match_statuses file is NULL. pid %i.", MyProcPid);
+				elog(NOTICE, "in ExecParallelHashJoinOuterGetTuple and outer_match_statuses file is NULL. curbatch %i. pid %i.", curbatch, MyProcPid);
 			}
 
 			*hashvalue = metadata.hashvalue;
@@ -1236,7 +1236,7 @@ ExecParallelHashJoinOuterGetTuple(PlanState *outerNode,
 			hjstate->hj_OuterTupleSlot->tuplenum = tuplenum;
 			slot = hjstate->hj_OuterTupleSlot;
 			//volatile int mybp = 0; while (mybp == 0);
-			elog(DEBUG1, "in ExecParallelHashJoinOuterGetTuple. tuplenum %i. curbatch %i. tupleval %i. pid %i.", tuplenum, curbatch, DatumGetInt32(slot->tts_values[0]), MyProcPid);
+			elog(NOTICE, "in ExecParallelHashJoinOuterGetTuple. current tuplenum is %i. curbatch %i. current tupleval %i. pid %i.", tuplenum, curbatch, DatumGetInt32(slot->tts_values[0]), MyProcPid);
 			return slot;
 		}
 		else
@@ -1448,7 +1448,21 @@ ExecParallelHashJoinNewBatch(HashJoinState *hjstate)
 	 */
 	if (hashtable->curbatch >= 0)
 	{
-		hashtable->batches[hashtable->curbatch].done = true;
+		int curbatch = hashtable->curbatch;
+		hashtable->batches[curbatch].done = true;
+		// if we are the last worker, need to print all the tuple nums from the sts
+		ParallelHashJoinBatch *batch = hashtable->batches[curbatch].shared;
+		if (checkIfLast(&batch->batch_barrier) == true)
+		{
+			MinimalTuple tuple;
+			tupleMetadata metadata;
+			//TODO: how to rewind to the begininng of the tuplestore? is this even possible or does each worker have to
+			// rewind and read its own file?
+			tuple = sts_parallel_scan_next(hashtable->batches[curbatch].outer_tuples,
+										   &metadata);
+			SharedTuplestoreAccessor *outer_acc = hashtable->batches[hashtable->curbatch].outer_tuples;
+			print_tuplenums(outer_acc);
+		}
 		ExecHashTableDetachBatch(hashtable);
 	}
 

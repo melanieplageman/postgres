@@ -584,6 +584,70 @@ sts_read_tuple(SharedTuplestoreAccessor *accessor, void *meta_data)
 	return tuple;
 }
 
+static MinimalTuple get_next_mintup(BufFile *file, void *meta_data, size_t meta_data_size)
+{
+	uint32 size;
+	MinimalTuple tuple;
+	size_t nread;
+	if (meta_data_size > 0)
+	{
+		if (BufFileRead(file,
+						meta_data,
+						meta_data_size) !=
+			meta_data_size)
+			ereport(ERROR,
+					(errcode_for_file_access(),
+							errmsg("could not read from shared tuplestore temporary file"),
+							errdetail_internal("Short read while reading meta-data.")));
+	}
+	if (BufFileRead(file,
+					&size,
+					sizeof(size)) != sizeof(size))
+		ereport(ERROR,
+				(errcode_for_file_access(),
+						errmsg("could not read from shared tuplestore temporary file"),
+						errdetail_internal("Short read while reading size.")));
+	tuple = (MinimalTuple) palloc(size);
+	tuple->t_len = size;
+	nread = BufFileRead(file,
+						(void *) ((char *) tuple + sizeof(uint32)),
+						size - sizeof(uint32));
+	if (nread != size - sizeof(uint32))
+		ereport(ERROR,
+				(errcode_for_file_access(),
+						errmsg("could not read from hash-join temporary file: %m")));
+	return tuple;
+}
+
+void
+print_tuplenums(SharedTuplestoreAccessor *accessor)
+{
+	MinimalTuple tuple;
+	for (size_t i = 0; i < accessor->sts->nparticipants; i++)
+	{
+		BufFile *read_file;
+		tupleMetadata *metadata;
+		void *meta_data = NULL;
+
+		char		name[MAXPGPATH];
+		sts_filename(name, accessor, i);
+
+		read_file = BufFileOpenShared(accessor->fileset, name);
+		if (read_file != NULL)
+		{
+			if (BufFileSeek(read_file, 0, 0L, SEEK_SET))
+				ereport(ERROR,
+						(errcode_for_file_access(),
+								errmsg("could not rewind shared outer temporary file: %m")));
+		}
+		while((tuple = get_next_mintup(read_file, meta_data, accessor->sts->meta_data_size)) != NULL)
+		{
+			metadata = (tupleMetadata *) meta_data;
+			elog(NOTICE, "%i", metadata->tuplenum);
+		}
+	}
+}
+
 /*
  * Get the next tuple in the current parallel scan.
  */
@@ -630,6 +694,7 @@ sts_parallel_scan_next(SharedTuplestoreAccessor *accessor, void *meta_data)
 				sts_filename(name, accessor, accessor->read_participant);
 				accessor->read_file =
 					BufFileOpenShared(accessor->fileset, name);
+				elog(NOTICE, "in sts_parallel_scan_next. participant %i. opening read file %s. pid %i", accessor->participant, name, MyProcPid);
 			}
 
 			/* Seek and load the chunk header. */
