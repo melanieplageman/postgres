@@ -267,6 +267,21 @@ BarrierParticipants(Barrier *barrier)
 	return participants;
 }
 
+bool checkIfLast(Barrier *barrier)
+{
+	int participants;
+	bool last;
+	SpinLockAcquire(&barrier->mutex);
+	Assert(barrier->participants > 0);
+	participants = barrier->participants;
+	participants--;
+	last = participants == 0;
+	SpinLockRelease(&barrier->mutex);
+	return last;
+}
+
+
+
 /*
  * Detach from a barrier.  If 'arrive' is true then also increment the phase
  * if there are no other participants.  If there are other participants

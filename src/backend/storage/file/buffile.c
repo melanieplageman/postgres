@@ -322,6 +322,7 @@ BufFileOpenShared(SharedFileSet *fileset, const char *name)
 		}
 		/* Try to load a segment. */
 		SharedSegmentName(segment_name, name, nfiles);
+		elog(NOTICE, "in BufFileOpenShared. sharedsegment name %s. pid %i.", segment_name, MyProcPid);
 		files[nfiles] = SharedFileSetOpen(fileset, segment_name);
 		if (files[nfiles] <= 0)
 			break;

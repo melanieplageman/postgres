@@ -70,4 +70,6 @@ extern MinimalTuple sts_parallel_scan_next(SharedTuplestoreAccessor *accessor, v
 
 extern char *sts_cleanup_outer_match_status_files(SharedTuplestoreAccessor *accessor);
 
+extern void print_tuplenums(SharedTuplestoreAccessor *accessor);
+
 #endif							/* SHAREDTUPLESTORE_H */
