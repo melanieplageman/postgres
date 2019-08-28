@@ -376,6 +376,8 @@ sts_puttuple(SharedTuplestoreAccessor *accessor, void *meta_data, MinimalTuple t
 	}
 
 	/* Do we have space? */
+	// TODO: correctly handle increasing tuplenum and writing tuple metadata in case of this if statement -- oversize tuples
+	// I missed some cases
 	size = accessor->sts->meta_data_size + tuple->t_len;
 	if (accessor->write_pointer + size >= accessor->write_end)
 	{
@@ -386,6 +388,8 @@ sts_puttuple(SharedTuplestoreAccessor *accessor, void *meta_data, MinimalTuple t
 				MemoryContextAllocZero(accessor->context,
 									   STS_CHUNK_PAGES * BLCKSZ);
 			accessor->write_chunk->ntuples = 0;
+			// TODO: count tuples that are written to our little buffer
+			// do they only get flushed with sts_flush_chunk?
 			accessor->write_pointer = &accessor->write_chunk->data[0];
 			accessor->write_end = (char *)
 				accessor->write_chunk + STS_CHUNK_PAGES * BLCKSZ;
@@ -393,6 +397,7 @@ sts_puttuple(SharedTuplestoreAccessor *accessor, void *meta_data, MinimalTuple t
 		else
 		{
 			/* See if flushing helps. */
+			//TODO: this is writing to the file, need to make sure these tuples are counted
 			sts_flush_chunk(accessor);
 		}
 
@@ -591,18 +596,13 @@ static MinimalTuple get_next_mintup(BufFile *file, void *meta_data, size_t meta_
 	size_t nread;
 	if (meta_data_size > 0)
 	{
-		if (BufFileRead(file,
-						meta_data,
-						meta_data_size) !=
-			meta_data_size)
+		if ((BufFileRead(file, meta_data, meta_data_size)) != meta_data_size)
 			ereport(ERROR,
 					(errcode_for_file_access(),
 							errmsg("could not read from shared tuplestore temporary file"),
 							errdetail_internal("Short read while reading meta-data.")));
 	}
-	if (BufFileRead(file,
-					&size,
-					sizeof(size)) != sizeof(size))
+	if ((BufFileRead(file, &size, sizeof(size))) != sizeof(size))
 		ereport(ERROR,
 				(errcode_for_file_access(),
 						errmsg("could not read from shared tuplestore temporary file"),
@@ -626,8 +626,7 @@ print_tuplenums(SharedTuplestoreAccessor *accessor)
 	for (size_t i = 0; i < accessor->sts->nparticipants; i++)
 	{
 		BufFile *read_file;
-		tupleMetadata *metadata;
-		void *meta_data = NULL;
+		tupleMetadata metadata;
 
 		char		name[MAXPGPATH];
 		sts_filename(name, accessor, i);
@@ -640,10 +639,9 @@ print_tuplenums(SharedTuplestoreAccessor *accessor)
 						(errcode_for_file_access(),
 								errmsg("could not rewind shared outer temporary file: %m")));
 		}
-		while((tuple = get_next_mintup(read_file, meta_data, accessor->sts->meta_data_size)) != NULL)
+		while((tuple = get_next_mintup(read_file, &metadata, accessor->sts->meta_data_size)) != NULL)
 		{
-			metadata = (tupleMetadata *) meta_data;
-			elog(NOTICE, "%i", metadata->tuplenum);
+			elog(NOTICE, "%i", metadata.tuplenum);
 		}
 	}
 }
