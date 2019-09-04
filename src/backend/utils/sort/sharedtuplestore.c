@@ -371,6 +371,7 @@ sts_puttuple(SharedTuplestoreAccessor *accessor, void *meta_data, MinimalTuple t
 		if (count_tuples == true)
 		{
 			((tupleMetadata *) meta_data)->tuplenum = pg_atomic_fetch_add_u32(&accessor->sts->exact_tuplenum, 1);
+			//((tupleMetadata *) meta_data)->tuplenum = 0x00ADBEEF;
 			elog(DEBUG1, "%i.%i.%s.%i.",((tupleMetadata *) meta_data)->tuplenum, accessor->participant, accessor->sts->name, MyProcPid);
 		}
 	}
@@ -420,6 +421,7 @@ sts_puttuple(SharedTuplestoreAccessor *accessor, void *meta_data, MinimalTuple t
 			if (count_tuples == true)
 			{
 				((tupleMetadata *) meta_data)->tuplenum = pg_atomic_fetch_add_u32(&accessor->sts->exact_tuplenum, 1);
+				//((tupleMetadata *) meta_data)->tuplenum = 0x00ADBEEF;
 				elog(DEBUG1, "%i.%i.%s.%i.",((tupleMetadata *) meta_data)->tuplenum, accessor->participant, accessor->sts->name, MyProcPid);
 			}
 
@@ -467,6 +469,7 @@ sts_puttuple(SharedTuplestoreAccessor *accessor, void *meta_data, MinimalTuple t
 	if (count_tuples == true)
 	{
 		((tupleMetadata *) meta_data)->tuplenum = pg_atomic_fetch_add_u32(&accessor->sts->exact_tuplenum, 1);
+		//((tupleMetadata *) meta_data)->tuplenum = 0x00ADBEEF;
 		elog(DEBUG1, "%i.%i.%s.%i.", ((tupleMetadata *) meta_data)->tuplenum, accessor->participant, accessor->sts->name,MyProcPid);
 	}
 
@@ -594,14 +597,11 @@ static MinimalTuple get_next_mintup(BufFile *file, void *meta_data, size_t meta_
 	uint32 size;
 	MinimalTuple tuple;
 	size_t nread;
-	if (meta_data_size > 0)
-	{
-		if ((BufFileRead(file, meta_data, meta_data_size)) != meta_data_size)
-			ereport(ERROR,
-					(errcode_for_file_access(),
-							errmsg("could not read from shared tuplestore temporary file"),
-							errdetail_internal("Short read while reading meta-data.")));
-	}
+	if ((BufFileRead(file, meta_data, meta_data_size)) != meta_data_size)
+		ereport(ERROR,
+				(errcode_for_file_access(),
+						errmsg("could not read from shared tuplestore temporary file"),
+						errdetail_internal("Short read while reading meta-data.")));
 	if ((BufFileRead(file, &size, sizeof(size))) != sizeof(size))
 		ereport(ERROR,
 				(errcode_for_file_access(),
@@ -627,22 +627,28 @@ print_tuplenums(SharedTuplestoreAccessor *accessor)
 	{
 		BufFile *read_file;
 		tupleMetadata metadata;
-
 		char		name[MAXPGPATH];
 		sts_filename(name, accessor, i);
 
-		read_file = BufFileOpenShared(accessor->fileset, name);
-		if (read_file != NULL)
+		read_file = BufFileOpenSharedIfExists(accessor->fileset, name);
+		if (read_file == NULL)
+			continue;
+		SharedTuplestoreChunk chunkheader;
+		if (BufFileSeek(read_file, 0, 0L, SEEK_SET))
+			ereport(ERROR,
+					(errcode_for_file_access(),
+							errmsg("could not rewind shared outer temporary file: %m")));
+
+		if (BufFileRead(read_file, &chunkheader, sizeof(SharedTuplestoreChunk)) != sizeof(SharedTuplestoreChunk))
+			ereport(ERROR,
+					(errcode_for_file_access(),
+							errmsg("could not read shared tuplestore chunk header: %m")));
+		for(int i = 0; i < chunkheader.ntuples; i++)
 		{
-			if (BufFileSeek(read_file, 0, 0L, SEEK_SET))
-				ereport(ERROR,
-						(errcode_for_file_access(),
-								errmsg("could not rewind shared outer temporary file: %m")));
+			tuple = get_next_mintup(read_file, &metadata, accessor->sts->meta_data_size);
+			elog(NOTICE, "tuplenum: %i. sts filename %s. pid %i.", metadata.tuplenum, name, MyProcPid);
 		}
-		while((tuple = get_next_mintup(read_file, &metadata, accessor->sts->meta_data_size)) != NULL)
-		{
-			elog(NOTICE, "%i", metadata.tuplenum);
-		}
+		BufFileClose(read_file);
 	}
 }
 
