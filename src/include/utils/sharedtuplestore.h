@@ -28,7 +28,7 @@ struct tupleMetadata
 {
 	uint32 hashvalue;
 	int tuplenum;
-};
+} __attribute__((packed));
 
 /*
  * A flag indicating that the tuplestore will only be scanned once, so backing

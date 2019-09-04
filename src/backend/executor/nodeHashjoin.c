@@ -251,7 +251,7 @@ ExecHashJoinImpl(PlanState *pstate, bool parallel)
 				 * from the outer plan node.  If we succeed, we have to stash
 				 * it away for later consumption by ExecHashJoinOuterGetTuple.
 				 */
-				volatile int mybp = 0; while (mybp == 0);
+				//volatile int mybp = 0; while (mybp == 0);
 				if (HJ_FILL_INNER(node))
 				{
 					/* no chance to not build the hash table */
@@ -1218,14 +1218,20 @@ ExecParallelHashJoinOuterGetTuple(PlanState *outerNode,
 			SharedTuplestoreAccessor *outer_acc = hashtable->batches[curbatch].outer_tuples;
 			// TODO: when do I need to make the file now?
 			BufFile *parallel_outer_matchstatuses = sts_get_outerMatchStatuses(outer_acc);
-			if (parallel_outer_matchstatuses != NULL)
+			uint32 final_tuplenum = sts_gettuplenum(outer_acc);
+			// final_tuplenum will be zero if we are not dealing with batch files
+			if (final_tuplenum != 0)
 			{
-				uint32 final_tuplenum = sts_gettuplenum(outer_acc);
-				elog(NOTICE, "in ExecParallelHashJoinOuterGetTuple. total tuplenum is %i for batchno %i. pid %i.", final_tuplenum, curbatch, MyProcPid);
-			}
-			else
-			{
-				elog(NOTICE, "in ExecParallelHashJoinOuterGetTuple and outer_match_statuses file is NULL. curbatch %i. pid %i.", curbatch, MyProcPid);
+				// this backend may not have had a chance to make its own outermatchstatus file yet because the other worker did all the work
+				if (parallel_outer_matchstatuses == NULL)
+				{
+					parallel_outer_matchstatuses = sts_make_outerMatchStatuses(outer_acc);
+					elog(NOTICE, "in ExecParallelHashJoinOuterGetTuple and outer_match_statuses file is NULL. curbatch %i. pid %i.", curbatch, MyProcPid);
+				}
+				else
+				{
+					elog(NOTICE, "in ExecParallelHashJoinOuterGetTuple. total tuplenum is %i for batchno %i. pid %i.", final_tuplenum, curbatch, MyProcPid);
+				}
 			}
 
 			*hashvalue = metadata.hashvalue;
@@ -1454,12 +1460,6 @@ ExecParallelHashJoinNewBatch(HashJoinState *hjstate)
 		ParallelHashJoinBatch *batch = hashtable->batches[curbatch].shared;
 		if (checkIfLast(&batch->batch_barrier) == true)
 		{
-			MinimalTuple tuple;
-			tupleMetadata metadata;
-			//TODO: how to rewind to the begininng of the tuplestore? is this even possible or does each worker have to
-			// rewind and read its own file?
-			tuple = sts_parallel_scan_next(hashtable->batches[curbatch].outer_tuples,
-										   &metadata);
 			SharedTuplestoreAccessor *outer_acc = hashtable->batches[hashtable->curbatch].outer_tuples;
 			print_tuplenums(outer_acc);
 		}
@@ -1787,8 +1787,7 @@ ExecParallelHashJoinPartitionOuter(HashJoinState *hjstate)
 	{
 		sts_end_write(hashtable->batches[i].outer_tuples);
 		BufFile *parallel_outer_match_statuses = sts_make_outerMatchStatuses(hashtable->batches[i].outer_tuples); //TODO: don't make for batch 0
-		if (i == 7)
-			elog(DEBUG1, "in ExecParallelHashJoinPartitionOuter. parallel outer_match_statuses file %s exists for batchno %i. pid %i.", BufFileGetName(parallel_outer_match_statuses), i, MyProcPid);
+		elog(NOTICE, "in ExecParallelHashJoinPartitionOuter. parallel outer_match_statuses file %s exists for batchno %i. pid %i.", BufFileGetName(parallel_outer_match_statuses), i, MyProcPid);
 	}
 }
 

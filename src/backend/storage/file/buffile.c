@@ -126,7 +126,7 @@ char *
 BufFileGetName(BufFile *file)
 {
 	if (file->name)
-		return file->name;
+		return (char *)file->name;
 	else
 	{
 		File curfile;
@@ -286,6 +286,64 @@ BufFileCreateShared(SharedFileSet *fileset, const char *name)
 	file->files = (File *) palloc(sizeof(File));
 	file->files[0] = MakeNewSharedSegment(file, 0);
 	file->readOnly = false;
+
+	return file;
+}
+
+/*
+ * Open a shared file created by any backend if it exists, otherwise return NULL
+ */
+BufFile *
+BufFileOpenSharedIfExists(SharedFileSet *fileset, const char *name)
+{
+	BufFile    *file;
+	char		segment_name[MAXPGPATH];
+	Size		capacity = 16;
+	File	   *files;
+	int			nfiles = 0;
+
+	files = palloc(sizeof(File) * capacity);
+
+	/*
+	 * We don't know how many segments there are, so we'll probe the
+	 * filesystem to find out.
+	 */
+	for (;;)
+	{
+		/* See if we need to expand our file segment array. */
+		if (nfiles + 1 > capacity)
+		{
+			capacity *= 2;
+			files = repalloc(files, sizeof(File) * capacity);
+		}
+		/* Try to load a segment. */
+		SharedSegmentName(segment_name, name, nfiles);
+		files[nfiles] = SharedFileSetOpen(fileset, segment_name);
+		if (files[nfiles] <= 0)
+			break;
+		++nfiles;
+
+		CHECK_FOR_INTERRUPTS();
+	}
+
+	/*
+	 * If we didn't find any files at all, then no BufFile exists with this
+	 * name.
+	 */
+	if (nfiles == 0)
+	{
+		elog(NOTICE, "in BufFileOpenSharedIfExists. sharedsegment name %s does not exist. pid %i.", segment_name, MyProcPid);
+		return NULL;
+	}
+	else
+	{
+		elog(NOTICE, "in BufFileOpenSharedIfExists. sharedsegment name %s exists. filename %s. pid %i.", segment_name, name, MyProcPid);
+	}
+	file = makeBufFileCommon(nfiles);
+	file->files = files;
+	file->readOnly = true;		/* Can't write to files opened this way */
+	file->fileset = fileset;
+	file->name = pstrdup(name);
 
 	return file;
 }
