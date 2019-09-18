@@ -225,7 +225,7 @@ typedef struct ExprContext
 #define FIELDNO_EXPRCONTEXT_INNERTUPLE 2
 	TupleTableSlot *ecxt_innertuple;
 #define FIELDNO_EXPRCONTEXT_OUTERTUPLE 3
-	TupleTableSlot *ecxt_outertuple;
+	TupleTableSlot *ecxt_outertuple; // TODO: is keeping tuplenum in here parallel-safe?
 
 	/* Memory contexts for expression evaluation --- see notes above */
 	MemoryContext ecxt_per_query_memory;
@@ -1936,7 +1936,7 @@ typedef struct HashJoinState
 	int			hj_CurBucketNo;
 	int			hj_CurSkewBucketNo;
 	HashJoinTuple hj_CurTuple;
-	TupleTableSlot *hj_OuterTupleSlot;
+	TupleTableSlot *hj_OuterTupleSlot; // TODO: is keeping tuplenum in here parallel-safe?
 	TupleTableSlot *hj_HashTupleSlot;
 	TupleTableSlot *hj_NullOuterTupleSlot;
 	TupleTableSlot *hj_NullInnerTupleSlot;

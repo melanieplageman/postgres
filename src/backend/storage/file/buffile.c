@@ -96,6 +96,7 @@ struct BufFile
 
 static BufFile *makeBufFileCommon(int nfiles);
 static BufFile *makeBufFile(File firstfile);
+static BufFile *makeNamedBufFile(File firstfile, char *name);
 static void extendBufFile(BufFile *file);
 static void BufFileLoadBuffer(BufFile *file);
 static void BufFileDumpBuffer(BufFile *file);
@@ -154,6 +155,20 @@ makeBufFile(File firstfile)
 	file->readOnly = false;
 	file->fileset = NULL;
 	file->name = NULL;
+
+	return file;
+}
+
+static BufFile *
+makeNamedBufFile(File firstfile, char *name)
+{
+	BufFile    *file = makeBufFileCommon(1);
+
+	file->files = (File *) palloc(sizeof(File));
+	file->files[0] = firstfile;
+	file->readOnly = false;
+	file->fileset = NULL;
+	file->name = name;
 
 	return file;
 }
@@ -219,6 +234,26 @@ BufFileCreateTemp(bool interXact)
 	Assert(pfile >= 0);
 
 	file = makeBufFile(pfile);
+	file->isInterXact = interXact;
+
+	if (file->files[0] == 0)
+		elog(DEBUG1, "file is 0");
+
+	return file;
+}
+
+BufFile *
+BufFileCreateNamedTemp(bool interXact, char *name)
+{
+	BufFile    *file;
+	File		pfile;
+
+	PrepareTempTablespaces();
+
+	pfile = OpenTemporaryFile(interXact);
+	Assert(pfile >= 0);
+
+	file = makeNamedBufFile(pfile, name);
 	file->isInterXact = interXact;
 
 	if (file->files[0] == 0)
@@ -332,12 +367,12 @@ BufFileOpenSharedIfExists(SharedFileSet *fileset, const char *name)
 	 */
 	if (nfiles == 0)
 	{
-		elog(NOTICE, "in BufFileOpenSharedIfExists. sharedsegment name %s does not exist. pid %i.", segment_name, MyProcPid);
+		elog(DEBUG1, "in BufFileOpenSharedIfExists. sharedsegment name %s does not exist. pid %i.", segment_name, MyProcPid);
 		return NULL;
 	}
 	else
 	{
-		elog(NOTICE, "in BufFileOpenSharedIfExists. sharedsegment name %s exists. filename %s. pid %i.", segment_name, name, MyProcPid);
+		elog(DEBUG1, "in BufFileOpenSharedIfExists. sharedsegment name %s exists. filename %s. pid %i.", segment_name, name, MyProcPid);
 	}
 	file = makeBufFileCommon(nfiles);
 	file->files = files;
@@ -380,7 +415,7 @@ BufFileOpenShared(SharedFileSet *fileset, const char *name)
 		}
 		/* Try to load a segment. */
 		SharedSegmentName(segment_name, name, nfiles);
-		elog(NOTICE, "in BufFileOpenShared. sharedsegment name %s. pid %i.", segment_name, MyProcPid);
+		elog(DEBUG1, "in BufFileOpenShared. sharedsegment name %s. pid %i.", segment_name, MyProcPid);
 		files[nfiles] = SharedFileSetOpen(fileset, segment_name);
 		if (files[nfiles] <= 0)
 			break;
