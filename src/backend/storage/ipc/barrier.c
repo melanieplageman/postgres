@@ -135,6 +135,15 @@ BarrierArriveAndWait(Barrier *barrier, uint32 wait_event_info)
 	++barrier->arrived;
 	if (barrier->arrived == barrier->participants)
 	{
+//		if (wait_event_info == WAIT_EVENT_HASH_BUILD_CREATE_OUTER_MATCH_STATUS_BITMAP_FILES)
+//		{
+//			/* Make sure all outer partitions are readable by any backend. */
+//			for (i = 0; i < hashtable->nbatch; ++i)
+//			{
+//				BufFile *parallel_outer_match_statuses = sts_make_outerMatchStatuses(hashtable->batches[i].outer_tuples, i); //TODO: don't make for batch 0
+//				elog(NOTICE, "Waiting on making build_outer_match_status_bitmap_files. file name %s batchno %i. pid %i.", BufFileGetName(parallel_outer_match_statuses), i, MyProcPid);
+//			}
+//		}
 		release = true;
 		barrier->arrived = 0;
 		barrier->phase = next_phase;

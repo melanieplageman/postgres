@@ -815,6 +815,7 @@ typedef enum
  * it is waiting for a notification from another process.
  * ----------
  */
+// TODO: add WAIT_EVENT_HASH_BUILD_CREATE_OUTER_MATCH_STATUS_BITMAP_FILES?
 typedef enum
 {
 	WAIT_EVENT_BGWORKER_SHUTDOWN = PG_WAIT_IPC,

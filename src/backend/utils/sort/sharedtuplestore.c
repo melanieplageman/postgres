@@ -23,6 +23,7 @@
 
 #include "access/htup.h"
 #include "access/htup_details.h"
+#include "executor/tuptable.h"
 #include "miscadmin.h"
 #include "storage/buffile.h"
 #include "storage/lwlock.h"
@@ -328,20 +329,26 @@ BufFile *sts_get_outerMatchStatuses(SharedTuplestoreAccessor *accessor)
 {
 	return accessor->outer_match_statuses;
 }
-BufFile *sts_make_outerMatchStatuses(SharedTuplestoreAccessor *accessor)
+BufFile *sts_make_outerMatchStatuses(SharedTuplestoreAccessor *accessor, int batchno)
 {
 	// TODO: should probably only make this on demand
 	if (accessor->outer_match_statuses == NULL)
 	{
-		accessor->outer_match_statuses = BufFileCreateTemp(false);
+		char name[MAXPGPATH];
+		snprintf(name, MAXPGPATH, "batchno %i. pid %i.", batchno, MyProcPid);
+		// TODO: make sure this logic is right
+		accessor->outer_match_statuses = BufFileCreateNamedTemp(false, name);
+
 		uint32 tuplenum = sts_gettuplenum(accessor);
-		uint32 num_to_write = (tuplenum / 8) + 1;
+		uint32 num_to_write = tuplenum / 8 + 1;
+
 		unsigned char byteToWrite = 0;
 		BufFileWrite(accessor->outer_match_statuses, &byteToWrite, num_to_write);
 		if (BufFileSeek(accessor->outer_match_statuses, 0, 0L, SEEK_SET))
 			ereport(ERROR,
 					(errcode_for_file_access(),
 							errmsg("could not rewind hash-join temporary file: %m")));
+		elog(LOG, "sts_make_outerMatchStatuses. batchno %i. final_tuplenum %i. pid %i.", batchno, tuplenum, MyProcPid);
 	}
 	return accessor->outer_match_statuses;
 }
@@ -623,16 +630,21 @@ void
 print_tuplenums(SharedTuplestoreAccessor *accessor)
 {
 	MinimalTuple tuple;
-	for (size_t i = 0; i < accessor->sts->nparticipants; i++)
+	for (int i = 0; i < accessor->sts->nparticipants; i++)
 	{
+		bool file_present = false;
+		BufFile *parallel_outer_matchstatuses = sts_get_outerMatchStatuses(accessor);
+		uint32 final_tuplenum = sts_gettuplenum(accessor);
 		BufFile *read_file;
 		tupleMetadata metadata;
 		char		name[MAXPGPATH];
 		sts_filename(name, accessor, i);
 
 		read_file = BufFileOpenSharedIfExists(accessor->fileset, name);
-		if (read_file == NULL)
+		if (read_file == NULL) {
+			elog(LOG, "pid %i. batchno %s. participant %i file missing.", MyProcPid, name, i);
 			continue;
+		}
 		SharedTuplestoreChunk chunkheader;
 		if (BufFileSeek(read_file, 0, 0L, SEEK_SET))
 			ereport(ERROR,
@@ -643,12 +655,61 @@ print_tuplenums(SharedTuplestoreAccessor *accessor)
 			ereport(ERROR,
 					(errcode_for_file_access(),
 							errmsg("could not read shared tuplestore chunk header: %m")));
-		for(int i = 0; i < chunkheader.ntuples; i++)
+		for(int j = 0; j < chunkheader.ntuples; j++)
 		{
 			tuple = get_next_mintup(read_file, &metadata, accessor->sts->meta_data_size);
-			elog(NOTICE, "tuplenum: %i. sts filename %s. pid %i.", metadata.tuplenum, name, MyProcPid);
+			// TODO: find a way to get the tuple's value
+
+			if (parallel_outer_matchstatuses != NULL)
+			{
+				file_present = true;
+				int bytenum = (metadata.tuplenum) / 8;
+				unsigned char bit = (metadata.tuplenum) % 8;
+				unsigned char byte_to_check = 0;
+
+				elog(DEBUG1, "bytenum is %i.", bytenum);
+				// seek to byte to check
+				if (BufFileSeek(parallel_outer_matchstatuses, 0, bytenum, SEEK_SET))
+					ereport(ERROR,
+							(errcode_for_file_access(),
+									errmsg("could not rewind shared outer temporary file: %m")));
+				// read byte containing ntuple bit
+				if (BufFileRead(parallel_outer_matchstatuses, &byte_to_check, 1) == 0)
+					ereport(ERROR,
+							(errcode_for_file_access(),
+									errmsg("could not read byte in outer match status bitmap: %m")));
+				// if bit is set
+				bool match = false;
+				if (((byte_to_check) >> bit) & 1)
+				{
+					elog(DEBUG1, "bit is set");
+					match = true;
+				}
+
+				elog(LOG, "ExecParallelHashJoinNewBatch. tupleid: %i. match_status %i. read_byteval %hhu. bytenum %i. bitnum %hhu. sts_filename %s. pid %i.",
+					 metadata.tuplenum, match, byte_to_check, bytenum, bit, name, MyProcPid);
+				elog(LOG,
+					 "ProbeEnd. batchno %s. final_tuplenum %i. tupleid %i. tupleval ?. match_status %i. bytenum %i. read_byteval %hhu. bitnum %i. pid %i.",
+					 name,
+					 final_tuplenum,
+					 metadata.tuplenum,
+					 match,
+					 bytenum,
+					 byte_to_check,
+					 bit,
+					 MyProcPid);
+
+			}
+			else
+			{
+				elog(LOG, "ExecParallelHashJoinNewBatch. tupleid: %i. outermatchstatus file is NULL. sts_filename %s. pid %i.",
+					 metadata.tuplenum, name, MyProcPid);
+			}
+			elog(LOG, "ExecParallelHashJoinNewBatch. tupleid: %i. sts_filename %s. pid %i.",
+				 metadata.tuplenum, name, MyProcPid);
 		}
 		BufFileClose(read_file);
+		elog(LOG, "pid %i. batchno %s. outermatchstatus for participant %i is %i.", MyProcPid, name, i, file_present);
 	}
 }
 
@@ -698,7 +759,7 @@ sts_parallel_scan_next(SharedTuplestoreAccessor *accessor, void *meta_data)
 				sts_filename(name, accessor, accessor->read_participant);
 				accessor->read_file =
 					BufFileOpenShared(accessor->fileset, name);
-				elog(NOTICE, "in sts_parallel_scan_next. participant %i. opening read file %s. pid %i", accessor->participant, name, MyProcPid);
+				elog(DEBUG1, "in sts_parallel_scan_next. participant %i. opening read file %s. pid %i", accessor->participant, name, MyProcPid);
 			}
 
 			/* Seek and load the chunk header. */

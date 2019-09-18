@@ -37,6 +37,7 @@ typedef struct BufFile BufFile;
  */
 
 extern BufFile *BufFileCreateTemp(bool interXact);
+extern BufFile *BufFileCreateNamedTemp(bool interXact, char *name);
 extern void BufFileClose(BufFile *file);
 extern size_t BufFileRead(BufFile *file, void *ptr, size_t size);
 extern size_t BufFileWrite(BufFile *file, void *ptr, size_t size);
