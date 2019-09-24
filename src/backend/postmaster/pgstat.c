@@ -3767,6 +3767,9 @@ pgstat_get_wait_ipc(WaitEventIPC w)
 		case WAIT_EVENT_HASH_BATCH_LOADING:
 			event_name = "Hash/Batch/Loading";
 			break;
+		case WAIT_EVENT_HASH_BATCH_PROBING:
+			event_name = "Hash/Batch/Probing";
+			break;
 		case WAIT_EVENT_HASH_BUILD_ALLOCATING:
 			event_name = "Hash/Build/Allocating";
 			break;
@@ -3778,6 +3781,9 @@ pgstat_get_wait_ipc(WaitEventIPC w)
 			break;
 		case WAIT_EVENT_HASH_BUILD_HASHING_OUTER:
 			event_name = "Hash/Build/HashingOuter";
+			break;
+		case WAIT_EVENT_HASH_BUILD_CREATE_OUTER_MATCH_STATUS_BITMAP_FILES:
+			event_name = "Hash/Build/CreateOuterMatchStatusBitmapFiles";
 			break;
 		case WAIT_EVENT_HASH_GROW_BATCHES_ALLOCATING:
 			event_name = "Hash/GrowBatches/Allocating";

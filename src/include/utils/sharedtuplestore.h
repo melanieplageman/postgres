@@ -64,12 +64,16 @@ extern uint32 sts_gettuplenum(SharedTuplestoreAccessor *accessor);
 
 extern BufFile *sts_get_outerMatchStatuses(SharedTuplestoreAccessor *accessor);
 extern BufFile *sts_make_outerMatchStatuses(SharedTuplestoreAccessor *accessor, int batchno);
+extern BufFile *sts_get_STP_outerMatchStatuses(SharedTuplestoreAccessor *accessor, int participant_num);
+extern BufFile *sts_make_STP_outerMatchStatuses(SharedTuplestoreAccessor *accessor, int batchno);
+extern int sts_get_my_participant_number(SharedTuplestoreAccessor *accessor);
 
 
 extern MinimalTuple sts_parallel_scan_next(SharedTuplestoreAccessor *accessor, void *meta_data);
 
-extern char *sts_cleanup_outer_match_status_files(SharedTuplestoreAccessor *accessor);
+extern char *sts_cleanup_STP_outer_match_status_files(SharedTuplestoreAccessor *accessor);
 
-extern void print_tuplenums(SharedTuplestoreAccessor *accessor);
+extern void print_tuplenums(SharedTuplestoreAccessor *accessor, int batchno);
+extern void combine_outer_match_statuses(SharedTuplestoreAccessor *accessor, int batchno);
 
 #endif							/* SHAREDTUPLESTORE_H */
