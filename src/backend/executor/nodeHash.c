@@ -1093,6 +1093,7 @@ ExecParallelHashIncreaseNumBatches(HashJoinTable hashtable)
 				pstate->batches = InvalidDsaPointer;
 
 				/* Free this backend's old accessors. */
+				elog(LOG, "ExecParallelHashIncreaseNumBatches 1. pid %i.", MyProcPid);
 				ExecParallelHashCloseBatchAccessors(hashtable);
 
 				/* Figure out how many batches to use. */
@@ -1182,6 +1183,7 @@ ExecParallelHashIncreaseNumBatches(HashJoinTable hashtable)
 			else
 			{
 				/* All other participants just flush their tuples to disk. */
+				elog(LOG, "ExecParallelHashIncreaseNumBatches 2. pid %i.", MyProcPid);
 				ExecParallelHashCloseBatchAccessors(hashtable);
 			}
 			/* Fall through. */
@@ -2989,7 +2991,10 @@ ExecParallelHashCloseBatchAccessors(HashJoinTable hashtable)
 		/* Make sure no files are left open. */
 		sts_end_write(hashtable->batches[i].inner_tuples);
 		sts_end_write(hashtable->batches[i].outer_tuples);
-		outer_match_status_filename = sts_cleanup_outer_match_status_files(hashtable->batches[i].outer_tuples);
+		elog(LOG, "in ExecParallelHashCloseBatchAccessors. about to close batch %i for participant %i.",
+				i,
+				sts_get_my_participant_number(hashtable->batches[i].outer_tuples));
+		//outer_match_status_filename = sts_cleanup_STP_outer_match_status_files(hashtable->batches[i].outer_tuples);
 		sts_end_parallel_scan(hashtable->batches[i].inner_tuples);
 		sts_end_parallel_scan(hashtable->batches[i].outer_tuples);
 		elog(DEBUG1, "in ExecParallelHashCloseBatchAccessors. batchno %i. filename %s. pid %i.", i, outer_match_status_filename, MyProcPid);
@@ -3014,6 +3019,7 @@ ExecParallelHashEnsureBatchAccessors(HashJoinTable hashtable)
 	{
 		if (hashtable->nbatch == pstate->nbatch)
 			return;
+		elog(LOG, "ExecParallelHashEnsureBatchAccessors");
 		ExecParallelHashCloseBatchAccessors(hashtable);
 	}
 
@@ -3097,6 +3103,7 @@ ExecHashTableDetachBatch(HashJoinTable hashtable)
 		/* Make sure any temporary files are closed. */
 		sts_end_parallel_scan(hashtable->batches[curbatch].inner_tuples);
 		sts_end_parallel_scan(hashtable->batches[curbatch].outer_tuples);
+		sts_cleanup_STP_outer_match_status_files(hashtable->batches[curbatch].outer_tuples);
 		elog(DEBUG1, "in ExecHashTableDetachBatch. batchno %i. pid %i", curbatch, MyProcPid);
 
 		/* Detach from the batch we were last working on. */
@@ -3159,7 +3166,10 @@ ExecHashTableDetach(HashJoinTable hashtable)
 				char *outer_match_status_filename = "";
 				sts_end_write(hashtable->batches[i].inner_tuples);
 				sts_end_write(hashtable->batches[i].outer_tuples);
-				outer_match_status_filename = sts_cleanup_outer_match_status_files(hashtable->batches[i].outer_tuples);
+				elog(LOG, "in ExecHashTableDetach. about to close batch %i for participant %i.",
+					 i,
+					 sts_get_my_participant_number(hashtable->batches[i].outer_tuples));
+				outer_match_status_filename = sts_cleanup_STP_outer_match_status_files(hashtable->batches[i].outer_tuples);
 				sts_end_parallel_scan(hashtable->batches[i].inner_tuples);
 				sts_end_parallel_scan(hashtable->batches[i].outer_tuples);
 				elog(DEBUG1, "in ExecHashTableDetach. batchno %i. filename %s. pid %i.", i, outer_match_status_filename, MyProcPid);

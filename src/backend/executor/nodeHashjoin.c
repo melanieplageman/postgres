@@ -584,7 +584,7 @@ ExecHashJoinImpl(PlanState *pstate, bool parallel)
 						// TODO: should I instead get it from node->hj_OuterTupleSlot->tuplenum or add something else altogether?
 						uint32 tupleid = econtext->ecxt_outertuple->tuplenum;
 						SharedTuplestoreAccessor *outer_acc = hashtable->batches[hashtable->curbatch].outer_tuples;
-						BufFile *parallel_outer_matchstatuses = sts_get_outerMatchStatuses(outer_acc);
+						BufFile *parallel_outer_matchstatuses = sts_get_STP_outerMatchStatuses(outer_acc, sts_get_my_participant_number(outer_acc));
 						uint32 final_tuplenum = sts_gettuplenum(outer_acc);
 						if (parallel_outer_matchstatuses == NULL)
 						{
@@ -1258,7 +1258,7 @@ ExecParallelHashJoinOuterGetTuple(PlanState *outerNode,
 			SharedTuplestoreAccessor *outer_acc = hashtable->batches[curbatch].outer_tuples;
 			// TODO: when do I need to make the file now?
 			// Only do this if it is the first time coming here
-			BufFile *parallel_outer_matchstatuses = sts_get_outerMatchStatuses(outer_acc);
+			BufFile *parallel_outer_matchstatuses = sts_get_STP_outerMatchStatuses(outer_acc, sts_get_my_participant_number(outer_acc));
 			uint32 final_tuplenum = sts_gettuplenum(outer_acc);
 			// final_tuplenum will be zero if we are not dealing with batch files
 			// TODO: make sure it is okay that we get final_tuplenum here and then do it again in sts_make_outerMatchStatuses (parallelism)
@@ -1268,7 +1268,7 @@ ExecParallelHashJoinOuterGetTuple(PlanState *outerNode,
 				// this should only happen on the first time here for this pid
 				if (parallel_outer_matchstatuses == NULL)
 				{
-					parallel_outer_matchstatuses = sts_make_outerMatchStatuses(outer_acc, curbatch);
+					//parallel_outer_matchstatuses= sts_make_STP_outerMatchStatuses(outer_acc, curbatch);
 					elog(LOG, "in ExecParallelHashJoinOuterGetTuple and outer_match_statuses file is NULL. curbatch %i. pid %i.", curbatch, MyProcPid);
 				}
 				else
@@ -1493,22 +1493,55 @@ ExecParallelHashJoinNewBatch(HashJoinState *hjstate)
 	if (hashtable->batches == NULL)
 		return false;
 
+	if (hashtable->curbatch < 0)
+	{
+		elog(NOTICE, "Batch: %p, %i. pid %i.", hashtable, hashtable->curbatch, MyProcPid);
+	}
+	else
+	{
+			elog(NOTICE, "Batch: %p, %i, participants = %i. pid %i.", hashtable, hashtable->curbatch,
+				hashtable->batches[hashtable->curbatch].shared->batch_barrier.participants, MyProcPid);
+	}
+
 	/*
 	 * If we were already attached to a batch, remember not to bother checking
 	 * it again, and detach from it (possibly freeing the hash table if we are
 	 * last to detach).
 	 */
+	// This member is set when the batch_barrier phase is either PHJ_BATCH_LOADING
+	// or PHJ_BATCH_PROBING (note that the PHJ_BATCH_LOADING case will fall through
+	// to the PHJ_BATCH_PROBING case). The PHJ_BATCH_PROBING case returns to the
+	// caller. So when this function is reentered with a curbatch >= 0 then we must
+	// be done probing.
 	if (hashtable->curbatch >= 0)
 	{
+		// If all workers (including this one) have finished probing the batch
+
+		// Only one worker should:
+		// Loop through the outer match status files from all workers that are attached to this batch
+		//   (assuming no worker incorrectly detached from this batch)
+		// Combine them into one bitmap
+		// Use the bitmap, loop through the outer batch file again, and emit unmatched tuples
+
+		// Then all participants can detach from the batch barrier so that the hashtable can be destroyed
+		// The batch files and outer match status files can be closed then
+
 		int curbatch = hashtable->curbatch;
-		hashtable->batches[curbatch].done = true;
-		// if we are the last worker, need to print all the tuple nums from the sts
-		ParallelHashJoinBatch *batch = hashtable->batches[curbatch].shared;
-		if (checkIfLast(&batch->batch_barrier) == true)
-		{
-			SharedTuplestoreAccessor *outer_acc = hashtable->batches[hashtable->curbatch].outer_tuples;
-			print_tuplenums(outer_acc);
+		ParallelHashJoinBatchAccessor *accessor = hashtable->batches + curbatch;
+		ParallelHashJoinBatch *batch = accessor->shared;
+
+		// if we are the last worker to arrive, print out the tuplenums, and
+		// combine the outer match status files
+		if (BarrierArriveAndWait(&batch->batch_barrier,
+								 WAIT_EVENT_HASH_BATCH_PROBING)) {
+			SharedTuplestoreAccessor *outer_acc = accessor->outer_tuples;
+			print_tuplenums(outer_acc, curbatch);
 		}
+
+		// everyone that is waiting here has a match status file
+		BarrierArriveAndWait(&batch->batch_barrier,
+				WAIT_EVENT_HASH_BUILD_CREATE_OUTER_MATCH_STATUS_BITMAP_FILES);
+		hashtable->batches[curbatch].done = true;
 		ExecHashTableDetachBatch(hashtable);
 	}
 
@@ -1520,6 +1553,8 @@ ExecParallelHashJoinNewBatch(HashJoinState *hjstate)
 	batchno = start_batchno =
 		pg_atomic_fetch_add_u32(&hashtable->parallel_state->distributor, 1) %
 		hashtable->nbatch;
+	elog(NOTICE, "Batch: %p, %i. pid %i", hashtable, hashtable->curbatch, MyProcPid);
+
 	do
 	{
 		uint32		hashvalue;
@@ -1535,8 +1570,8 @@ ExecParallelHashJoinNewBatch(HashJoinState *hjstate)
 			switch (BarrierAttach(batch_barrier))
 			{
 				case PHJ_BATCH_ELECTING:
-
 					/* One backend allocates the hash table. */
+					elog(NOTICE, "PHJ_BATCH_ELECTING batch %i. pid %i.",batchno, MyProcPid);
 					if (BarrierArriveAndWait(batch_barrier,
 											 WAIT_EVENT_HASH_BATCH_ELECTING))
 						ExecParallelHashTableAlloc(hashtable, batchno);
@@ -1544,12 +1579,14 @@ ExecParallelHashJoinNewBatch(HashJoinState *hjstate)
 
 				case PHJ_BATCH_ALLOCATING:
 					/* Wait for allocation to complete. */
+					elog(NOTICE, "PHJ_BATCH_ALLOCATING batch %i. pid %i", batchno, MyProcPid);
 					BarrierArriveAndWait(batch_barrier,
 										 WAIT_EVENT_HASH_BATCH_ALLOCATING);
 					/* Fall through. */
 
 				case PHJ_BATCH_LOADING:
 					/* Start (or join in) loading tuples. */
+					elog(NOTICE, "PHJ_BATCH_LOADING batch %i. pid %i.", batchno, MyProcPid);
 					ExecParallelHashTableSetCurrentBatch(hashtable, batchno);
 					inner_tuples = hashtable->batches[batchno].inner_tuples;
 					sts_begin_parallel_scan(inner_tuples);
@@ -1569,7 +1606,6 @@ ExecParallelHashJoinNewBatch(HashJoinState *hjstate)
 					/* Fall through. */
 
 				case PHJ_BATCH_PROBING:
-
 					/*
 					 * This batch is ready to probe.  Return control to
 					 * caller. We stay attached to batch_barrier so that the
@@ -1580,12 +1616,34 @@ ExecParallelHashJoinNewBatch(HashJoinState *hjstate)
 					 * BarrierArriveAndDetach() so that the final phase
 					 * PHJ_BATCH_DONE can be reached.
 					 */
+					elog(NOTICE, "PHJ_BATCH_PROBING batch %i. pid %i.", batchno, MyProcPid);
 					ExecParallelHashTableSetCurrentBatch(hashtable, batchno);
 					sts_begin_parallel_scan(hashtable->batches[batchno].outer_tuples);
+
+					// Create an outer match status file for this batch for this worker
+					// This file must be accessible to the other workers
+					// But *only* written to by this worker. Written to by this worker and readable by any worker
+					sts_make_STP_outerMatchStatuses(hashtable->batches[batchno].outer_tuples, batchno);
+
 					return true;
 
-				case PHJ_BATCH_DONE:
+				case PHJ_BATCH_OUTER_MATCH_STATUS_PROCESSING:
+					elog(DEBUG1, "in PHJ_BATCH_OUTER_MATCH_STATUS_PROCESSING. done with batchno %i. process %i.", batchno, MyProcPid);
+					BarrierDetach(batch_barrier);
+					// The batch isn't done but this worker can't contribute anything to it so it might as well be done from this worker's perspective
+					hashtable->batches[batchno].done = true;
+					hashtable->curbatch = -1;
+					break;
 
+				case PHJ_TEST_BATCH:
+					elog(DEBUG1, "in PHJ_TEST_BATCH. done with batchno %i. process %i.", batchno, MyProcPid);
+					BarrierDetach(batch_barrier);
+					// The batch isn't done but this worker can't contribute anything to it so it might as well be done from this worker's perspective
+					hashtable->batches[batchno].done = true;
+					hashtable->curbatch = -1;
+					break;
+
+				case PHJ_BATCH_DONE:
 					/*
 					 * Already done.  Detach and go around again (if any
 					 * remain).
@@ -1597,8 +1655,8 @@ ExecParallelHashJoinNewBatch(HashJoinState *hjstate)
 					break;
 
 				default:
-					elog(ERROR, "unexpected batch phase %d",
-						 BarrierPhase(batch_barrier));
+					elog(ERROR, "unexpected batch phase %d. pid %i. batchno %i.",
+						 BarrierPhase(batch_barrier), MyProcPid, batchno);
 			}
 		}
 		batchno = (batchno + 1) % hashtable->nbatch;
