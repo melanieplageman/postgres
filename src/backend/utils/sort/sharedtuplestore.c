@@ -672,7 +672,7 @@ combine_outer_match_statuses(SharedTuplestoreAccessor *accessor, int batchno)
 		}
 	}
 	if (first_file == NULL) {
-		elog(NOTICE, "all outer match status files null. batchno %i.", batchno);
+		elog(LOG, "all outer match status files null. batchno %i.", batchno);
 		return;
 	}
 
@@ -716,13 +716,17 @@ combine_outer_match_statuses(SharedTuplestoreAccessor *accessor, int batchno)
 
 }
 
-
+/*
+ * One worker will loop through all of the outer match status files and combine them into a single bitmap
+ * then it will loop through the outer batch file and emit tuples based on the match status in the bitmap
+ */
 void
 print_tuplenums(SharedTuplestoreAccessor *accessor, int batchno)
 {
 	MinimalTuple tuple;
 	bool flag = false;
 
+	// TODO: can I do something better since I know only participants attached to the barrier will be here for now?
 	for (int i = 0; i < accessor->sts->nparticipants; i++)
 	{
 		bool file_present = false;
@@ -741,6 +745,7 @@ print_tuplenums(SharedTuplestoreAccessor *accessor, int batchno)
 		else {
 			flag = true;
 		}
+		elog(NOTICE, "outer match status file present for participant %i. batchno %i. pid %i.", i, batchno, MyProcPid);
 		SharedTuplestoreChunk chunkheader;
 		if (BufFileSeek(read_file, 0, 0L, SEEK_SET))
 			ereport(ERROR,
@@ -808,7 +813,7 @@ print_tuplenums(SharedTuplestoreAccessor *accessor, int batchno)
 		elog(LOG, "pid %i. batchno %s. outermatchstatus for participant %i is %i.", MyProcPid, name, i, file_present);
 	}
 	if (flag == false)
-		elog(NOTICE, "all batch files empty for batchno %i. pid %i.", batchno, MyProcPid);
+		elog(LOG, "all batch files empty for batchno %i. pid %i.", batchno, MyProcPid);
 	combine_outer_match_statuses(accessor, batchno);
 }
 
