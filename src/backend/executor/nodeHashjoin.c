@@ -1495,11 +1495,11 @@ ExecParallelHashJoinNewBatch(HashJoinState *hjstate)
 
 	if (hashtable->curbatch < 0)
 	{
-		elog(NOTICE, "Batch: %p, %i. pid %i.", hashtable, hashtable->curbatch, MyProcPid);
+		elog(LOG, "Batch: %p, %i. pid %i.", hashtable, hashtable->curbatch, MyProcPid);
 	}
 	else
 	{
-			elog(NOTICE, "Batch: %p, %i, participants = %i. pid %i.", hashtable, hashtable->curbatch,
+			elog(LOG, "Batch: %p, %i, participants = %i. pid %i.", hashtable, hashtable->curbatch,
 				hashtable->batches[hashtable->curbatch].shared->batch_barrier.participants, MyProcPid);
 	}
 
@@ -1553,7 +1553,7 @@ ExecParallelHashJoinNewBatch(HashJoinState *hjstate)
 	batchno = start_batchno =
 		pg_atomic_fetch_add_u32(&hashtable->parallel_state->distributor, 1) %
 		hashtable->nbatch;
-	elog(NOTICE, "Batch: %p, %i. pid %i", hashtable, hashtable->curbatch, MyProcPid);
+	elog(LOG, "Batch: %p, %i. pid %i", hashtable, hashtable->curbatch, MyProcPid);
 
 	do
 	{
@@ -1571,7 +1571,7 @@ ExecParallelHashJoinNewBatch(HashJoinState *hjstate)
 			{
 				case PHJ_BATCH_ELECTING:
 					/* One backend allocates the hash table. */
-					elog(NOTICE, "PHJ_BATCH_ELECTING batch %i. pid %i.",batchno, MyProcPid);
+					elog(LOG, "PHJ_BATCH_ELECTING batch %i. pid %i.",batchno, MyProcPid);
 					if (BarrierArriveAndWait(batch_barrier,
 											 WAIT_EVENT_HASH_BATCH_ELECTING))
 						ExecParallelHashTableAlloc(hashtable, batchno);
@@ -1579,14 +1579,14 @@ ExecParallelHashJoinNewBatch(HashJoinState *hjstate)
 
 				case PHJ_BATCH_ALLOCATING:
 					/* Wait for allocation to complete. */
-					elog(NOTICE, "PHJ_BATCH_ALLOCATING batch %i. pid %i", batchno, MyProcPid);
+					elog(LOG, "PHJ_BATCH_ALLOCATING batch %i. pid %i", batchno, MyProcPid);
 					BarrierArriveAndWait(batch_barrier,
 										 WAIT_EVENT_HASH_BATCH_ALLOCATING);
 					/* Fall through. */
 
 				case PHJ_BATCH_LOADING:
 					/* Start (or join in) loading tuples. */
-					elog(NOTICE, "PHJ_BATCH_LOADING batch %i. pid %i.", batchno, MyProcPid);
+					elog(LOG, "PHJ_BATCH_LOADING batch %i. pid %i.", batchno, MyProcPid);
 					ExecParallelHashTableSetCurrentBatch(hashtable, batchno);
 					inner_tuples = hashtable->batches[batchno].inner_tuples;
 					sts_begin_parallel_scan(inner_tuples);
@@ -1616,7 +1616,7 @@ ExecParallelHashJoinNewBatch(HashJoinState *hjstate)
 					 * BarrierArriveAndDetach() so that the final phase
 					 * PHJ_BATCH_DONE can be reached.
 					 */
-					elog(NOTICE, "PHJ_BATCH_PROBING batch %i. pid %i.", batchno, MyProcPid);
+					elog(LOG, "PHJ_BATCH_PROBING batch %i. pid %i.", batchno, MyProcPid);
 					ExecParallelHashTableSetCurrentBatch(hashtable, batchno);
 					sts_begin_parallel_scan(hashtable->batches[batchno].outer_tuples);
 
