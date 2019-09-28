@@ -1536,8 +1536,12 @@ ExecParallelHashJoinNewBatch(HashJoinState *hjstate)
 		if (BarrierArriveAndWait(&batch->batch_barrier,
 								 WAIT_EVENT_HASH_BATCH_PROBING)) {
 			SharedTuplestoreAccessor *outer_acc = accessor->outer_tuples;
-
-			print_tuplenums(outer_acc, curbatch); // will this always be for the correct batch?
+			int length = BarrierParticipants(&batch->batch_barrier);
+			BufFile **outer_match_statuses = alloca(length);
+			populate_outer_match_statuses(outer_acc, outer_match_statuses);
+			size_t num_bytes = BufFileBytesUsed(outer_match_statuses[0]);
+			print_tuplenums(outer_acc, outer_match_statuses, length, num_bytes, curbatch); // will this always be for the correct batch?
+			close_outer_match_statuses(outer_acc, outer_match_statuses, length);
 		}
 
 		// TODO: can't get rid of this barrier, because each participant currently has to cleanup/close

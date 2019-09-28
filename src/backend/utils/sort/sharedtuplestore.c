@@ -649,80 +649,68 @@ static BufFile *rewindOuterMatchStatus(BufFile *bufFile)
 						errmsg("could not rewind hash-join temporary file: %m")));
 	return bufFile;
 }
+
+void
+populate_outer_match_statuses(SharedTuplestoreAccessor *accessor, BufFile *outer_match_statuses[])
+{
+	int j = 0;
+	for (int i = 0; i < accessor->sts->nparticipants; i++)
+	{
+		char bitmap_filename[MAXPGPATH];
+		sts_bitmap_filename(bitmap_filename, accessor, i);
+		BufFile *file = BufFileOpenSharedIfExists(accessor->fileset, bitmap_filename);
+		if (file != NULL)
+			outer_match_statuses[j++] = file;
+	}
+}
+
+void
+close_outer_match_statuses(SharedTuplestoreAccessor *accessor, BufFile *outer_match_statuses[], int length)
+{
+	for (int i = 0; i < length; i++)
+	{
+		BufFileClose(outer_match_statuses[i]);
+	}
+}
+
+
 /*
  * Only the last worker will be calling this
  */
 void
-combine_outer_match_statuses(SharedTuplestoreAccessor *accessor, int batchno, BufFile **combined_bitmap_file)
+combine_outer_match_statuses(SharedTuplestoreAccessor *accessor, BufFile *outer_match_statuses[], int length, size_t num_bytes, int batchno, BufFile **combined_bitmap_file)
 {
-	BufFile *first_file = NULL;
-	int first_participant_num = 0;
-	BufFile *file = NULL;
-	// rewind all the files
-	for (int l = 0; l < accessor->sts->nparticipants; l++)
-	{
-		// am I wasting having a pointer to my own? only workers that have one of these outer_match_status files should be coming here
-		char bitmap_filename[MAXPGPATH];
-		sts_bitmap_filename(bitmap_filename, accessor, l);
-		file = BufFileOpenSharedIfExists(accessor->fileset, bitmap_filename);
-		if (file == NULL)
-			continue;
-		rewindOuterMatchStatus(file);
-		// find a non-NULL file to use
-		if (first_file == NULL)
-		{
-			first_file = file;
-			first_participant_num = l;
-		}
-	}
-	if (first_file == NULL) {
-		elog(LOG, "all outer match status files null. batchno %i.", batchno);
-		BufFileClose(file);
-		return;
-	}
-
+	BufFile *first_file = outer_match_statuses[0];
 	// make an output file for now
 	BufFile *combined_file = *combined_bitmap_file;
 
 	unsigned char current_byte_to_write = 0;
 	unsigned char current_byte_to_read = 0;
-	int64 numBytes = BufFileBytesUsed(first_file);
-	for(int64 cur = 0; cur < numBytes; cur++) // make it while not EOF
+	for(int64 cur = 0; cur < num_bytes; cur++) // make it while not EOF
 	{
 		BufFileRead(first_file, &current_byte_to_write, 1);
-		BufFile *current_participant = NULL;
-		for (int k = 0; k < accessor->sts->nparticipants; k++)
+		BufFile *file1 = NULL;
+		for (int k = 1; k < length; k++)
 		{
-			current_participant = sts_get_a_STA_outerMatchStatuses(accessor, k);
-			if (current_participant == NULL)
-				continue;
-			char bitmap_filename[MAXPGPATH];
-			sts_bitmap_filename(bitmap_filename, accessor, k);
-			elog(NOTICE, "in combine_outer_match_statuses. batchno %i. pid %i. outer_match_status filename %s.", batchno, MyProcPid, bitmap_filename);
-			// don't read the next byte if it is from the same participant as the initial participant
-			if (first_participant_num == k)
-				continue;
-			BufFileRead(current_participant, &current_byte_to_read, 1);
+			file1 = outer_match_statuses[k];
+			elog(NOTICE, "in combine_outer_match_statuses. batchno %i. pid %i.", batchno, MyProcPid);
+			BufFileRead(file1, &current_byte_to_read, 1);
 			current_byte_to_write = current_byte_to_write | current_byte_to_read;
 		}
 		BufFileWrite(combined_file, &current_byte_to_write, 1);
 	}
 
-
 	rewindOuterMatchStatus(combined_file);
-	if (numBytes > 0)
+	size_t bytes_used = BufFileBytesUsed(combined_file);
+	if (bytes_used > 0)
 	{
-		elog(LOG, "numbytes is %ld", numBytes);
+		elog(LOG, "numbytes is %ld", bytes_used);
 		char buf[MAXPGPATH];
-		BufFileRead(combined_file, buf, numBytes);
+		BufFileRead(combined_file, buf, bytes_used);
 		// TODO: fix the name generation code
-		for (int64 cur = 0; cur < numBytes; cur++)
-		{
+		for (int64 cur = 0; cur < bytes_used; cur++)
 			elog(LOG, "outer match status file %hhu", buf[cur]);
-		}
 	}
-	// TODO: should I cleanup the outer match status files here or later when I clean up the outer batch files
-	// seems like currently here everyone will be waiting
 }
 
 /*
@@ -730,7 +718,7 @@ combine_outer_match_statuses(SharedTuplestoreAccessor *accessor, int batchno, Bu
  * then it will loop through the outer batch file and emit tuples based on the match status in the bitmap
  */
 void
-print_tuplenums(SharedTuplestoreAccessor *accessor, int batchno)
+print_tuplenums(SharedTuplestoreAccessor *accessor, BufFile *outer_match_statuses[], int length, size_t num_bytes, int batchno)
 {
 	MinimalTuple tuple;
 	bool flag = false;
@@ -738,7 +726,8 @@ print_tuplenums(SharedTuplestoreAccessor *accessor, int batchno)
 	// TODO: do I need to go through all read_files (in each participant?) to make sure I am getting all the tuples?
 
 	BufFile *combined_bitmap_file = BufFileCreateTemp(false);
-	combine_outer_match_statuses(accessor, batchno, &combined_bitmap_file);
+	combine_outer_match_statuses(accessor, outer_match_statuses, length, num_bytes, batchno, &combined_bitmap_file);
+	rewindOuterMatchStatus(combined_bitmap_file);
 	// TODO: can I do something better since I know only participants attached to the barrier will be here for now?
 	for (int i = 0; i < accessor->sts->nparticipants; i++)
 	{
