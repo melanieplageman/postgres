@@ -151,7 +151,7 @@ static bool ExecHashJoinLoadInnerBatch(HashJoinState *hjstate);
 static bool ExecParallelHashJoinNewBatch(HashJoinState *hjstate);
 static void ExecParallelHashJoinPartitionOuter(HashJoinState *node);
 
-static BufFile *rewindOuterBatch(BufFile *bufFile);
+static BufFile *rewindFileIfExists(BufFile *bufFile);
 static TupleTableSlot *emitUnmatchedOuterTuple(ExprState *otherqual,
 											   ExprContext *econtext,
 											   HashJoinState *hjstate);
@@ -726,7 +726,7 @@ ExecHashJoinImpl(PlanState *pstate, bool parallel)
 					if (!ExecHashJoinAdvanceBatch(node))
 						return NULL;    /* end of parallel-oblivious join */
 
-					if (rewindOuterBatch(node->hj_HashTable->outerBatchFile[node->hj_HashTable->curbatch]) != NULL)
+					if (rewindFileIfExists(node->hj_HashTable->outerBatchFile[node->hj_HashTable->curbatch]) != NULL)
 						ExecHashJoinLoadInnerBatch(node); /* TODO: should I ever load inner when outer file is not present? */
 				}
 				node->hj_JoinState = HJ_NEED_NEW_OUTER;
@@ -778,9 +778,9 @@ ExecHashJoinImpl(PlanState *pstate, bool parallel)
 				 */
 				node->hj_JoinState = HJ_NEED_NEW_OUTER;
 
-				if (rewindOuterBatch(node->hj_HashTable->outerBatchFile[node->hj_HashTable->curbatch]) == NULL)
+				if (rewindFileIfExists(node->hj_HashTable->outerBatchFile[node->hj_HashTable->curbatch]) == NULL)
 					break; /* TODO: Is breaking here the right thing to do when outer file is not present? */
-				rewindOuterBatch(node->hj_OuterMatchStatusesFile);
+				rewindFileIfExists(node->hj_OuterMatchStatusesFile);
 				node->hj_OuterTupleCount = 0;
 				ExecHashJoinLoadInnerBatch(node);
 				break;
@@ -790,7 +790,7 @@ ExecHashJoinImpl(PlanState *pstate, bool parallel)
 				elog(DEBUG1, "HJ_ADAPTIVE_EMIT_UNMATCHED_OUTER_INIT");
 
 				node->hj_OuterTupleCount = 0;
-				rewindOuterBatch(node->hj_OuterMatchStatusesFile);
+				rewindFileIfExists(node->hj_OuterMatchStatusesFile);
 
 				/* TODO: is it okay to use the hashtable to get the outer batch file here? */
 				outerFileForAdaptiveRead = hashtable->outerBatchFile[hashtable->curbatch];
@@ -799,7 +799,7 @@ ExecHashJoinImpl(PlanState *pstate, bool parallel)
 					node->hj_JoinState = HJ_NEED_NEW_BATCH;
 					break;
 				}
-				rewindOuterBatch(outerFileForAdaptiveRead);
+				rewindFileIfExists(outerFileForAdaptiveRead);
 
 				node->hj_JoinState = HJ_ADAPTIVE_EMIT_UNMATCHED_OUTER;
 				/* fall through */
@@ -1083,7 +1083,7 @@ ExecEndHashJoin(HashJoinState *node)
 	ExecEndNode(innerPlanState(node));
 }
 
-static BufFile *rewindOuterBatch(BufFile *bufFile)
+static BufFile *rewindFileIfExists(BufFile *bufFile)
 {
 	if (bufFile != NULL)
 	{
@@ -1540,8 +1540,12 @@ ExecParallelHashJoinNewBatch(HashJoinState *hjstate)
 			BufFile **outer_match_statuses = alloca(length);
 			populate_outer_match_statuses(outer_acc, outer_match_statuses);
 			size_t num_bytes = BufFileBytesUsed(outer_match_statuses[0]);
-			print_tuplenums(outer_acc, outer_match_statuses, length, num_bytes, curbatch); // will this always be for the correct batch?
+			BufFile *combined_bitmap_file = BufFileCreateTemp(false);
+			combine_outer_match_statuses(outer_acc, outer_match_statuses, length, num_bytes, curbatch, &combined_bitmap_file);
+			rewindFileIfExists(combined_bitmap_file);
+			print_tuplenums(outer_acc, outer_match_statuses, length, num_bytes, curbatch, combined_bitmap_file); // will this always be for the correct batch?
 			close_outer_match_statuses(outer_acc, outer_match_statuses, length);
+			BufFileClose(combined_bitmap_file);
 		}
 
 		// TODO: can't get rid of this barrier, because each participant currently has to cleanup/close

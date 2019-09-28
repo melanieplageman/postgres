@@ -335,8 +335,8 @@ sts_make_STA_outerMatchStatuses(SharedTuplestoreAccessor *accessor, int batchno,
 {
 	uint32 tuplenum = sts_gettuplenum(accessor);
 	// don't make a file if there are no tuples
-	if (tuplenum == 0)
-		return;
+//	if (tuplenum == 0)
+//		return;
 	sts_bitmap_filename(name, accessor, sts_get_my_participant_number(accessor));
 	accessor->outer_match_status_file = BufFileCreateShared(sts_get_fileset(accessor), name);
 
@@ -720,16 +720,13 @@ combine_outer_match_statuses(SharedTuplestoreAccessor *accessor, BufFile *outer_
  * then it will loop through the outer batch file and emit tuples based on the match status in the bitmap
  */
 void
-print_tuplenums(SharedTuplestoreAccessor *accessor, BufFile *outer_match_statuses[], int length, size_t num_bytes, int batchno)
+print_tuplenums(SharedTuplestoreAccessor *accessor, BufFile *outer_match_statuses[], int length,
+				size_t num_bytes, int batchno, BufFile *combined_bitmap_file)
 {
 	MinimalTuple tuple;
 	bool flag = false;
 
 	// TODO: do I need to go through all read_files (in each participant?) to make sure I am getting all the tuples?
-
-	BufFile *combined_bitmap_file = BufFileCreateTemp(false);
-	combine_outer_match_statuses(accessor, outer_match_statuses, length, num_bytes, batchno, &combined_bitmap_file);
-	rewindOuterMatchStatus(combined_bitmap_file);
 	// TODO: can I do something better since I know only participants attached to the barrier will be here for now?
 	for (int i = 0; i < accessor->sts->nparticipants; i++)
 	{
@@ -801,11 +798,20 @@ print_tuplenums(SharedTuplestoreAccessor *accessor, BufFile *outer_match_statuse
 					 byte_to_check,
 					 bit,
 					 MyProcPid);
-
+				if (match == false)
+				{
+					// need to emit tuples here
+					//ExprContext *econtext = hjstate->js.ps.ps_ExprContext;
+					//ExecForceStoreMinimalTuple(tuple,
+					//						   econtext->ecxt_outertuple,
+					//						   false);
+					//econtext->ecxt_innertuple = hjstate->hj_NullInnerTupleSlot;
+				}
 			}
 			else
 			{
-				elog(LOG, "ExecParallelHashJoinNewBatch. tupleid: %i. outermatchstatus file is NULL. sts_filename %s. pid %i.",
+				// TODO: make this an error for now, since all outer match status files have to exist bc we always make them
+				elog(ERROR, "ExecParallelHashJoinNewBatch. tupleid: %i. outermatchstatus file is NULL. sts_filename %s. pid %i.",
 					 metadata.tuplenum, name, MyProcPid);
 			}
 			elog(LOG, "ExecParallelHashJoinNewBatch. tupleid: %i. sts_filename %s. pid %i.",
@@ -816,7 +822,6 @@ print_tuplenums(SharedTuplestoreAccessor *accessor, BufFile *outer_match_statuse
 	}
 	if (flag == false)
 		elog(LOG, "all batch files empty for batchno %i. pid %i.", batchno, MyProcPid);
-	BufFileClose(combined_bitmap_file);
 }
 
 /*

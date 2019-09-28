@@ -14,6 +14,7 @@
 #define SHAREDTUPLESTORE_H
 
 #include "access/htup.h"
+#include "nodes/execnodes.h"
 #include "storage/fd.h"
 #include "storage/sharedfileset.h"
 
@@ -77,7 +78,9 @@ extern char *sts_cleanup_STA_outer_match_status_files(SharedTuplestoreAccessor *
 extern void sts_bitmap_filename(char *name, SharedTuplestoreAccessor *accessor, int participant);
 extern SharedFileSet *sts_get_fileset(SharedTuplestoreAccessor *accessor);
 
-extern void print_tuplenums(SharedTuplestoreAccessor *accessor, BufFile *outer_match_statuses[], int length, size_t num_bytes, int batchno);
+extern void
+print_tuplenums(SharedTuplestoreAccessor *accessor, BufFile *outer_match_statuses[], int length,
+				size_t num_bytes, int batchno, BufFile *combined_bitmap_file);
 extern void
 combine_outer_match_statuses(SharedTuplestoreAccessor *accessor, BufFile *outer_match_statuses[], int length, size_t num_bytes, int batchno, BufFile **combined_bitmap_file);
 extern void
