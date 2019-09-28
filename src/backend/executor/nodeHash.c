@@ -1372,7 +1372,7 @@ ExecParallelHashRepartitionRest(HashJoinTable hashtable)
 
 		/* Scan one partition from the previous generation. */
 		sts_begin_parallel_scan(old_inner_tuples[i]);
-		while ((tuple = sts_parallel_scan_next(old_inner_tuples[i], &hashvalue)))
+		while ((tuple = sts_parallel_scan_next(old_inner_tuples[i], &hashvalue, false)))
 		{
 			size_t		tuple_size = MAXALIGN(HJTUPLE_OVERHEAD + tuple->t_len);
 			int			bucketno;
@@ -3105,7 +3105,7 @@ ExecHashTableDetachBatch(HashJoinTable hashtable)
 		sts_end_parallel_scan(hashtable->batches[curbatch].outer_tuples);
 		elog(NOTICE, "ExecHashTableDetachBatch. batchno %i. pid %i. about to clean up outermatchstatus file for participant %i.", curbatch, MyProcPid,
 				sts_get_my_participant_number(hashtable->batches[curbatch].outer_tuples));
-		sts_cleanup_STP_outer_match_status_files(hashtable->batches[curbatch].outer_tuples);
+		sts_cleanup_STA_outer_match_status_files(hashtable->batches[curbatch].outer_tuples);
 
 		/* Detach from the batch we were last working on. */
 		if (BarrierArriveAndDetach(&batch->batch_barrier))

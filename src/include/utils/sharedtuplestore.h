@@ -64,16 +64,21 @@ extern uint32 sts_gettuplenum(SharedTuplestoreAccessor *accessor);
 
 extern BufFile *sts_get_outerMatchStatuses(SharedTuplestoreAccessor *accessor);
 extern BufFile *sts_make_outerMatchStatuses(SharedTuplestoreAccessor *accessor, int batchno);
-extern BufFile *sts_get_STP_outerMatchStatuses(SharedTuplestoreAccessor *accessor, int participant_num);
-extern BufFile *sts_make_STP_outerMatchStatuses(SharedTuplestoreAccessor *accessor, int batchno);
+
 extern int sts_get_my_participant_number(SharedTuplestoreAccessor *accessor);
+extern void sts_make_STA_outerMatchStatuses(SharedTuplestoreAccessor *accessor, int batchno, char *name);
+extern BufFile *sts_get_my_STA_outerMatchStatuses(SharedTuplestoreAccessor *accessor);
+extern BufFile *sts_get_a_STA_outerMatchStatuses(SharedTuplestoreAccessor *accessor, int participant_num);
 
+extern MinimalTuple sts_parallel_scan_next(SharedTuplestoreAccessor *accessor, void *meta_data, bool is_outer);
 
-extern MinimalTuple sts_parallel_scan_next(SharedTuplestoreAccessor *accessor, void *meta_data);
+extern char *sts_cleanup_STA_outer_match_status_files(SharedTuplestoreAccessor *accessor);
 
-extern char *sts_cleanup_STP_outer_match_status_files(SharedTuplestoreAccessor *accessor);
+extern void sts_bitmap_filename(char *name, SharedTuplestoreAccessor *accessor, int participant);
+extern SharedFileSet *sts_get_fileset(SharedTuplestoreAccessor *accessor);
 
 extern void print_tuplenums(SharedTuplestoreAccessor *accessor, int batchno);
-extern void combine_outer_match_statuses(SharedTuplestoreAccessor *accessor, int batchno);
+extern void
+combine_outer_match_statuses(SharedTuplestoreAccessor *accessor, int batchno, BufFile **combined_bitmap_file);
 
 #endif							/* SHAREDTUPLESTORE_H */

@@ -584,7 +584,7 @@ ExecHashJoinImpl(PlanState *pstate, bool parallel)
 						// TODO: should I instead get it from node->hj_OuterTupleSlot->tuplenum or add something else altogether?
 						uint32 tupleid = econtext->ecxt_outertuple->tuplenum;
 						SharedTuplestoreAccessor *outer_acc = hashtable->batches[hashtable->curbatch].outer_tuples;
-						BufFile *parallel_outer_matchstatuses = sts_get_STP_outerMatchStatuses(outer_acc, sts_get_my_participant_number(outer_acc));
+						BufFile *parallel_outer_matchstatuses = sts_get_my_STA_outerMatchStatuses(outer_acc); // TODO: make sure I always want to get my own file here
 						uint32 final_tuplenum = sts_gettuplenum(outer_acc);
 						if (parallel_outer_matchstatuses == NULL)
 						{
@@ -1252,13 +1252,13 @@ ExecParallelHashJoinOuterGetTuple(PlanState *outerNode,
 		tupleMetadata metadata;
 		int tupleid;
 		tuple = sts_parallel_scan_next(hashtable->batches[curbatch].outer_tuples,
-									   &metadata);
+									   &metadata, true);
 		if (tuple != NULL)
 		{
 			SharedTuplestoreAccessor *outer_acc = hashtable->batches[curbatch].outer_tuples;
 			// TODO: when do I need to make the file now?
 			// Only do this if it is the first time coming here
-			BufFile *parallel_outer_matchstatuses = sts_get_STP_outerMatchStatuses(outer_acc, sts_get_my_participant_number(outer_acc));
+			BufFile *parallel_outer_matchstatuses = sts_get_my_STA_outerMatchStatuses(outer_acc); // TODO: make sure I always want to get my own
 			uint32 final_tuplenum = sts_gettuplenum(outer_acc);
 			// final_tuplenum will be zero if we are not dealing with batch files
 			// TODO: make sure it is okay that we get final_tuplenum here and then do it again in sts_make_outerMatchStatuses (parallelism)
@@ -1529,14 +1529,25 @@ ExecParallelHashJoinNewBatch(HashJoinState *hjstate)
 		int curbatch = hashtable->curbatch;
 		ParallelHashJoinBatchAccessor *accessor = hashtable->batches + curbatch;
 		ParallelHashJoinBatch *batch = accessor->shared;
+		BufFileExportShared(sts_get_my_STA_outerMatchStatuses(accessor->outer_tuples));
 
 		// if we are the last worker to arrive, print out the tuplenums, and
 		// combine the outer match status files
 		if (BarrierArriveAndWait(&batch->batch_barrier,
 								 WAIT_EVENT_HASH_BATCH_PROBING)) {
 			SharedTuplestoreAccessor *outer_acc = accessor->outer_tuples;
-			print_tuplenums(outer_acc, curbatch);
+
+			print_tuplenums(outer_acc, curbatch); // will this always be for the correct batch?
 		}
+
+		// TODO: can't get rid of this barrier, because each participant currently has to cleanup/close
+		// its own file descriptor for the outer_match_status file and it can't do that until the one worker
+		// has finished combining them. without this barrier, one worker will be working on the combining
+		// and the file will be ripped out from under him
+		// ideally, the one last worker can clean all of the files up for the other workers same as for outer
+		// batch file -- it seems like that should be the same/possible, but, not sure it can work
+		// double check how read/write_files work
+		// since I made a shared fileset, can each process access the others' file descriptors?
 
 		// everyone that is waiting here has a match status file
 		BarrierArriveAndWait(&batch->batch_barrier,
@@ -1591,7 +1602,7 @@ ExecParallelHashJoinNewBatch(HashJoinState *hjstate)
 					inner_tuples = hashtable->batches[batchno].inner_tuples;
 					sts_begin_parallel_scan(inner_tuples);
 					while ((tuple = sts_parallel_scan_next(inner_tuples,
-														   &hashvalue)))
+														   &hashvalue, false)))
 					{
 						ExecForceStoreMinimalTuple(tuple,
 												   hjstate->hj_HashTupleSlot,
@@ -1623,7 +1634,8 @@ ExecParallelHashJoinNewBatch(HashJoinState *hjstate)
 					// Create an outer match status file for this batch for this worker
 					// This file must be accessible to the other workers
 					// But *only* written to by this worker. Written to by this worker and readable by any worker
-					sts_make_STP_outerMatchStatuses(hashtable->batches[batchno].outer_tuples, batchno);
+					char		outer_match_status_filename[MAXPGPATH];
+					sts_make_STA_outerMatchStatuses(hashtable->batches[batchno].outer_tuples, batchno, outer_match_status_filename);
 
 					return true;
 
