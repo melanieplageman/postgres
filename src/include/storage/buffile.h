@@ -53,8 +53,10 @@ extern long BufFileAppend(BufFile *target, BufFile *source);
 extern BufFile *BufFileCreateShared(SharedFileSet *fileset, const char *name);
 extern void BufFileExportShared(BufFile *file);
 extern BufFile *BufFileOpenSharedIfExists(SharedFileSet *fileset, const char *name);
-extern BufFile *BufFileOpenShared(SharedFileSet *fileset, const char *name);
+extern BufFile *BufFileOpenShared(SharedFileSet *fileset, const char *name, bool from_outer_codepath);
 extern void BufFileDeleteShared(SharedFileSet *fileset, const char *name);
 extern char *BufFileGetName(BufFile *file);
+
+extern int	BufFileFlush(BufFile *file);
 
 #endif							/* BUFFILE_H */

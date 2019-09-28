@@ -100,7 +100,7 @@ static BufFile *makeNamedBufFile(File firstfile, char *name);
 static void extendBufFile(BufFile *file);
 static void BufFileLoadBuffer(BufFile *file);
 static void BufFileDumpBuffer(BufFile *file);
-static int	BufFileFlush(BufFile *file);
+int	BufFileFlush(BufFile *file);
 static File MakeNewSharedSegment(BufFile *file, int segment);
 
 /*
@@ -391,7 +391,7 @@ BufFileOpenSharedIfExists(SharedFileSet *fileset, const char *name)
  * backends and render it read-only.
  */
 BufFile *
-BufFileOpenShared(SharedFileSet *fileset, const char *name)
+BufFileOpenShared(SharedFileSet *fileset, const char *name, bool from_outer_codepath)
 {
 	BufFile    *file;
 	char		segment_name[MAXPGPATH];
@@ -415,7 +415,8 @@ BufFileOpenShared(SharedFileSet *fileset, const char *name)
 		}
 		/* Try to load a segment. */
 		SharedSegmentName(segment_name, name, nfiles);
-		elog(DEBUG1, "in BufFileOpenShared. sharedsegment name %s. pid %i.", segment_name, MyProcPid);
+		elog(NOTICE, "in BufFileOpenShared. sharedsegment name %s. filename %s. pid %i. from_outer_codepath: %i.",
+				segment_name, name, MyProcPid, from_outer_codepath);
 		files[nfiles] = SharedFileSetOpen(fileset, segment_name);
 		if (files[nfiles] <= 0)
 			break;
@@ -738,7 +739,7 @@ BufFileWrite(BufFile *file, void *ptr, size_t size)
  *
  * Like fflush()
  */
-static int
+int
 BufFileFlush(BufFile *file)
 {
 	if (file->dirty)
