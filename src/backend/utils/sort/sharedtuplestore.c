@@ -333,11 +333,13 @@ uint32 sts_gettuplenum(SharedTuplestoreAccessor *accessor)
 void
 sts_make_STA_outerMatchStatuses(SharedTuplestoreAccessor *accessor, int batchno, char *name)
 {
-
+	uint32 tuplenum = sts_gettuplenum(accessor);
+	// don't make a file if there are no tuples
+	if (tuplenum == 0)
+		return;
 	sts_bitmap_filename(name, accessor, sts_get_my_participant_number(accessor));
 	accessor->outer_match_status_file = BufFileCreateShared(sts_get_fileset(accessor), name);
 
-	uint32 tuplenum = sts_gettuplenum(accessor);
 	uint32 num_to_write = tuplenum / 8 + 1;
 
 	unsigned char byteToWrite = 0;
