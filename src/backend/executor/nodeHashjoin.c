@@ -528,9 +528,8 @@ ExecHashJoinImpl(PlanState *pstate, bool parallel)
 						 DatumGetInt32(econtext->ecxt_outertuple->tts_values[0]),
 						 MyProcPid);
 					// *************TODO*************** disable this for parallel case once I get the other part working
-					if (node->hj_HashTable->curbatch == 0 || node->hashloop_fallback == false)
+					if ((node->hj_HashTable->curbatch == 0 || node->hashloop_fallback == false) && !parallel)
 					{
-
 						TupleTableSlot *slot = emitUnmatchedOuterTuple(otherqual, econtext, node);
 						if (slot != NULL)
 							return slot;
