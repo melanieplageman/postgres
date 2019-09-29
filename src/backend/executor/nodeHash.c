@@ -2940,6 +2940,7 @@ ExecParallelHashJoinSetUpBatches(HashJoinTable hashtable, int nbatch)
 		ParallelHashJoinBatch *shared = NthParallelHashJoinBatch(batches, i);
 		char		name[MAXPGPATH];
 
+		shared->parallel_hashloop_fallback = true; // TODO: initialize to false and set to true later
 		/*
 		 * All members of shared were zero-initialized.  We just need to set
 		 * up the Barrier.

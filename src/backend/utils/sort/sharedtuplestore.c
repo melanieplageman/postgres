@@ -271,11 +271,8 @@ sts_reinitialize(SharedTuplestoreAccessor *accessor)
 	 * initial chunk size to the minimum (any increases from that size will be
 	 * recorded in chunk_expansion_log).
 	 */
-	for (i = 0; i < accessor->sts->nparticipants; ++i)
-	{
+	for (i = 0; i < accessor->sts->nparticipants; i++)
 		accessor->sts->participants[i].read_page = 0;
-		// TODO: do I need to do anything with outer match status file here?
-	}
 }
 
 /*
@@ -566,7 +563,6 @@ sts_read_tuple(SharedTuplestoreAccessor *accessor, void *meta_data)
 	remaining_size -= this_chunk_size;
 	destination += this_chunk_size;
 	++accessor->read_ntuples;
-	//accessor->tuplenum++;
 
 	/* Check if we need to read any overflow chunks. */
 	while (remaining_size > 0)
@@ -715,42 +711,46 @@ combine_outer_match_statuses(SharedTuplestoreAccessor *accessor, BufFile *outer_
 	}
 }
 
+void sts_rewind_all_outer_files(SharedTuplestoreAccessor *accessor, BufFile **outer_read_files, int length)
+{
+	// TODO: do I need to go through all read_files (in each participant?) to make sure I am getting all the tuples?
+	// TODO: can I do something better since I know only participants attached to the barrier will be here for now?
+	int j = 0;
+	for (int i = 0; i < accessor->sts->nparticipants; i++)
+	{
+		char name[MAXPGPATH];
+		sts_filename(name, accessor, i);
+		BufFile *read_file = BufFileOpenSharedIfExists(accessor->fileset, name);
+
+		if (read_file != NULL)
+			outer_read_files[j++] = read_file;
+		if (BufFileSeek(read_file, 0, 0L, SEEK_SET))
+			ereport(ERROR,
+					(errcode_for_file_access(),
+							errmsg("could not rewind shared outer temporary file: %m")));
+	}
+}
+
+
 /*
  * One worker will loop through all of the outer match status files and combine them into a single bitmap
  * then it will loop through the outer batch file and emit tuples based on the match status in the bitmap
  */
 void
-print_tuplenums(SharedTuplestoreAccessor *accessor, BufFile *outer_match_statuses[], int length,
-				size_t num_bytes, int batchno, BufFile *combined_bitmap_file)
+print_tuplenums(SharedTuplestoreAccessor *accessor, int batchno, BufFile *combined_bitmap_file,
+				BufFile **outer_read_files, int num_outer_read_files)
 {
 	MinimalTuple tuple;
-	bool flag = false;
-
-	// TODO: do I need to go through all read_files (in each participant?) to make sure I am getting all the tuples?
-	// TODO: can I do something better since I know only participants attached to the barrier will be here for now?
-	for (int i = 0; i < accessor->sts->nparticipants; i++)
+	for (int i = 0; i < num_outer_read_files; i++)
 	{
 		bool file_present = false;
 		uint32 final_tuplenum = sts_gettuplenum(accessor);
 		BufFile *read_file;
 		tupleMetadata metadata;
 
-		char name[MAXPGPATH];
-		sts_filename(name, accessor, i);
-		read_file = BufFileOpenSharedIfExists(accessor->fileset, name);
-		if (read_file == NULL) {
-			elog(LOG, "pid %i. batchno %s. participant %i file missing.", MyProcPid, name, i);
-			continue;
-		}
-		else {
-			flag = true;
-		}
+		// we assume they are rewound as needed (could rewind here also?)
+		read_file = outer_read_files[i];
 		SharedTuplestoreChunk chunkheader;
-		if (BufFileSeek(read_file, 0, 0L, SEEK_SET))
-			ereport(ERROR,
-					(errcode_for_file_access(),
-							errmsg("could not rewind shared outer temporary file: %m")));
-
 		if (BufFileRead(read_file, &chunkheader, sizeof(SharedTuplestoreChunk)) != sizeof(SharedTuplestoreChunk))
 			ereport(ERROR,
 					(errcode_for_file_access(),
@@ -758,70 +758,55 @@ print_tuplenums(SharedTuplestoreAccessor *accessor, BufFile *outer_match_statuse
 		for(int j = 0; j < chunkheader.ntuples; j++)
 		{
 			tuple = get_next_mintup(read_file, &metadata, accessor->sts->meta_data_size);
-			// TODO: find a way to get the tuple's value
 
-			if (combined_bitmap_file != NULL)
-			{
-				file_present = true;
-				int bytenum = (metadata.tuplenum) / 8;
-				unsigned char bit = (metadata.tuplenum) % 8;
-				unsigned char byte_to_check = 0;
-
-				elog(DEBUG1, "bytenum is %i.", bytenum);
-				// seek to byte to check
-				if (BufFileSeek(combined_bitmap_file, 0, bytenum, SEEK_SET))
-					ereport(ERROR,
-							(errcode_for_file_access(),
-									errmsg("could not rewind shared outer temporary file: %m")));
-				// read byte containing ntuple bit
-				if (BufFileRead(combined_bitmap_file, &byte_to_check, 1) == 0)
-					ereport(ERROR,
-							(errcode_for_file_access(),
-									errmsg("could not read byte in outer match status bitmap: %m. batchno %i", batchno)));
-				// if bit is set
-				bool match = false;
-				if (((byte_to_check) >> bit) & 1)
-				{
-					elog(DEBUG1, "bit is set");
-					match = true;
-				}
-
-				elog(LOG, "ExecParallelHashJoinNewBatch. tupleid: %i. match_status %i. read_byteval %hhu. bytenum %i. bitnum %hhu. sts_filename %s. pid %i.",
-					 metadata.tuplenum, match, byte_to_check, bytenum, bit, name, MyProcPid);
-				elog(LOG,
-					 "ProbeEnd. batchno %s. final_tuplenum %i. tupleid %i. tupleval ?. match_status %i. bytenum %i. read_byteval %hhu. bitnum %i. pid %i.",
-					 name,
-					 final_tuplenum,
-					 metadata.tuplenum,
-					 match,
-					 bytenum,
-					 byte_to_check,
-					 bit,
-					 MyProcPid);
-				if (match == false)
-				{
-					// need to emit tuples here
-					//ExprContext *econtext = hjstate->js.ps.ps_ExprContext;
-					//ExecForceStoreMinimalTuple(tuple,
-					//						   econtext->ecxt_outertuple,
-					//						   false);
-					//econtext->ecxt_innertuple = hjstate->hj_NullInnerTupleSlot;
-				}
-			}
-			else
-			{
+			if (combined_bitmap_file == NULL)
 				// TODO: make this an error for now, since all outer match status files have to exist bc we always make them
-				elog(ERROR, "ExecParallelHashJoinNewBatch. tupleid: %i. outermatchstatus file is NULL. sts_filename %s. pid %i.",
-					 metadata.tuplenum, name, MyProcPid);
+				elog(ERROR, "ExecParallelHashJoinNewBatch. tupleid: %i. outermatchstatus file is NULL. pid %i.",
+					 metadata.tuplenum, MyProcPid);
+
+			file_present = true;
+			int bytenum = (metadata.tuplenum) / 8;
+			unsigned char bit = (metadata.tuplenum) % 8;
+			unsigned char byte_to_check = 0;
+
+			elog(DEBUG1, "bytenum is %i.", bytenum);
+			// seek to byte to check
+			if (BufFileSeek(combined_bitmap_file, 0, bytenum, SEEK_SET))
+				ereport(ERROR,
+						(errcode_for_file_access(),
+								errmsg("could not rewind shared outer temporary file: %m")));
+			// read byte containing ntuple bit
+			if (BufFileRead(combined_bitmap_file, &byte_to_check, 1) == 0)
+				ereport(ERROR,
+						(errcode_for_file_access(),
+								errmsg("could not read byte in outer match status bitmap: %m. batchno %i", batchno)));
+			// if bit is set
+			bool match = false;
+			if (((byte_to_check) >> bit) & 1)
+				match = true;
+
+			elog(LOG, "ExecParallelHashJoinNewBatch. tupleid: %i. match_status %i. read_byteval %hhu. bytenum %i. bitnum %hhu. pid %i.",
+				 metadata.tuplenum, match, byte_to_check, bytenum, bit, MyProcPid);
+			elog(LOG,
+				 "ProbeEnd.final_tuplenum %i. tupleid %i. tupleval ?. match_status %i. bytenum %i. read_byteval %hhu. bitnum %i. pid %i.",
+				 final_tuplenum,
+				 metadata.tuplenum,
+				 match,
+				 bytenum,
+				 byte_to_check,
+				 bit,
+				 MyProcPid);
+			if (match == false)
+			{
+				// need to emit tuples here
+				//ExprContext *econtext = hjstate->js.ps.ps_ExprContext;
+				//ExecForceStoreMinimalTuple(tuple,
+				//						   econtext->ecxt_outertuple,
+				//						   false);
+				//econtext->ecxt_innertuple = hjstate->hj_NullInnerTupleSlot;
 			}
-			elog(LOG, "ExecParallelHashJoinNewBatch. tupleid: %i. sts_filename %s. pid %i.",
-				 metadata.tuplenum, name, MyProcPid);
 		}
-		BufFileClose(read_file);
-		elog(LOG, "pid %i. batchno %s. outermatchstatus for participant %i is %i.", MyProcPid, name, i, file_present);
 	}
-	if (flag == false)
-		elog(LOG, "all batch files empty for batchno %i. pid %i.", batchno, MyProcPid);
 }
 
 /*

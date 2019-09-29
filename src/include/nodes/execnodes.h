@@ -1956,6 +1956,14 @@ typedef struct HashJoinState
 	unsigned char hj_OuterCurrentByte;
 	BufFile *hj_OuterMatchStatusesFile;
 	int64 hj_OuterTupleCount;
+
+	/* parallel hashloop fallback outer side */
+	bool last_worker; // TODO: initialize these
+	BufFile *combined_bitmap; // TODO: initialize this and clean it up
+	bool parallel_hashloop_fallback; // TODO: initialize and reset this
+	BufFile **outer_read_files; // TODO: initialize and clean up
+	int current_outer_read_file;
+	int num_outer_read_files; // TODO: initialize
 } HashJoinState;
 
 

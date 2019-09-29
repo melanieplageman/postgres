@@ -698,6 +698,12 @@ ExecHashJoinImpl(PlanState *pstate, bool parallel)
 				{
 					if (!ExecParallelHashJoinNewBatch(node))
 						return NULL;	/* end of parallel-aware join */
+					if (node->last_worker)
+					{
+						node->last_worker = false;
+						node->hj_JoinState = HJ_ADAPTIVE_EMIT_UNMATCHED_OUTER_INIT;
+						break;
+					}
 				}
 				else
 				{
@@ -789,17 +795,26 @@ ExecHashJoinImpl(PlanState *pstate, bool parallel)
 
 				elog(DEBUG1, "HJ_ADAPTIVE_EMIT_UNMATCHED_OUTER_INIT");
 
-				node->hj_OuterTupleCount = 0;
-				rewindFileIfExists(node->hj_OuterMatchStatusesFile);
-
-				/* TODO: is it okay to use the hashtable to get the outer batch file here? */
-				outerFileForAdaptiveRead = hashtable->outerBatchFile[hashtable->curbatch];
-				if (outerFileForAdaptiveRead == NULL) /* TODO: could this happen */
+				if (parallel)
 				{
-					node->hj_JoinState = HJ_NEED_NEW_BATCH;
-					break;
+					SharedTuplestoreAccessor *outer_acc = hashtable->batches[hashtable->curbatch].outer_tuples;
+					sts_reinitialize(outer_acc);
+					sts_begin_parallel_scan(outer_acc);
 				}
-				rewindFileIfExists(outerFileForAdaptiveRead);
+				else
+				{
+					node->hj_OuterTupleCount = 0;
+					rewindFileIfExists(node->hj_OuterMatchStatusesFile);
+
+					/* TODO: is it okay to use the hashtable to get the outer batch file here? */
+					outerFileForAdaptiveRead = hashtable->outerBatchFile[hashtable->curbatch];
+					if (outerFileForAdaptiveRead == NULL) /* TODO: could this happen */
+					{
+						node->hj_JoinState = HJ_NEED_NEW_BATCH;
+						break;
+					}
+					rewindFileIfExists(outerFileForAdaptiveRead);
+				}
 
 				node->hj_JoinState = HJ_ADAPTIVE_EMIT_UNMATCHED_OUTER;
 				/* fall through */
@@ -807,46 +822,113 @@ ExecHashJoinImpl(PlanState *pstate, bool parallel)
 			case HJ_ADAPTIVE_EMIT_UNMATCHED_OUTER:
 
 				elog(DEBUG1, "HJ_ADAPTIVE_EMIT_UNMATCHED_OUTER");
-
-				outerFileForAdaptiveRead = hashtable->outerBatchFile[hashtable->curbatch];
-
-				while (true)
+				if (parallel)
 				{
-					uint32 unmatchedOuterHashvalue;
-					TupleTableSlot *temp = ExecHashJoinGetSavedTuple(node, outerFileForAdaptiveRead, &unmatchedOuterHashvalue, node->hj_OuterTupleSlot);
-					node->hj_OuterTupleCount++;
+					SharedTuplestoreAccessor *outer_acc = hashtable->batches[hashtable->curbatch].outer_tuples;
+					MinimalTuple tuple;
 
-					if (temp == NULL)
+					if (node->combined_bitmap == NULL)
+						// TODO: make this an error for now, since all outer match status files have to exist bc we always make them
+						elog(ERROR, "ExecParallelHashJoinNewBatch. outermatchstatus file is NULL. pid %i.", MyProcPid);
+
+					do
 					{
+						tupleMetadata metadata;
+						tuple = sts_parallel_scan_next(outer_acc, &metadata, true);
+						if (tuple == NULL)
+							break;
+
+						int bytenum = metadata.tuplenum / 8;
+						unsigned char bit = metadata.tuplenum % 8;
+						unsigned char byte_to_check = 0;
+
+						elog(DEBUG1, "bytenum is %i.", bytenum);
+						// seek to byte to check
+						if (BufFileSeek(node->combined_bitmap, 0, bytenum, SEEK_SET))
+							ereport(ERROR,
+									(errcode_for_file_access(),
+											errmsg("could not rewind shared outer temporary file: %m")));
+						// read byte containing ntuple bit
+						if (BufFileRead(node->combined_bitmap, &byte_to_check, 1) == 0)
+							ereport(ERROR,
+									(errcode_for_file_access(),
+											errmsg("could not read byte in outer match status bitmap: %m.")));
+						// if bit is set
+						bool match = false;
+						if (((byte_to_check) >> bit) & 1)
+							match = true;
+
+						elog(LOG, "ExecParallelHashJoinNewBatch. tupleid: %i. match_status %i. read_byteval %hhu. bytenum %i. bitnum %hhu. pid %i.",
+							 metadata.tuplenum, match, byte_to_check, bytenum, bit, MyProcPid);
+						elog(LOG,
+							 "ProbeEnd tupleid %i. tupleval ?. match_status %i. bytenum %i. read_byteval %hhu. bitnum %i. pid %i.",
+							 metadata.tuplenum,
+							 match,
+							 bytenum,
+							 byte_to_check,
+							 bit,
+							 MyProcPid);
+
+						if (!match)
+							break;
+					} while (1);
+
+					if (tuple == NULL)
+					{
+						sts_end_parallel_scan(outer_acc);
 						node->hj_JoinState = HJ_NEED_NEW_BATCH;
 						break;
 					}
 
-					unsigned char bit = (node->hj_OuterTupleCount - 1) % 8;
-
-					/* need to read the next byte */
-					if (bit == 0)
-						BufFileRead(node->hj_OuterMatchStatusesFile, &node->hj_OuterCurrentByte, 1);
-
-					elog(DEBUG1, "in HJ_ADAPTIVE_EMIT_UNMATCHED_OUTER. batchno %i. val %i. num %li. bitnum %hhu. current byte %hhu.",
-						 node->hj_HashTable->curbatch,
-						 DatumGetInt32(temp->tts_values[0]),
-						 node->hj_OuterTupleCount,
-						 bit,
-						 node->hj_OuterCurrentByte);
-
-					/* if the match bit is set for this tuple, continue */
-					if ((node->hj_OuterCurrentByte >> bit) & 1)
-						continue;
-					/*
-					 * if it is not a match
-					 * emit it NULL-extended
-					 */
-					econtext->ecxt_outertuple = temp;
+					ExecForceStoreMinimalTuple(tuple,
+											   econtext->ecxt_outertuple,
+											   false);
 					econtext->ecxt_innertuple = node->hj_NullInnerTupleSlot;
+					elog(NOTICE, "emitting outer tuple");
 					return ExecProject(node->js.ps.ps_ProjInfo);
-				}
 
+				}
+				else
+				{
+					outerFileForAdaptiveRead = hashtable->outerBatchFile[hashtable->curbatch];
+
+					while (true)
+					{
+						uint32 unmatchedOuterHashvalue;
+						TupleTableSlot *temp = ExecHashJoinGetSavedTuple(node, outerFileForAdaptiveRead, &unmatchedOuterHashvalue, node->hj_OuterTupleSlot);
+						node->hj_OuterTupleCount++;
+
+						if (temp == NULL)
+						{
+							node->hj_JoinState = HJ_NEED_NEW_BATCH;
+							break;
+						}
+
+						unsigned char bit = (node->hj_OuterTupleCount - 1) % 8;
+
+						/* need to read the next byte */
+						if (bit == 0)
+							BufFileRead(node->hj_OuterMatchStatusesFile, &node->hj_OuterCurrentByte, 1);
+
+						elog(DEBUG1, "in HJ_ADAPTIVE_EMIT_UNMATCHED_OUTER. batchno %i. val %i. num %li. bitnum %hhu. current byte %hhu.",
+							 node->hj_HashTable->curbatch,
+							 DatumGetInt32(temp->tts_values[0]),
+							 node->hj_OuterTupleCount,
+							 bit,
+							 node->hj_OuterCurrentByte);
+
+						/* if the match bit is set for this tuple, continue */
+						if ((node->hj_OuterCurrentByte >> bit) & 1)
+							continue;
+						/*
+						 * if it is not a match
+						 * emit it NULL-extended
+						 */
+						econtext->ecxt_outertuple = temp;
+						econtext->ecxt_innertuple = node->hj_NullInnerTupleSlot;
+						return ExecProject(node->js.ps.ps_ProjInfo);
+					}
+				}
 				/* came here from HJ_NEED_NEW_BATCH, so go back there */
 				node->hj_JoinState = HJ_NEED_NEW_BATCH;
 				break;
@@ -932,6 +1014,10 @@ ExecInitHashJoin(HashJoin *node, EState *estate, int eflags)
 	hjstate->hj_OuterMatchStatusesFile = NULL;
 	hjstate->hj_OuterTupleCount  = 0;
 	hjstate->hj_InnerExhausted = false;
+
+	hjstate->last_worker = false;
+	hjstate->combined_bitmap = NULL;
+	hjstate->current_outer_read_file = 0;
 	/*
 	 * Miscellaneous initialization
 	 *
@@ -1503,6 +1589,21 @@ ExecParallelHashJoinNewBatch(HashJoinState *hjstate)
 				hashtable->batches[hashtable->curbatch].shared->batch_barrier.participants, MyProcPid);
 	}
 
+	// only the last worker should reach here
+	if (hjstate->combined_bitmap != NULL)
+	{
+		hjstate->combined_bitmap = NULL;
+
+		int curbatch = hashtable->curbatch;
+		ParallelHashJoinBatchAccessor *accessor = hashtable->batches + curbatch;
+		ParallelHashJoinBatch *batch = accessor->shared;
+
+		BarrierArriveAndWait(&batch->batch_barrier,
+							 WAIT_EVENT_HASH_BUILD_CREATE_OUTER_MATCH_STATUS_BITMAP_FILES);
+		hashtable->batches[curbatch].done = true;
+		ExecHashTableDetachBatch(hashtable);
+	}
+
 	/*
 	 * If we were already attached to a batch, remember not to bother checking
 	 * it again, and detach from it (possibly freeing the hash table if we are
@@ -1529,6 +1630,14 @@ ExecParallelHashJoinNewBatch(HashJoinState *hjstate)
 		int curbatch = hashtable->curbatch;
 		ParallelHashJoinBatchAccessor *accessor = hashtable->batches + curbatch;
 		ParallelHashJoinBatch *batch = accessor->shared;
+
+		/*
+		 * End the parallel scan on the outer tuples before we arrive at the next barrier
+		 * so that the last worker to arrive at that barrier can reinitialize the SharedTuplestore
+		 * for another parallel scan.
+		 */
+		sts_end_parallel_scan(accessor->outer_tuples);
+
 		BufFileExportShared(sts_get_my_STA_outerMatchStatuses(accessor->outer_tuples));
 
 		// if we are the last worker to arrive, print out the tuplenums, and
@@ -1536,16 +1645,28 @@ ExecParallelHashJoinNewBatch(HashJoinState *hjstate)
 		if (BarrierArriveAndWait(&batch->batch_barrier,
 								 WAIT_EVENT_HASH_BATCH_PROBING)) {
 			SharedTuplestoreAccessor *outer_acc = accessor->outer_tuples;
+
 			int length = BarrierParticipants(&batch->batch_barrier);
-			BufFile **outer_match_statuses = alloca(length);
+			BufFile **outer_match_statuses = alloca(sizeof(BufFile *) * length);
 			populate_outer_match_statuses(outer_acc, outer_match_statuses);
-			size_t num_bytes = BufFileBytesUsed(outer_match_statuses[0]);
+
 			BufFile *combined_bitmap_file = BufFileCreateTemp(false);
-			combine_outer_match_statuses(outer_acc, outer_match_statuses, length, num_bytes, curbatch, &combined_bitmap_file);
+			combine_outer_match_statuses(
+					outer_acc,
+					outer_match_statuses,
+					length,
+					BufFileBytesUsed(outer_match_statuses[0]),
+					curbatch,
+					&combined_bitmap_file);
 			rewindFileIfExists(combined_bitmap_file);
-			print_tuplenums(outer_acc, outer_match_statuses, length, num_bytes, curbatch, combined_bitmap_file); // will this always be for the correct batch?
+
+			hjstate->combined_bitmap = combined_bitmap_file;
+			hjstate->last_worker = true;
+			hjstate->parallel_hashloop_fallback = true;
+			hjstate->num_outer_read_files = length;
+
 			close_outer_match_statuses(outer_acc, outer_match_statuses, length);
-			BufFileClose(combined_bitmap_file);
+			return true;
 		}
 
 		// TODO: can't get rid of this barrier, because each participant currently has to cleanup/close
@@ -1558,6 +1679,7 @@ ExecParallelHashJoinNewBatch(HashJoinState *hjstate)
 		// since I made a shared fileset, can each process access the others' file descriptors?
 
 		// everyone that is waiting here has a match status file
+		// the last worker should not reach here
 		BarrierArriveAndWait(&batch->batch_barrier,
 				WAIT_EVENT_HASH_BUILD_CREATE_OUTER_MATCH_STATUS_BITMAP_FILES);
 		hashtable->batches[curbatch].done = true;
@@ -1642,7 +1764,7 @@ ExecParallelHashJoinNewBatch(HashJoinState *hjstate)
 					// Create an outer match status file for this batch for this worker
 					// This file must be accessible to the other workers
 					// But *only* written to by this worker. Written to by this worker and readable by any worker
-					char		outer_match_status_filename[MAXPGPATH];
+					char outer_match_status_filename[MAXPGPATH];
 					sts_make_STA_outerMatchStatuses(hashtable->batches[batchno].outer_tuples, batchno, outer_match_status_filename);
 
 					return true;
