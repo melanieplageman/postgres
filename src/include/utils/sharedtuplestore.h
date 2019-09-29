@@ -79,13 +79,16 @@ extern void sts_bitmap_filename(char *name, SharedTuplestoreAccessor *accessor, 
 extern SharedFileSet *sts_get_fileset(SharedTuplestoreAccessor *accessor);
 
 extern void
-print_tuplenums(SharedTuplestoreAccessor *accessor, BufFile *outer_match_statuses[], int length,
-				size_t num_bytes, int batchno, BufFile *combined_bitmap_file);
+print_tuplenums(SharedTuplestoreAccessor *accessor, int batchno, BufFile *combined_bitmap_file,
+				BufFile **outer_read_files, int num_outer_read_files);
 extern void
 combine_outer_match_statuses(SharedTuplestoreAccessor *accessor, BufFile *outer_match_statuses[], int length, size_t num_bytes, int batchno, BufFile **combined_bitmap_file);
 extern void
 populate_outer_match_statuses(SharedTuplestoreAccessor *accessor, BufFile *outer_match_statuses[]);
 extern void
 close_outer_match_statuses(SharedTuplestoreAccessor *accessor, BufFile *outer_match_statuses[], int length);
+
+extern
+void sts_rewind_all_outer_files(SharedTuplestoreAccessor *accessor, BufFile **outer_read_files, int length);
 
 #endif							/* SHAREDTUPLESTORE_H */
