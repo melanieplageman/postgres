@@ -2029,11 +2029,7 @@ ExecParallelHashJoinPartitionOuter(HashJoinState *hjstate)
 
 	/* Make sure all outer partitions are readable by any backend. */
 	for (i = 0; i < hashtable->nbatch; ++i)
-	{
 		sts_end_write(hashtable->batches[i].outer_tuples);
-		//BufFile *parallel_outer_match_statuses = sts_make_outerMatchStatuses(hashtable->batches[i].outer_tuples, i); //TODO: don't make for batch 0
-		//elog(DEBUG1, "in ExecParallelHashJoinPartitionOuter. parallel outer_match_statuses file %s exists for batchno %i. pid %i.", BufFileGetName(parallel_outer_match_statuses), i, MyProcPid);
-	}
 }
 
 void
