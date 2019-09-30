@@ -883,7 +883,7 @@ ExecHashJoinImpl(PlanState *pstate, bool parallel)
 											   econtext->ecxt_outertuple,
 											   false);
 					econtext->ecxt_innertuple = node->hj_NullInnerTupleSlot;
-					elog(NOTICE, "emitting outer tuple");
+					elog(LOG, "emitting outer tuple");
 					return ExecProject(node->js.ps.ps_ProjInfo);
 
 				}
