@@ -3000,7 +3000,6 @@ ExecParallelHashCloseBatchAccessors(HashJoinTable hashtable)
 		elog(LOG, "in ExecParallelHashCloseBatchAccessors. about to close batch %i for participant %i.",
 				i,
 				sts_get_my_participant_number(hashtable->batches[i].outer_tuples));
-		//outer_match_status_filename = sts_cleanup_STP_outer_match_status_files(hashtable->batches[i].outer_tuples);
 		sts_end_parallel_scan(hashtable->batches[i].inner_tuples);
 		sts_end_parallel_scan(hashtable->batches[i].outer_tuples);
 		elog(DEBUG1, "in ExecParallelHashCloseBatchAccessors. batchno %i. filename %s. pid %i.", i, outer_match_status_filename, MyProcPid);

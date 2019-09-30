@@ -342,11 +342,6 @@ ExecHashJoinImpl(PlanState *pstate, bool parallel)
 							ExecParallelHashJoinPartitionOuter(node);
 						BarrierArriveAndWait(build_barrier,
 											 WAIT_EVENT_HASH_BUILD_HASHING_OUTER);
-						for (int i = 0; i < hashtable->nbatch; ++i)
-						{
-							SharedTuplestoreAccessor *outer_acc = hashtable->batches[i].outer_tuples;
-							elog(LOG, "finished PHJ_BUILD_HASHING_OUTER. batchno %i. final_tuplenum %i. pid %i.", i, sts_gettuplenum(outer_acc), MyProcPid);
-						}
 					}
 					Assert(BarrierPhase(build_barrier) == PHJ_BUILD_DONE);
 
@@ -584,23 +579,18 @@ ExecHashJoinImpl(PlanState *pstate, bool parallel)
 						uint32 tupleid = econtext->ecxt_outertuple->tuplenum;
 						SharedTuplestoreAccessor *outer_acc = hashtable->batches[hashtable->curbatch].outer_tuples;
 						BufFile *parallel_outer_matchstatuses = sts_get_my_STA_outerMatchStatuses(outer_acc); // TODO: make sure I always want to get my own file here
-						uint32 final_tuplenum = sts_gettuplenum(outer_acc);
-						if (parallel_outer_matchstatuses == NULL)
-						{
-							elog(ERROR, "in HJ_SCAN_BUCKET for batchno %i and match status file is unexpectedly NULL. pid %i.", batchno, MyProcPid);
-						}
 
 						// TODO: make sure this logic is right for tuplenum -- ugh seems like no +1 ?
 						if (BufFileSeek(parallel_outer_matchstatuses, 0, (tupleid / 8), SEEK_SET) != 0)
 							elog(DEBUG1, "HJ_SCAN_BUCKET for batchno %i. at beginning of file. pid %i.", batchno, MyProcPid);
-						size_t nread = BufFileRead(parallel_outer_matchstatuses, &current_outer_byte, 1);
-						elog(LOG, "HJ_SCAN_BUCKET. batchno %i. nread is %zu. pid %i", batchno, nread, MyProcPid);
+						BufFileRead(parallel_outer_matchstatuses, &current_outer_byte, 1);
 
 						// I think I don't need to subtract 1 for parallel case because tuplenums are not off by one?
 						int bit_to_set_in_byte = tupleid % 8;
 
 						current_outer_byte = current_outer_byte | (1 << bit_to_set_in_byte);
 
+						uint32 final_tuplenum = sts_gettuplenum(outer_acc);
 						elog(LOG,
 							 "tupleval %i. HJ_SCAN_BUCKET. batchno o%iof. final_tuplenum %i. write_byteval %hhu. bytenum %i. tupleid %i. bitnum %i. pid %i.",
 							 DatumGetInt32(econtext->ecxt_outertuple->tts_values[0]),
@@ -1341,27 +1331,6 @@ ExecParallelHashJoinOuterGetTuple(PlanState *outerNode,
 		if (tuple != NULL)
 		{
 			SharedTuplestoreAccessor *outer_acc = hashtable->batches[curbatch].outer_tuples;
-			// TODO: when do I need to make the file now?
-			// Only do this if it is the first time coming here
-			BufFile *parallel_outer_matchstatuses = sts_get_my_STA_outerMatchStatuses(outer_acc); // TODO: make sure I always want to get my own
-			uint32 final_tuplenum = sts_gettuplenum(outer_acc);
-			// final_tuplenum will be zero if we are not dealing with batch files
-			// TODO: make sure it is okay that we get final_tuplenum here and then do it again in sts_make_outerMatchStatuses (parallelism)
-			if (final_tuplenum != 0)
-			{
-				// not true anymore: this backend may not have had a chance to make its own outermatchstatus file yet because the other worker did all the work
-				// this should only happen on the first time here for this pid
-				if (parallel_outer_matchstatuses == NULL)
-				{
-					//parallel_outer_matchstatuses= sts_make_STP_outerMatchStatuses(outer_acc, curbatch);
-					elog(LOG, "in ExecParallelHashJoinOuterGetTuple and outer_match_statuses file is NULL. curbatch %i. pid %i.", curbatch, MyProcPid);
-				}
-				else
-				{
-					elog(LOG, "in ExecParallelHashJoinOuterGetTuple. total tuplenum is %i for batchno %i. pid %i.", final_tuplenum, curbatch, MyProcPid);
-				}
-			}
-
 			*hashvalue = metadata.hashvalue;
 			tupleid = metadata.tuplenum; // change tuplenums to tupleid or similar to make less confusing
 			ExecForceStoreMinimalTuple(tuple,
@@ -1371,7 +1340,8 @@ ExecParallelHashJoinOuterGetTuple(PlanState *outerNode,
 			hjstate->hj_OuterTupleSlot->tuplenum = tupleid;
 			//hjstate->js.ps.ps_ExprContext->ecxt_outertuple->tuplenum = tuplenum;
 			slot = hjstate->hj_OuterTupleSlot;
-			elog(LOG, "ExecParallelHashJoinOuterGetTuple. batchno %i. final_tuplenum is %i. tupleid %i. tupval %i. pid %i.", curbatch, final_tuplenum, tupleid, DatumGetInt32(slot->tts_values[0]), MyProcPid);
+
+			uint32 final_tuplenum = sts_gettuplenum(outer_acc);
 			elog(LOG, "ExecParallelHashJoinOuterGetTuple. final_tuplenum is %i. %i.%i.%i. tupval %i.", final_tuplenum, curbatch, tupleid, MyProcPid, DatumGetInt32(slot->tts_values[0]));
 
 			return slot;

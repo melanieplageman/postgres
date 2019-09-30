@@ -23,7 +23,6 @@
 
 #include "access/htup.h"
 #include "access/htup_details.h"
-#include "executor/tuptable.h"
 #include "miscadmin.h"
 #include "storage/buffile.h"
 #include "storage/lwlock.h"
@@ -171,7 +170,8 @@ sts_initialize(SharedTuplestore *sts, int participants,
 	accessor->fileset = fileset;
 	accessor->context = CurrentMemoryContext;
 	// TODO: should I initialize this here
-	accessor->outer_match_status_file = NULL; // TODO: do I need this here. also, if read_file isn't set to NULL here, why?
+	// also, if read_file isn't set to NULL here, why?
+	accessor->outer_match_status_file = NULL;
 
 	return accessor;
 }
@@ -194,6 +194,7 @@ sts_attach(SharedTuplestore *sts,
 	accessor->sts = sts;
 	accessor->fileset = fileset;
 	accessor->context = CurrentMemoryContext;
+
 	return accessor;
 }
 
@@ -231,27 +232,20 @@ sts_end_write(SharedTuplestoreAccessor *accessor)
 		accessor->write_file = NULL;
 		accessor->sts->participants[accessor->participant].writing = false;
 	}
-
 }
 
-
-char *sts_cleanup_STA_outer_match_status_files(SharedTuplestoreAccessor *accessor)
+/*
+ * Each participant will clean up only its own match status file
+ */
+void sts_cleanup_STA_outer_match_status_files(SharedTuplestoreAccessor *accessor)
 {
-//	for (int i = 0; i < accessor->sts->nparticipants; i++)
-//	{
-//		char bitmap_filename[MAXPGPATH];
-//		sts_bitmap_filename(bitmap_filename, accessor, i);
-//
-//	}
 	if (accessor->outer_match_status_file != NULL)
 	{
 		char bitmap_filename[MAXPGPATH];
 		sts_bitmap_filename(bitmap_filename, accessor, accessor->participant);
 		BufFileClose(accessor->outer_match_status_file);
 		accessor->outer_match_status_file = NULL;
-		return "";
 	}
-	return "";
 }
 
 /*
@@ -271,8 +265,10 @@ sts_reinitialize(SharedTuplestoreAccessor *accessor)
 	 * initial chunk size to the minimum (any increases from that size will be
 	 * recorded in chunk_expansion_log).
 	 */
-	for (i = 0; i < accessor->sts->nparticipants; i++)
+	for (i = 0; i < accessor->sts->nparticipants; ++i)
+	{
 		accessor->sts->participants[i].read_page = 0;
+	}
 }
 
 /*
@@ -322,6 +318,10 @@ sts_end_parallel_scan(SharedTuplestoreAccessor *accessor)
 	}
 }
 
+/*
+ * Used in this file for convenience
+ * Used in nodeHashjoin.c only for debugging purposes -- TODO: delete later
+ */
 uint32 sts_gettuplenum(SharedTuplestoreAccessor *accessor)
 {
 	 return pg_atomic_read_u32(&accessor->sts->exact_tuplenum);
@@ -334,7 +334,8 @@ sts_make_STA_outerMatchStatuses(SharedTuplestoreAccessor *accessor, int batchno,
 	// don't make a file if there are no tuples
 //	if (tuplenum == 0)
 //		return;
-	sts_bitmap_filename(name, accessor, sts_get_my_participant_number(accessor));
+	sts_bitmap_filename(name, accessor, accessor->participant);
+
 	accessor->outer_match_status_file = BufFileCreateShared(sts_get_fileset(accessor), name);
 
 	uint32 num_to_write = tuplenum / 8 + 1;
@@ -353,14 +354,9 @@ BufFile *sts_get_my_STA_outerMatchStatuses(SharedTuplestoreAccessor *accessor)
 	return accessor->outer_match_status_file;
 }
 
-BufFile *sts_get_a_STA_outerMatchStatuses(SharedTuplestoreAccessor *accessor, int participant_num)
-{
-	char bitmap_filename[MAXPGPATH];
-	sts_bitmap_filename(bitmap_filename, accessor, participant_num);
-	return BufFileOpenSharedIfExists(accessor->fileset, bitmap_filename);
-}
-
-
+/*
+ * Used only for logging in nodeHash.c
+ */
 int sts_get_my_participant_number(SharedTuplestoreAccessor *accessor)
 {
 	return accessor->participant;
