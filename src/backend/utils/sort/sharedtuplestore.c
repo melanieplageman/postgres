@@ -387,7 +387,6 @@ sts_puttuple(SharedTuplestoreAccessor *accessor, void *meta_data, MinimalTuple t
 		if (count_tuples == true)
 		{
 			((tupleMetadata *) meta_data)->tuplenum = pg_atomic_fetch_add_u32(&accessor->sts->exact_tuplenum, 1);
-			//((tupleMetadata *) meta_data)->tuplenum = 0x00ADBEEF;
 			elog(DEBUG1, "%i.%i.%s.%i.",((tupleMetadata *) meta_data)->tuplenum, accessor->participant, accessor->sts->name, MyProcPid);
 		}
 	}
@@ -485,7 +484,6 @@ sts_puttuple(SharedTuplestoreAccessor *accessor, void *meta_data, MinimalTuple t
 	if (count_tuples == true)
 	{
 		((tupleMetadata *) meta_data)->tuplenum = pg_atomic_fetch_add_u32(&accessor->sts->exact_tuplenum, 1);
-		//((tupleMetadata *) meta_data)->tuplenum = 0x00ADBEEF;
 		elog(DEBUG1, "%i.%i.%s.%i.", ((tupleMetadata *) meta_data)->tuplenum, accessor->participant, accessor->sts->name,MyProcPid);
 	}
 
@@ -493,7 +491,6 @@ sts_puttuple(SharedTuplestoreAccessor *accessor, void *meta_data, MinimalTuple t
 	if (accessor->sts->meta_data_size > 0)
 		memcpy(accessor->write_pointer, meta_data,
 			   accessor->sts->meta_data_size);
-
 	memcpy(accessor->write_pointer + accessor->sts->meta_data_size, tuple,
 		   tuple->t_len);
 	accessor->write_pointer += size;
