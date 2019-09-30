@@ -3109,7 +3109,7 @@ ExecHashTableDetachBatch(HashJoinTable hashtable)
 		/* Make sure any temporary files are closed. */
 		sts_end_parallel_scan(hashtable->batches[curbatch].inner_tuples);
 		sts_end_parallel_scan(hashtable->batches[curbatch].outer_tuples);
-		elog(NOTICE, "ExecHashTableDetachBatch. batchno %i. pid %i. about to clean up outermatchstatus file for participant %i.", curbatch, MyProcPid,
+		elog(LOG, "ExecHashTableDetachBatch. batchno %i. pid %i. about to clean up outermatchstatus file for participant %i.", curbatch, MyProcPid,
 				sts_get_my_participant_number(hashtable->batches[curbatch].outer_tuples));
 		sts_cleanup_STA_outer_match_status_files(hashtable->batches[curbatch].outer_tuples);
 

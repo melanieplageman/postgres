@@ -346,7 +346,7 @@ sts_make_STA_outerMatchStatuses(SharedTuplestoreAccessor *accessor, int batchno,
 		ereport(ERROR,
 				(errcode_for_file_access(),
 						errmsg("could not rewind hash-join temporary file: %m")));
-	elog(NOTICE, "sts_make_STA_outerMatchStatuses. batchno %i. final_tuplenum %i. pid %i.", batchno, tuplenum, MyProcPid);
+	elog(LOG, "sts_make_STA_outerMatchStatuses. batchno %i. final_tuplenum %i. pid %i.", batchno, tuplenum, MyProcPid);
 }
 BufFile *sts_get_my_STA_outerMatchStatuses(SharedTuplestoreAccessor *accessor)
 {
@@ -691,7 +691,7 @@ combine_outer_match_statuses(SharedTuplestoreAccessor *accessor, BufFile *outer_
 		for (int k = 1; k < length; k++)
 		{
 			file1 = outer_match_statuses[k];
-			elog(NOTICE, "in combine_outer_match_statuses. batchno %i. pid %i.", batchno, MyProcPid);
+			elog(LOG, "in combine_outer_match_statuses. batchno %i. pid %i.", batchno, MyProcPid);
 			BufFileRead(file1, &current_byte_to_read, 1);
 			current_byte_to_write = current_byte_to_write | current_byte_to_read;
 		}
@@ -853,7 +853,7 @@ sts_parallel_scan_next(SharedTuplestoreAccessor *accessor, void *meta_data, bool
 				char		name[MAXPGPATH];
 
 				sts_filename(name, accessor, accessor->read_participant);
-				elog(NOTICE, "sts_parallel_scan_next. participant %i. opening read file %s. pid %i. is_outer: %i",
+				elog(LOG, "sts_parallel_scan_next. participant %i. opening read file %s. pid %i. is_outer: %i",
 						accessor->participant, name, MyProcPid, is_outer);
 				accessor->read_file =
 						BufFileOpenShared(accessor->fileset, name, is_outer);
