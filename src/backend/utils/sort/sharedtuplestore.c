@@ -139,7 +139,7 @@ sts_initialize(SharedTuplestore *sts, int participants,
 	Assert(my_participant_number < participants);
 
 	sts->nparticipants = participants;
-	pg_atomic_init_u32(&sts->exact_tuplenum, 0);
+	pg_atomic_init_u32(&sts->exact_tuplenum, 1);
 	sts->meta_data_size = meta_data_size;
 	sts->flags = flags;
 
@@ -382,24 +382,13 @@ sts_puttuple(SharedTuplestoreAccessor *accessor, void *meta_data, MinimalTuple t
 		/* Create one.  Only this backend will write into it. */
 		sts_filename(name, accessor, accessor->participant);
 		accessor->write_file = BufFileCreateShared(accessor->fileset, name);
-		if (accessor->write_file != NULL)
-			elog(DEBUG3, "sts_puttuple. just BufFileCreateShared accessor->write_file. participant %i. pid %i. File %i .",
-				 accessor->participant, MyProcPid, get_0_fileno(accessor->write_file));
 
 		/* Set up the shared state for this backend's file. */
 		participant = &accessor->sts->participants[accessor->participant];
 		participant->writing = true;	/* for assertions only */
-		if (count_tuples == true)
-		{
-			// Does this initialize it to 1?
-			((tupleMetadata *) meta_data)->tuplenum = pg_atomic_fetch_add_u32(&accessor->sts->exact_tuplenum, 1);
-			elog(DEBUG1, "%i.%i.%s.%i.",((tupleMetadata *) meta_data)->tuplenum, accessor->participant, accessor->sts->name, MyProcPid);
-		}
 	}
 
 	/* Do we have space? */
-	// TODO: correctly handle increasing tuplenum and writing tuple metadata in case of this if statement -- oversize tuples
-	// I missed some cases
 	size = accessor->sts->meta_data_size + tuple->t_len;
 	if (accessor->write_pointer + size >= accessor->write_end)
 	{
@@ -410,8 +399,6 @@ sts_puttuple(SharedTuplestoreAccessor *accessor, void *meta_data, MinimalTuple t
 				MemoryContextAllocZero(accessor->context,
 									   STS_CHUNK_PAGES * BLCKSZ);
 			accessor->write_chunk->ntuples = 0;
-			// TODO: count tuples that are written to our little buffer
-			// do they only get flushed with sts_flush_chunk?
 			accessor->write_pointer = &accessor->write_chunk->data[0];
 			accessor->write_end = (char *)
 				accessor->write_chunk + STS_CHUNK_PAGES * BLCKSZ;
@@ -419,7 +406,6 @@ sts_puttuple(SharedTuplestoreAccessor *accessor, void *meta_data, MinimalTuple t
 		else
 		{
 			/* See if flushing helps. */
-			//TODO: this is writing to the file, need to make sure these tuples are counted
 			sts_flush_chunk(accessor);
 		}
 
@@ -439,13 +425,10 @@ sts_puttuple(SharedTuplestoreAccessor *accessor, void *meta_data, MinimalTuple t
 			 */
 			Assert(accessor->write_pointer + accessor->sts->meta_data_size +
 				   sizeof(uint32) < accessor->write_end);
-			if (count_tuples == true)
-			{
-				((tupleMetadata *) meta_data)->tuplenum = pg_atomic_fetch_add_u32(&accessor->sts->exact_tuplenum, 1);
-				//((tupleMetadata *) meta_data)->tuplenum = 0x00ADBEEF;
-				elog(DEBUG1, "%i.%i.%s.%i.",((tupleMetadata *) meta_data)->tuplenum, accessor->participant, accessor->sts->name, MyProcPid);
-			}
 
+			// TODO: exercise this code with a test in adaptive_hj test file
+			if (count_tuples == true)
+				((tupleMetadata *) meta_data)->tuplenum = pg_atomic_fetch_add_u32(&accessor->sts->exact_tuplenum, 1);
 
 			/* Write the meta-data as one chunk. */
 			if (accessor->sts->meta_data_size > 0)
@@ -488,10 +471,7 @@ sts_puttuple(SharedTuplestoreAccessor *accessor, void *meta_data, MinimalTuple t
 		}
 	}
 	if (count_tuples == true)
-	{
 		((tupleMetadata *) meta_data)->tuplenum = pg_atomic_fetch_add_u32(&accessor->sts->exact_tuplenum, 1);
-		elog(DEBUG1, "%i.%i.%s.%i.", ((tupleMetadata *) meta_data)->tuplenum, accessor->participant, accessor->sts->name,MyProcPid);
-	}
 
 	/* Copy meta-data and tuple into buffer. */
 	if (accessor->sts->meta_data_size > 0)
