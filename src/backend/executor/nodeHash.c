@@ -3102,7 +3102,6 @@ ExecHashTableDetachBatch(HashJoinTable hashtable)
 		/* Make sure any temporary files are closed. */
 		sts_end_parallel_scan(hashtable->batches[curbatch].inner_tuples);
 		sts_end_parallel_scan(hashtable->batches[curbatch].outer_tuples);
-		sts_cleanup_STA_outer_match_status_files(hashtable->batches[curbatch].outer_tuples);
 
 		/* Detach from the batch we were last working on. */
 		if (BarrierArriveAndDetach(&batch->batch_barrier))

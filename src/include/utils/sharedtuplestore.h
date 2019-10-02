@@ -80,7 +80,7 @@ print_tuplenums(SharedTuplestoreAccessor *accessor, int batchno, BufFile *combin
 extern void
 combine_outer_match_statuses(SharedTuplestoreAccessor *accessor, BufFile *outer_match_statuses[], int length, size_t num_bytes, int batchno, BufFile **combined_bitmap_file);
 extern void
-populate_outer_match_statuses(SharedTuplestoreAccessor *accessor, BufFile *outer_match_statuses[]);
+populate_outer_match_statuses(SharedTuplestoreAccessor *accessor, BufFile *outer_match_statuses[], char **outer_match_status_filenames);
 extern void
 close_outer_match_statuses(SharedTuplestoreAccessor *accessor, BufFile *outer_match_statuses[], int length);
 

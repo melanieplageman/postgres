@@ -36,8 +36,9 @@ typedef struct BufFile BufFile;
  * prototypes for functions in buffile.c
  */
 
+extern int get_0_fileno(BufFile *bufFile);
+
 extern BufFile *BufFileCreateTemp(bool interXact);
-extern BufFile *BufFileCreateNamedTemp(bool interXact, char *name);
 extern void BufFileClose(BufFile *file);
 extern size_t BufFileRead(BufFile *file, void *ptr, size_t size);
 extern size_t BufFileWrite(BufFile *file, void *ptr, size_t size);
@@ -54,7 +55,9 @@ extern BufFile *BufFileCreateShared(SharedFileSet *fileset, const char *name);
 extern void BufFileExportShared(BufFile *file);
 extern BufFile *BufFileOpenSharedIfExists(SharedFileSet *fileset, const char *name);
 extern BufFile *BufFileOpenShared(SharedFileSet *fileset, const char *name, bool from_outer_codepath);
+extern void BufFileCloseShared(BufFile *file);
 extern void BufFileDeleteShared(SharedFileSet *fileset, const char *name);
+extern void BufFileDeleteSharedIfExists(SharedFileSet *fileset, const char *name);
 extern char *BufFileGetName(BufFile *file);
 
 extern int	BufFileFlush(BufFile *file);

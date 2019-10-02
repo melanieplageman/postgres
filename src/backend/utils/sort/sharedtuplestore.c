@@ -337,6 +337,8 @@ sts_make_STA_outerMatchStatuses(SharedTuplestoreAccessor *accessor, int batchno,
 	sts_bitmap_filename(name, accessor, accessor->participant);
 
 	accessor->outer_match_status_file = BufFileCreateShared(sts_get_fileset(accessor), name);
+	elog(DEBUG3, "sts_make_STA_outerMatchStatuses. just BufFileCreateShared accessor->outer_match_status_file participant %i. pid %i. File %i .",
+			accessor->participant, MyProcPid, get_0_fileno(accessor->outer_match_status_file));
 
 	uint32 num_to_write = tuplenum / 8 + 1;
 
@@ -347,7 +349,7 @@ sts_make_STA_outerMatchStatuses(SharedTuplestoreAccessor *accessor, int batchno,
 		ereport(ERROR,
 				(errcode_for_file_access(),
 						errmsg("could not rewind hash-join temporary file: %m")));
-	elog(LOG, "sts_make_STA_outerMatchStatuses. batchno %i. final_tuplenum %i. pid %i.", batchno, tuplenum, MyProcPid);
+	elog(DEBUG3, "sts_make_STA_outerMatchStatuses. batchno %i. final_tuplenum %i. pid %i.", batchno, tuplenum, MyProcPid);
 }
 BufFile *sts_get_my_STA_outerMatchStatuses(SharedTuplestoreAccessor *accessor)
 {
@@ -380,12 +382,16 @@ sts_puttuple(SharedTuplestoreAccessor *accessor, void *meta_data, MinimalTuple t
 		/* Create one.  Only this backend will write into it. */
 		sts_filename(name, accessor, accessor->participant);
 		accessor->write_file = BufFileCreateShared(accessor->fileset, name);
+		if (accessor->write_file != NULL)
+			elog(DEBUG3, "sts_puttuple. just BufFileCreateShared accessor->write_file. participant %i. pid %i. File %i .",
+				 accessor->participant, MyProcPid, get_0_fileno(accessor->write_file));
 
 		/* Set up the shared state for this backend's file. */
 		participant = &accessor->sts->participants[accessor->participant];
 		participant->writing = true;	/* for assertions only */
 		if (count_tuples == true)
 		{
+			// Does this initialize it to 1?
 			((tupleMetadata *) meta_data)->tuplenum = pg_atomic_fetch_add_u32(&accessor->sts->exact_tuplenum, 1);
 			elog(DEBUG1, "%i.%i.%s.%i.",((tupleMetadata *) meta_data)->tuplenum, accessor->participant, accessor->sts->name, MyProcPid);
 		}
@@ -642,7 +648,7 @@ static BufFile *rewindOuterMatchStatus(BufFile *bufFile)
 }
 
 void
-populate_outer_match_statuses(SharedTuplestoreAccessor *accessor, BufFile *outer_match_statuses[])
+populate_outer_match_statuses(SharedTuplestoreAccessor *accessor, BufFile *outer_match_statuses[], char **outer_match_status_filenames)
 {
 	int j = 0;
 	for (int i = 0; i < accessor->sts->nparticipants; i++)
@@ -650,8 +656,15 @@ populate_outer_match_statuses(SharedTuplestoreAccessor *accessor, BufFile *outer
 		char bitmap_filename[MAXPGPATH];
 		sts_bitmap_filename(bitmap_filename, accessor, i);
 		BufFile *file = BufFileOpenSharedIfExists(accessor->fileset, bitmap_filename);
+
 		if (file != NULL)
-			outer_match_statuses[j++] = file;
+		{
+			outer_match_statuses[j] = file;
+			elog(DEBUG3, "populate_outer_match_statuses. just BufFileOpenSharedIfExists bitmap_filename %s. I am participant %i. current participant is %i. pid %i. File %i .",
+				 bitmap_filename, accessor->participant, i, MyProcPid, get_0_fileno(file));
+			outer_match_status_filenames[j] = bitmap_filename;
+			j++;
+		}
 	}
 }
 
@@ -659,9 +672,7 @@ void
 close_outer_match_statuses(SharedTuplestoreAccessor *accessor, BufFile *outer_match_statuses[], int length)
 {
 	for (int i = 0; i < length; i++)
-	{
-		BufFileClose(outer_match_statuses[i]);
-	}
+		BufFileCloseShared(outer_match_statuses[i]);
 }
 
 
@@ -684,43 +695,16 @@ combine_outer_match_statuses(SharedTuplestoreAccessor *accessor, BufFile *outer_
 		for (int k = 1; k < length; k++)
 		{
 			file1 = outer_match_statuses[k];
-			elog(LOG, "in combine_outer_match_statuses. batchno %i. pid %i.", batchno, MyProcPid);
+			elog(DEBUG3, "in combine_outer_match_statuses. batchno %i. pid %i.", batchno, MyProcPid);
 			BufFileRead(file1, &current_byte_to_read, 1);
 			current_byte_to_write = current_byte_to_write | current_byte_to_read;
 		}
 		BufFileWrite(combined_file, &current_byte_to_write, 1);
 	}
 
-	rewindOuterMatchStatus(combined_file);
-	size_t bytes_used = BufFileBytesUsed(combined_file);
-	if (bytes_used > 0)
+	for (int j = 0; j < length; j++)
 	{
-		elog(LOG, "numbytes is %ld", bytes_used);
-		char buf[MAXPGPATH];
-		BufFileRead(combined_file, buf, bytes_used);
-		// TODO: fix the name generation code
-		for (int64 cur = 0; cur < bytes_used; cur++)
-			elog(LOG, "outer match status file %hhu", buf[cur]);
-	}
-}
-
-void sts_rewind_all_outer_files(SharedTuplestoreAccessor *accessor, BufFile **outer_read_files, int length)
-{
-	// TODO: do I need to go through all read_files (in each participant?) to make sure I am getting all the tuples?
-	// TODO: can I do something better since I know only participants attached to the barrier will be here for now?
-	int j = 0;
-	for (int i = 0; i < accessor->sts->nparticipants; i++)
-	{
-		char name[MAXPGPATH];
-		sts_filename(name, accessor, i);
-		BufFile *read_file = BufFileOpenSharedIfExists(accessor->fileset, name);
-
-		if (read_file != NULL)
-			outer_read_files[j++] = read_file;
-		if (BufFileSeek(read_file, 0, 0L, SEEK_SET))
-			ereport(ERROR,
-					(errcode_for_file_access(),
-							errmsg("could not rewind shared outer temporary file: %m")));
+		BufFileClose(outer_match_statuses[j]);
 	}
 }
 
@@ -778,9 +762,9 @@ print_tuplenums(SharedTuplestoreAccessor *accessor, int batchno, BufFile *combin
 			if (((byte_to_check) >> bit) & 1)
 				match = true;
 
-			elog(LOG, "ExecParallelHashJoinNewBatch. tupleid: %i. match_status %i. read_byteval %hhu. bytenum %i. bitnum %hhu. pid %i.",
+			elog(DEBUG3, "ExecParallelHashJoinNewBatch. tupleid: %i. match_status %i. read_byteval %hhu. bytenum %i. bitnum %hhu. pid %i.",
 				 metadata.tuplenum, match, byte_to_check, bytenum, bit, MyProcPid);
-			elog(LOG,
+			elog(DEBUG3,
 				 "ProbeEnd.final_tuplenum %i. tupleid %i. tupleval ?. match_status %i. bytenum %i. read_byteval %hhu. bitnum %i. pid %i.",
 				 final_tuplenum,
 				 metadata.tuplenum,
@@ -846,10 +830,13 @@ sts_parallel_scan_next(SharedTuplestoreAccessor *accessor, void *meta_data, bool
 				char		name[MAXPGPATH];
 
 				sts_filename(name, accessor, accessor->read_participant);
-				elog(LOG, "sts_parallel_scan_next. participant %i. opening read file %s. pid %i. is_outer: %i",
+				elog(DEBUG3, "sts_parallel_scan_next. participant %i. opening read file %s. pid %i. is_outer: %i",
 						accessor->participant, name, MyProcPid, is_outer);
 				accessor->read_file =
 						BufFileOpenShared(accessor->fileset, name, is_outer);
+				if (accessor->read_file != NULL)
+					elog(DEBUG3, "sts_parallel_scan_next. just BufFileOpenShared accessor->read_file for my own outer_match_status file. I am participant %i. pid %i. File %i .",
+						 accessor->participant, MyProcPid, get_0_fileno(accessor->read_file));
 			}
 
 			/* Seek and load the chunk header. */
