@@ -59,6 +59,7 @@ extern void sts_begin_parallel_scan(SharedTuplestoreAccessor *accessor);
 
 extern void sts_end_parallel_scan(SharedTuplestoreAccessor *accessor);
 
+// TODO: this API is not great -- passing count_tuples flag. However, I don't want to count tuples for the inner side
 extern void sts_puttuple(SharedTuplestoreAccessor *accessor, void *meta_data, MinimalTuple tuple, bool count_tuples);
 
 extern uint32 sts_gettuplenum(SharedTuplestoreAccessor *accessor);
