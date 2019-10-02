@@ -96,7 +96,6 @@ struct BufFile
 
 static BufFile *makeBufFileCommon(int nfiles);
 static BufFile *makeBufFile(File firstfile);
-static BufFile *makeNamedBufFile(File firstfile, char *name);
 static void extendBufFile(BufFile *file);
 static void BufFileLoadBuffer(BufFile *file);
 static void BufFileDumpBuffer(BufFile *file);
@@ -121,6 +120,11 @@ makeBufFileCommon(int nfiles)
 	file->nbytes = 0;
 
 	return file;
+}
+
+int get_0_fileno(BufFile *bufFile)
+{
+	return bufFile->files[0];
 }
 
 char *
@@ -155,20 +159,6 @@ makeBufFile(File firstfile)
 	file->readOnly = false;
 	file->fileset = NULL;
 	file->name = NULL;
-
-	return file;
-}
-
-static BufFile *
-makeNamedBufFile(File firstfile, char *name)
-{
-	BufFile    *file = makeBufFileCommon(1);
-
-	file->files = (File *) palloc(sizeof(File));
-	file->files[0] = firstfile;
-	file->readOnly = false;
-	file->fileset = NULL;
-	file->name = name;
 
 	return file;
 }
@@ -234,26 +224,6 @@ BufFileCreateTemp(bool interXact)
 	Assert(pfile >= 0);
 
 	file = makeBufFile(pfile);
-	file->isInterXact = interXact;
-
-	if (file->files[0] == 0)
-		elog(DEBUG1, "file is 0");
-
-	return file;
-}
-
-BufFile *
-BufFileCreateNamedTemp(bool interXact, char *name)
-{
-	BufFile    *file;
-	File		pfile;
-
-	PrepareTempTablespaces();
-
-	pfile = OpenTemporaryFile(interXact);
-	Assert(pfile >= 0);
-
-	file = makeNamedBufFile(pfile, name);
 	file->isInterXact = interXact;
 
 	if (file->files[0] == 0)
@@ -481,6 +451,29 @@ BufFileDeleteShared(SharedFileSet *fileset, const char *name)
 	if (!found)
 		elog(ERROR, "could not delete unknown shared BufFile \"%s\"", name);
 }
+void
+BufFileDeleteSharedIfExists(SharedFileSet *fileset, const char *name)
+{
+	char		segment_name[MAXPGPATH];
+	int			segment = 0;
+	bool		found = false;
+
+	/*
+	 * We don't know how many segments the file has.  We'll keep deleting
+	 * until we run out.  If we don't manage to find even an initial segment,
+	 * raise an error.
+	 */
+	for (;;)
+	{
+		SharedSegmentName(segment_name, name, segment);
+		if (!SharedFileSetDelete(fileset, segment_name, true))
+			break;
+		found = true;
+		++segment;
+
+		CHECK_FOR_INTERRUPTS();
+	}
+}
 
 /*
  * BufFileExportShared --- flush and make read-only, in preparation for sharing.
@@ -510,6 +503,19 @@ BufFileClose(BufFile *file)
 
 	/* flush any unwritten data */
 	BufFileFlush(file);
+	/* close and delete the underlying file(s) */
+	for (i = 0; i < file->numFiles; i++)
+		FileClose(file->files[i]);
+	/* release the buffer space */
+	pfree(file->files);
+	pfree(file);
+}
+
+void
+BufFileCloseShared(BufFile *file)
+{
+	int i;
+
 	/* close and delete the underlying file(s) */
 	for (i = 0; i < file->numFiles; i++)
 		FileClose(file->files[i]);

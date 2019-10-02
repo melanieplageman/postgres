@@ -680,7 +680,7 @@ ExecHashJoinImpl(PlanState *pstate, bool parallel)
 				{
 					if (!ExecParallelHashJoinNewBatch(node))
 						return NULL;	/* end of parallel-aware join */
-					if (node->last_worker)
+					if (node->last_worker && HJ_FILL_OUTER(node))
 					{
 						node->last_worker = false;
 						node->hj_JoinState = HJ_ADAPTIVE_EMIT_UNMATCHED_OUTER_INIT;
@@ -1533,9 +1533,13 @@ ExecParallelHashJoinNewBatch(HashJoinState *hjstate)
 	 */
 	if (hashtable->batches == NULL)
 		return false;
+
 	// only the last worker should reach here
 	if (hjstate->combined_bitmap != NULL)
 	{
+		elog(DEBUG3, "ExecParallelHashJoinNewBatch. about to close combined_bitmap_file. pid %i. File %i . batchno %i",
+			 MyProcPid, get_0_fileno(hjstate->combined_bitmap), hashtable->curbatch);
+		BufFileClose(hjstate->combined_bitmap);
 		hjstate->combined_bitmap = NULL;
 
 		int curbatch = hashtable->curbatch;
@@ -1582,34 +1586,39 @@ ExecParallelHashJoinNewBatch(HashJoinState *hjstate)
 		 */
 		sts_end_parallel_scan(accessor->outer_tuples);
 
-		BufFileExportShared(sts_get_my_STA_outerMatchStatuses(accessor->outer_tuples));
+		BufFileClose(sts_get_my_STA_outerMatchStatuses(accessor->outer_tuples));
 
 		// if we are the last worker to arrive, print out the tuplenums, and
 		// combine the outer match status files
 		if (BarrierArriveAndWait(&batch->batch_barrier,
-								 WAIT_EVENT_HASH_BATCH_PROBING)) {
+								 WAIT_EVENT_HASH_BATCH_PROBING))
+		{
 			SharedTuplestoreAccessor *outer_acc = accessor->outer_tuples;
 
 			int length = BarrierParticipants(&batch->batch_barrier);
-			BufFile **outer_match_statuses = alloca(sizeof(BufFile *) * length);
-			populate_outer_match_statuses(outer_acc, outer_match_statuses);
+			BufFile **outer_match_statuses = alloca(sizeof(BufFile *) * length); // use palloc?
+			char **outer_match_status_filenames = alloca(sizeof(char *) * length);
+
+			populate_outer_match_statuses(outer_acc, outer_match_statuses, outer_match_status_filenames);
 
 			BufFile *combined_bitmap_file = BufFileCreateTemp(false);
+			if (combined_bitmap_file != NULL)
+				elog(LOG, "ExecParallelHashJoinNewBatch. just BufFileCreateTemp combined_bitmap_file. participant %i. pid %i. File %i . batchno %i",
+					 sts_get_my_participant_number(outer_acc), MyProcPid, get_0_fileno(combined_bitmap_file), curbatch);
+			// This also closes the files opened in populate_outer_match_statuses
 			combine_outer_match_statuses(
 					outer_acc,
 					outer_match_statuses,
 					length,
 					BufFileBytesUsed(outer_match_statuses[0]),
 					curbatch,
-					&combined_bitmap_file);
-			rewindFileIfExists(combined_bitmap_file);
+					&combined_bitmap_file); // is this working?
+			rewindFileIfExists(combined_bitmap_file); // TODO: do I need to flush this file?
 
 			hjstate->combined_bitmap = combined_bitmap_file;
 			hjstate->last_worker = true;
 			hjstate->parallel_hashloop_fallback = true;
 			hjstate->num_outer_read_files = length;
-
-			close_outer_match_statuses(outer_acc, outer_match_statuses, length);
 			return true;
 		}
 
