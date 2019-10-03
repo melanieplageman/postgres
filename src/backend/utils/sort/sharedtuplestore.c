@@ -235,20 +235,6 @@ sts_end_write(SharedTuplestoreAccessor *accessor)
 }
 
 /*
- * Each participant will clean up only its own match status file
- */
-void sts_cleanup_STA_outer_match_status_files(SharedTuplestoreAccessor *accessor)
-{
-	if (accessor->outer_match_status_file != NULL)
-	{
-		char bitmap_filename[MAXPGPATH];
-		sts_bitmap_filename(bitmap_filename, accessor, accessor->participant);
-		BufFileClose(accessor->outer_match_status_file);
-		accessor->outer_match_status_file = NULL;
-	}
-}
-
-/*
  * Prepare to rescan.  Only one participant must call this.  After it returns,
  * all participants may call sts_begin_parallel_scan() and then loop over
  * sts_parallel_scan_next().  This function must not be called concurrently
@@ -590,43 +576,6 @@ sts_read_tuple(SharedTuplestoreAccessor *accessor, void *meta_data)
 	return tuple;
 }
 
-static MinimalTuple get_next_mintup(BufFile *file, void *meta_data, size_t meta_data_size)
-{
-	uint32 size;
-	MinimalTuple tuple;
-	size_t nread;
-	if ((BufFileRead(file, meta_data, meta_data_size)) != meta_data_size)
-		ereport(ERROR,
-				(errcode_for_file_access(),
-						errmsg("could not read from shared tuplestore temporary file"),
-						errdetail_internal("Short read while reading meta-data.")));
-	if ((BufFileRead(file, &size, sizeof(size))) != sizeof(size))
-		ereport(ERROR,
-				(errcode_for_file_access(),
-						errmsg("could not read from shared tuplestore temporary file"),
-						errdetail_internal("Short read while reading size.")));
-	tuple = (MinimalTuple) palloc(size);
-	tuple->t_len = size;
-	nread = BufFileRead(file,
-						(void *) ((char *) tuple + sizeof(uint32)),
-						size - sizeof(uint32));
-	if (nread != size - sizeof(uint32))
-		ereport(ERROR,
-				(errcode_for_file_access(),
-						errmsg("could not read from hash-join temporary file: %m")));
-	return tuple;
-}
-static BufFile *rewindOuterMatchStatus(BufFile *bufFile)
-{
-	if (bufFile == NULL)
-		return NULL;
-	if (BufFileSeek(bufFile, 0, 0L, SEEK_SET))
-		ereport(ERROR,
-				(errcode_for_file_access(),
-						errmsg("could not rewind hash-join temporary file: %m")));
-	return bufFile;
-}
-
 void
 populate_outer_match_statuses(SharedTuplestoreAccessor *accessor, BufFile *outer_match_statuses[], char **outer_match_status_filenames)
 {
@@ -640,130 +589,16 @@ populate_outer_match_statuses(SharedTuplestoreAccessor *accessor, BufFile *outer
 		if (file != NULL)
 		{
 			outer_match_statuses[j] = file;
-			elog(DEBUG3, "populate_outer_match_statuses. just BufFileOpenSharedIfExists bitmap_filename %s. I am participant %i. current participant is %i. pid %i. File %i .",
-				 bitmap_filename, accessor->participant, i, MyProcPid, get_0_fileno(file));
 			outer_match_status_filenames[j] = bitmap_filename;
 			j++;
 		}
 	}
 }
 
-void
-close_outer_match_statuses(SharedTuplestoreAccessor *accessor, BufFile *outer_match_statuses[], int length)
+int
+sts_participants(SharedTuplestoreAccessor *accessor)
 {
-	for (int i = 0; i < length; i++)
-		BufFileCloseShared(outer_match_statuses[i]);
-}
-
-
-/*
- * Only the last worker will be calling this
- */
-void
-combine_outer_match_statuses(SharedTuplestoreAccessor *accessor, BufFile *outer_match_statuses[], int length, size_t num_bytes, int batchno, BufFile **combined_bitmap_file)
-{
-	BufFile *first_file = outer_match_statuses[0];
-	// make an output file for now
-	BufFile *combined_file = *combined_bitmap_file;
-
-	unsigned char current_byte_to_write = 0;
-	unsigned char current_byte_to_read = 0;
-	for(int64 cur = 0; cur < num_bytes; cur++) // make it while not EOF
-	{
-		BufFileRead(first_file, &current_byte_to_write, 1);
-		BufFile *file1 = NULL;
-		for (int k = 1; k < length; k++)
-		{
-			file1 = outer_match_statuses[k];
-			elog(DEBUG3, "in combine_outer_match_statuses. batchno %i. pid %i.", batchno, MyProcPid);
-			BufFileRead(file1, &current_byte_to_read, 1);
-			current_byte_to_write = current_byte_to_write | current_byte_to_read;
-		}
-		BufFileWrite(combined_file, &current_byte_to_write, 1);
-	}
-
-	for (int j = 0; j < length; j++)
-	{
-		BufFileClose(outer_match_statuses[j]);
-	}
-}
-
-
-/*
- * One worker will loop through all of the outer match status files and combine them into a single bitmap
- * then it will loop through the outer batch file and emit tuples based on the match status in the bitmap
- */
-void
-print_tuplenums(SharedTuplestoreAccessor *accessor, int batchno, BufFile *combined_bitmap_file,
-				BufFile **outer_read_files, int num_outer_read_files)
-{
-	MinimalTuple tuple;
-	for (int i = 0; i < num_outer_read_files; i++)
-	{
-		bool file_present = false;
-		uint32 final_tuplenum = sts_gettuplenum(accessor);
-		BufFile *read_file;
-		tupleMetadata metadata;
-
-		// we assume they are rewound as needed (could rewind here also?)
-		read_file = outer_read_files[i];
-		SharedTuplestoreChunk chunkheader;
-		if (BufFileRead(read_file, &chunkheader, sizeof(SharedTuplestoreChunk)) != sizeof(SharedTuplestoreChunk))
-			ereport(ERROR,
-					(errcode_for_file_access(),
-							errmsg("could not read shared tuplestore chunk header: %m")));
-		for(int j = 0; j < chunkheader.ntuples; j++)
-		{
-			tuple = get_next_mintup(read_file, &metadata, accessor->sts->meta_data_size);
-
-			if (combined_bitmap_file == NULL)
-				// TODO: make this an error for now, since all outer match status files have to exist bc we always make them
-				elog(ERROR, "ExecParallelHashJoinNewBatch. tupleid: %i. outermatchstatus file is NULL. pid %i.",
-					 metadata.tuplenum, MyProcPid);
-
-			file_present = true;
-			int bytenum = (metadata.tuplenum) / 8;
-			unsigned char bit = (metadata.tuplenum) % 8;
-			unsigned char byte_to_check = 0;
-
-			elog(DEBUG1, "bytenum is %i.", bytenum);
-			// seek to byte to check
-			if (BufFileSeek(combined_bitmap_file, 0, bytenum, SEEK_SET))
-				ereport(ERROR,
-						(errcode_for_file_access(),
-								errmsg("could not rewind shared outer temporary file: %m")));
-			// read byte containing ntuple bit
-			if (BufFileRead(combined_bitmap_file, &byte_to_check, 1) == 0)
-				ereport(ERROR,
-						(errcode_for_file_access(),
-								errmsg("could not read byte in outer match status bitmap: %m. batchno %i", batchno)));
-			// if bit is set
-			bool match = false;
-			if (((byte_to_check) >> bit) & 1)
-				match = true;
-
-			elog(DEBUG3, "ExecParallelHashJoinNewBatch. tupleid: %i. match_status %i. read_byteval %hhu. bytenum %i. bitnum %hhu. pid %i.",
-				 metadata.tuplenum, match, byte_to_check, bytenum, bit, MyProcPid);
-			elog(DEBUG3,
-				 "ProbeEnd.final_tuplenum %i. tupleid %i. tupleval ?. match_status %i. bytenum %i. read_byteval %hhu. bitnum %i. pid %i.",
-				 final_tuplenum,
-				 metadata.tuplenum,
-				 match,
-				 bytenum,
-				 byte_to_check,
-				 bit,
-				 MyProcPid);
-			if (match == false)
-			{
-				// need to emit tuples here
-				//ExprContext *econtext = hjstate->js.ps.ps_ExprContext;
-				//ExecForceStoreMinimalTuple(tuple,
-				//						   econtext->ecxt_outertuple,
-				//						   false);
-				//econtext->ecxt_innertuple = hjstate->hj_NullInnerTupleSlot;
-			}
-		}
-	}
+	return accessor->sts->nparticipants;
 }
 
 /*

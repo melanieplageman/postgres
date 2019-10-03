@@ -155,6 +155,8 @@ static BufFile *rewindFileIfExists(BufFile *bufFile);
 static TupleTableSlot *emitUnmatchedOuterTuple(ExprState *otherqual,
 											   ExprContext *econtext,
 											   HashJoinState *hjstate);
+static void combine_outer_match_statuses(BufFile *outer_match_statuses[], int length, size_t num_bytes,
+		int batchno, BufFile **combined_bitmap_file);
 
 /* ----------------------------------------------------------------
  *		ExecHashJoinImpl
@@ -1184,6 +1186,40 @@ emitUnmatchedOuterTuple(ExprState *otherqual, ExprContext *econtext, HashJoinSta
 }
 
 /*
+ * Only the elected worker will be calling this
+ */
+static void
+combine_outer_match_statuses(BufFile *outer_match_statuses[], int length, size_t num_bytes, int batchno, BufFile **combined_bitmap_file)
+{
+	BufFile *first_file = outer_match_statuses[0];
+	// make an output file for now
+	BufFile *combined_file = *combined_bitmap_file;
+
+	unsigned char current_byte_to_write = 0;
+	unsigned char current_byte_to_read = 0;
+	for(int64 cur = 0; cur < num_bytes; cur++) // make it while not EOF
+	{
+		BufFileRead(first_file, &current_byte_to_write, 1);
+		BufFile *file1 = NULL;
+		for (int k = 1; k < length; k++)
+		{
+			file1 = outer_match_statuses[k];
+			elog(DEBUG3, "in combine_outer_match_statuses. batchno %i. pid %i.", batchno, MyProcPid);
+			BufFileRead(file1, &current_byte_to_read, 1);
+			current_byte_to_write = current_byte_to_write | current_byte_to_read;
+		}
+		BufFileWrite(combined_file, &current_byte_to_write, 1);
+	}
+	if (BufFileSeek(combined_file, 0, 0L, SEEK_SET))
+		ereport(ERROR,
+				(errcode_for_file_access(),
+						errmsg("could not rewind hash-join temporary file: %m")));
+
+	for (int j = 0; j < length; j++)
+		BufFileClose(outer_match_statuses[j]);
+}
+
+/*
  * ExecHashJoinOuterGetTuple
  *
  *		get the next outer tuple for a parallel oblivious hashjoin: either by
@@ -1534,21 +1570,16 @@ ExecParallelHashJoinNewBatch(HashJoinState *hjstate)
 	if (hashtable->batches == NULL)
 		return false;
 
-	// only the last worker should reach here
-	if (hjstate->combined_bitmap != NULL)
+	/*
+	 * For hashloop fallback only
+	 * Only the elected worker who was chosen to combine the outer match status bitmaps
+	 * should reach here. This worker must do some final cleanup and then detach from the batch
+	 */
+	 if (hjstate->combined_bitmap != NULL)
 	{
-		elog(DEBUG3, "ExecParallelHashJoinNewBatch. about to close combined_bitmap_file. pid %i. File %i . batchno %i",
-			 MyProcPid, get_0_fileno(hjstate->combined_bitmap), hashtable->curbatch);
 		BufFileClose(hjstate->combined_bitmap);
 		hjstate->combined_bitmap = NULL;
-
-		int curbatch = hashtable->curbatch;
-		ParallelHashJoinBatchAccessor *accessor = hashtable->batches + curbatch;
-		ParallelHashJoinBatch *batch = accessor->shared;
-
-		BarrierArriveAndWait(&batch->batch_barrier,
-							 WAIT_EVENT_HASH_BUILD_CREATE_OUTER_MATCH_STATUS_BITMAP_FILES);
-		hashtable->batches[curbatch].done = true;
+		hashtable->batches[hashtable->curbatch].done = true;
 		ExecHashTableDetachBatch(hashtable);
 	}
 
@@ -1556,24 +1587,14 @@ ExecParallelHashJoinNewBatch(HashJoinState *hjstate)
 	 * If we were already attached to a batch, remember not to bother checking
 	 * it again, and detach from it (possibly freeing the hash table if we are
 	 * last to detach).
+	 * curbatch is set when the batch_barrier phase is either PHJ_BATCH_LOADING
+	 * or PHJ_BATCH_PROBING (note that the PHJ_BATCH_LOADING case will fall through
+	 * to the PHJ_BATCH_PROBING case). The PHJ_BATCH_PROBING case returns to the
+	 * caller. So when this function is reentered with a curbatch >= 0 then we must
+	 * be done probing.
 	 */
-	// This member is set when the batch_barrier phase is either PHJ_BATCH_LOADING
-	// or PHJ_BATCH_PROBING (note that the PHJ_BATCH_LOADING case will fall through
-	// to the PHJ_BATCH_PROBING case). The PHJ_BATCH_PROBING case returns to the
-	// caller. So when this function is reentered with a curbatch >= 0 then we must
-	// be done probing.
 	if (hashtable->curbatch >= 0)
 	{
-		// If all workers (including this one) have finished probing the batch
-
-		// Only one worker should:
-		// Loop through the outer match status files from all workers that are attached to this batch
-		//   (assuming no worker incorrectly detached from this batch)
-		// Combine them into one bitmap
-		// Use the bitmap, loop through the outer batch file again, and emit unmatched tuples
-
-		// Then all participants can detach from the batch barrier so that the hashtable can be destroyed
-		// The batch files and outer match status files can be closed then
 
 		int curbatch = hashtable->curbatch;
 		ParallelHashJoinBatchAccessor *accessor = hashtable->batches + curbatch;
@@ -1588,53 +1609,48 @@ ExecParallelHashJoinNewBatch(HashJoinState *hjstate)
 
 		BufFileClose(sts_get_my_STA_outerMatchStatuses(accessor->outer_tuples));
 
-		// if we are the last worker to arrive, print out the tuplenums, and
-		// combine the outer match status files
+		/*
+		 * If all workers (including this one) have finished probing the batch, one worker is elected to
+		 * Combine all the outer match status files from the workers who were attached to this batch
+		 * Loop through the outer match status files from all workers that were attached to this batch
+		 * Combine them into one bitmap
+		 * Use the bitmap, loop through the outer batch file again, and emit unmatched tuples
+		 */
+		// The batch files and outer match status files can be closed then
+
 		if (BarrierArriveAndWait(&batch->batch_barrier,
 								 WAIT_EVENT_HASH_BATCH_PROBING))
 		{
 			SharedTuplestoreAccessor *outer_acc = accessor->outer_tuples;
 
+			//TODO: right? This doesn't work if I let the other workers move on -- the number of participants won't be right
 			int length = BarrierParticipants(&batch->batch_barrier);
-			BufFile **outer_match_statuses = alloca(sizeof(BufFile *) * length); // use palloc?
+			//int length = sts_participants(outer_acc);
+			BufFile **outer_match_statuses = palloc(sizeof(BufFile *) * length);
 			char **outer_match_status_filenames = alloca(sizeof(char *) * length);
 
 			populate_outer_match_statuses(outer_acc, outer_match_statuses, outer_match_status_filenames);
 
 			BufFile *combined_bitmap_file = BufFileCreateTemp(false);
-			if (combined_bitmap_file != NULL)
-				elog(LOG, "ExecParallelHashJoinNewBatch. just BufFileCreateTemp combined_bitmap_file. participant %i. pid %i. File %i . batchno %i",
-					 sts_get_my_participant_number(outer_acc), MyProcPid, get_0_fileno(combined_bitmap_file), curbatch);
 			// This also closes the files opened in populate_outer_match_statuses
 			combine_outer_match_statuses(
-					outer_acc,
 					outer_match_statuses,
 					length,
 					BufFileBytesUsed(outer_match_statuses[0]),
 					curbatch,
-					&combined_bitmap_file); // is this working?
-			rewindFileIfExists(combined_bitmap_file); // TODO: do I need to flush this file?
+					&combined_bitmap_file);
 
 			hjstate->combined_bitmap = combined_bitmap_file;
 			hjstate->last_worker = true;
 			hjstate->parallel_hashloop_fallback = true;
 			hjstate->num_outer_read_files = length;
+			pfree(outer_match_statuses);
 			return true;
 		}
-
-		// TODO: can't get rid of this barrier, because each participant currently has to cleanup/close
-		// its own file descriptor for the outer_match_status file and it can't do that until the one worker
-		// has finished combining them. without this barrier, one worker will be working on the combining
-		// and the file will be ripped out from under him
-		// ideally, the one last worker can clean all of the files up for the other workers same as for outer
-		// batch file -- it seems like that should be the same/possible, but, not sure it can work
-		// double check how read/write_files work
-		// since I made a shared fileset, can each process access the others' file descriptors?
-
-		// everyone that is waiting here has a match status file
-		// the last worker should not reach here
-		BarrierArriveAndWait(&batch->batch_barrier,
-				WAIT_EVENT_HASH_BUILD_CREATE_OUTER_MATCH_STATUS_BITMAP_FILES);
+		/*
+		 * the elected combining worker should not reach here
+		 * TODO: when hashloop_fallback is implemented as a choice, only the below two lines should be executed for the normal (non-fallback) case
+		 */
 		hashtable->batches[curbatch].done = true;
 		ExecHashTableDetachBatch(hashtable);
 	}
@@ -1723,14 +1739,6 @@ ExecParallelHashJoinNewBatch(HashJoinState *hjstate)
 
 				case PHJ_BATCH_OUTER_MATCH_STATUS_PROCESSING:
 					elog(DEBUG3, "in PHJ_BATCH_OUTER_MATCH_STATUS_PROCESSING. done with batchno %i. process %i.", batchno, MyProcPid);
-					BarrierDetach(batch_barrier);
-					// The batch isn't done but this worker can't contribute anything to it so it might as well be done from this worker's perspective
-					hashtable->batches[batchno].done = true;
-					hashtable->curbatch = -1;
-					break;
-
-				case PHJ_TEST_BATCH:
-					elog(DEBUG3, "in PHJ_TEST_BATCH. done with batchno %i. process %i.", batchno, MyProcPid);
 					BarrierDetach(batch_barrier);
 					// The batch isn't done but this worker can't contribute anything to it so it might as well be done from this worker's perspective
 					hashtable->batches[batchno].done = true;
