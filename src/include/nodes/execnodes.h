@@ -1964,6 +1964,8 @@ typedef struct HashJoinState
 	BufFile **outer_read_files; // TODO: initialize and clean up
 	int current_outer_read_file;
 	int num_outer_read_files; // TODO: initialize
+
+	int batch_num_increases;
 } HashJoinState;
 
 
