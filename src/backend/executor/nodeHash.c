@@ -494,6 +494,7 @@ ExecHashTableCreate(HashState *state, List *hashOperators, List *hashCollations,
 	hashtable->skewBucketNums = NULL;
 	hashtable->nbatch = nbatch;
 	hashtable->curbatch = 0;
+	hashtable->batch_num_increases = 0;
 	hashtable->nbatch_original = nbatch;
 	hashtable->nbatch_outstart = nbatch;
 	hashtable->growEnabled = true;
@@ -1062,7 +1063,7 @@ ExecParallelHashIncreaseNumBatches(HashJoinTable hashtable)
 	int			i;
 
 	Assert(BarrierPhase(&pstate->build_barrier) == PHJ_BUILD_HASHING_INNER);
-
+	elog(NOTICE, "ExecParallelHashIncreaseNumBatches. pid %i.", MyProcPid);
 	/*
 	 * It's unlikely, but we need to be prepared for new participants to show
 	 * up while we're in the middle of this operation so we need to switch on
@@ -1086,8 +1087,9 @@ ExecParallelHashIncreaseNumBatches(HashJoinTable hashtable)
 				int			new_nbatch;
 				int			i;
 
-				/* Move the old batch out of the way. */
 				old_batch0 = hashtable->batches[0].shared;
+				hashtable->batch_num_increases = hashtable->batch_num_increases++;
+				/* Move the old batch out of the way. */
 				pstate->old_batches = pstate->batches;
 				pstate->old_nbatch = hashtable->nbatch;
 				pstate->batches = InvalidDsaPointer;
@@ -1217,6 +1219,7 @@ ExecParallelHashIncreaseNumBatches(HashJoinTable hashtable)
 			{
 				bool		space_exhausted = false;
 				bool		extreme_skew_detected = false;
+				bool		excessive_batch_num_increases = false;
 
 				/* Make sure that we have the current dimensions and buckets. */
 				ExecParallelHashEnsureBatchAccessors(hashtable);
@@ -1233,7 +1236,14 @@ ExecParallelHashIncreaseNumBatches(HashJoinTable hashtable)
 						int			parent;
 
 						space_exhausted = true;
+						elog(NOTICE, "in ExecParallelHashIncreaseNumBatches PHJ_GROW_BATCHES_DECIDING and space_exhausted.");
 
+						if (hashtable->batch_num_increases > 2) /* pick an arbitrary number for now */
+						{
+							batch->parallel_hashloop_fallback = true;
+							excessive_batch_num_increases = true;
+							elog(NOTICE, "set parallel_hashloop_fallback to true for batchno %i", i);
+						}
 						/*
 						 * Did this batch receive ALL of the tuples from its
 						 * parent batch?  That would indicate that further
@@ -1247,7 +1257,7 @@ ExecParallelHashIncreaseNumBatches(HashJoinTable hashtable)
 				}
 
 				/* Don't keep growing if it's not helping or we'd overflow. */
-				if (extreme_skew_detected || hashtable->nbatch >= INT_MAX / 2)
+				if (extreme_skew_detected || hashtable->nbatch >= INT_MAX / 2 || excessive_batch_num_increases)
 					pstate->growth = PHJ_GROWTH_DISABLED;
 				else if (space_exhausted)
 					pstate->growth = PHJ_GROWTH_NEED_MORE_BATCHES;
@@ -2933,7 +2943,7 @@ ExecParallelHashJoinSetUpBatches(HashJoinTable hashtable, int nbatch)
 		ParallelHashJoinBatch *shared = NthParallelHashJoinBatch(batches, i);
 		char		name[MAXPGPATH];
 
-		shared->parallel_hashloop_fallback = true; // TODO: initialize to false and set to true later
+		shared->parallel_hashloop_fallback = false;
 		/*
 		 * All members of shared were zero-initialized.  We just need to set
 		 * up the Barrier.

@@ -148,6 +148,7 @@ static TupleTableSlot *ExecHashJoinGetSavedTuple(HashJoinState *hjstate,
 
 static bool ExecHashJoinAdvanceBatch(HashJoinState *hjstate);
 static bool ExecHashJoinLoadInnerBatch(HashJoinState *hjstate);
+static bool ExecParallelCheckHashloopFallback(HashJoinState *hjstate, int batchno);
 static bool ExecParallelHashJoinNewBatch(HashJoinState *hjstate);
 static void ExecParallelHashJoinPartitionOuter(HashJoinState *node);
 
@@ -399,6 +400,7 @@ ExecHashJoinImpl(PlanState *pstate, bool parallel)
 				 * set to true until HJ_NEED_NEW_BATCH,
 				 * so need to handle batch 0 explicitly
 				 */
+				// TODO: handle parallel (once chunking is implemented)
 				if (node->hashloop_fallback == false || node->hj_InnerFirstChunk || hashtable->curbatch == 0)
 					node->hj_MatchedOuter = false;
 				econtext->ecxt_outertuple = outerTupleSlot;
@@ -413,6 +415,8 @@ ExecHashJoinImpl(PlanState *pstate, bool parallel)
 				node->hj_CurSkewBucketNo = ExecHashGetSkewBucket(hashtable,
 																 hashvalue);
 				node->hj_CurTuple = NULL;
+				// TODO: this is doing it for every outer tuple -- make it only do it for new batches
+				node->parallel_hashloop_fallback = ExecParallelCheckHashloopFallback(node, batchno);
 
 				/*
 				 * The tuple might not belong to the current batch (where
@@ -454,6 +458,7 @@ ExecHashJoinImpl(PlanState *pstate, bool parallel)
 					break;
 				}
 
+				// TODO: make this clear this not for parallel fallback
 				if (node->hashloop_fallback == true)
 				{
 					/* first tuple of new batch */
@@ -517,8 +522,8 @@ ExecHashJoinImpl(PlanState *pstate, bool parallel)
 					 * one or not, the next state is NEED_NEW_OUTER.
 					 */
 					node->hj_JoinState = HJ_NEED_NEW_OUTER;
-					// TODO: revert this back when I have better criteria for parallel case fallback
-					if ((node->hj_HashTable->curbatch == 0 || node->hashloop_fallback == false) && !parallel)
+					if ((node->hj_HashTable->curbatch == 0 || node->hashloop_fallback == false) ||
+						(parallel && node->parallel_hashloop_fallback == false))
 					{
 						TupleTableSlot *slot = emitUnmatchedOuterTuple(otherqual, econtext, node);
 						if (slot != NULL)
@@ -565,7 +570,7 @@ ExecHashJoinImpl(PlanState *pstate, bool parallel)
 					 */
 					// TODO: for parallel, do I still need to do this for batch 0
 					//if (parallel && batchno > 0)
-					if (parallel)
+					if (parallel && node->parallel_hashloop_fallback == true)
 					{
 						// TODO: make this only when it is fallback case
 						unsigned char current_outer_byte;
@@ -614,6 +619,7 @@ ExecHashJoinImpl(PlanState *pstate, bool parallel)
 						BufFileWrite(parallel_outer_matchstatuses, &current_outer_byte, 1);
 					}
 
+					// TODO: make it clear this is just for serial fallback case
 					else if (node->hj_OuterMatchStatusesFile != NULL)
 					{
 						Assert(node->hashloop_fallback == true);
@@ -682,7 +688,7 @@ ExecHashJoinImpl(PlanState *pstate, bool parallel)
 				{
 					if (!ExecParallelHashJoinNewBatch(node))
 						return NULL;	/* end of parallel-aware join */
-					if (node->last_worker && HJ_FILL_OUTER(node))
+					if (node->last_worker == true && HJ_FILL_OUTER(node) && node->parallel_hashloop_fallback == true)
 					{
 						node->last_worker = false;
 						node->hj_JoinState = HJ_ADAPTIVE_EMIT_UNMATCHED_OUTER_INIT;
@@ -726,6 +732,7 @@ ExecHashJoinImpl(PlanState *pstate, bool parallel)
 
 				elog(DEBUG3, "HJ_NEED_NEW_INNER_CHUNK");
 
+				// TODO: make this work for parallel case (chunking)
 				/*
 				 * there were never chunks because this is the normal case (not
 				 * hashloop fallback) or this is batch 0. batch 0 cannot have
@@ -781,6 +788,11 @@ ExecHashJoinImpl(PlanState *pstate, bool parallel)
 
 				if (parallel)
 				{
+					if (node->parallel_hashloop_fallback == false)
+					{
+						node->hj_JoinState = HJ_NEED_NEW_BATCH;
+						break;
+					}
 					SharedTuplestoreAccessor *outer_acc = hashtable->batches[hashtable->curbatch].outer_tuples;
 					sts_reinitialize(outer_acc);
 					sts_begin_parallel_scan(outer_acc);
@@ -858,6 +870,7 @@ ExecHashJoinImpl(PlanState *pstate, bool parallel)
 
 					if (tuple == NULL)
 					{
+						// TODO: do I need to do any of this for the parallel non-fallback case?
 						sts_end_parallel_scan(outer_acc);
 						node->hj_JoinState = HJ_NEED_NEW_BATCH;
 						break;
@@ -1551,6 +1564,18 @@ static bool ExecHashJoinLoadInnerBatch(HashJoinState *hjstate)
 	return false;
 }
 
+static bool
+ExecParallelCheckHashloopFallback(HashJoinState *hjstate, int batchno)
+{
+	HashJoinTable hashtable = hjstate->hj_HashTable;
+	int curbatch = hashtable->curbatch;
+	if (curbatch != batchno)
+		elog(ERROR, "curbatch != batchno in ExecParallelCheckHashloopFallback");
+	ParallelHashJoinBatchAccessor *accessor = hashtable->batches + curbatch;
+	ParallelHashJoinBatch *batch = accessor->shared;
+	return batch->parallel_hashloop_fallback;
+}
+
 /*
  * Choose a batch to work on, and attach to it.  Returns true if successful,
  * false if there are no more batches.
@@ -1593,6 +1618,7 @@ ExecParallelHashJoinNewBatch(HashJoinState *hjstate)
 	 * caller. So when this function is reentered with a curbatch >= 0 then we must
 	 * be done probing.
 	 */
+	// TODO: make fallback stuff only for fallback case
 	if (hashtable->curbatch >= 0)
 	{
 
@@ -1642,7 +1668,7 @@ ExecParallelHashJoinNewBatch(HashJoinState *hjstate)
 
 			hjstate->combined_bitmap = combined_bitmap_file;
 			hjstate->last_worker = true;
-			hjstate->parallel_hashloop_fallback = true;
+			hjstate->parallel_hashloop_fallback = false;
 			hjstate->num_outer_read_files = length;
 			pfree(outer_match_statuses);
 			return true;
