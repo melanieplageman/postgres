@@ -494,7 +494,6 @@ ExecHashTableCreate(HashState *state, List *hashOperators, List *hashCollations,
 	hashtable->skewBucketNums = NULL;
 	hashtable->nbatch = nbatch;
 	hashtable->curbatch = 0;
-	hashtable->batch_num_increases = 0;
 	hashtable->nbatch_original = nbatch;
 	hashtable->nbatch_outstart = nbatch;
 	hashtable->growEnabled = true;
@@ -1063,7 +1062,9 @@ ExecParallelHashIncreaseNumBatches(HashJoinTable hashtable)
 	int			i;
 
 	Assert(BarrierPhase(&pstate->build_barrier) == PHJ_BUILD_HASHING_INNER);
-	elog(NOTICE, "ExecParallelHashIncreaseNumBatches. pid %i.", MyProcPid);
+	pstate->num_batch_increases++;
+	elog(NOTICE, "ExecParallelHashIncreaseNumBatches. pstate->num_batch_increases for this parallel hashjoin %i. pid %i.",
+			pstate->num_batch_increases, MyProcPid);
 	/*
 	 * It's unlikely, but we need to be prepared for new participants to show
 	 * up while we're in the middle of this operation so we need to switch on
@@ -1088,7 +1089,11 @@ ExecParallelHashIncreaseNumBatches(HashJoinTable hashtable)
 				int			i;
 
 				old_batch0 = hashtable->batches[0].shared;
-				hashtable->batch_num_increases = hashtable->batch_num_increases++;
+				//old_batch0->batch_num_increases++;
+				//elog(NOTICE, "in ExecParallelHashIncreaseNumBatches PHJ_GROW_BATCHES_ELECTING. num_increases is %i. pid is %i",
+				//		old_batch0->batch_num_increases, MyProcPid);
+				//if (old_batch0->batch_num_increases >= 3)
+				//	elog(ERROR, "should not be repartitioning a batch with more than 3 increases");
 				/* Move the old batch out of the way. */
 				pstate->old_batches = pstate->batches;
 				pstate->old_nbatch = hashtable->nbatch;
@@ -1225,11 +1230,21 @@ ExecParallelHashIncreaseNumBatches(HashJoinTable hashtable)
 				ExecParallelHashEnsureBatchAccessors(hashtable);
 				ExecParallelHashTableSetCurrentBatch(hashtable, 0);
 
+				if (pstate->num_batch_increases >= 2)
+				{
+					excessive_batch_num_increases = true;
+				}
 				/* Are any of the new generation of batches exhausted? */
 				for (i = 0; i < hashtable->nbatch; ++i)
 				{
 					ParallelHashJoinBatch *batch = hashtable->batches[i].shared;
+					if (i == 7)
+					{
+						elog(NOTICE, "in ExecParallelHashIncreaseNumBatches. batch->estimated_size is %zu.", batch->estimated_size);
+					}
 
+					// TODO: hardcode this to make batch 7 have this property and then fix later
+					// TODO: need to make sure I have a test case that can exercise this (what happened to it)
 					if (batch->space_exhausted ||
 						batch->estimated_size > pstate->space_allowed)
 					{
@@ -1238,11 +1253,14 @@ ExecParallelHashIncreaseNumBatches(HashJoinTable hashtable)
 						space_exhausted = true;
 						elog(NOTICE, "in ExecParallelHashIncreaseNumBatches PHJ_GROW_BATCHES_DECIDING and space_exhausted.");
 
-						if (hashtable->batch_num_increases > 2) /* pick an arbitrary number for now */
+						// only once we've increased the number of batches overall many times should we start setting
+						// some batches to use the fallback strategy. Those that are still too big will have this option set
+						if (excessive_batch_num_increases == true)
 						{
 							batch->parallel_hashloop_fallback = true;
-							excessive_batch_num_increases = true;
+							// we better not repartition again (growth should be disabled), so that we don't overwrite this value
 							elog(NOTICE, "set parallel_hashloop_fallback to true for batchno %i", i);
+
 						}
 						/*
 						 * Did this batch receive ALL of the tuples from its
@@ -1257,7 +1275,9 @@ ExecParallelHashIncreaseNumBatches(HashJoinTable hashtable)
 				}
 
 				/* Don't keep growing if it's not helping or we'd overflow. */
-				if (extreme_skew_detected || hashtable->nbatch >= INT_MAX / 2 || excessive_batch_num_increases)
+				if (extreme_skew_detected || hashtable->nbatch >= INT_MAX / 2)
+					pstate->growth = PHJ_GROWTH_DISABLED;
+				else if (excessive_batch_num_increases && space_exhausted)
 					pstate->growth = PHJ_GROWTH_DISABLED;
 				else if (space_exhausted)
 					pstate->growth = PHJ_GROWTH_NEED_MORE_BATCHES;
@@ -2844,6 +2864,7 @@ ExecParallelHashTupleAlloc(HashJoinTable hashtable, size_t size,
 			chunk_size > pstate->space_allowed)
 		{
 			pstate->growth = PHJ_GROWTH_NEED_MORE_BATCHES;
+			//hashtable->batches[0].shared->batch_num_increases++; do it here later
 			hashtable->batches[0].shared->space_exhausted = true;
 			LWLockRelease(&pstate->lock);
 
@@ -2943,7 +2964,13 @@ ExecParallelHashJoinSetUpBatches(HashJoinTable hashtable, int nbatch)
 		ParallelHashJoinBatch *shared = NthParallelHashJoinBatch(batches, i);
 		char		name[MAXPGPATH];
 
-		shared->parallel_hashloop_fallback = false;
+		// TODO: This gets called every time we repartition, so it doesn't count as initialization so can't do here
+		if (pstate->num_batch_increases == 0)
+		{
+			shared->parallel_hashloop_fallback = false;
+			shared->batch_num_increases = 0;
+		}
+
 		/*
 		 * All members of shared were zero-initialized.  We just need to set
 		 * up the Barrier.
@@ -3340,6 +3367,7 @@ ExecParallelHashTuplePrealloc(HashJoinTable hashtable, int batchno, size_t size)
 		 */
 		batch->shared->space_exhausted = true;
 		pstate->growth = PHJ_GROWTH_NEED_MORE_BATCHES;
+		//batch->shared->batch_num_increases++; do it here later
 		LWLockRelease(&pstate->lock);
 
 		return false;

@@ -153,6 +153,7 @@ typedef struct ParallelHashJoinBatch
 	dsa_pointer buckets;		/* array of hash table buckets */
 	Barrier		batch_barrier;	/* synchronization for joining this batch */
 	bool		parallel_hashloop_fallback;
+	int		batch_num_increases;
 
 	dsa_pointer chunks;			/* chunks of tuples loaded */
 	size_t		size;			/* size of buckets + chunks in memory */
@@ -252,6 +253,7 @@ typedef struct ParallelHashJoinState
 	pg_atomic_uint32 distributor;	/* counter for load balancing */
 
 	SharedFileSet fileset;		/* space for shared temporary files */
+	int num_batch_increases;
 } ParallelHashJoinState;
 
 /* The phases for building batches, used by build_barrier. */

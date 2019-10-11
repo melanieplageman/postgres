@@ -414,9 +414,23 @@ ExecHashJoinImpl(PlanState *pstate, bool parallel)
 										  &node->hj_CurBucketNo, &batchno);
 				node->hj_CurSkewBucketNo = ExecHashGetSkewBucket(hashtable,
 																 hashvalue);
+
 				node->hj_CurTuple = NULL;
 				// TODO: this is doing it for every outer tuple -- make it only do it for new batches
-				node->parallel_hashloop_fallback = ExecParallelCheckHashloopFallback(node, batchno);
+				if (parallel)
+					node->parallel_hashloop_fallback = ExecParallelCheckHashloopFallback(node, batchno);
+				else
+					node->parallel_hashloop_fallback = false;
+
+				//if (node->parallel_hashloop_fallback == true)
+				if (parallel && node->hj_HashTable->batches[node->hj_HashTable->curbatch].shared->parallel_hashloop_fallback == true)
+				{
+					elog(NOTICE, "it is true");
+					elog(NOTICE, "very true");
+				}
+				//elog(NOTICE, "batchno %i. batch->parallel_hashloop_fallback %i", batchno, node->parallel_hashloop_fallback);
+				if (parallel)
+					elog(NOTICE, "in HJ_NEED_NEW_OUTER. batchno %i. batch->parallel_hashloop_fallback %i. pid %i.", batchno, node->hj_HashTable->batches[node->hj_HashTable->curbatch].shared->parallel_hashloop_fallback, MyProcPid);
 
 				/*
 				 * The tuple might not belong to the current batch (where
@@ -451,6 +465,7 @@ ExecHashJoinImpl(PlanState *pstate, bool parallel)
 					break;
 				}
 
+				// TODO: why is both this and the thing above it here??
 				BufFile *outerFile = hashtable->outerBatchFile[batchno];
 				if (outerFile == NULL)
 				{
@@ -522,8 +537,21 @@ ExecHashJoinImpl(PlanState *pstate, bool parallel)
 					 * one or not, the next state is NEED_NEW_OUTER.
 					 */
 					node->hj_JoinState = HJ_NEED_NEW_OUTER;
-					if ((node->hj_HashTable->curbatch == 0 || node->hashloop_fallback == false) ||
-						(parallel && node->parallel_hashloop_fallback == false))
+					if (parallel)
+					{
+						//if (node->parallel_hashloop_fallback == false)
+						if (node->hj_HashTable->batches[node->hj_HashTable->curbatch].shared->parallel_hashloop_fallback == false)
+						{
+							elog(NOTICE, "in HJ_SCAN_BUCKET and parallel_hashloop_fallback is %i. batchno %i. emitting as we go. pid %i.",
+								 node->hj_HashTable->batches[node->hj_HashTable->curbatch].shared->parallel_hashloop_fallback, hashtable->curbatch, MyProcPid);
+									//node->parallel_hashloop_fallback, hashtable->curbatch);
+							TupleTableSlot *slot = emitUnmatchedOuterTuple(otherqual, econtext, node);
+							if (slot != NULL)
+								return slot;
+						}
+
+					}
+					else if (node->hj_HashTable->curbatch == 0 || node->hashloop_fallback == false)
 					{
 						TupleTableSlot *slot = emitUnmatchedOuterTuple(otherqual, econtext, node);
 						if (slot != NULL)
@@ -570,7 +598,10 @@ ExecHashJoinImpl(PlanState *pstate, bool parallel)
 					 */
 					// TODO: for parallel, do I still need to do this for batch 0
 					//if (parallel && batchno > 0)
-					if (parallel && node->parallel_hashloop_fallback == true)
+					bool fallback = false;
+					if (parallel)
+						fallback = node->hj_HashTable->batches[node->hj_HashTable->curbatch].shared->parallel_hashloop_fallback;
+					if (parallel && fallback == true)
 					{
 						// TODO: make this only when it is fallback case
 						unsigned char current_outer_byte;
@@ -686,11 +717,21 @@ ExecHashJoinImpl(PlanState *pstate, bool parallel)
 				 */
 				if (parallel)
 				{
+					// VIP TODO: need to find a way to be able to check the parallel_hashloop_fallback status that is on the actual
+					// batch when we try to advance to the next batch, we need to know if the batch we come out as having selected
+					// should be processed fallback style -- not sure I can do it out here
+					// the one in the node will not be correct here since workers can do batches as they please
 					if (!ExecParallelHashJoinNewBatch(node))
 						return NULL;	/* end of parallel-aware join */
-					if (node->last_worker == true && HJ_FILL_OUTER(node) && node->parallel_hashloop_fallback == true)
+					bool fallback = false;
+					if (parallel)
+						fallback = node->hj_HashTable->batches[node->hj_HashTable->curbatch].shared->parallel_hashloop_fallback;
+					elog(NOTICE, "in HJ_NEED_NEW_BATCH. batchno %i. batch->parallel_hashloop_fallback is %i. node->last_worker is %i. pid %i.",
+							hashtable->curbatch, fallback, node->last_worker, MyProcPid);
+					if (node->last_worker == true && HJ_FILL_OUTER(node) && fallback == true)
 					{
 						node->last_worker = false;
+						node->parallel_hashloop_fallback = false;
 						node->hj_JoinState = HJ_ADAPTIVE_EMIT_UNMATCHED_OUTER_INIT;
 						break;
 					}
@@ -788,7 +829,11 @@ ExecHashJoinImpl(PlanState *pstate, bool parallel)
 
 				if (parallel)
 				{
-					if (node->parallel_hashloop_fallback == false)
+					elog(NOTICE, "in HJ_ADAPTIVE_EMIT_UNMATCHED_OUTER_INIT. batchno %i. pid %i.", node->hj_HashTable->curbatch, MyProcPid);
+					bool fallback = false;
+					if (parallel)
+						fallback = node->hj_HashTable->batches[node->hj_HashTable->curbatch].shared->parallel_hashloop_fallback;
+					if (fallback == false)
 					{
 						node->hj_JoinState = HJ_NEED_NEW_BATCH;
 						break;
@@ -822,6 +867,7 @@ ExecHashJoinImpl(PlanState *pstate, bool parallel)
 				{
 					SharedTuplestoreAccessor *outer_acc = hashtable->batches[hashtable->curbatch].outer_tuples;
 					MinimalTuple tuple;
+					elog(NOTICE, "in HJ_ADAPTIVE_EMIT_UNMATCHED_OUTER. batchno %i. pid %i.", hashtable->curbatch, MyProcPid);
 
 					if (node->combined_bitmap == NULL)
 						// TODO: make this an error for now, since all outer match status files have to exist bc we always make them
@@ -880,6 +926,7 @@ ExecHashJoinImpl(PlanState *pstate, bool parallel)
 											   econtext->ecxt_outertuple,
 											   false);
 					econtext->ecxt_innertuple = node->hj_NullInnerTupleSlot;
+					elog(NOTICE, "in HJ_ADAPTIVE_EMIT_UNMATCHED_OUTER. emitting at the end of the batch. pid %i.", MyProcPid);
 					return ExecProject(node->js.ps.ps_ProjInfo);
 
 				}
@@ -1618,7 +1665,6 @@ ExecParallelHashJoinNewBatch(HashJoinState *hjstate)
 	 * caller. So when this function is reentered with a curbatch >= 0 then we must
 	 * be done probing.
 	 */
-	// TODO: make fallback stuff only for fallback case
 	if (hashtable->curbatch >= 0)
 	{
 
@@ -1631,54 +1677,71 @@ ExecParallelHashJoinNewBatch(HashJoinState *hjstate)
 		 * so that the last worker to arrive at that barrier can reinitialize the SharedTuplestore
 		 * for another parallel scan.
 		 */
+
+		// TODO:  do I still want to end the parallel scan even if parallel_hashloop_fallback is false?
 		sts_end_parallel_scan(accessor->outer_tuples);
 
-		BufFileClose(sts_get_my_STA_outerMatchStatuses(accessor->outer_tuples));
-
-		/*
-		 * If all workers (including this one) have finished probing the batch, one worker is elected to
-		 * Combine all the outer match status files from the workers who were attached to this batch
-		 * Loop through the outer match status files from all workers that were attached to this batch
-		 * Combine them into one bitmap
-		 * Use the bitmap, loop through the outer batch file again, and emit unmatched tuples
-		 */
-		// The batch files and outer match status files can be closed then
-
-		if (BarrierArriveAndWait(&batch->batch_barrier,
-								 WAIT_EVENT_HASH_BATCH_PROBING))
+		if (batch->parallel_hashloop_fallback == true)
 		{
-			SharedTuplestoreAccessor *outer_acc = accessor->outer_tuples;
+			// everybody does this
+			BufFileClose(sts_get_my_STA_outerMatchStatuses(accessor->outer_tuples));
 
-			//TODO: right? This doesn't work if I let the other workers move on -- the number of participants won't be right
-			int length = BarrierParticipants(&batch->batch_barrier);
-			//int length = sts_participants(outer_acc);
-			BufFile **outer_match_statuses = palloc(sizeof(BufFile *) * length);
-			char **outer_match_status_filenames = alloca(sizeof(char *) * length);
+			/*
+			 * If all workers (including this one) have finished probing the batch, one worker is elected to
+			 * Combine all the outer match status files from the workers who were attached to this batch
+			 * Loop through the outer match status files from all workers that were attached to this batch
+			 * Combine them into one bitmap
+			 * Use the bitmap, loop through the outer batch file again, and emit unmatched tuples
+			 */
 
-			populate_outer_match_statuses(outer_acc, outer_match_statuses, outer_match_status_filenames);
+			// The batch files and outer match status files can be closed then
 
-			BufFile *combined_bitmap_file = BufFileCreateTemp(false);
-			// This also closes the files opened in populate_outer_match_statuses
-			combine_outer_match_statuses(
-					outer_match_statuses,
-					length,
-					BufFileBytesUsed(outer_match_statuses[0]),
-					curbatch,
-					&combined_bitmap_file);
+			if (BarrierArriveAndWait(&batch->batch_barrier,
+									 WAIT_EVENT_HASH_BATCH_PROBING))
+			{
+				// on the elected combining worker should do this
+				SharedTuplestoreAccessor *outer_acc = accessor->outer_tuples;
 
-			hjstate->combined_bitmap = combined_bitmap_file;
-			hjstate->last_worker = true;
-			hjstate->parallel_hashloop_fallback = false;
-			hjstate->num_outer_read_files = length;
-			pfree(outer_match_statuses);
-			return true;
+				//TODO: right? This doesn't work if I let the other workers move on -- the number of participants won't be right
+				int length = BarrierParticipants(&batch->batch_barrier);
+				//int length = sts_participants(outer_acc);
+				BufFile **outer_match_statuses = palloc(sizeof(BufFile *) * length);
+				char **outer_match_status_filenames = alloca(sizeof(char *) * length);
+
+				populate_outer_match_statuses(outer_acc, outer_match_statuses, outer_match_status_filenames);
+
+				BufFile *combined_bitmap_file = BufFileCreateTemp(false);
+				// This also closes the files opened in populate_outer_match_statuses
+				combine_outer_match_statuses(
+						outer_match_statuses,
+						length,
+						BufFileBytesUsed(outer_match_statuses[0]),
+						curbatch,
+						&combined_bitmap_file);
+
+				hjstate->combined_bitmap = combined_bitmap_file;
+				hjstate->last_worker = true;
+				hjstate->parallel_hashloop_fallback = true;
+				hjstate->num_outer_read_files = length;
+				pfree(outer_match_statuses);
+				return true;
+			}
+
+			/*
+			 * the elected combining worker should not reach here
+			 */
+			hashtable->batches[curbatch].done = true;
+			ExecHashTableDetachBatch(hashtable);
 		}
-		/*
-		 * the elected combining worker should not reach here
-		 * TODO: when hashloop_fallback is implemented as a choice, only the below two lines should be executed for the normal (non-fallback) case
-		 */
-		hashtable->batches[curbatch].done = true;
-		ExecHashTableDetachBatch(hashtable);
+		else
+		{
+			// non fallback case
+
+			BarrierArriveAndWait(&batch->batch_barrier,
+								 WAIT_EVENT_HASH_BATCH_PROBING);
+			hashtable->batches[curbatch].done = true;
+			ExecHashTableDetachBatch(hashtable);
+		}
 	}
 
 	/*
@@ -1758,15 +1821,19 @@ ExecParallelHashJoinNewBatch(HashJoinState *hjstate)
 					// Create an outer match status file for this batch for this worker
 					// This file must be accessible to the other workers
 					// But *only* written to by this worker. Written to by this worker and readable by any worker
-					char outer_match_status_filename[MAXPGPATH];
-					sts_make_STA_outerMatchStatuses(hashtable->batches[batchno].outer_tuples, batchno, outer_match_status_filename);
-
+					if (hashtable->batches[batchno].shared->parallel_hashloop_fallback == true)
+					{
+						char outer_match_status_filename[MAXPGPATH];
+						sts_make_STA_outerMatchStatuses(hashtable->batches[batchno].outer_tuples, batchno, outer_match_status_filename);
+						hjstate->parallel_hashloop_fallback = true;
+					}
 					return true;
 
 				case PHJ_BATCH_OUTER_MATCH_STATUS_PROCESSING:
 					elog(DEBUG3, "in PHJ_BATCH_OUTER_MATCH_STATUS_PROCESSING. done with batchno %i. process %i.", batchno, MyProcPid);
 					BarrierDetach(batch_barrier);
-					// The batch isn't done but this worker can't contribute anything to it so it might as well be done from this worker's perspective
+					// The batch isn't done but this worker can't contribute anything to it
+					// so it might as well be done from this worker's perspective
 					hashtable->batches[batchno].done = true;
 					hashtable->curbatch = -1;
 					break;
@@ -2055,6 +2122,7 @@ ExecHashJoinInitializeDSM(HashJoinState *state, ParallelContext *pcxt)
 	 * and space_allowed.
 	 */
 	pstate->nbatch = 0;
+	pstate->num_batch_increases = 0;
 	pstate->space_allowed = 0;
 	pstate->batches = InvalidDsaPointer;
 	pstate->old_batches = InvalidDsaPointer;
