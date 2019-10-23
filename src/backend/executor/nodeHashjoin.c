@@ -425,12 +425,12 @@ ExecHashJoinImpl(PlanState *pstate, bool parallel)
 				//if (node->parallel_hashloop_fallback == true)
 				if (parallel && node->hj_HashTable->batches[node->hj_HashTable->curbatch].shared->parallel_hashloop_fallback == true)
 				{
-					elog(NOTICE, "it is true");
-					elog(NOTICE, "very true");
+//					elog(NOTICE, "it is true");
+//					elog(NOTICE, "very true");
 				}
 				//elog(NOTICE, "batchno %i. batch->parallel_hashloop_fallback %i", batchno, node->parallel_hashloop_fallback);
 				if (parallel)
-					elog(NOTICE, "in HJ_NEED_NEW_OUTER. batchno %i. batch->parallel_hashloop_fallback %i. pid %i.", batchno, node->hj_HashTable->batches[node->hj_HashTable->curbatch].shared->parallel_hashloop_fallback, MyProcPid);
+					elog(DEBUG3, "in HJ_NEED_NEW_OUTER. batchno %i. batch->parallel_hashloop_fallback %i. pid %i.", batchno, node->hj_HashTable->batches[node->hj_HashTable->curbatch].shared->parallel_hashloop_fallback, MyProcPid);
 
 				/*
 				 * The tuple might not belong to the current batch (where
@@ -458,6 +458,9 @@ ExecHashJoinImpl(PlanState *pstate, bool parallel)
 					/* Loop around, staying in HJ_NEED_NEW_OUTER state */
 					continue;
 				}
+				if (DatumGetInt32(outerTupleSlot->tts_values[0]) == 500)
+					elog(NOTICE, "later on in HJ_NEED_NEW_OUTER. tupleval 500. batchno %i. pid %i.",
+							batchno, MyProcPid);
 
 				if (hashtable->outerBatchFile == NULL)
 				{
@@ -673,6 +676,9 @@ ExecHashJoinImpl(PlanState *pstate, bool parallel)
 
 						BufFileWrite(node->hj_OuterMatchStatusesFile, &node->hj_OuterCurrentByte, 1);
 					}
+					if (DatumGetInt32(econtext->ecxt_outertuple->tts_values[0]) == 500)
+						elog(NOTICE, "emitting matched tupleval 500. batchno %i. pid %i.",
+							 node->hj_HashTable->curbatch, MyProcPid);
 					if (otherqual == NULL || ExecQual(otherqual, econtext))
 						return ExecProject(node->js.ps.ps_ProjInfo);
 					else
@@ -726,7 +732,7 @@ ExecHashJoinImpl(PlanState *pstate, bool parallel)
 					bool fallback = false;
 					if (parallel)
 						fallback = node->hj_HashTable->batches[node->hj_HashTable->curbatch].shared->parallel_hashloop_fallback;
-					elog(NOTICE, "in HJ_NEED_NEW_BATCH. batchno %i. batch->parallel_hashloop_fallback is %i. node->last_worker is %i. pid %i.",
+					elog(DEBUG3, "in HJ_NEED_NEW_BATCH. batchno %i. batch->parallel_hashloop_fallback is %i. node->last_worker is %i. pid %i.",
 							hashtable->curbatch, fallback, node->last_worker, MyProcPid);
 					if (node->last_worker == true && HJ_FILL_OUTER(node) && fallback == true)
 					{
@@ -829,7 +835,7 @@ ExecHashJoinImpl(PlanState *pstate, bool parallel)
 
 				if (parallel)
 				{
-					elog(NOTICE, "in HJ_ADAPTIVE_EMIT_UNMATCHED_OUTER_INIT. batchno %i. pid %i.", node->hj_HashTable->curbatch, MyProcPid);
+					elog(DEBUG3, "in HJ_ADAPTIVE_EMIT_UNMATCHED_OUTER_INIT. batchno %i. pid %i.", node->hj_HashTable->curbatch, MyProcPid);
 					bool fallback = false;
 					if (parallel)
 						fallback = node->hj_HashTable->batches[node->hj_HashTable->curbatch].shared->parallel_hashloop_fallback;
@@ -867,7 +873,7 @@ ExecHashJoinImpl(PlanState *pstate, bool parallel)
 				{
 					SharedTuplestoreAccessor *outer_acc = hashtable->batches[hashtable->curbatch].outer_tuples;
 					MinimalTuple tuple;
-					elog(NOTICE, "in HJ_ADAPTIVE_EMIT_UNMATCHED_OUTER. batchno %i. pid %i.", hashtable->curbatch, MyProcPid);
+					elog(NOTICE, "in HJ_ADAPTIVE_EMIT_UNMATCHED_OUTER. batchno %i. pid %i. emitting at end of batch.", hashtable->curbatch, MyProcPid);
 
 					if (node->combined_bitmap == NULL)
 						// TODO: make this an error for now, since all outer match status files have to exist bc we always make them
@@ -926,7 +932,7 @@ ExecHashJoinImpl(PlanState *pstate, bool parallel)
 											   econtext->ecxt_outertuple,
 											   false);
 					econtext->ecxt_innertuple = node->hj_NullInnerTupleSlot;
-					elog(NOTICE, "in HJ_ADAPTIVE_EMIT_UNMATCHED_OUTER. emitting at the end of the batch. pid %i.", MyProcPid);
+					elog(DEBUG3, "in HJ_ADAPTIVE_EMIT_UNMATCHED_OUTER. emitting at the end of the batch. pid %i.", MyProcPid);
 					return ExecProject(node->js.ps.ps_ProjInfo);
 
 				}
@@ -1424,7 +1430,8 @@ ExecParallelHashJoinOuterGetTuple(PlanState *outerNode,
 			slot = hjstate->hj_OuterTupleSlot;
 
 			uint32 final_tuplenum = sts_gettuplenum(outer_acc);
-			elog(DEBUG3, "ExecParallelHashJoinOuterGetTuple. final_tuplenum is %i. %i.%i.%i. tupval %i.", final_tuplenum, curbatch, tupleid, MyProcPid, DatumGetInt32(slot->tts_values[0]));
+			if (slot->tts_values[0] == 500)
+				elog(NOTICE, "ExecParallelHashJoinOuterGetTuple. final_tuplenum is %i. %i.%i.%i. tupleval %i. pid %i. batchno %i.", final_tuplenum, curbatch, tupleid, MyProcPid, DatumGetInt32(slot->tts_values[0]), MyProcPid, curbatch);
 
 			return slot;
 		}
@@ -1817,6 +1824,15 @@ ExecParallelHashJoinNewBatch(HashJoinState *hjstate)
 					elog(DEBUG3, "PHJ_BATCH_PROBING batch %i. pid %i.", batchno, MyProcPid);
 					ExecParallelHashTableSetCurrentBatch(hashtable, batchno);
 					sts_begin_parallel_scan(hashtable->batches[batchno].outer_tuples);
+					elog(NOTICE, "in need_new_batch about to start probing PHJ_BATCH_PROBING batchno %i. pid %i.", batchno, MyProcPid);
+					// print estimated size for batch 7
+					if (batchno == 7)
+					{
+						ParallelHashJoinBatch *phj_batch = hashtable->batches[batchno].shared;
+						size_t size = phj_batch->estimated_size;
+						elog(NOTICE, "In ExecParallelHashJoinNewBatch PHJ_BATCH_PROBING. For batchno 7, the estimated size is %zu. fallback is %i. pid %i.",
+								size, phj_batch->parallel_hashloop_fallback, MyProcPid);
+					}
 
 					// Create an outer match status file for this batch for this worker
 					// This file must be accessible to the other workers
@@ -2073,7 +2089,7 @@ ExecParallelHashJoinPartitionOuter(HashJoinState *hjstate)
 									  &batchno);
 			metadata.hashvalue = hashvalue;
 			sts_puttuple(hashtable->batches[batchno].outer_tuples,
-						 &metadata, mintup, true);
+						 &metadata, mintup, true, 0);
 
 			if (shouldFree)
 				heap_free_minimal_tuple(mintup);

@@ -28,7 +28,7 @@ typedef struct tupleMetadata tupleMetadata;
 struct tupleMetadata
 {
 	uint32 hashvalue;
-	int tuplenum;
+	int tuplenum; // reuse this as chunk number for inner side
 } __attribute__((packed));
 
 /*
@@ -60,7 +60,8 @@ extern void sts_begin_parallel_scan(SharedTuplestoreAccessor *accessor);
 extern void sts_end_parallel_scan(SharedTuplestoreAccessor *accessor);
 
 // TODO: this API is not great -- passing count_tuples flag. However, I don't want to count tuples for the inner side
-extern void sts_puttuple(SharedTuplestoreAccessor *accessor, void *meta_data, MinimalTuple tuple, bool count_tuples);
+extern void
+sts_puttuple(SharedTuplestoreAccessor *accessor, void *meta_data, MinimalTuple tuple, bool count_tuples, int chunk_num);
 extern uint32 sts_gettuplenum(SharedTuplestoreAccessor *accessor);
 extern int sts_get_my_participant_number(SharedTuplestoreAccessor *accessor);
 extern void sts_make_STA_outerMatchStatuses(SharedTuplestoreAccessor *accessor, int batchno, char *name);
