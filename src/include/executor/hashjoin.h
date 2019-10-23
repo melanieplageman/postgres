@@ -155,6 +155,10 @@ typedef struct ParallelHashJoinBatch
 	bool		parallel_hashloop_fallback;
 	int		batch_num_increases;
 
+	int 	total_num_chunks;
+	int		current_chunk_num;
+	size_t	estimated_chunk_size;
+
 	dsa_pointer chunks;			/* chunks of tuples loaded */
 	size_t		size;			/* size of buckets + chunks in memory */
 	size_t		estimated_size; /* size of buckets + chunks while writing */
