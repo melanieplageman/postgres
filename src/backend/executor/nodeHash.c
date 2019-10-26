@@ -1241,7 +1241,7 @@ ExecParallelHashIncreaseNumBatches(HashJoinTable hashtable)
 					ParallelHashJoinBatch *batch = hashtable->batches[i].shared;
 					if (i == 7)
 					{
-						elog(NOTICE, "in ExecParallelHashIncreaseNumBatches PHJ_GROW_BATCHES_DECIDING. batchno 7. batch->estimated_size is %zu. pid %i.", batch->estimated_size, MyProcPid);
+						elog(DEBUG3, "in ExecParallelHashIncreaseNumBatches PHJ_GROW_BATCHES_DECIDING. batchno 7. batch->estimated_size is %zu. pid %i.", batch->estimated_size, MyProcPid);
 					}
 
 					// TODO: hardcode this to make batch 7 have this property and then fix later
@@ -1831,7 +1831,7 @@ retry:
 		if (batchno == 7)
 		{
 			ParallelHashJoinBatchAccessor phj_batch_acc = hashtable->batches[batchno];
-			elog(NOTICE, "in ExecParallelHashTableInsert. batchno 7. estimated_size %zu. size %zu. estimated_chunk_size %zu . space_allowed %zu. ntuples %zu. old_ntuples %zu. pid %i. parallel_hashloop_fallback is %i. tupleval %i.",
+			elog(DEBUG3, "in ExecParallelHashTableInsert. batchno 7. estimated_size %zu. size %zu. estimated_chunk_size %zu . space_allowed %zu. ntuples %zu. old_ntuples %zu. pid %i. parallel_hashloop_fallback is %i. tupleval %i.",
 					phj_batch->estimated_size, phj_batch->size, phj_batch->estimated_chunk_size, pstate->space_allowed, phj_batch_acc.ntuples, phj_batch_acc.old_ntuples,  MyProcPid, phj_batch->parallel_hashloop_fallback, DatumGetInt32(slot->tts_values[0]));
 		}
 		// TODO: should I check batch estimated size here at all? do I care about that in the other place
@@ -3111,7 +3111,7 @@ ExecParallelHashJoinSetUpBatches(HashJoinTable hashtable, int nbatch)
 						   SHARED_TUPLESTORE_SINGLE_PASS,
 						   &pstate->fileset,
 						   name);
-		elog(NOTICE, "ExecParallelHashJoinSetUpBatches. just made a new batch batchno %i. estimated_size is %zu. pid %i.",
+		elog(DEBUG3, "ExecParallelHashJoinSetUpBatches. just made a new batch batchno %i. estimated_size is %zu. pid %i.",
 				i, batches[i].estimated_size, MyProcPid);
 	}
 
@@ -3448,7 +3448,7 @@ ExecParallelHashTuplePrealloc(HashJoinTable hashtable, int batchno, size_t size)
 
 	if (batch->shared->estimated_size + want + HASH_CHUNK_HEADER_SIZE > pstate->space_allowed)
 	{
-		elog(NOTICE, "ExecParallelHashTuplePrealloc. batch estimated size + want exceeds space allowed. batch estimated size %zu. pid %i",
+		elog(DEBUG3, "ExecParallelHashTuplePrealloc. batch estimated size + want exceeds space allowed. batch estimated size %zu. pid %i",
 			 batch->shared->estimated_size, MyProcPid);
 	}
 	/* Has another participant commanded us to help grow? */
