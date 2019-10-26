@@ -1328,6 +1328,7 @@ ExecParallelHashRepartitionFirst(HashJoinTable hashtable)
 									  &bucketno, &batchno);
 
 			Assert(batchno < hashtable->nbatch);
+			// maybe chunk batch 0
 			if (batchno == 0)
 			{
 				/* It still belongs in batch 0.  Copy to a new chunk. */
@@ -1355,17 +1356,25 @@ ExecParallelHashRepartitionFirst(HashJoinTable hashtable)
 				LWLockAcquire(&pstate->lock, LW_EXCLUSIVE);
 
 				// TODO: should I check batch estimated size here at all? do I care about that in the other place
-				if (phj_batch->estimated_size + tuple_size > pstate->space_allowed)
+				if (phj_batch->estimated_chunk_size + tuple_size > pstate->space_allowed)
+					//if ((phj_batch->estimated_chunk_size * 3) + tuple_size > pstate->space_allowed)
+				//if (phj_batch->estimated_size + tuple_size > pstate->space_allowed)
 				{
-					phj_batch->current_chunk_num++;
 					phj_batch->total_num_chunks++;
 					phj_batch->estimated_chunk_size = tuple_size;
 				}
+				else
+				{
+					phj_batch->estimated_chunk_size += tuple_size;
+				}
 				LWLockRelease(&pstate->lock);
 
+				tupleMetadata metadata;
+				metadata.hashvalue = hashTuple->hashvalue;
+				metadata.tuplenum = phj_batch->total_num_chunks;
 				hashtable->batches[batchno].estimated_size += tuple_size;
 				sts_puttuple(hashtable->batches[batchno].inner_tuples,
-							 &hashTuple->hashvalue, tuple, false, phj_batch->current_chunk_num);
+							 &metadata, tuple, false, phj_batch->total_num_chunks);
 			}
 
 			/* Count this tuple. */
@@ -1417,12 +1426,17 @@ ExecParallelHashRepartitionRest(HashJoinTable hashtable)
 
 		/* Scan one partition from the previous generation. */
 		sts_begin_parallel_scan(old_inner_tuples[i]);
-		while ((tuple = sts_parallel_scan_next(old_inner_tuples[i], &hashvalue, false)))
+		// should I check the old chunk number?
+		tupleMetadata metadata;
+		int old_chunk_num = 0;
+		while ((tuple = sts_parallel_scan_next(old_inner_tuples[i], &metadata, false)))
 		{
 			size_t		tuple_size = MAXALIGN(HJTUPLE_OVERHEAD + tuple->t_len);
 			int			bucketno;
 			int			batchno;
 
+			hashvalue = metadata.hashvalue;
+			old_chunk_num = metadata.tuplenum;
 			/* Decide which partition it goes to in the new generation. */
 			ExecHashGetBucketAndBatch(hashtable, hashvalue, &bucketno,
 									  &batchno);
@@ -1436,19 +1450,26 @@ ExecParallelHashRepartitionRest(HashJoinTable hashtable)
 			// TODO: *** does having a lock on the pstate->lock help me at all with concurrent access to the chunk_num info?
 			LWLockAcquire(&pstate->lock, LW_EXCLUSIVE);
 
-			elog(NOTICE, "in ExecParallelHashRepartitionRest. old batchno %i. new batchno %i. current_chunk_num is %i. pid %i.",
-						i, batchno, phj_batch->current_chunk_num, MyProcPid);
+
 			// TODO: should I check batch estimated size here at all? do I care about that in the other place
-			if (phj_batch->estimated_size + tuple_size > pstate->space_allowed)
+//			if ((phj_batch->estimated_chunk_size * 3) + tuple_size > pstate->space_allowed)
+			//if (phj_batch->estimated_size + tuple_size > pstate->space_allowed)
+			if (phj_batch->estimated_chunk_size + tuple_size > pstate->space_allowed)
 			{
-				phj_batch->current_chunk_num++;
 				phj_batch->total_num_chunks++;
 				phj_batch->estimated_chunk_size = tuple_size;
 			}
+			else
+			{
+				phj_batch->estimated_chunk_size += tuple_size;
+			}
+			//elog(NOTICE, "in ExecParallelHashRepartitionRest. old batchno %i. new batchno %i. old_num_chunks is %i . total_num_chunks is %i . pid %i.",
+			//	 i, batchno, old_chunk_num, phj_batch->total_num_chunks, MyProcPid);
 			LWLockRelease(&pstate->lock);
+			metadata.tuplenum = phj_batch->total_num_chunks;
 			/* Store the tuple its new batch. */
 			sts_puttuple(hashtable->batches[batchno].inner_tuples,
-						 &hashvalue, tuple, false, phj_batch->current_chunk_num);
+						 &metadata, tuple, false, phj_batch->total_num_chunks);
 
 			CHECK_FOR_INTERRUPTS();
 		}
@@ -1756,12 +1777,9 @@ ExecParallelHashTableInsert(HashJoinTable hashtable,
 retry:
 	ExecHashGetBucketAndBatch(hashtable, hashvalue, &bucketno, &batchno);
 
-	if (DatumGetInt32(slot->tts_values[0]) == 500)
-	{
-		elog(NOTICE, "ExecParallelHashTableInsert. tupleval 500. batchno %i. pid %i.",
-				batchno, MyProcPid);
-	}
 	// TODO: figure out if I want to be able to chunk batch 0 for parallel
+	// Is this only for batch 0 before we've done any resizing?
+	// TODO: do I want the chunks for batch 0?
 	if (batchno == 0)
 	{
 		HashJoinTuple hashTuple;
@@ -1791,7 +1809,7 @@ retry:
 		size_t estimated_size = hashtable->batches[batchno].shared->estimated_size;
 		ParallelHashJoinState *pstate = hashtable->parallel_state;
 		size_t total_tuples = pstate->total_tuples;
-		size_t allowed_space = pstate->space_allowed;
+//		size_t allowed_space = pstate->space_allowed;
 		elog(NOTICE, "ExecParallelHashTableInsert. batchno %i. total_tuples %zu. estimated_size %zu. pid %i.",
 				batchno, total_tuples, estimated_size, MyProcPid);
 
@@ -1805,28 +1823,37 @@ retry:
 		Assert(hashtable->batches[batchno].preallocated >= tuple_size);
 		hashtable->batches[batchno].preallocated -= tuple_size;
 		ParallelHashJoinBatch *phj_batch = hashtable->batches[batchno].shared;
-
-		if (batchno == 7)
-		{
-			ParallelHashJoinBatchAccessor phj_batch_acc = hashtable->batches[batchno];
-			elog(NOTICE, "in ExecParallelHashTableInsert. batchno 7. estimated_size %zu. size %zu. ntuples %zu. old_ntuples %zu. pid %i. parallel_hashloop_fallback is %i.",
-					phj_batch->estimated_size, phj_batch->size, phj_batch_acc.ntuples, phj_batch_acc.old_ntuples,  MyProcPid, phj_batch->parallel_hashloop_fallback);
-		}
 		// TODO: do I need this lock?
 		// TODO: *** does having a lock on the pstate->lock help me at all with concurrent access to the chunk_num info?
 		LWLockAcquire(&pstate->lock, LW_EXCLUSIVE);
 
-		// TODO: should I check batch estimated size here at all? do I care about that in the other place
-		if (phj_batch->estimated_size + tuple_size > pstate->space_allowed)
+		if (batchno == 7)
 		{
-			phj_batch->current_chunk_num++;
+			ParallelHashJoinBatchAccessor phj_batch_acc = hashtable->batches[batchno];
+			elog(NOTICE, "in ExecParallelHashTableInsert. batchno 7. estimated_size %zu. size %zu. estimated_chunk_size %zu . space_allowed %zu. ntuples %zu. old_ntuples %zu. pid %i. parallel_hashloop_fallback is %i. tupleval %i.",
+					phj_batch->estimated_size, phj_batch->size, phj_batch->estimated_chunk_size, pstate->space_allowed, phj_batch_acc.ntuples, phj_batch_acc.old_ntuples,  MyProcPid, phj_batch->parallel_hashloop_fallback, DatumGetInt32(slot->tts_values[0]));
+		}
+		// TODO: should I check batch estimated size here at all? do I care about that in the other place
+		//if ((phj_batch->estimated_chunk_size * 3) + tuple_size > pstate->space_allowed)
+		//if (phj_batch->estimated_size + tuple_size > pstate->space_allowed)
+		if (phj_batch->estimated_chunk_size + tuple_size > pstate->space_allowed)
+		{
+			if (batchno == 7)
+				elog(NOTICE, "increasing total_num_chunks from %i to %i for batchno 7. pid %i. tupleval %i.", phj_batch->total_num_chunks, phj_batch->total_num_chunks + 1, MyProcPid, DatumGetInt32(slot->tts_values[0]));
 			phj_batch->total_num_chunks++;
 			phj_batch->estimated_chunk_size = tuple_size;
 		}
+		else
+		{
+			phj_batch->estimated_chunk_size += tuple_size;
+		}
 		LWLockRelease(&pstate->lock);
 
-		sts_puttuple(hashtable->batches[batchno].inner_tuples, &hashvalue,
-					 tuple, false, phj_batch->current_chunk_num);
+		tupleMetadata metadata;
+		metadata.hashvalue = hashvalue;
+		metadata.tuplenum = phj_batch->total_num_chunks;
+		sts_puttuple(hashtable->batches[batchno].inner_tuples, &metadata,
+					 tuple, false, phj_batch->total_num_chunks);
 	}
 	++hashtable->batches[batchno].ntuples;
 
@@ -1841,9 +1868,7 @@ retry:
  * tuples that belong in the current batch once growth has been disabled.
  */
 void
-ExecParallelHashTableInsertCurrentBatch(HashJoinTable hashtable,
-										TupleTableSlot *slot,
-										uint32 hashvalue)
+ExecParallelHashTableInsertCurrentBatch(HashJoinTable hashtable, TupleTableSlot *slot, uint32 hashvalue, int chunk_num)
 {
 	bool		shouldFree;
 	MinimalTuple tuple = ExecFetchSlotMinimalTuple(slot, &shouldFree);
@@ -1854,6 +1879,8 @@ ExecParallelHashTableInsertCurrentBatch(HashJoinTable hashtable,
 
 	ExecHashGetBucketAndBatch(hashtable, hashvalue, &bucketno, &batchno);
 	Assert(batchno == hashtable->curbatch);
+	//ParallelHashJoinBatch *phj_batch = hashtable->batches[batchno].shared;
+	// TODO: add some logic if the chunk num is different than the current chunk num
 	hashTuple = ExecParallelHashTupleAlloc(hashtable,
 										   HJTUPLE_OVERHEAD + tuple->t_len,
 										   &shared);
@@ -2112,9 +2139,6 @@ ExecParallelScanHashBucket(HashJoinState *hjstate,
 											 false);	/* do not pfree */
 			econtext->ecxt_innertuple = inntuple;
 
-			if (DatumGetInt32(inntuple->tts_values[0]) == 500)
-				elog(NOTICE, "ExecParallelScanHashBucket. tupleval 500. batchno %i. pid %i.",
-						hashtable->curbatch, MyProcPid);
 			if (ExecQualAndReset(hjclauses, econtext))
 			{
 				hjstate->hj_CurTuple = hashTuple;

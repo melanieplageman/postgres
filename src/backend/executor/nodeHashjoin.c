@@ -458,9 +458,9 @@ ExecHashJoinImpl(PlanState *pstate, bool parallel)
 					/* Loop around, staying in HJ_NEED_NEW_OUTER state */
 					continue;
 				}
-				if (DatumGetInt32(outerTupleSlot->tts_values[0]) == 500)
-					elog(NOTICE, "later on in HJ_NEED_NEW_OUTER. tupleval 500. batchno %i. pid %i.",
-							batchno, MyProcPid);
+//				if (DatumGetInt32(outerTupleSlot->tts_values[0]) == 500)
+//					elog(NOTICE, "later on in HJ_NEED_NEW_OUTER. tupleval 500. batchno %i. pid %i.",
+//							batchno, MyProcPid);
 
 				if (hashtable->outerBatchFile == NULL)
 				{
@@ -676,9 +676,9 @@ ExecHashJoinImpl(PlanState *pstate, bool parallel)
 
 						BufFileWrite(node->hj_OuterMatchStatusesFile, &node->hj_OuterCurrentByte, 1);
 					}
-					if (DatumGetInt32(econtext->ecxt_outertuple->tts_values[0]) == 500)
-						elog(NOTICE, "emitting matched tupleval 500. batchno %i. pid %i.",
-							 node->hj_HashTable->curbatch, MyProcPid);
+//					if (DatumGetInt32(econtext->ecxt_outertuple->tts_values[0]) == 500)
+//						elog(NOTICE, "emitting matched tupleval 500. batchno %i. pid %i.",
+//							 node->hj_HashTable->curbatch, MyProcPid);
 					if (otherqual == NULL || ExecQual(otherqual, econtext))
 						return ExecProject(node->js.ps.ps_ProjInfo);
 					else
@@ -1419,8 +1419,9 @@ ExecParallelHashJoinOuterGetTuple(PlanState *outerNode,
 		if (tuple != NULL)
 		{
 			SharedTuplestoreAccessor *outer_acc = hashtable->batches[curbatch].outer_tuples;
+			// where is this hashvalue being used?
 			*hashvalue = metadata.hashvalue;
-			tupleid = metadata.tuplenum; // change tuplenums to tupleid or similar to make less confusing
+			tupleid = metadata.tuplenum; // change tuplenums to tupleid or similar to make less confusing that it is used for inner and outer
 			ExecForceStoreMinimalTuple(tuple,
 									   hjstate->hj_OuterTupleSlot,
 									   false);
@@ -1429,9 +1430,9 @@ ExecParallelHashJoinOuterGetTuple(PlanState *outerNode,
 			//hjstate->js.ps.ps_ExprContext->ecxt_outertuple->tuplenum = tuplenum;
 			slot = hjstate->hj_OuterTupleSlot;
 
-			uint32 final_tuplenum = sts_gettuplenum(outer_acc);
-			if (slot->tts_values[0] == 500)
-				elog(NOTICE, "ExecParallelHashJoinOuterGetTuple. final_tuplenum is %i. %i.%i.%i. tupleval %i. pid %i. batchno %i.", final_tuplenum, curbatch, tupleid, MyProcPid, DatumGetInt32(slot->tts_values[0]), MyProcPid, curbatch);
+		//	uint32 final_tuplenum = sts_gettuplenum(outer_acc);
+//			if (DatumGetInt32(slot->tts_values[0]) == 500)
+//				elog(NOTICE, "ExecParallelHashJoinOuterGetTuple. final_tuplenum is %i. %i.%i.%i. tupleval %i. pid %i. batchno %i.", final_tuplenum, curbatch, tupleid, MyProcPid, DatumGetInt32(slot->tts_values[0]), MyProcPid, curbatch);
 
 			return slot;
 		}
@@ -1795,15 +1796,28 @@ ExecParallelHashJoinNewBatch(HashJoinState *hjstate)
 					ExecParallelHashTableSetCurrentBatch(hashtable, batchno);
 					inner_tuples = hashtable->batches[batchno].inner_tuples;
 					sts_begin_parallel_scan(inner_tuples);
+					tupleMetadata metadata;
+					int chunk_num = 0;
 					while ((tuple = sts_parallel_scan_next(inner_tuples,
-														   &hashvalue, false)))
+														   &metadata, false)))
 					{
+						hashvalue = metadata.hashvalue;
+						chunk_num = metadata.tuplenum;
+						elog(NOTICE, "chunk_num_before %i", chunk_num);
 						ExecForceStoreMinimalTuple(tuple,
 												   hjstate->hj_HashTupleSlot,
 												   false);
-						slot = hjstate->hj_HashTupleSlot;
+						slot = hjstate->hj_HashTupleSlot; // does this slot have the plain inner tuple or does it have a hashtable tuple
+						if (batchno == 7)
+							elog(NOTICE, "ExecParallelHashJoinNewBatch PHJ_BATCH_LOADING.  pid %i. batchno %i. chunk_num %i .", MyProcPid, batchno, chunk_num);
+						// TODO: make parallel safe
+						ParallelHashJoinBatch *phj_batch = hashtable->batches[batchno].shared;
+						// TODO: what should I do if they are not the same? should probably wait
+						// TODO: should I do this inside ExecParallelHashTableInsertCurrentBatch
+						phj_batch->current_chunk_num = chunk_num;
+						// TODO: need to insert chunk_num also, I think
 						ExecParallelHashTableInsertCurrentBatch(hashtable, slot,
-																hashvalue);
+																hashvalue, chunk_num);
 					}
 					sts_end_parallel_scan(inner_tuples);
 					BarrierArriveAndWait(batch_barrier,
@@ -1824,10 +1838,10 @@ ExecParallelHashJoinNewBatch(HashJoinState *hjstate)
 					elog(DEBUG3, "PHJ_BATCH_PROBING batch %i. pid %i.", batchno, MyProcPid);
 					ExecParallelHashTableSetCurrentBatch(hashtable, batchno);
 					sts_begin_parallel_scan(hashtable->batches[batchno].outer_tuples);
-					elog(NOTICE, "in need_new_batch about to start probing PHJ_BATCH_PROBING batchno %i. pid %i.", batchno, MyProcPid);
 					// print estimated size for batch 7
 					if (batchno == 7)
 					{
+						elog(NOTICE, "in need_new_batch about to start probing PHJ_BATCH_PROBING batchno %i. pid %i.", batchno, MyProcPid);
 						ParallelHashJoinBatch *phj_batch = hashtable->batches[batchno].shared;
 						size_t size = phj_batch->estimated_size;
 						elog(NOTICE, "In ExecParallelHashJoinNewBatch PHJ_BATCH_PROBING. For batchno 7, the estimated size is %zu. fallback is %i. pid %i.",
