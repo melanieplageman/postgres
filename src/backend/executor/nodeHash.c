@@ -1811,8 +1811,8 @@ retry:
 		ParallelHashJoinState *pstate = hashtable->parallel_state;
 		size_t total_tuples = pstate->total_tuples;
 //		size_t allowed_space = pstate->space_allowed;
-		elog(NOTICE, "ExecParallelHashTableInsert. batchno %i. total_tuples %zu. estimated_size %zu. pid %i.",
-				batchno, total_tuples, estimated_size, MyProcPid);
+	//	elog(NOTICE, "ExecParallelHashTableInsert. batchno %i. total_tuples %zu. estimated_size %zu. pid %i.",
+			//	batchno, total_tuples, estimated_size, MyProcPid);
 
 		/* Try to preallocate space in the batch if necessary. */
 		if (hashtable->batches[batchno].preallocated < tuple_size)
@@ -3097,7 +3097,7 @@ ExecParallelHashJoinSetUpBatches(HashJoinTable hashtable, int nbatch)
 			sts_initialize(ParallelHashJoinBatchInner(shared),
 						   pstate->nparticipants,
 						   ParallelWorkerNumber + 1,
-						   sizeof(uint32),
+						   sizeof(uint32) + sizeof(int),
 						   SHARED_TUPLESTORE_SINGLE_PASS,
 						   &pstate->fileset,
 						   name);

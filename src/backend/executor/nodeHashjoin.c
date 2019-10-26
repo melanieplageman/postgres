@@ -1803,7 +1803,6 @@ ExecParallelHashJoinNewBatch(HashJoinState *hjstate)
 					{
 						hashvalue = metadata.hashvalue;
 						chunk_num = metadata.tuplenum;
-						elog(NOTICE, "chunk_num_before %i", chunk_num);
 						ExecForceStoreMinimalTuple(tuple,
 												   hjstate->hj_HashTupleSlot,
 												   false);
