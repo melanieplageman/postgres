@@ -425,8 +425,6 @@ ExecHashJoinImpl(PlanState *pstate, bool parallel)
 				//if (node->parallel_hashloop_fallback == true)
 				if (parallel && node->hj_HashTable->batches[node->hj_HashTable->curbatch].shared->parallel_hashloop_fallback == true)
 				{
-//					elog(NOTICE, "it is true");
-//					elog(NOTICE, "very true");
 				}
 				//elog(NOTICE, "batchno %i. batch->parallel_hashloop_fallback %i", batchno, node->parallel_hashloop_fallback);
 				if (parallel)
@@ -1807,15 +1805,16 @@ ExecParallelHashJoinNewBatch(HashJoinState *hjstate)
 												   hjstate->hj_HashTupleSlot,
 												   false);
 						slot = hjstate->hj_HashTupleSlot; // does this slot have the plain inner tuple or does it have a hashtable tuple
-						if (batchno == 7)
-							elog(NOTICE, "ExecParallelHashJoinNewBatch PHJ_BATCH_LOADING.  pid %i. batchno %i. chunk_num %i .", MyProcPid, batchno, chunk_num);
-						// TODO: make parallel safe
 						ParallelHashJoinBatch *phj_batch = hashtable->batches[batchno].shared;
+						if (batchno == 7 && phj_batch->current_chunk_num != chunk_num)
+							elog(DEBUG3, "ExecParallelHashJoinNewBatch PHJ_BATCH_LOADING.  pid %i. batchno %i. chunk_num %i .", MyProcPid, batchno, chunk_num);
+						// TODO: make parallel safe
 						// TODO: what should I do if they are not the same? should probably wait
 						// TODO: should I do this inside ExecParallelHashTableInsertCurrentBatch
-						phj_batch->current_chunk_num = chunk_num;
+						//phj_batch->current_chunk_num = chunk_num;
 						// TODO: need to insert chunk_num also, I think
-						ExecParallelHashTableInsertCurrentBatch(hashtable, slot,
+					//	if (chunk_num == phj_batch->current_chunk_num)
+							ExecParallelHashTableInsertCurrentBatch(hashtable, slot,
 																hashvalue, chunk_num);
 					}
 					sts_end_parallel_scan(inner_tuples);
@@ -1840,7 +1839,6 @@ ExecParallelHashJoinNewBatch(HashJoinState *hjstate)
 					// print estimated size for batch 7
 					if (batchno == 7)
 					{
-						elog(NOTICE, "in need_new_batch about to start probing PHJ_BATCH_PROBING batchno %i. pid %i.", batchno, MyProcPid);
 						ParallelHashJoinBatch *phj_batch = hashtable->batches[batchno].shared;
 						size_t size = phj_batch->estimated_size;
 						elog(NOTICE, "In ExecParallelHashJoinNewBatch PHJ_BATCH_PROBING. For batchno 7, the estimated size is %zu. fallback is %i. pid %i.",
