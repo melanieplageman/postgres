@@ -152,7 +152,6 @@ static bool ExecParallelCheckHashloopFallback(HashJoinState *hjstate, int batchn
 static bool ExecParallelHashJoinNewBatch(HashJoinState *hjstate);
 static void ExecParallelHashJoinPartitionOuter(HashJoinState *node);
 
-static BufFile *rewindFileIfExists(BufFile *bufFile);
 static TupleTableSlot *emitUnmatchedOuterTuple(ExprState *otherqual,
 											   ExprContext *econtext,
 											   HashJoinState *hjstate);
@@ -422,14 +421,6 @@ ExecHashJoinImpl(PlanState *pstate, bool parallel)
 				else
 					node->parallel_hashloop_fallback = false;
 
-				//if (node->parallel_hashloop_fallback == true)
-				if (parallel && node->hj_HashTable->batches[node->hj_HashTable->curbatch].shared->parallel_hashloop_fallback == true)
-				{
-				}
-				//elog(NOTICE, "batchno %i. batch->parallel_hashloop_fallback %i", batchno, node->parallel_hashloop_fallback);
-				if (parallel)
-					elog(DEBUG3, "in HJ_NEED_NEW_OUTER. batchno %i. batch->parallel_hashloop_fallback %i. pid %i.", batchno, node->hj_HashTable->batches[node->hj_HashTable->curbatch].shared->parallel_hashloop_fallback, MyProcPid);
-
 				/*
 				 * The tuple might not belong to the current batch (where
 				 * "current batch" includes the skew buckets if any).
@@ -456,9 +447,6 @@ ExecHashJoinImpl(PlanState *pstate, bool parallel)
 					/* Loop around, staying in HJ_NEED_NEW_OUTER state */
 					continue;
 				}
-//				if (DatumGetInt32(outerTupleSlot->tts_values[0]) == 500)
-//					elog(NOTICE, "later on in HJ_NEED_NEW_OUTER. tupleval 500. batchno %i. pid %i.",
-//							batchno, MyProcPid);
 
 				if (hashtable->outerBatchFile == NULL)
 				{
@@ -545,7 +533,6 @@ ExecHashJoinImpl(PlanState *pstate, bool parallel)
 						{
 							elog(NOTICE, "in HJ_SCAN_BUCKET and parallel_hashloop_fallback is %i. batchno %i. emitting as we go. pid %i.",
 								 node->hj_HashTable->batches[node->hj_HashTable->curbatch].shared->parallel_hashloop_fallback, hashtable->curbatch, MyProcPid);
-									//node->parallel_hashloop_fallback, hashtable->curbatch);
 							TupleTableSlot *slot = emitUnmatchedOuterTuple(otherqual, econtext, node);
 							if (slot != NULL)
 								return slot;
@@ -674,9 +661,6 @@ ExecHashJoinImpl(PlanState *pstate, bool parallel)
 
 						BufFileWrite(node->hj_OuterMatchStatusesFile, &node->hj_OuterCurrentByte, 1);
 					}
-//					if (DatumGetInt32(econtext->ecxt_outertuple->tts_values[0]) == 500)
-//						elog(NOTICE, "emitting matched tupleval 500. batchno %i. pid %i.",
-//							 node->hj_HashTable->curbatch, MyProcPid);
 					if (otherqual == NULL || ExecQual(otherqual, econtext))
 						return ExecProject(node->js.ps.ps_ProjInfo);
 					else
@@ -767,7 +751,7 @@ ExecHashJoinImpl(PlanState *pstate, bool parallel)
 					if (!ExecHashJoinAdvanceBatch(node))
 						return NULL;    /* end of parallel-oblivious join */
 
-					if (rewindFileIfExists(node->hj_HashTable->outerBatchFile[node->hj_HashTable->curbatch]) != NULL)
+					if (BufFileRewindIfExists(node->hj_HashTable->outerBatchFile[node->hj_HashTable->curbatch]) != NULL)
 						ExecHashJoinLoadInnerBatch(node); /* TODO: should I ever load inner when outer file is not present? */
 				}
 				node->hj_JoinState = HJ_NEED_NEW_OUTER;
@@ -820,9 +804,9 @@ ExecHashJoinImpl(PlanState *pstate, bool parallel)
 				 */
 				node->hj_JoinState = HJ_NEED_NEW_OUTER;
 
-				if (rewindFileIfExists(node->hj_HashTable->outerBatchFile[node->hj_HashTable->curbatch]) == NULL)
+				if (BufFileRewindIfExists(node->hj_HashTable->outerBatchFile[node->hj_HashTable->curbatch]) == NULL)
 					break; /* TODO: Is breaking here the right thing to do when outer file is not present? */
-				rewindFileIfExists(node->hj_OuterMatchStatusesFile);
+				BufFileRewindIfExists(node->hj_OuterMatchStatusesFile);
 				node->hj_OuterTupleCount = 0;
 				ExecHashJoinLoadInnerBatch(node);
 				break;
@@ -849,7 +833,7 @@ ExecHashJoinImpl(PlanState *pstate, bool parallel)
 				else
 				{
 					node->hj_OuterTupleCount = 0;
-					rewindFileIfExists(node->hj_OuterMatchStatusesFile);
+					BufFileRewindIfExists(node->hj_OuterMatchStatusesFile);
 
 					/* TODO: is it okay to use the hashtable to get the outer batch file here? */
 					outerFileForAdaptiveRead = hashtable->outerBatchFile[hashtable->curbatch];
@@ -858,7 +842,7 @@ ExecHashJoinImpl(PlanState *pstate, bool parallel)
 						node->hj_JoinState = HJ_NEED_NEW_BATCH;
 						break;
 					}
-					rewindFileIfExists(outerFileForAdaptiveRead);
+					BufFileRewindIfExists(outerFileForAdaptiveRead);
 				}
 
 				node->hj_JoinState = HJ_ADAPTIVE_EMIT_UNMATCHED_OUTER;
@@ -1215,18 +1199,6 @@ ExecEndHashJoin(HashJoinState *node)
 	ExecEndNode(innerPlanState(node));
 }
 
-static BufFile *rewindFileIfExists(BufFile *bufFile)
-{
-	if (bufFile != NULL)
-	{
-		if (BufFileSeek(bufFile, 0, 0L, SEEK_SET))
-			ereport(ERROR,
-				(errcode_for_file_access(),
-					errmsg("could not rewind hash-join temporary file: %m")));
-		return bufFile;
-	}
-	return NULL;
-}
 
 static TupleTableSlot *
 emitUnmatchedOuterTuple(ExprState *otherqual, ExprContext *econtext, HashJoinState *hjstate)

@@ -987,3 +987,16 @@ BufFileAppend(BufFile *target, BufFile *source)
 
 	return startBlock;
 }
+
+BufFile *BufFileRewindIfExists(BufFile *bufFile)
+{
+	if (bufFile != NULL)
+	{
+		if (BufFileSeek(bufFile, 0, 0L, SEEK_SET))
+			ereport(ERROR,
+					(errcode_for_file_access(),
+							errmsg("could not rewind hash-join temporary file: %m")));
+		return bufFile;
+	}
+	return NULL;
+}
