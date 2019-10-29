@@ -775,22 +775,7 @@ ExecHashJoinImpl(PlanState *pstate, bool parallel)
 
 				elog(DEBUG3, "HJ_NEED_NEW_INNER_CHUNK");
 
-				// TODO: make this work for parallel case (chunking)
-				/*
-				 * there were never chunks because this is the normal case (not
-				 * hashloop fallback) or this is batch 0. batch 0 cannot have
-				 * chunks. hashloop_fallback should always be false when
-				 * curbatch is 0 here. proceed to HJ_NEED_NEW_BATCH to either
-				 * advance to the next batch or complete the join
-				 */
-				if (node->hj_HashTable->curbatch == 0)
-				{
-					Assert(node->hashloop_fallback == false);
-					if(node->hj_InnerPageOffset != 0L)
-						elog(DEBUG1, "hj_InnerPageOffset is not reset to 0 on batch 0");
-				}
-
-				// TODO: this probably isn't the right way to hack in parallel here
+				// TODO: this probably isn't the right way to hack in parallel here, should probably change state machine
 				if (parallel)
 				{
 					int batchno = node->hj_HashTable->curbatch;
@@ -851,6 +836,20 @@ ExecHashJoinImpl(PlanState *pstate, bool parallel)
 					}
 				}
 // serial case (parallel case should never come here)
+				/*
+				 * there were never chunks because this is the normal case (not
+				 * hashloop fallback) or this is batch 0. batch 0 cannot have
+				 * chunks. hashloop_fallback should always be false when
+				 * curbatch is 0 here. proceed to HJ_NEED_NEW_BATCH to either
+				 * advance to the next batch or complete the join
+				 */
+				if (node->hj_HashTable->curbatch == 0) // don't do this check for parallel
+				{
+					Assert(node->hashloop_fallback == false);
+					if(node->hj_InnerPageOffset != 0L)
+						elog(DEBUG1, "hj_InnerPageOffset is not reset to 0 on batch 0");
+				}
+
 				if (node->hashloop_fallback == false)
 				{
 					node->hj_JoinState = HJ_NEED_NEW_BATCH;
