@@ -1351,9 +1351,7 @@ ExecParallelHashRepartitionFirst(HashJoinTable hashtable)
 				LWLockAcquire(&pstate->lock, LW_EXCLUSIVE);
 
 				// TODO: should I check batch estimated size here at all? do I care about that in the other place
-				if (phj_batch->estimated_chunk_size + tuple_size > pstate->space_allowed)
-					//if ((phj_batch->estimated_chunk_size * 3) + tuple_size > pstate->space_allowed)
-				//if (phj_batch->estimated_size + tuple_size > pstate->space_allowed)
+				if (phj_batch->parallel_hashloop_fallback == true && (phj_batch->estimated_chunk_size + tuple_size > pstate->space_allowed))
 				{
 					phj_batch->total_num_chunks++;
 					phj_batch->estimated_chunk_size = tuple_size;
@@ -1447,9 +1445,7 @@ ExecParallelHashRepartitionRest(HashJoinTable hashtable)
 
 
 			// TODO: should I check batch estimated size here at all? do I care about that in the other place
-//			if ((phj_batch->estimated_chunk_size * 3) + tuple_size > pstate->space_allowed)
-			//if (phj_batch->estimated_size + tuple_size > pstate->space_allowed)
-			if (phj_batch->estimated_chunk_size + tuple_size > pstate->space_allowed)
+			if (phj_batch->parallel_hashloop_fallback == true && (phj_batch->estimated_chunk_size + tuple_size > pstate->space_allowed))
 			{
 				phj_batch->total_num_chunks++;
 				phj_batch->estimated_chunk_size = tuple_size;
@@ -1821,7 +1817,7 @@ retry:
 					phj_batch->estimated_size, phj_batch->size, phj_batch->estimated_chunk_size, pstate->space_allowed, phj_batch_acc.ntuples, phj_batch_acc.old_ntuples,  MyProcPid, phj_batch->parallel_hashloop_fallback, DatumGetInt32(slot->tts_values[0]));
 		}
 		// TODO: should I check batch estimated size here at all? do I care about that in the other place
-		if (phj_batch->estimated_chunk_size + tuple_size > pstate->space_allowed)
+		if (phj_batch->parallel_hashloop_fallback == true && (phj_batch->estimated_chunk_size + tuple_size > pstate->space_allowed))
 		{
 			// FAVE_LOG
 			if (batchno == 7)

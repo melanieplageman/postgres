@@ -850,7 +850,7 @@ ExecHashJoinImpl(PlanState *pstate, bool parallel)
 						break;
 					}
 				}
-// serial case (parallel case should never come here
+// serial case (parallel case should never come here)
 				if (node->hashloop_fallback == false)
 				{
 					node->hj_JoinState = HJ_NEED_NEW_BATCH;
@@ -1887,8 +1887,8 @@ ExecParallelHashJoinNewBatch(HashJoinState *hjstate)
 						ParallelHashJoinBatch *phj_batch = hashtable->batches[batchno].shared;
 						size_t size = phj_batch->estimated_size;
 						// FAVE_LOG
-						elog(DEBUG3, "In ExecParallelHashJoinNewBatch PHJ_BATCH_PROBING. For batchno 7, the estimated size is %zu. fallback is %i. pid %i.",
-								size, phj_batch->parallel_hashloop_fallback, MyProcPid);
+						elog(DEBUG3, "In ExecParallelHashJoinNewBatch PHJ_BATCH_PROBING. For batchno 7, the estimated size is %zu. fallback is %i. total_num_chunks is %i . pid %i.",
+								size, phj_batch->parallel_hashloop_fallback, phj_batch->total_num_chunks, MyProcPid);
 					}
 
 					// Create an outer match status file for this batch for this worker
