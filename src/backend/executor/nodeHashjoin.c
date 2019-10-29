@@ -400,8 +400,18 @@ ExecHashJoinImpl(PlanState *pstate, bool parallel)
 				 * so need to handle batch 0 explicitly
 				 */
 				// TODO: handle parallel (once chunking is implemented)
-				if (node->hashloop_fallback == false || node->hj_InnerFirstChunk || hashtable->curbatch == 0)
-					node->hj_MatchedOuter = false;
+
+				if (parallel)
+				{
+					ParallelHashJoinBatch *phj_batch = node->hj_HashTable->batches[node->hj_HashTable->curbatch].shared;
+					if (phj_batch->parallel_hashloop_fallback == false || phj_batch->current_chunk_num == 1)
+						node->hj_MatchedOuter = false;
+				}
+				else
+				{
+					if (node->hashloop_fallback == false || node->hj_InnerFirstChunk || hashtable->curbatch == 0)
+						node->hj_MatchedOuter = false;
+				}
 				econtext->ecxt_outertuple = outerTupleSlot;
 
 				/*
@@ -716,7 +726,10 @@ ExecHashJoinImpl(PlanState *pstate, bool parallel)
 						fallback = node->hj_HashTable->batches[node->hj_HashTable->curbatch].shared->parallel_hashloop_fallback;
 					elog(DEBUG3, "in HJ_NEED_NEW_BATCH. batchno %i. batch->parallel_hashloop_fallback is %i. node->last_worker is %i. pid %i.",
 							hashtable->curbatch, fallback, node->last_worker, MyProcPid);
-					if (node->last_worker == true && HJ_FILL_OUTER(node) && fallback == true)
+					// TODO: does this need to be parallel-safe?
+
+					bool inner_exhausted = node->hj_InnerExhausted;
+					if (node->last_worker == true && HJ_FILL_OUTER(node) && fallback == true && inner_exhausted == true)
 					{
 						node->last_worker = false;
 						node->parallel_hashloop_fallback = false;
@@ -776,6 +789,66 @@ ExecHashJoinImpl(PlanState *pstate, bool parallel)
 						elog(DEBUG1, "hj_InnerPageOffset is not reset to 0 on batch 0");
 				}
 
+				// TODO: this probably isn't the right way to hack in parallel here
+				if (parallel)
+				{
+					int batchno = node->hj_HashTable->curbatch;
+					bool fallback = node->hj_HashTable->batches[batchno].shared->parallel_hashloop_fallback;
+					if (fallback == true)
+						elog(NOTICE, "HJ_NEED_NEW_INNER_CHUNK. fallback is true. batchno %i.", batchno);
+					ParallelHashJoinBatch *phj_batch = node->hj_HashTable->batches[batchno].shared;
+					if (phj_batch->current_chunk_num == phj_batch->total_num_chunks)
+					{
+						// if we came to need new chunk and we are on the last chunk, advance the batches
+						// TODO: do I want this backend local variable for this?
+						node->hj_InnerExhausted = true;
+						node->hj_JoinState = HJ_NEED_NEW_BATCH;
+						break;
+					}
+					// otherwise, we have more inner chunks
+					else
+					{
+						node->hj_JoinState = HJ_NEED_NEW_OUTER;
+
+						phj_batch->current_chunk_num++;
+
+						// rewind/reset outer tuplestore and rewind outer match status files
+						SharedTuplestoreAccessor *outer_tuples = hashtable->batches[hashtable->curbatch].outer_tuples;
+						sts_reinitialize(outer_tuples);
+						// maybe I need to do sts_end_write() and or something manual to make it so I can rewind the outer tuples tuplestore and also keep the bitmap
+						// or maybe just do sts_end_parallel_scan(outer_tuples);
+						// todo: make a version of sts_begin_parallel_scan() that doesn't null out the bitmap file
+						sts_begin_parallel_scan(outer_tuples);
+
+						// reset hashtable
+						ExecHashTableReset(hashtable);
+						// load the next chunk of inner tuples into the hashtable
+						MinimalTuple tuple;
+						TupleTableSlot *slot;
+						SharedTuplestoreAccessor *inner_tuples = hashtable->batches[batchno].inner_tuples;
+						sts_reinitialize(inner_tuples);
+						sts_begin_parallel_scan(inner_tuples);
+						tupleMetadata metadata;
+						int chunk_num = 0;
+						while ((tuple = sts_parallel_scan_next(inner_tuples,
+															   &metadata, false)))
+						{
+							hashvalue = metadata.hashvalue;
+							chunk_num = metadata.tuplenum;
+							ExecForceStoreMinimalTuple(tuple,
+													   node->hj_HashTupleSlot,
+													   false);
+							slot = node->hj_HashTupleSlot;
+
+							if (chunk_num == phj_batch->current_chunk_num)
+								ExecParallelHashTableInsertCurrentBatch(hashtable, slot,
+																		hashvalue, chunk_num);
+						}
+						sts_end_parallel_scan(inner_tuples);
+						break;
+					}
+				}
+// serial case (parallel case should never come here
 				if (node->hashloop_fallback == false)
 				{
 					node->hj_JoinState = HJ_NEED_NEW_BATCH;
@@ -960,6 +1033,11 @@ ExecHashJoinImpl(PlanState *pstate, bool parallel)
 					}
 				}
 				/* came here from HJ_NEED_NEW_BATCH, so go back there */
+				if (parallel)
+				{
+					sts_end_parallel_scan(hashtable->batches[hashtable->curbatch].outer_tuples);
+					sts_end_parallel_scan(hashtable->batches[hashtable->curbatch].inner_tuples);
+				}
 				node->hj_JoinState = HJ_NEED_NEW_BATCH;
 				break;
 
@@ -1778,14 +1856,13 @@ ExecParallelHashJoinNewBatch(HashJoinState *hjstate)
 												   false);
 						slot = hjstate->hj_HashTupleSlot; // does this slot have the plain inner tuple or does it have a hashtable tuple
 						ParallelHashJoinBatch *phj_batch = hashtable->batches[batchno].shared;
-						if (batchno == 7 && phj_batch->current_chunk_num != chunk_num)
-							elog(DEBUG3, "ExecParallelHashJoinNewBatch PHJ_BATCH_LOADING.  pid %i. batchno %i. chunk_num %i .", MyProcPid, batchno, chunk_num);
+						if (batchno == 7)
+							elog(DEBUG3, "ExecParallelHashJoinNewBatch PHJ_BATCH_LOADING.  pid %i. batchno %i. chunk_num %i . total_chunk_num is %i .", MyProcPid, batchno, chunk_num, phj_batch->total_num_chunks);
 						// TODO: make parallel safe
 						// TODO: what should I do if they are not the same? should probably wait
 						// TODO: should I do this inside ExecParallelHashTableInsertCurrentBatch
-						//phj_batch->current_chunk_num = chunk_num;
 						// TODO: need to insert chunk_num also, I think
-					//	if (chunk_num == phj_batch->current_chunk_num)
+						if (chunk_num == phj_batch->current_chunk_num)
 							ExecParallelHashTableInsertCurrentBatch(hashtable, slot,
 																hashvalue, chunk_num);
 					}
