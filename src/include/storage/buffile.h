@@ -62,4 +62,7 @@ extern char *BufFileGetName(BufFile *file);
 
 extern int	BufFileFlush(BufFile *file);
 
+
+extern BufFile *BufFileRewindIfExists(BufFile *bufFile);
+
 #endif							/* BUFFILE_H */
