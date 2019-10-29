@@ -1090,11 +1090,6 @@ ExecParallelHashIncreaseNumBatches(HashJoinTable hashtable)
 				int			i;
 
 				old_batch0 = hashtable->batches[0].shared;
-				//old_batch0->batch_num_increases++;
-				//elog(NOTICE, "in ExecParallelHashIncreaseNumBatches PHJ_GROW_BATCHES_ELECTING. num_increases is %i. pid is %i",
-				//		old_batch0->batch_num_increases, MyProcPid);
-				//if (old_batch0->batch_num_increases >= 3)
-				//	elog(ERROR, "should not be repartitioning a batch with more than 3 increases");
 				/* Move the old batch out of the way. */
 				pstate->old_batches = pstate->batches;
 				pstate->old_nbatch = hashtable->nbatch;
@@ -1464,8 +1459,6 @@ ExecParallelHashRepartitionRest(HashJoinTable hashtable)
 			{
 				phj_batch->estimated_chunk_size += tuple_size;
 			}
-			//elog(NOTICE, "in ExecParallelHashRepartitionRest. old batchno %i. new batchno %i. old_num_chunks is %i . total_num_chunks is %i . pid %i.",
-			//	 i, batchno, old_chunk_num, phj_batch->total_num_chunks, MyProcPid);
 			LWLockRelease(&pstate->lock);
 			metadata.tuplenum = phj_batch->total_num_chunks;
 			/* Store the tuple its new batch. */
@@ -1807,13 +1800,7 @@ retry:
 		size_t		tuple_size = MAXALIGN(HJTUPLE_OVERHEAD + tuple->t_len);
 
 		Assert(batchno > 0);
-		size_t estimated_size = hashtable->batches[batchno].shared->estimated_size;
 		ParallelHashJoinState *pstate = hashtable->parallel_state;
-		size_t total_tuples = pstate->total_tuples;
-//		size_t allowed_space = pstate->space_allowed;
-	//	elog(NOTICE, "ExecParallelHashTableInsert. batchno %i. total_tuples %zu. estimated_size %zu. pid %i.",
-			//	batchno, total_tuples, estimated_size, MyProcPid);
-
 		/* Try to preallocate space in the batch if necessary. */
 		if (hashtable->batches[batchno].preallocated < tuple_size)
 		{
@@ -1835,12 +1822,11 @@ retry:
 					phj_batch->estimated_size, phj_batch->size, phj_batch->estimated_chunk_size, pstate->space_allowed, phj_batch_acc.ntuples, phj_batch_acc.old_ntuples,  MyProcPid, phj_batch->parallel_hashloop_fallback, DatumGetInt32(slot->tts_values[0]));
 		}
 		// TODO: should I check batch estimated size here at all? do I care about that in the other place
-		//if ((phj_batch->estimated_chunk_size * 3) + tuple_size > pstate->space_allowed)
-		//if (phj_batch->estimated_size + tuple_size > pstate->space_allowed)
 		if (phj_batch->estimated_chunk_size + tuple_size > pstate->space_allowed)
 		{
+			// FAVE_LOG
 			if (batchno == 7)
-				elog(NOTICE, "increasing total_num_chunks from %i to %i for batchno 7. pid %i. tupleval %i.", phj_batch->total_num_chunks, phj_batch->total_num_chunks + 1, MyProcPid, DatumGetInt32(slot->tts_values[0]));
+				elog(DEBUG3, "increasing total_num_chunks from %i to %i for batchno 7. pid %i. tupleval %i.", phj_batch->total_num_chunks, phj_batch->total_num_chunks + 1, MyProcPid, DatumGetInt32(slot->tts_values[0]));
 			phj_batch->total_num_chunks++;
 			phj_batch->estimated_chunk_size = tuple_size;
 		}
