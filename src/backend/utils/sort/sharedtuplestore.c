@@ -254,6 +254,12 @@ sts_reinitialize(SharedTuplestoreAccessor *accessor)
 	for (i = 0; i < accessor->sts->nparticipants; ++i)
 	{
 		accessor->sts->participants[i].read_page = 0;
+		// rewind outer match status file
+		// TODO: do I need to do this? esp per participant
+		char bitmap_filename[MAXPGPATH];
+		sts_bitmap_filename(bitmap_filename, accessor, i);
+		BufFile *match_status_file = BufFileOpenSharedIfExists(accessor->fileset, bitmap_filename);
+		BufFileRewindIfExists(match_status_file);
 	}
 }
 
@@ -282,7 +288,7 @@ sts_begin_parallel_scan(SharedTuplestoreAccessor *accessor)
 	 */
 	accessor->read_participant = accessor->participant;
 	accessor->read_file = NULL;
-	accessor->outer_match_status_file = NULL;
+	//accessor->outer_match_status_file = NULL;
 	accessor->read_next_page = 0;
 }
 
