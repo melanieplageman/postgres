@@ -1,4 +1,5 @@
-
+create schema adaptive_hj;
+set search_path=adaptive_hj;
 drop table if exists t1;
 drop table if exists t2;
 create table t1(a int);
@@ -68,3 +69,4 @@ drop table t2;
 
 reset enable_mergejoin;
 reset work_mem;
+reset search_path;
