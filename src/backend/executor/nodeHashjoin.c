@@ -542,7 +542,7 @@ ExecHashJoinImpl(PlanState *pstate, bool parallel)
 						if (node->hj_HashTable->batches[node->hj_HashTable->curbatch].shared->parallel_hashloop_fallback == false)
 						{
 							// FAVE_LOG
-							elog(DEBUG3, "in HJ_SCAN_BUCKET and parallel_hashloop_fallback is %i. batchno %i. emitting as we go. pid %i.",
+							elog(NOTICE, "in HJ_SCAN_BUCKET and parallel_hashloop_fallback is %i. batchno %i. emitting as we go. pid %i.",
 								 node->hj_HashTable->batches[node->hj_HashTable->curbatch].shared->parallel_hashloop_fallback, hashtable->curbatch, MyProcPid);
 							TupleTableSlot *slot = emitUnmatchedOuterTuple(otherqual, econtext, node);
 							if (slot != NULL)
@@ -891,7 +891,12 @@ ExecHashJoinImpl(PlanState *pstate, bool parallel)
 
 				if (parallel)
 				{
-					elog(DEBUG3, "in HJ_ADAPTIVE_EMIT_UNMATCHED_OUTER_INIT. batchno %i. pid %i.", node->hj_HashTable->curbatch, MyProcPid);
+					ParallelHashJoinBatch *phj_batch = node->hj_HashTable->batches[node->hj_HashTable->curbatch].shared;
+					// PAHJ debugging
+					elog(NOTICE, "HJ_ADAPTIVE_EMIT_UNMATCHED_OUTER_INIT: parallel. batch %i falls back with %i chunks. pid %i.",
+							node->hj_HashTable->curbatch,
+							phj_batch->total_num_chunks,
+							MyProcPid);
 					bool fallback = false;
 					if (parallel)
 						fallback = node->hj_HashTable->batches[node->hj_HashTable->curbatch].shared->parallel_hashloop_fallback;
@@ -906,6 +911,8 @@ ExecHashJoinImpl(PlanState *pstate, bool parallel)
 				}
 				else
 				{
+					// AHJ debugging
+					elog(DEBUG3, "HJ_ADAPTIVE_EMIT_UNMATCHED_OUTER_INIT: serial. batch %i falls back with %i chunks.", hashtable->curbatch, node->serial_chunk_count);
 					node->hj_OuterTupleCount = 0;
 					BufFileRewindIfExists(node->hj_OuterMatchStatusesFile);
 
@@ -989,7 +996,11 @@ ExecHashJoinImpl(PlanState *pstate, bool parallel)
 											   econtext->ecxt_outertuple,
 											   false);
 					econtext->ecxt_innertuple = node->hj_NullInnerTupleSlot;
-					elog(DEBUG3, "in HJ_ADAPTIVE_EMIT_UNMATCHED_OUTER. emitting at the end of the batch. pid %i.", MyProcPid);
+					// PAHJ debugging
+					elog(NOTICE, "HJ_ADAPTIVE_EMIT_UNMATCHED_OUTER. parallel. emitting batch %i unmatched outer tuple value %i. pid %i",
+							hashtable->curbatch,
+							DatumGetInt32(econtext->ecxt_outertuple->tts_values[0]),
+							MyProcPid);
 					return ExecProject(node->js.ps.ps_ProjInfo);
 
 				}
@@ -1029,6 +1040,11 @@ ExecHashJoinImpl(PlanState *pstate, bool parallel)
 						 * if it is not a match
 						 * emit it NULL-extended
 						 */
+						// AHJ debugging
+						elog(DEBUG3, "HJ_ADAPTIVE_EMIT_UNMATCHED_OUTER. serial. emitting batch %i unmatched outer tuple value %i.",
+								node->hj_HashTable->curbatch,
+								DatumGetInt32(temp->tts_values[0])
+								);
 						econtext->ecxt_outertuple = temp;
 						econtext->ecxt_innertuple = node->hj_NullInnerTupleSlot;
 						return ExecProject(node->js.ps.ps_ProjInfo);
@@ -1294,6 +1310,7 @@ emitUnmatchedOuterTuple(ExprState *otherqual, ExprContext *econtext, HashJoinSta
 	 * Generate a fake join tuple with nulls for the inner
 	 * tuple, and return it if it passes the non-join quals.
 	 */
+	elog(NOTICE, "emitting outer tuple. fall back is false. value %i. batch %i. pid %i..", DatumGetInt32(econtext->ecxt_outertuple->tts_values[0]), hjstate->hj_HashTable->curbatch, MyProcPid);
 	if (otherqual == NULL || ExecQual(otherqual, econtext))
 		return ExecProject(hjstate->js.ps.ps_ProjInfo);
 
@@ -1576,6 +1593,7 @@ ExecHashJoinAdvanceBatch(HashJoinState *hjstate)
 	hjstate->hj_InnerPageOffset = 0L;
 	hjstate->hj_InnerFirstChunk = true;
 	hjstate->hashloop_fallback = false; /* new batch, so start it off false */
+	hjstate->serial_chunk_count = 1;
 	if (hjstate->hj_OuterMatchStatusesFile != NULL)
 		BufFileClose(hjstate->hj_OuterMatchStatusesFile);
 	hjstate->hj_OuterMatchStatusesFile = NULL;
@@ -1637,6 +1655,7 @@ static bool ExecHashJoinLoadInnerBatch(HashJoinState *hjstate)
 			{
 				hjstate->hj_InnerPageOffset = tup_start_offset;
 				hjstate->hashloop_fallback = true;
+				hjstate->serial_chunk_count++;
 				return true;
 			}
 			hjstate->hj_InnerPageOffset = tup_end_offset;
@@ -1837,6 +1856,18 @@ ExecParallelHashJoinNewBatch(HashJoinState *hjstate)
 					/* Start (or join in) loading tuples. */
 					elog(DEBUG3, "PHJ_BATCH_LOADING batch %i. pid %i.", batchno, MyProcPid);
 					ExecParallelHashTableSetCurrentBatch(hashtable, batchno);
+					ParallelHashJoinBatch *phj_batch = hashtable->batches[batchno].shared;
+					// FAVE_LOG show which workers are participating in loading tuples into a batch
+					if (phj_batch->parallel_hashloop_fallback == true)
+					{
+						elog(NOTICE, "PHJ_BATCH_LOADING. batch %i falls back with %i chunks. pid %i.",
+								batchno, phj_batch->total_num_chunks, MyProcPid);
+					}
+					else
+					{
+						elog(NOTICE, "PHJ_BATCH_LOADING. batch %i does not fall back with %i chunks. pid %i.",
+							 batchno, phj_batch->total_num_chunks, MyProcPid);
+					}
 					inner_tuples = hashtable->batches[batchno].inner_tuples;
 					sts_begin_parallel_scan(inner_tuples);
 					tupleMetadata metadata;
