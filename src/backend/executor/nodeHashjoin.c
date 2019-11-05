@@ -1908,7 +1908,6 @@ ExecParallelHashJoinNewBatch(HashJoinState *hjstate)
 												   hjstate->hj_HashTupleSlot,
 												   false);
 						slot = hjstate->hj_HashTupleSlot; // does this slot have the plain inner tuple or does it have a hashtable tuple
-						ParallelHashJoinBatch *phj_batch = hashtable->batches[batchno].shared;
 						if (batchno == 7)
 							elog(DEBUG3, "ExecParallelHashJoinNewBatch PHJ_BATCH_LOADING.  pid %i. batchno %i. chunk_num %i . total_chunk_num is %i .", MyProcPid, batchno, chunk_num, phj_batch->total_num_chunks);
 						// TODO: make parallel safe
@@ -1936,12 +1935,21 @@ ExecParallelHashJoinNewBatch(HashJoinState *hjstate)
 					 * PHJ_BATCH_DONE can be reached.
 					 */
 					elog(DEBUG3, "PHJ_BATCH_PROBING batch %i. pid %i.", batchno, MyProcPid);
+
 					ExecParallelHashTableSetCurrentBatch(hashtable, batchno);
+					phj_batch = hashtable->batches[batchno].shared;
+					// FAVE_LOG shows workers participating in probing a specific batch
+					if (phj_batch->parallel_hashloop_fallback == true)
+						elog(NOTICE, "PHJ_BATCH_PROBING. batch %i falls back with %i chunks. pid %i.",
+						 batchno, phj_batch->total_num_chunks, MyProcPid);
+					else
+						elog(NOTICE, "PHJ_BATCH_PROBING. batch %i does not fall back with %i chunks. pid %i.",
+							 batchno, phj_batch->total_num_chunks, MyProcPid);
 					sts_begin_parallel_scan(hashtable->batches[batchno].outer_tuples);
+
 					// print estimated size for batch 7
 					if (batchno == 7)
 					{
-						ParallelHashJoinBatch *phj_batch = hashtable->batches[batchno].shared;
 						size_t size = phj_batch->estimated_size;
 						// FAVE_LOG
 						elog(DEBUG3, "In ExecParallelHashJoinNewBatch PHJ_BATCH_PROBING. For batchno 7, the estimated size is %zu. fallback is %i. total_num_chunks is %i . pid %i.",
