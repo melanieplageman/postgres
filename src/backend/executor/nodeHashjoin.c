@@ -765,8 +765,21 @@ ExecHashJoinImpl(PlanState *pstate, bool parallel)
 					if (!ExecHashJoinAdvanceBatch(node))
 						return NULL;    /* end of parallel-oblivious join */
 
-					if (BufFileRewindIfExists(node->hj_HashTable->outerBatchFile[node->hj_HashTable->curbatch]) != NULL)
+					// TODO: need to find a better way to distinguish if I should load inner batch again than checking for outer batch file
+					// I need to also do this even if it is NULL when it is a ROJ
+					// need to load inner again if it is an inner or left outer join and there are outer tuples in the batch OR
+					// if it is a ROJ and there are inner tuples in the batch -- should never have no tuples in either batch...
+					if (BufFileRewindIfExists(node->hj_HashTable->outerBatchFile[node->hj_HashTable->curbatch]) != NULL ||
+							(node->hj_HashTable->innerBatchFile[node->hj_HashTable->curbatch] != NULL && HJ_FILL_INNER(node)))
+					{
 						ExecHashJoinLoadInnerBatch(node); /* TODO: should I ever load inner when outer file is not present? */
+					}
+					else
+					{
+						if (node->hj_HashTable->curbatch == 21)
+							elog(WARNING, "HJ_NEED_NEW_BATCH. skipping loading batch 21. HJ_FILL_INNER is %i.", HJ_FILL_INNER(node));
+					}
+
 				}
 				node->hj_JoinState = HJ_NEED_NEW_OUTER;
 				break;
@@ -878,11 +891,25 @@ ExecHashJoinImpl(PlanState *pstate, bool parallel)
 				 */
 				node->hj_JoinState = HJ_NEED_NEW_OUTER;
 
-				if (BufFileRewindIfExists(node->hj_HashTable->outerBatchFile[node->hj_HashTable->curbatch]) == NULL)
-					break; /* TODO: Is breaking here the right thing to do when outer file is not present? */
-				BufFileRewindIfExists(node->hj_OuterMatchStatusesFile);
-				node->hj_OuterTupleCount = 0;
-				ExecHashJoinLoadInnerBatch(node);
+
+				// TODO: need to find a better way to distinguish if I should load inner batch again than checking for outer batch file
+				// I need to also do this even if it is NULL when it is a ROJ
+				// need to load inner again if it is an inner or left outer join and there are outer tuples in the batch OR
+				// if it is a ROJ and there are inner tuples in the batch -- should never have no tuples in either batch...
+				// TODO: is this right?
+				// if outer is not null or if it is a ROJ and inner is not null, must rewind outer match status and load inner
+				if (BufFileRewindIfExists(node->hj_HashTable->outerBatchFile[node->hj_HashTable->curbatch]) != NULL ||
+					(node->hj_HashTable->innerBatchFile[node->hj_HashTable->curbatch] != NULL && HJ_FILL_INNER(node)))
+				{
+					BufFileRewindIfExists(node->hj_OuterMatchStatusesFile);
+					node->hj_OuterTupleCount = 0;
+					ExecHashJoinLoadInnerBatch(node);
+				}
+				else
+				{
+					if (node->hj_HashTable->curbatch == 21)
+						elog(WARNING, "HJ_NEED_NEW_INNER_CHUNK. skipping loading batch 21");
+				}
 				break;
 
 			case HJ_ADAPTIVE_EMIT_UNMATCHED_OUTER_INIT:
