@@ -1965,6 +1965,7 @@ typedef struct HashJoinState
 	int current_outer_read_file;
 	int num_outer_read_files; // TODO: initialize
 
+	int serial_chunk_count;
 	int batch_num_increases;
 } HashJoinState;
 

@@ -271,7 +271,10 @@ MultiExecParallelHash(HashState *node)
 			 */
 			if (PHJ_GROW_BATCHES_PHASE(BarrierAttach(&pstate->grow_batches_barrier)) !=
 				PHJ_GROW_BATCHES_ELECTING)
+			{
+				elog(DEBUG3, "Increase nbatches during initial hashtable build. batch %i. pid %i.", hashtable->curbatch, MyProcPid);
 				ExecParallelHashIncreaseNumBatches(hashtable);
+			}
 			if (PHJ_GROW_BUCKETS_PHASE(BarrierAttach(&pstate->grow_buckets_barrier)) !=
 				PHJ_GROW_BUCKETS_ELECTING)
 				ExecParallelHashIncreaseNumBuckets(hashtable);
@@ -1255,8 +1258,11 @@ ExecParallelHashIncreaseNumBatches(HashJoinTable hashtable)
 						{
 							batch->parallel_hashloop_fallback = true;
 							// we better not repartition again (growth should be disabled), so that we don't overwrite this value
-							elog(DEBUG3, "set parallel_hashloop_fallback to true for batchno %i", i);
-
+							elog(NOTICE, "ExecParallelHashIncreaseNumBatches PHJ_GROW_BATCHES_DECIDING. set parallel_hashloop_fallback to true for batch %i with chunks %i. pid %i.", i, batch->total_num_chunks, MyProcPid);
+						}
+						else
+						{
+							elog(NOTICE, "ExecParallelHashIncreaseNumBatches PHJ_GROW_BATCHES_DECIDING. fall back is false for batch %i with chunks %i. pid %i.", i, batch->total_num_chunks, MyProcPid);
 						}
 						/*
 						 * Did this batch receive ALL of the tuples from its
