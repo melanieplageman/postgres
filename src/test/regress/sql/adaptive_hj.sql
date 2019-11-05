@@ -87,10 +87,17 @@ insert into t2 values(2),(2),(3),(3),(4);
 select * from explain_multi_batch();
 select * from t1 left outer join t2 on a = b order by b;
 
+-- TODO: check coverage for emitting ummatched inner tuples
+-- Serial_Test_2.1.a
+-- results checking for inner join
 select * from t1, t2 where a = b order by b;
 
+-- Serial_Test_2.1.b
+-- results checking for right outer join
 select * from t1 right outer join t2 on a = b order by b;
 
+-- Serial_Test_2.1.b
+-- results checking for full outer join
 select * from t1 full outer join t2 on a = b order by b;
 
 -- Serial_Test_2.2 setup
@@ -200,6 +207,7 @@ analyze t1; analyze t2;
 --batch 31 falls back with 396 chunks with 2 unmatched outer tuples (13,16)
 select * from explain_multi_batch();
 select * from t1 left outer join t2 on a = b order by a, b;
+select count(a) from t1 left outer join t2 on a = b;
 
 select * from t1, t2 where a = b order by b;
 
@@ -207,7 +215,32 @@ select * from t1 right outer join t2 on a = b order by b;
 
 select * from t1 full outer join t2 on a = b order by b;
 
--- Test_5 non-negligible amount of data test case
+-- Test_5
+-- used to give wrong results because there is a whole batch of outer which is
+-- empty and so the inner doesn't emit unmatched tuples with ROJ
+
+drop table t1;
+create table t1(b int);
+alter table t1 set (parallel_workers = 1);
+
+insert into t1 select i from generate_series(1,111)i;
+insert into t1 select 2 from generate_series(1,180)i;
+analyze t1;
+
+drop table t2;
+create table t2(a int);
+alter table t2 set (parallel_workers = 1);
+
+insert into t2 select i from generate_series(20,25000)i;
+insert into t2 select 2 from generate_series(1,100)i;
+analyze t2;
+update pg_class
+  set reltuples = 10, relpages = pg_relation_size('t2') / 8192
+  where relname = 't2';
+
+select count(*) from t1 right outer join t2 on a = b order by b, a;
+
+-- Test_6 non-negligible amount of data test case
 -- TODO: doesn't finish with my code when it is set to be serial
 -- it does finish when it is parallel -- the serial version is either simply too
 -- slow or has a bug -- I tried it with less data and it did finish, so it must
