@@ -1971,6 +1971,7 @@ typedef struct HashJoinState
 
 	int serial_chunk_count;
 	int batch_num_increases;
+	int64 local_matched_tuple_count;
 } HashJoinState;
 
 

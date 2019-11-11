@@ -1257,11 +1257,14 @@ ExecParallelHashIncreaseNumBatches(HashJoinTable hashtable)
 						{
 							batch->parallel_hashloop_fallback = true;
 							// we better not repartition again (growth should be disabled), so that we don't overwrite this value
-							elog(NOTICE, "ExecParallelHashIncreaseNumBatches PHJ_GROW_BATCHES_DECIDING. set parallel_hashloop_fallback to true for batch %i with chunks %i. pid %i.", i, batch->total_num_chunks, MyProcPid);
+							// this tells us if we have set fallback to true or not and how many chunks -- useful for seeing how many chunks
+							// we can get to before setting it to true (since we still mark chunks (work_mem sized chunks)) in batches even if we don't fall back
+							// same for below but opposite
+							elog(DEBUG3, "ExecParallelHashIncreaseNumBatches PHJ_GROW_BATCHES_DECIDING. set parallel_hashloop_fallback to true for batch %i with chunks %i. pid %i.", i, batch->total_num_chunks, MyProcPid);
 						}
 						else
 						{
-							elog(NOTICE, "ExecParallelHashIncreaseNumBatches PHJ_GROW_BATCHES_DECIDING. fall back is false for batch %i with chunks %i. pid %i.", i, batch->total_num_chunks, MyProcPid);
+							elog(DEBUG3, "ExecParallelHashIncreaseNumBatches PHJ_GROW_BATCHES_DECIDING. fall back is false for batch %i with chunks %i. pid %i.", i, batch->total_num_chunks, MyProcPid);
 						}
 						/*
 						 * Did this batch receive ALL of the tuples from its
@@ -1329,7 +1332,7 @@ ExecParallelHashRepartitionFirst(HashJoinTable hashtable)
 									  &bucketno, &batchno);
 
 			Assert(batchno < hashtable->nbatch);
-			// maybe chunk batch 0
+			// maybe chunk batch 0 -- but shouldn't need to since it is the hashtable
 			if (batchno == 0)
 			{
 				/* It still belongs in batch 0.  Copy to a new chunk. */
@@ -1865,13 +1868,22 @@ ExecParallelHashTableInsertCurrentBatch(HashJoinTable hashtable, TupleTableSlot 
 	int			batchno;
 	int			bucketno;
 
+
 	ExecHashGetBucketAndBatch(hashtable, hashvalue, &bucketno, &batchno);
+	ParallelHashJoinBatch *phj_batch = hashtable->batches[batchno].shared;
+
 	Assert(batchno == hashtable->curbatch);
 	//ParallelHashJoinBatch *phj_batch = hashtable->batches[batchno].shared;
 	// TODO: add some logic if the chunk num is different than the current chunk num
 	hashTuple = ExecParallelHashTupleAlloc(hashtable,
 										   HJTUPLE_OVERHEAD + tuple->t_len,
 										   &shared);
+	size_t size = phj_batch->estimated_size;
+	// PAHJ_debugging
+	// used this to determine if there were any tuples on the inner side
+	if (batchno == 20)
+		elog(DEBUG3, "In ExecParallelHashTableInsertCurrentBatch. For batchno 20, the estimated size of the inner file is %zu. fallback is %i. total_num_chunks is %i . pid %i.",
+		 size, phj_batch->parallel_hashloop_fallback, phj_batch->total_num_chunks, MyProcPid);
 	hashTuple->hashvalue = hashvalue;
 	memcpy(HJTUPLE_MINTUPLE(hashTuple), tuple, tuple->t_len);
 	HeapTupleHeaderClearMatch(HJTUPLE_MINTUPLE(hashTuple));
@@ -2109,6 +2121,7 @@ ExecParallelScanHashBucket(HashJoinState *hjstate,
 	 * hj_CurTuple is the address of the tuple last returned from the current
 	 * bucket, or NULL if it's time to start scanning a new bucket.
 	 */
+	elog(DEBUG3, "ExecParallelScanHashBucket. batch %i. pid %i.", hashtable->curbatch, MyProcPid);
 	if (hashTuple != NULL)
 		hashTuple = ExecParallelHashNextTuple(hashtable, hashTuple);
 	else
