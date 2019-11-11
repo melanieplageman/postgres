@@ -117,7 +117,8 @@ select * from explain_parallel_multi_batch();
 -- also, note that this example did reveal with ROJ that it wasn't working, so
 -- maybe keep that but it is not parallel
 -- make sure the plans make sense for the code we are writing
-select count(a) from t1 left outer join t2 on a = b;
+select count(*) from t1 left outer join t2 on a = b;
+
 select count(*) from t1, t2 where a = b;
 select count(*) from t1 right outer join t2 on a = b;
 select count(*) from t1 full outer join t2 on a = b;
