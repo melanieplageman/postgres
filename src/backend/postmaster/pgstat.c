@@ -3809,6 +3809,21 @@ pgstat_get_wait_ipc(WaitEventIPC w)
 		case WAIT_EVENT_HASH_GROW_BUCKETS_REINSERTING:
 			event_name = "Hash/GrowBuckets/Reinserting";
 			break;
+		case WAIT_EVENT_HASH_CHUNK_ALLOCATING:
+			event_name = "Hash/Chunk/Allocating";
+			break;
+		case WAIT_EVENT_HASH_CHUNK_ELECTING:
+			event_name = "Hash/Chunk/Electing";
+			break;
+		case WAIT_EVENT_HASH_CHUNK_LOADING:
+			event_name = "Hash/Chunk/Loading";
+			break;
+		case WAIT_EVENT_HASH_CHUNK_PROBING:
+			event_name = "Hash/Chunk/Probing";
+			break;
+		case WAIT_EVENT_HASH_CHUNK_FINISHING_PROBING:
+			event_name = "Hash/Chunk/FinishingProbing";
+			break;
 		case WAIT_EVENT_LOGICAL_SYNC_DATA:
 			event_name = "LogicalSyncData";
 			break;

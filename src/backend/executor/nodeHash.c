@@ -593,7 +593,7 @@ ExecHashTableCreate(HashState *state, List *hashOperators, List *hashCollations,
 		 * Attach to the build barrier.  The corresponding detach operation is
 		 * in ExecHashTableDetach.  Note that we won't attach to the
 		 * batch_barrier for batch 0 yet.  We'll attach later and start it out
-		 * in PHJ_BATCH_PROBING phase, because batch 0 is allocated up front
+		 * in PHJ_BATCH_CHUNKING phase, because batch 0 is allocated up front
 		 * and then loaded while hashing (the standard hybrid hash join
 		 * algorithm), and we'll coordinate that using build_barrier.
 		 */
@@ -3071,7 +3071,7 @@ ExecParallelHashJoinSetUpBatches(HashJoinTable hashtable, int nbatch)
 //			shared->current_chunk_num = 0;
 //			shared->total_num_chunks = 0;
 		}
-		shared->current_chunk_num = 1;
+		shared->current_chunk_num = 0;
 		shared->total_num_chunks = 1;
 		shared->estimated_chunk_size = 0;
 
@@ -3084,9 +3084,14 @@ ExecParallelHashJoinSetUpBatches(HashJoinTable hashtable, int nbatch)
 		{
 			/* Batch 0 doesn't need to be loaded. */
 			BarrierAttach(&shared->batch_barrier);
-			while (BarrierPhase(&shared->batch_barrier) < PHJ_BATCH_PROBING)
+			while (BarrierPhase(&shared->batch_barrier) < PHJ_BATCH_CHUNKING)
 				BarrierArriveAndWait(&shared->batch_barrier, 0);
 			BarrierDetach(&shared->batch_barrier);
+		}
+		else
+		{
+			// batch 0 cannot fall back
+			BarrierInit(&shared->fallback_chunk_barrier, 0);
 		}
 
 		/* Initialize accessor state.  All members were zero-initialized. */
