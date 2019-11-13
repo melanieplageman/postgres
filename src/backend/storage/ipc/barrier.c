@@ -196,6 +196,91 @@ BarrierArriveAndWait(Barrier *barrier, uint32 wait_event_info)
 }
 
 /*
+ * Arrive at this barrier, wait for all other attached participants to arrive
+ * too and then return.  Sets the current phase to next_phase.  The caller must
+ * be attached.
+ *
+ * While waiting, pg_stat_activity shows a wait_event_type and wait_event
+ * controlled by the wait_event_info passed in, which should be a value from
+ * one of the WaitEventXXX enums defined in pgstat.h.
+ *
+ * Return true in one arbitrarily chosen participant.  Return false in all
+ * others.  The return code can be used to elect one participant to execute a
+ * phase of work that must be done serially while other participants wait.
+ */
+bool
+BarrierArriveExplicitAndWait(Barrier *barrier, int next_phase, uint32 wait_event_info)
+{
+	bool		release = false;
+	bool		elected;
+	int			start_phase;
+
+	SpinLockAcquire(&barrier->mutex);
+	start_phase = barrier->phase;
+	++barrier->arrived;
+	if (barrier->arrived == barrier->participants)
+	{
+		release = true;
+		barrier->arrived = 0;
+		barrier->phase = next_phase;
+		barrier->elected = next_phase;
+	}
+	SpinLockRelease(&barrier->mutex);
+
+	/*
+	 * If we were the last expected participant to arrive, we can release our
+	 * peers and return true to indicate that this backend has been elected to
+	 * perform any serial work.
+	 */
+	if (release)
+	{
+		ConditionVariableBroadcast(&barrier->condition_variable);
+
+		return true;
+	}
+
+	/*
+	 * Otherwise we have to wait for the last participant to arrive and
+	 * advance the phase.
+	 */
+	elected = false;
+	ConditionVariablePrepareToSleep(&barrier->condition_variable);
+	for (;;)
+	{
+		/*
+		 * We know that phase must either be start_phase, indicating that we
+		 * need to keep waiting, or next_phase, indicating that the last
+		 * participant that we were waiting for has either arrived or detached
+		 * so that the next phase has begun.  The phase cannot advance any
+		 * further than that without this backend's participation, because
+		 * this backend is attached.
+		 */
+		SpinLockAcquire(&barrier->mutex);
+		Assert(barrier->phase == start_phase || barrier->phase == next_phase);
+		release = barrier->phase == next_phase;
+		if (release && barrier->elected != next_phase)
+		{
+			/*
+			 * Usually the backend that arrives last and releases the other
+			 * backends is elected to return true (see above), so that it can
+			 * begin processing serial work while it has a CPU timeslice.
+			 * However, if the barrier advanced because someone detached, then
+			 * one of the backends that is awoken will need to be elected.
+			 */
+			barrier->elected = barrier->phase;
+			elected = true;
+		}
+		SpinLockRelease(&barrier->mutex);
+		if (release)
+			break;
+		ConditionVariableSleep(&barrier->condition_variable, wait_event_info);
+	}
+	ConditionVariableCancelSleep();
+
+	return elected;
+}
+
+/*
  * Arrive at this barrier, but detach rather than waiting.  Returns true if
  * the caller was the last to detach.
  */
