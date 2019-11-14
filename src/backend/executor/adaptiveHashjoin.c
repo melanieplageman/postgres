@@ -119,7 +119,7 @@ ExecParallelHashJoinNewChunk(HashJoinState *hjstate, bool advance_from_probing)
 				slot = hjstate->hj_HashTupleSlot;
 				// TODO: make parallel safe
 				// TODO: should I do this inside ExecParallelHashTableInsertCurrentBatch
-				if (chunk_num == current_chunk_num)
+				if (chunk_num == phj_batch->current_chunk_num)
 					ExecParallelHashTableInsertCurrentBatch(hashtable, slot,
 															hashvalue, chunk_num);
 			}
@@ -159,7 +159,7 @@ ExecParallelHashJoinNewChunk(HashJoinState *hjstate, bool advance_from_probing)
 			}
 
 			// otherwise it is time for the next chunk
-			if (BarrierArriveExplicitAndWait(chunk_barrier, PHJ_CHUNK_ELECTING))
+			if (BarrierArriveExplicitAndWait(chunk_barrier, PHJ_CHUNK_ELECTING, WAIT_EVENT_CHUNK_FINAL))
 			{
 				// rewind/reset outer tuplestore and rewind outer match status files
 				sts_reinitialize(outer_tuples);
@@ -319,13 +319,8 @@ ExecParallelHashJoinNewBatch(HashJoinState *hjstate)
 
 	do
 	{
-		uint32		hashvalue;
-		MinimalTuple tuple;
-		TupleTableSlot *slot;
-
 		if (!hashtable->batches[batchno].done)
 		{
-			SharedTuplestoreAccessor *inner_tuples;
 			Barrier    *batch_barrier =
 					&hashtable->batches[batchno].shared->batch_barrier;
 

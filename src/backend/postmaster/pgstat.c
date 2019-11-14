@@ -3824,6 +3824,15 @@ pgstat_get_wait_ipc(WaitEventIPC w)
 		case WAIT_EVENT_HASH_CHUNK_FINISHING_PROBING:
 			event_name = "Hash/Chunk/FinishingProbing";
 			break;
+		case WAIT_EVENT_HASH_CHUNK_DONE:
+			event_name = "Hash/Chunk/Done";
+			break;
+		case WAIT_EVENT_HASH_CHUNK_MORE_DONE:
+			event_name = "Hash/Chunk/MoreDone";
+			break;
+		case WAIT_EVENT_CHUNK_FINAL:
+			event_name = "Hash/Chunk/Final";
+			break;
 		case WAIT_EVENT_LOGICAL_SYNC_DATA:
 			event_name = "LogicalSyncData";
 			break;
