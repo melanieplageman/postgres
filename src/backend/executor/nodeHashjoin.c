@@ -199,6 +199,8 @@ ExecHashJoinImpl(PlanState *pstate, bool parallel)
 	econtext = node->js.ps.ps_ExprContext;
 	parallel_state = hashNode->parallel_state;
 
+	bool advance_from_probing = false;
+
 	/*
 	 * Reset per-tuple memory context to free any expression evaluation
 	 * storage allocated in the previous tuple cycle.
@@ -384,6 +386,7 @@ ExecHashJoinImpl(PlanState *pstate, bool parallel)
 						node->hj_JoinState = HJ_FILL_INNER_TUPLES;
 						break;
 					}
+					advance_from_probing = true;
 					node->hj_JoinState = HJ_NEED_NEW_INNER_CHUNK;
 					break;
 				}
@@ -400,9 +403,10 @@ ExecHashJoinImpl(PlanState *pstate, bool parallel)
 
 				if (parallel)
 				{
-					// TODO: make sure current_chunk_num is right here
 					ParallelHashJoinBatch *phj_batch = node->hj_HashTable->batches[node->hj_HashTable->curbatch].shared;
-					if (phj_batch->parallel_hashloop_fallback == false || phj_batch->current_chunk_num == 0)
+
+					// TODO: is this needed (chunk_num)?
+					if (phj_batch->parallel_hashloop_fallback == false || phj_batch->current_chunk_num == 1)
 						node->hj_MatchedOuter = false;
 				}
 				else
@@ -456,15 +460,6 @@ ExecHashJoinImpl(PlanState *pstate, bool parallel)
 					continue;
 				}
 
-				if (parallel && node->parallel_hashloop_fallback)
-				{
-					ParallelHashJoinBatch *phj_batch = node->hj_HashTable->batches[node->hj_HashTable->curbatch].shared;
-					if (phj_batch->current_chunk_num == 0)
-					{
-						node->hj_JoinState = HJ_NEED_NEW_INNER_CHUNK;
-						break;
-					}
-				}
 				if (hashtable->outerBatchFile == NULL)
 				{
 					node->hj_JoinState = HJ_SCAN_BUCKET;
@@ -709,6 +704,7 @@ ExecHashJoinImpl(PlanState *pstate, bool parallel)
 				if (!ExecScanHashTableForUnmatched(node, econtext))
 				{
 					/* no more unmatched tuples */
+					advance_from_probing = true;
 					node->hj_JoinState = HJ_NEED_NEW_INNER_CHUNK;
 					continue;
 				}
@@ -746,14 +742,23 @@ ExecHashJoinImpl(PlanState *pstate, bool parallel)
 					bool fallback = node->hj_HashTable->batches[node->hj_HashTable->curbatch].shared->parallel_hashloop_fallback;
 
 					// TODO: does this need to be parallel-safe?
-					bool inner_exhausted = node->hj_InnerExhausted;
-					if (node->last_worker == true && HJ_FILL_OUTER(node) && fallback == true && inner_exhausted == true)
+					if (node->last_worker == true
+					&& HJ_FILL_OUTER(node) && fallback == true
+					&& node->hj_InnerExhausted == true)
 					{
 						node->last_worker = false;
 						node->parallel_hashloop_fallback = false;
 						node->hj_JoinState = HJ_ADAPTIVE_EMIT_UNMATCHED_OUTER_INIT;
 						break;
 					}
+					if (node->hj_HashTable->curbatch == 0)
+					{
+						node->hj_JoinState = HJ_NEED_NEW_OUTER;
+						break;
+					}
+					advance_from_probing = false;
+					node->hj_JoinState = HJ_NEED_NEW_INNER_CHUNK;
+					break;
 				}
 				else
 				{
@@ -803,13 +808,8 @@ ExecHashJoinImpl(PlanState *pstate, bool parallel)
 				if (parallel)
 				{
 					ParallelHashJoinBatch *phj_batch = node->hj_HashTable->batches[node->hj_HashTable->curbatch].shared;
-					bool fallback = phj_batch->parallel_hashloop_fallback;
 
-					// tells us the number of chunks for each batch and if fallback is true
-					// lets us see when we might have a batch with multiple chunks but fallback is false or vice versa
-					elog(DEBUG3, "batch %i. current_chunk_num %i. total_num_chunks %i. fallback is %i.", node->hj_HashTable->curbatch, phj_batch->current_chunk_num, phj_batch->total_num_chunks, fallback);
-
-					if (!fallback)
+					if (!phj_batch->parallel_hashloop_fallback)
 					{
 						node->hj_InnerExhausted = true; // TODO: do I need this for non-fallback case?
 						node->hj_JoinState = HJ_NEED_NEW_BATCH;
@@ -817,7 +817,6 @@ ExecHashJoinImpl(PlanState *pstate, bool parallel)
 					}
 
 					// fallback is true. need to do chunk management
-					elog(NOTICE, "HJ_NEED_NEW_INNER_CHUNK. batch %i. current_chunk_num %i. total_num_chunks %i. fallback is %i. pid %i.", node->hj_HashTable->curbatch, phj_batch->current_chunk_num, phj_batch->total_num_chunks, fallback, MyProcPid);
 
 					// If we're not attached to a batch at all then we need to go to HJ_NEED_NEW_BATCH
 					if (node->hj_HashTable->curbatch == -1 || node->hj_HashTable->curbatch == 0)
@@ -827,7 +826,7 @@ ExecHashJoinImpl(PlanState *pstate, bool parallel)
 						node->hj_InnerExhausted = true; // TODO: do I want this backend local variable for this?
 						node->hj_JoinState = HJ_NEED_NEW_BATCH;
 					}
-					else if (!ExecParallelHashJoinNewChunk(node))
+					else if (!ExecParallelHashJoinNewChunk(node, advance_from_probing))
 					{
 						// If there's no next chunk available then detach from the chunk and go to HJ_NEED_NEW_BATCH
 						node->hj_InnerExhausted = true; // TODO: do I want this backend local variable for this?
@@ -912,18 +911,8 @@ ExecHashJoinImpl(PlanState *pstate, bool parallel)
 				if (parallel)
 				{
 					ParallelHashJoinBatch *phj_batch = node->hj_HashTable->batches[node->hj_HashTable->curbatch].shared;
-					// PAHJ_debugging
-					// tells us that a batch is falling back, how many chunks it has, and that it is correctly going to see if
-					// it has any unmatched tuples to emit
-					// VIP_PAHJ_debugging -- reenable to make sure we have multiple batches with differing numbers of chunks for testing
-					elog(DEBUG3, "HJ_ADAPTIVE_EMIT_UNMATCHED_OUTER_INIT: parallel. batch %i falls back with %i chunks. pid %i.",
-							node->hj_HashTable->curbatch,
-							phj_batch->total_num_chunks,
-							MyProcPid);
-					bool fallback = false;
-					if (parallel)
-						fallback = node->hj_HashTable->batches[node->hj_HashTable->curbatch].shared->parallel_hashloop_fallback;
-					if (fallback == false)
+
+					if (!phj_batch->parallel_hashloop_fallback)
 					{
 						node->hj_JoinState = HJ_NEED_NEW_BATCH;
 						break;
@@ -957,17 +946,12 @@ ExecHashJoinImpl(PlanState *pstate, bool parallel)
 				elog(NOTICE, "HJ_ADAPTIVE_EMIT_UNMATCHED_OUTER. pid %i.", MyProcPid);
 				if (parallel)
 				{
-					SharedTuplestoreAccessor *outer_acc = node->hj_HashTable->batches[node->hj_HashTable->curbatch].outer_tuples;
-					MinimalTuple tuple;
-					// tells us that a fallback batch will actually scan for unmatched tuples -- in case the one in init didn't end up sending us here
-					// and outerFileForAdaptiveRead was NULL
-					elog(DEBUG3, "in HJ_ADAPTIVE_EMIT_UNMATCHED_OUTER. batchno %i. pid %i. emitting at end of batch.", node->hj_HashTable->curbatch, MyProcPid);
-
-
 					if (node->combined_bitmap == NULL)
 						// TODO: make this an error for now, since all outer match status files have to exist bc we always make them
 						elog(ERROR, "ExecParallelHashJoinNewBatch. outermatchstatus file is NULL. pid %i.", MyProcPid);
 
+					SharedTuplestoreAccessor *outer_acc = node->hj_HashTable->batches[node->hj_HashTable->curbatch].outer_tuples;
+					MinimalTuple tuple;
 					do
 					{
 						tupleMetadata metadata;
@@ -994,22 +978,6 @@ ExecHashJoinImpl(PlanState *pstate, bool parallel)
 						if (((byte_to_check) >> bit) & 1)
 							match = true;
 
-						elog(DEBUG1, "ExecParallelHashJoinNewBatch. tupleid: %i. match_status %i. read_byteval %hhu. bytenum %i. bitnum %hhu. pid %i.",
-							 metadata.tuplenum, match, byte_to_check, bytenum, bit, MyProcPid);
-						elog(DEBUG1,
-							 "ProbeEnd tupleid %i. tupleval ?. match_status %i. bytenum %i. read_byteval %hhu. bitnum %i. pid %i.",
-							 metadata.tuplenum,
-							 match,
-							 bytenum,
-							 byte_to_check,
-							 bit,
-							 MyProcPid);
-						// re-enable me
-						elog(DEBUG3, "HJ_ADAPTIVE_EMIT_UNMATCHED_OUTER. parallel. batch %i matched outer tuple value %i. pid %i",
-							 hashtable->curbatch,
-							 DatumGetInt32(econtext->ecxt_outertuple->tts_values[0]),
-							 MyProcPid);
-
 						if (!match)
 							break;
 					} while (1);
@@ -1030,14 +998,6 @@ ExecHashJoinImpl(PlanState *pstate, bool parallel)
 					elog(NOTICE, "nomatch o.%i.i.NULL.",
 						 DatumGetInt32(econtext->ecxt_outertuple->tts_values[0]));
 
-					// PAHJ_debugging
-					// VIP_PAHJ_debugging tells us that an unmatched tuple gets emitted for this batch at the end
-					// important that at least one test case exercises this
-					// re-enable me to complete PAHJ test suite
-					elog(DEBUG2, "HJ_ADAPTIVE_EMIT_UNMATCHED_OUTER. parallel. emitting batch %i unmatched outer tuple value %i. pid %i",
-							hashtable->curbatch,
-							DatumGetInt32(econtext->ecxt_outertuple->tts_values[0]),
-							MyProcPid);
 					return ExecProject(node->js.ps.ps_ProjInfo);
 
 				}

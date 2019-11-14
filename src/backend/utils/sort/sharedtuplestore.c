@@ -282,7 +282,7 @@ sts_begin_parallel_scan(SharedTuplestoreAccessor *accessor)
 	 */
 	accessor->read_participant = accessor->participant;
 	accessor->read_file = NULL;
-	//accessor->outer_match_status_file = NULL;
+	//accessor->outer_match_status_file = NULL; // TODO: re-enable
 	accessor->read_next_page = 0;
 }
 

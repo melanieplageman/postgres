@@ -3238,6 +3238,7 @@ ExecHashTableDetachBatch(HashJoinTable hashtable)
 		ParallelHashJoinBatch *batch = hashtable->batches[curbatch].shared;
 
 		/* Make sure any temporary files are closed. */
+		// inner scan end not needed for batch 0
 		sts_end_parallel_scan(hashtable->batches[curbatch].inner_tuples);
 		sts_end_parallel_scan(hashtable->batches[curbatch].outer_tuples);
 
