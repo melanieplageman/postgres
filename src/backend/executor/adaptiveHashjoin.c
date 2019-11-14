@@ -50,7 +50,7 @@ combine_outer_match_statuses(BufFile *outer_match_statuses[], int length, size_t
 
 // TODO: fix this
 bool
-ExecParallelHashJoinNewChunk(HashJoinState *hjstate)
+ExecParallelHashJoinNewChunk(HashJoinState *hjstate, bool advance_from_probing)
 {
 	HashJoinTable hashtable = hjstate->hj_HashTable;
 	int batchno = hashtable->curbatch;
@@ -63,23 +63,22 @@ ExecParallelHashJoinNewChunk(HashJoinState *hjstate)
 	Barrier *chunk_barrier =
 			&hashtable->batches[batchno].shared->fallback_chunk_barrier;
 
-	// we will come here for batches after batch 0 either
-	// a) need a new batch in which case curbatch should be -1
-	// b) need a new
-	if (batchno > 0 && phj_batch->current_chunk_num > 0)
+	if (batchno > 0 && advance_from_probing)
 	{
+		// We must be in the PROBING phase
 		// need to advance the batch
 		BarrierArriveAndWait(chunk_barrier,
 							 WAIT_EVENT_HASH_CHUNK_FINISHING_PROBING);
-
+		goto phj_chunk_done;
+		// Once the barrier is advanced we'll be in the DONE phase
+		// unfortunately, we are still attached to chunk barrier so we don't want to reattach
+		// and increase nparticipants or we will have deadlock
 	}
-	else if (phj_batch->current_chunk_num == 0)
-	{
 
-	}
 	// should only come here for batches after batch 0
 	// either I need a new batch (was on the last chunk or coming from batch 0)
 	// or I need the next chunk (exhausted outer)
+	// should we do this if we already had a barrier arrive and wait above?
 	switch (BarrierAttach(chunk_barrier))
 	{
 		case PHJ_CHUNK_ELECTING:
@@ -134,11 +133,11 @@ ExecParallelHashJoinNewChunk(HashJoinState *hjstate)
 			// this is characterized by batch > 0 (and chunk > 0)
 		case PHJ_CHUNK_PROBING:
 			elog(NOTICE, "PHJ_CHUNK_PROBING batch %i. pid %i.", batchno, MyProcPid);
-			// Figure out how to make this exclusive
 			sts_begin_parallel_scan(outer_tuples);
 			return true;
 
 		case PHJ_CHUNK_DONE:
+		phj_chunk_done:
 			elog(NOTICE, "PHJ_CHUNK_DONE batch %i. pid %i.", batchno, MyProcPid);
 
 			// the current chunk number can't be incremented if *any* worker isn't
@@ -175,6 +174,9 @@ ExecParallelHashJoinNewChunk(HashJoinState *hjstate)
 			}
 			/* Fall through to PHJ_CHUNK_ELECTING */
 			goto phj_chunk_electing;
+
+		case PHJ_CHUNK_FINAL:
+				;
 
 		default:
 			elog(ERROR, "unexpected chunk phase %d. pid %i. batch %i.",
@@ -332,6 +334,7 @@ ExecParallelHashJoinNewBatch(HashJoinState *hjstate)
 				case PHJ_BATCH_ELECTING:
 					/* One backend allocates the hash table. */
 					elog(NOTICE, "PHJ_BATCH_ELECTING batch %i. pid %i.",batchno, MyProcPid);
+					hjstate->hj_InnerExhausted = false;
 					if (BarrierArriveAndWait(batch_barrier,
 											 WAIT_EVENT_HASH_BATCH_ELECTING))
 					{
@@ -339,13 +342,14 @@ ExecParallelHashJoinNewBatch(HashJoinState *hjstate)
 						Barrier *chunk_barrier =
 								&hashtable->batches[batchno].shared->fallback_chunk_barrier;
 						BarrierInit(chunk_barrier, 0);
-						hashtable->batches[batchno].shared->current_chunk_num = 0;
+						hashtable->batches[batchno].shared->current_chunk_num = 1;
 					}
 					/* Fall through. */
 
 				case PHJ_BATCH_ALLOCATING:
 					/* Wait for allocation to complete. */
 					elog(NOTICE, "PHJ_BATCH_ALLOCATING batch %i. pid %i", batchno, MyProcPid);
+					hjstate->hj_InnerExhausted = false;
 					BarrierArriveAndWait(batch_barrier,
 										 WAIT_EVENT_HASH_BATCH_ALLOCATING);
 					ExecParallelHashTableSetCurrentBatch(hashtable, batchno);
@@ -354,6 +358,7 @@ ExecParallelHashJoinNewBatch(HashJoinState *hjstate)
 				case PHJ_BATCH_LOADING: // delete me
 					/* Start (or join in) loading tuples. */
 					elog(NOTICE, "PHJ_BATCH_LOADING batch %i. pid %i.", batchno, MyProcPid);
+					hjstate->hj_InnerExhausted = false;
 					BarrierArriveAndWait(batch_barrier,
 										 WAIT_EVENT_HASH_BATCH_LOADING);
 					ExecParallelHashTableSetCurrentBatch(hashtable, batchno);
@@ -372,7 +377,8 @@ ExecParallelHashJoinNewBatch(HashJoinState *hjstate)
 					 */
 					elog(NOTICE, "PHJ_BATCH_CHUNKING batch %i. pid %i.", batchno, MyProcPid);
 					ExecParallelHashTableSetCurrentBatch(hashtable, batchno);
-					sts_begin_parallel_scan(hashtable->batches[batchno].outer_tuples);
+					// TODO: what if a worker joins here and hasn't set hjstate->hj_InnerExhausted = false;
+					// it would be true from the previous batch
 
 					// Create an outer match status file for this batch for this worker
 					// This file must be accessible to the other workers
@@ -382,6 +388,12 @@ ExecParallelHashJoinNewBatch(HashJoinState *hjstate)
 						char outer_match_status_filename[MAXPGPATH];
 						sts_make_STA_outerMatchStatuses(hashtable->batches[batchno].outer_tuples, batchno, outer_match_status_filename);
 						hjstate->parallel_hashloop_fallback = true;
+					}
+					if (batchno == 0)
+					{
+						hashtable->batches[batchno].shared->current_chunk_num = 1;
+						// is this right place to do this
+						sts_begin_parallel_scan(hashtable->batches[batchno].outer_tuples);
 					}
 					return true;
 
