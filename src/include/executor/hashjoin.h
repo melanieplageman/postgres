@@ -281,6 +281,8 @@ typedef struct ParallelHashJoinState
 #define PHJ_CHUNK_LOADING				2
 #define PHJ_CHUNK_PROBING				3
 #define PHJ_CHUNK_DONE					4
+#define PHJ_CHUNK_MORE_DONE				5
+#define PHJ_CHUNK_FINAL					6
 
 /* The phases of batch growth while hashing, for grow_batches_barrier. */
 #define PHJ_GROW_BATCHES_ELECTING		0
