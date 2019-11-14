@@ -546,6 +546,7 @@ ExecHashJoinImpl(PlanState *pstate, bool parallel)
 						// does it have to do with batch 0?
 						if (!phj_batch->parallel_hashloop_fallback)
 						{
+
 							TupleTableSlot *slot = emitUnmatchedOuterTuple(otherqual, econtext, node);
 							if (slot != NULL)
 								return slot;
@@ -676,11 +677,11 @@ ExecHashJoinImpl(PlanState *pstate, bool parallel)
 					if (otherqual == NULL || ExecQual(otherqual, econtext))
 					{
 						// LOG_NOW inner and outer tuples here
-//							if (DatumGetInt32(econtext->ecxt_innertuple->tts_values[0]) != 2)
-//								elog(NOTICE, "match o.%i.i.%i.",
-//									DatumGetInt32(econtext->ecxt_outertuple->tts_values[0]),
-//									DatumGetInt32(econtext->ecxt_innertuple->tts_values[0]));
-						if (DatumGetInt32(econtext->ecxt_innertuple->tts_values[0]) == 2 || DatumGetInt32(econtext->ecxt_outertuple->tts_values[0]) == 2)
+						//if (DatumGetInt32(econtext->ecxt_innertuple->tts_values[0]) != 2)
+								elog(NOTICE, "match o.%i.i.%i.",
+									DatumGetInt32(econtext->ecxt_outertuple->tts_values[0]),
+									DatumGetInt32(econtext->ecxt_innertuple->tts_values[0]));
+						//if (DatumGetInt32(econtext->ecxt_innertuple->tts_values[0]) == 2 || DatumGetInt32(econtext->ecxt_outertuple->tts_values[0]) == 2)
 						{
 							node->local_matched_tuple_count++;
 						}
@@ -717,7 +718,7 @@ ExecHashJoinImpl(PlanState *pstate, bool parallel)
 
 				if (otherqual == NULL || ExecQual(otherqual, econtext))
 				{
-					// LOG_NOW inner and outer tuples here
+					// LOG_NOW inner tuple and NULL
 					elog(NOTICE, "nomatch o.NULL.i.%i.",
 						 DatumGetInt32(econtext->ecxt_innertuple->tts_values[0]));
 					return ExecProject(node->js.ps.ps_ProjInfo);
@@ -994,7 +995,7 @@ ExecHashJoinImpl(PlanState *pstate, bool parallel)
 											   econtext->ecxt_outertuple,
 											   false);
 					econtext->ecxt_innertuple = node->hj_NullInnerTupleSlot;
-					// LOG_NOW inner and outer tuples here
+					// LOG_NOW outer tuple and NULL
 					elog(NOTICE, "nomatch o.%i.i.NULL.",
 						 DatumGetInt32(econtext->ecxt_outertuple->tts_values[0]));
 
@@ -1314,9 +1315,11 @@ emitUnmatchedOuterTuple(ExprState *otherqual, ExprContext *econtext, HashJoinSta
 	// as opposed to waiting to emit until the end of the batch in fallback case
 	// will only log when there is an unmatched tuple
 	elog(DEBUG3, "emitting outer tuple. fall back is false. value %i. batch %i. pid %i..", DatumGetInt32(econtext->ecxt_outertuple->tts_values[0]), hjstate->hj_HashTable->curbatch, MyProcPid);
+
 	if (otherqual == NULL || ExecQual(otherqual, econtext))
 	{
-		// logging inner and outer tuples here
+		// LOG_NOW outer tuple and NULL
+		// (parallel and serial case come here)
 		elog(NOTICE, "nomatch o.%i.i.NULL.",
 			 DatumGetInt32(econtext->ecxt_outertuple->tts_values[0]));
 		return ExecProject(hjstate->js.ps.ps_ProjInfo);
