@@ -65,40 +65,45 @@ ExecParallelHashJoinNewChunk(HashJoinState *hjstate, bool advance_from_probing)
 
 	if (batchno > 0 && advance_from_probing)
 	{
+		// the current chunk number can't be incremented if *any* worker isn't
+		// done yet (otherwise they might access the wrong data structure!)
 		// We must be in the PROBING phase
 		// need to advance the batch
-		BarrierArriveAndWait(chunk_barrier,
-							 WAIT_EVENT_HASH_CHUNK_FINISHING_PROBING);
-		goto phj_chunk_done;
+		if (BarrierArriveAndWait(chunk_barrier,
+								 WAIT_EVENT_HASH_CHUNK_FINISHING_PROBING))
+			phj_batch->current_chunk_num++;
+
 		// Once the barrier is advanced we'll be in the DONE phase
 		// unfortunately, we are still attached to chunk barrier so we don't want to reattach
 		// and increase nparticipants or we will have deadlock
 	}
+	else
+		BarrierAttach(chunk_barrier);
 
 	// should only come here for batches after batch 0
 	// either I need a new batch (was on the last chunk or coming from batch 0)
 	// or I need the next chunk (exhausted outer)
 	// should we do this if we already had a barrier arrive and wait above?
-	switch (BarrierAttach(chunk_barrier))
+	switch (BarrierPhase(chunk_barrier))
 	{
 		case PHJ_CHUNK_ELECTING:
 		phj_chunk_electing:
 			/* One backend allocates the hash table or resets it. */
-			elog(NOTICE, "PHJ_CHUNK_ELECTING batch %i. pid %i.", batchno, MyProcPid);
+			elog(DEBUG3, "PHJ_CHUNK_ELECTING batch %i. pid %i.", batchno, MyProcPid);
 			BarrierArriveAndWait(chunk_barrier,
 									 WAIT_EVENT_HASH_CHUNK_ELECTING);
 			/* Fall through. */
 
 		case PHJ_CHUNK_ALLOCATING: // delete me
 			/* Wait for allocation to complete. */
-			elog(NOTICE, "PHJ_CHUNK_ALLOCATING batch %i. pid %i", batchno, MyProcPid);
+			elog(DEBUG3, "PHJ_CHUNK_ALLOCATING batch %i. pid %i", batchno, MyProcPid);
 			BarrierArriveAndWait(chunk_barrier,
 								 WAIT_EVENT_HASH_CHUNK_ALLOCATING);
 			/* Fall through. */
 
 		case PHJ_CHUNK_LOADING:
 			/* Start (or join in) loading tuples. */
-			elog(NOTICE, "PHJ_CHUNK_LOADING batch %i. pid %i.", batchno, MyProcPid);
+			elog(DEBUG3, "PHJ_CHUNK_LOADING batch %i. pid %i.", batchno, MyProcPid);
 			// load the next chunk of inner tuples into the hashtable
 
 			sts_begin_parallel_scan(inner_tuples);
@@ -117,7 +122,6 @@ ExecParallelHashJoinNewChunk(HashJoinState *hjstate, bool advance_from_probing)
 										   hjstate->hj_HashTupleSlot,
 										   false);
 				slot = hjstate->hj_HashTupleSlot;
-				// TODO: make parallel safe
 				// TODO: should I do this inside ExecParallelHashTableInsertCurrentBatch
 				if (chunk_num == phj_batch->current_chunk_num)
 					ExecParallelHashTableInsertCurrentBatch(hashtable, slot,
@@ -131,28 +135,18 @@ ExecParallelHashJoinNewChunk(HashJoinState *hjstate, bool advance_from_probing)
 			// need to advance the phase at the top because we will return to here
 			// when we come back for a new chunk and be in the probing phase
 			// this is characterized by batch > 0 (and chunk > 0)
+
 		case PHJ_CHUNK_PROBING:
-			elog(NOTICE, "PHJ_CHUNK_PROBING batch %i. pid %i.", batchno, MyProcPid);
+			elog(DEBUG3, "PHJ_CHUNK_PROBING batch %i. pid %i.", batchno, MyProcPid);
 			sts_begin_parallel_scan(outer_tuples);
 			return true;
 
 		case PHJ_CHUNK_DONE:
-		phj_chunk_done:
-			elog(NOTICE, "PHJ_CHUNK_DONE batch %i. pid %i.", batchno, MyProcPid);
+			elog(DEBUG3, "PHJ_CHUNK_DONE batch %i. pid %i.", batchno, MyProcPid);
 
-			// the current chunk number can't be incremented if *any* worker isn't
-			// done yet (otherwise they might access the wrong data structure!)
-			if (BarrierArriveAndWait(chunk_barrier,
-									 WAIT_EVENT_HASH_CHUNK_DONE))
-			{
-				phj_batch->current_chunk_num++;
-			}
-			/* Fall through */
-
-		case PHJ_CHUNK_MORE_DONE:
 			BarrierArriveAndWait(chunk_barrier, WAIT_EVENT_HASH_CHUNK_MORE_DONE);
 
-			if (phj_batch->current_chunk_num >= phj_batch->total_num_chunks)
+			if (phj_batch->current_chunk_num > phj_batch->total_num_chunks)
 			{
 				BarrierDetach(chunk_barrier);
 				return false;
@@ -166,17 +160,25 @@ ExecParallelHashJoinNewChunk(HashJoinState *hjstate, bool advance_from_probing)
 				// maybe I need to do sts_end_write() and or something manual to make it so I can rewind the outer tuples tuplestore and also keep the bitmap
 				// or maybe just do sts_end_parallel_scan(outer_tuples);
 				// todo: make a version of sts_begin_parallel_scan() that doesn't null out the bitmap file
-				sts_begin_parallel_scan(outer_tuples);
+
 				// reset inner's hashtable
-				ExecHashTableReset(hashtable);
+				//ExecHashTableReset(hashtable);
+
+				/* Recycle the existing bucket array. */
+				dsa_pointer_atomic *buckets = (dsa_pointer_atomic *)
+						dsa_get_address(hashtable->area, phj_batch->buckets);
+				for (size_t i = 0; i < hashtable->nbuckets; ++i)
+					dsa_pointer_atomic_write(&buckets[i], InvalidDsaPointer);
+//				ExecParallelHashTableAlloc(hashtable, batchno);
+
 				// TODO: this will unfortunately rescan all inner tuples in the batch for each chunk
 				sts_reinitialize(inner_tuples);
 			}
-			/* Fall through to PHJ_CHUNK_ELECTING */
 			goto phj_chunk_electing;
 
 		case PHJ_CHUNK_FINAL:
-				;
+			BarrierDetach(chunk_barrier);
+			return false;
 
 		default:
 			elog(ERROR, "unexpected chunk phase %d. pid %i. batch %i.",
@@ -328,7 +330,7 @@ ExecParallelHashJoinNewBatch(HashJoinState *hjstate)
 			{
 				case PHJ_BATCH_ELECTING:
 					/* One backend allocates the hash table. */
-					elog(NOTICE, "PHJ_BATCH_ELECTING batch %i. pid %i.",batchno, MyProcPid);
+					elog(DEBUG3, "PHJ_BATCH_ELECTING batch %i. pid %i.",batchno, MyProcPid);
 					hjstate->hj_InnerExhausted = false;
 					if (BarrierArriveAndWait(batch_barrier,
 											 WAIT_EVENT_HASH_BATCH_ELECTING))
@@ -343,20 +345,19 @@ ExecParallelHashJoinNewBatch(HashJoinState *hjstate)
 
 				case PHJ_BATCH_ALLOCATING:
 					/* Wait for allocation to complete. */
-					elog(NOTICE, "PHJ_BATCH_ALLOCATING batch %i. pid %i", batchno, MyProcPid);
+					elog(DEBUG3, "PHJ_BATCH_ALLOCATING batch %i. pid %i", batchno, MyProcPid);
 					hjstate->hj_InnerExhausted = false;
 					BarrierArriveAndWait(batch_barrier,
 										 WAIT_EVENT_HASH_BATCH_ALLOCATING);
-					ExecParallelHashTableSetCurrentBatch(hashtable, batchno);
 					/* Fall through. */
 
 				case PHJ_BATCH_LOADING: // delete me
 					/* Start (or join in) loading tuples. */
-					elog(NOTICE, "PHJ_BATCH_LOADING batch %i. pid %i.", batchno, MyProcPid);
+					elog(DEBUG3, "PHJ_BATCH_LOADING batch %i. pid %i.", batchno, MyProcPid);
+					ExecParallelHashTableSetCurrentBatch(hashtable, batchno);
 					hjstate->hj_InnerExhausted = false;
 					BarrierArriveAndWait(batch_barrier,
 										 WAIT_EVENT_HASH_BATCH_LOADING);
-					ExecParallelHashTableSetCurrentBatch(hashtable, batchno);
 					/* Fall through. */
 
 				case PHJ_BATCH_CHUNKING:
@@ -370,7 +371,7 @@ ExecParallelHashJoinNewBatch(HashJoinState *hjstate)
 					 * BarrierArriveAndDetach() so that the final phase
 					 * PHJ_BATCH_DONE can be reached.
 					 */
-					elog(NOTICE, "PHJ_BATCH_CHUNKING batch %i. pid %i.", batchno, MyProcPid);
+					elog(DEBUG3, "PHJ_BATCH_CHUNKING batch %i. pid %i.", batchno, MyProcPid);
 					ExecParallelHashTableSetCurrentBatch(hashtable, batchno);
 					// TODO: what if a worker joins here and hasn't set hjstate->hj_InnerExhausted = false;
 					// it would be true from the previous batch
@@ -393,7 +394,7 @@ ExecParallelHashJoinNewBatch(HashJoinState *hjstate)
 					return true;
 
 				case PHJ_BATCH_OUTER_MATCH_STATUS_PROCESSING:
-					elog(NOTICE, "in PHJ_BATCH_OUTER_MATCH_STATUS_PROCESSING. done with batch %i. process %i.", batchno, MyProcPid);
+					elog(DEBUG3, "in PHJ_BATCH_OUTER_MATCH_STATUS_PROCESSING. done with batch %i. process %i.", batchno, MyProcPid);
 					BarrierDetach(batch_barrier);
 					// The batch isn't done but this worker can't contribute anything to it
 					// so it might as well be done from this worker's perspective
@@ -406,7 +407,7 @@ ExecParallelHashJoinNewBatch(HashJoinState *hjstate)
 					 * Already done.  Detach and go around again (if any
 					 * remain).
 					 */
-					elog(NOTICE, "in PHJ_BATCH_DONE. done with batch %i. process %i.", batchno, MyProcPid);
+					elog(DEBUG3, "in PHJ_BATCH_DONE. done with batch %i. process %i.", batchno, MyProcPid);
 					BarrierDetach(batch_barrier);
 					hashtable->batches[batchno].done = true;
 					hashtable->curbatch = -1;
