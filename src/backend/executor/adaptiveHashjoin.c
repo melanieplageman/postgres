@@ -122,7 +122,6 @@ ExecParallelHashJoinNewChunk(HashJoinState *hjstate, bool advance_from_probing)
 										   hjstate->hj_HashTupleSlot,
 										   false);
 				slot = hjstate->hj_HashTupleSlot;
-				// TODO: should I do this inside ExecParallelHashTableInsertCurrentBatch
 				if (chunk_num == phj_batch->current_chunk_num)
 					ExecParallelHashTableInsertCurrentBatch(hashtable, slot,
 															hashvalue, chunk_num);
