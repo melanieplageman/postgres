@@ -3088,11 +3088,6 @@ ExecParallelHashJoinSetUpBatches(HashJoinTable hashtable, int nbatch)
 				BarrierArriveAndWait(&shared->batch_barrier, 0);
 			BarrierDetach(&shared->batch_barrier);
 		}
-		else
-		{
-			// batch 0 cannot fall back
-			BarrierInit(&shared->fallback_chunk_barrier, 0);
-		}
 
 		/* Initialize accessor state.  All members were zero-initialized. */
 		accessor->shared = shared;
