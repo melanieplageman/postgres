@@ -48,13 +48,13 @@ combine_outer_match_statuses(BufFile *outer_match_statuses[], int length, size_t
 		BufFileClose(outer_match_statuses[j]);
 }
 
-// TODO: fix this
 bool
 ExecParallelHashJoinNewChunk(HashJoinState *hjstate, bool advance_from_probing)
 {
 	HashJoinTable hashtable = hjstate->hj_HashTable;
 	int batchno = hashtable->curbatch;
 	ParallelHashJoinBatch *phj_batch = hashtable->batches[batchno].shared;
+
 	SharedTuplestoreAccessor *outer_tuples = hashtable->batches[batchno].outer_tuples;
 	SharedTuplestoreAccessor *inner_tuples = hashtable->batches[batchno].inner_tuples;
 
@@ -63,28 +63,34 @@ ExecParallelHashJoinNewChunk(HashJoinState *hjstate, bool advance_from_probing)
 	Barrier *chunk_barrier =
 			&hashtable->batches[batchno].shared->fallback_chunk_barrier;
 
+	int phase;
+
+	elog(WARNING, "batch %i, advance_from_probing %i, pid %i.", batchno, advance_from_probing, MyProcPid);
+
 	if (batchno > 0 && advance_from_probing)
 	{
 		// the current chunk number can't be incremented if *any* worker isn't
 		// done yet (otherwise they might access the wrong data structure!)
 		// We must be in the PROBING phase
 		// need to advance the batch
+
 		if (BarrierArriveAndWait(chunk_barrier,
 								 WAIT_EVENT_HASH_CHUNK_FINISHING_PROBING))
 			phj_batch->current_chunk_num++;
+		phase = PHJ_CHUNK_DONE;
 
 		// Once the barrier is advanced we'll be in the DONE phase
 		// unfortunately, we are still attached to chunk barrier so we don't want to reattach
 		// and increase nparticipants or we will have deadlock
 	}
 	else
-		BarrierAttach(chunk_barrier);
+		phase = BarrierAttach(chunk_barrier);
 
 	// should only come here for batches after batch 0
 	// either I need a new batch (was on the last chunk or coming from batch 0)
 	// or I need the next chunk (exhausted outer)
 	// should we do this if we already had a barrier arrive and wait above?
-	switch (BarrierPhase(chunk_barrier))
+	switch (phase)
 	{
 		case PHJ_CHUNK_ELECTING:
 		phj_chunk_electing:
@@ -145,30 +151,36 @@ ExecParallelHashJoinNewChunk(HashJoinState *hjstate, bool advance_from_probing)
 
 			BarrierArriveAndWait(chunk_barrier, WAIT_EVENT_HASH_CHUNK_MORE_DONE);
 
+			Assert(BarrierPhase(chunk_barrier) == PHJ_CHUNK_FINAL);
+			BarrierDetach(chunk_barrier);
+			return false;
+
 			if (phj_batch->current_chunk_num > phj_batch->total_num_chunks)
 			{
+				Assert(BarrierPhase(chunk_barrier) == PHJ_CHUNK_FINAL);
 				BarrierDetach(chunk_barrier);
 				return false;
 			}
+
+			Assert(BarrierPhase(chunk_barrier) == PHJ_CHUNK_FINAL);
+			BarrierDetach(chunk_barrier);
+			return false;
 
 			// otherwise it is time for the next chunk
 			if (BarrierArriveExplicitAndWait(chunk_barrier, PHJ_CHUNK_ELECTING, WAIT_EVENT_CHUNK_FINAL))
 			{
 				// rewind/reset outer tuplestore and rewind outer match status files
 				sts_reinitialize(outer_tuples);
+				// TODO: make a version of sts_begin_parallel_scan() that doesn't null out the bitmap file
 				// maybe I need to do sts_end_write() and or something manual to make it so I can rewind the outer tuples tuplestore and also keep the bitmap
 				// or maybe just do sts_end_parallel_scan(outer_tuples);
-				// todo: make a version of sts_begin_parallel_scan() that doesn't null out the bitmap file
 
 				// reset inner's hashtable
-				//ExecHashTableReset(hashtable);
-
 				/* Recycle the existing bucket array. */
 				dsa_pointer_atomic *buckets = (dsa_pointer_atomic *)
 						dsa_get_address(hashtable->area, phj_batch->buckets);
 				for (size_t i = 0; i < hashtable->nbuckets; ++i)
 					dsa_pointer_atomic_write(&buckets[i], InvalidDsaPointer);
-//				ExecParallelHashTableAlloc(hashtable, batchno);
 
 				// TODO: this will unfortunately rescan all inner tuples in the batch for each chunk
 				sts_reinitialize(inner_tuples);
@@ -176,6 +188,7 @@ ExecParallelHashJoinNewChunk(HashJoinState *hjstate, bool advance_from_probing)
 			goto phj_chunk_electing;
 
 		case PHJ_CHUNK_FINAL:
+			Assert(BarrierPhase(chunk_barrier) == PHJ_CHUNK_FINAL);
 			BarrierDetach(chunk_barrier);
 			return false;
 
@@ -287,7 +300,6 @@ ExecParallelHashJoinNewBatch(HashJoinState *hjstate)
 
 				hjstate->combined_bitmap = combined_bitmap_file;
 				hjstate->last_worker = true;
-				hjstate->parallel_hashloop_fallback = true;
 				hjstate->num_outer_read_files = length;
 				pfree(outer_match_statuses);
 				return true;
@@ -382,7 +394,6 @@ ExecParallelHashJoinNewBatch(HashJoinState *hjstate)
 					{
 						char outer_match_status_filename[MAXPGPATH];
 						sts_make_STA_outerMatchStatuses(hashtable->batches[batchno].outer_tuples, batchno, outer_match_status_filename);
-						hjstate->parallel_hashloop_fallback = true;
 					}
 					if (batchno == 0)
 					{

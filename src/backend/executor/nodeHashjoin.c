@@ -347,8 +347,7 @@ ExecHashJoinImpl(PlanState *pstate, bool parallel)
 					}
 					Assert(BarrierPhase(build_barrier) == PHJ_BUILD_DONE);
 
-					/* Each backend should now select a batch to work on. */
-					hashtable->curbatch = -1; // where do we do this for the last worker
+					hashtable->curbatch = -1;
 					node->hj_JoinState = HJ_NEED_NEW_BATCH;
 
 					continue;
@@ -405,7 +404,6 @@ ExecHashJoinImpl(PlanState *pstate, bool parallel)
 				{
 					ParallelHashJoinBatch *phj_batch = node->hj_HashTable->batches[node->hj_HashTable->curbatch].shared;
 
-					// TODO: is this needed (chunk_num)?
 					if (phj_batch->parallel_hashloop_fallback == false || phj_batch->current_chunk_num == 1)
 						node->hj_MatchedOuter = false;
 				}
@@ -427,15 +425,11 @@ ExecHashJoinImpl(PlanState *pstate, bool parallel)
 																 hashvalue);
 
 				node->hj_CurTuple = NULL;
-				// TODO: this is doing it for every outer tuple -- make it only do it for new batches
-				if (parallel)
-					node->parallel_hashloop_fallback = ExecParallelCheckHashloopFallback(node, batchno);
-				else
-					node->parallel_hashloop_fallback = false;
 
 				/*
 				 * The tuple might not belong to the current batch (where
 				 * "current batch" includes the skew buckets if any).
+				 * This should never happen for parallel hashjoin
 				 */
 				if (batchno != hashtable->curbatch &&
 					node->hj_CurSkewBucketNo == INVALID_SKEW_BUCKET_NO)
@@ -594,9 +588,8 @@ ExecHashJoinImpl(PlanState *pstate, bool parallel)
 					bool fallback = false;
 					if (parallel)
 						fallback = node->hj_HashTable->batches[node->hj_HashTable->curbatch].shared->parallel_hashloop_fallback;
-					if (parallel && fallback == true)
+					if (parallel && fallback)
 					{
-						// TODO: make this only when it is fallback case
 						unsigned char current_outer_byte;
 						// TODO: is this parallel-safe
 						// TODO: should I instead get it from node->hj_OuterTupleSlot->tuplenum or add something else altogether?
@@ -613,9 +606,6 @@ ExecHashJoinImpl(PlanState *pstate, bool parallel)
 						int bit_to_set_in_byte = tupleid % 8;
 
 						current_outer_byte = current_outer_byte | (1 << bit_to_set_in_byte);
-
-						uint32 final_tuplenum = sts_gettuplenum(outer_acc);
-
 
 						if (BufFileSeek(parallel_outer_matchstatuses, 0, -1, SEEK_CUR) != 0)
 							elog(ERROR, "there is a problem with outer match status file. pid %i.", MyProcPid);
@@ -640,13 +630,10 @@ ExecHashJoinImpl(PlanState *pstate, bool parallel)
 					if (otherqual == NULL || ExecQual(otherqual, econtext))
 					{
 						// LOG_NOW inner and outer tuples here
-						// VIP
-								elog(DEBUG3, "match o.%i.i.%i.",
-									DatumGetInt32(econtext->ecxt_outertuple->tts_values[0]),
-									DatumGetInt32(econtext->ecxt_innertuple->tts_values[0]));
-						{
-							node->local_matched_tuple_count++;
-						}
+						elog(DEBUG3, "match o.%i.i.%i.",
+							DatumGetInt32(econtext->ecxt_outertuple->tts_values[0]),
+							DatumGetInt32(econtext->ecxt_innertuple->tts_values[0]));
+						node->local_matched_tuple_count++;
 						return ExecProject(node->js.ps.ps_ProjInfo);
 					}
 					else
@@ -681,7 +668,6 @@ ExecHashJoinImpl(PlanState *pstate, bool parallel)
 				if (otherqual == NULL || ExecQual(otherqual, econtext))
 				{
 					// LOG_NOW inner tuple and NULL
-					// VIP
 					elog(NOTICE, "nomatch o.NULL.i.%i.",
 						 DatumGetInt32(econtext->ecxt_innertuple->tts_values[0]));
 					return ExecProject(node->js.ps.ps_ProjInfo);
@@ -711,7 +697,6 @@ ExecHashJoinImpl(PlanState *pstate, bool parallel)
 					&& node->hj_InnerExhausted == true)
 					{
 						node->last_worker = false;
-						node->parallel_hashloop_fallback = false;
 						node->hj_JoinState = HJ_ADAPTIVE_EMIT_UNMATCHED_OUTER_INIT;
 						break;
 					}
@@ -947,7 +932,6 @@ ExecHashJoinImpl(PlanState *pstate, bool parallel)
 											   false);
 					econtext->ecxt_innertuple = node->hj_NullInnerTupleSlot;
 					// LOG_NOW outer tuple and NULL
-					// VIP
 					elog(DEBUG3, "nomatch o.%i.i.NULL.",
 						 DatumGetInt32(econtext->ecxt_outertuple->tts_values[0]));
 
@@ -976,13 +960,6 @@ ExecHashJoinImpl(PlanState *pstate, bool parallel)
 						if (bit == 0)
 							BufFileRead(node->hj_OuterMatchStatusesFile, &node->hj_OuterCurrentByte, 1);
 
-						elog(DEBUG1, "in HJ_ADAPTIVE_EMIT_UNMATCHED_OUTER. batchno %i. val %i. num %li. bitnum %hhu. current byte %hhu.",
-							 node->hj_HashTable->curbatch,
-							 DatumGetInt32(temp->tts_values[0]),
-							 node->hj_OuterTupleCount,
-							 bit,
-							 node->hj_OuterCurrentByte);
-
 						/* if the match bit is set for this tuple, continue */
 						if ((node->hj_OuterCurrentByte >> bit) & 1)
 							continue;
@@ -990,11 +967,6 @@ ExecHashJoinImpl(PlanState *pstate, bool parallel)
 						 * if it is not a match
 						 * emit it NULL-extended
 						 */
-						// AHJ debugging
-						elog(DEBUG3, "HJ_ADAPTIVE_EMIT_UNMATCHED_OUTER. serial. emitting batch %i unmatched outer tuple value %i.",
-								node->hj_HashTable->curbatch,
-								DatumGetInt32(temp->tts_values[0])
-								);
 						econtext->ecxt_outertuple = temp;
 						econtext->ecxt_innertuple = node->hj_NullInnerTupleSlot;
 						return ExecProject(node->js.ps.ps_ProjInfo);
