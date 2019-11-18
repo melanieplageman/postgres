@@ -668,7 +668,7 @@ ExecHashJoinImpl(PlanState *pstate, bool parallel)
 				if (otherqual == NULL || ExecQual(otherqual, econtext))
 				{
 					// LOG_NOW inner tuple and NULL
-					elog(NOTICE, "nomatch o.NULL.i.%i.",
+					elog(DEBUG3, "nomatch o.NULL.i.%i.",
 						 DatumGetInt32(econtext->ecxt_innertuple->tts_values[0]));
 					return ExecProject(node->js.ps.ps_ProjInfo);
 				}
@@ -686,7 +686,7 @@ ExecHashJoinImpl(PlanState *pstate, bool parallel)
 				{
 					if (!ExecParallelHashJoinNewBatch(node))
 					{
-						elog(NOTICE, "%i.%li.", MyProcPid, node->local_matched_tuple_count);
+						elog(DEBUG3, "%i.%li.", MyProcPid, node->local_matched_tuple_count);
 						return NULL;	/* end of parallel-aware join */
 					}
 					bool fallback = node->hj_HashTable->batches[node->hj_HashTable->curbatch].shared->parallel_hashloop_fallback;
