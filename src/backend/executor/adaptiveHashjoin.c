@@ -269,11 +269,13 @@ ExecParallelHashJoinNewBatch(HashJoinState *hjstate)
 				SharedTuplestoreAccessor *outer_acc = accessor->outer_tuples;
 
 				//TODO: right? This doesn't work if I let the other workers move on -- the number of participants won't be right
-				int length = BarrierParticipants(&batch->batch_barrier);
-				//int length = sts_participants(outer_acc);
+				// problem, there are sts participants that detach from the barrier below before we have a chance to get their match status files
+				//int length = BarrierParticipants(&batch->batch_barrier);
+				int length = sts_participants(outer_acc);
 				BufFile **outer_match_statuses = palloc(sizeof(BufFile *) * length);
 				char **outer_match_status_filenames = alloca(sizeof(char *) * length);
 
+				//elog(DEBUG3, "batch %i. sts participants %i. barrier participants %i. pid %i.", curbatch, sts_participants(outer_acc), length, MyProcPid);
 				populate_outer_match_statuses(outer_acc, outer_match_statuses, outer_match_status_filenames);
 
 				BufFile *combined_bitmap_file = BufFileCreateTemp(false);
