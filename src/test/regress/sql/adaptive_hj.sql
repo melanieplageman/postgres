@@ -16,10 +16,9 @@ declare ln text;
 begin
     for ln in
         explain (analyze, summary off, timing off, costs off)
-		select * from t1 left outer join t2 on a = b order by b
+		select count(*) from t1 left outer join t2 on a = b
     loop
-        ln := regexp_replace(ln, 'Planning Time: \S*',  'Memory: xxx');
-        ln := regexp_replace(ln, 'Execution Time: \S*',  'Memory: xxx');
+        ln := regexp_replace(ln, 'Memory Usage: \S*',  'Memory Usage: xxx');
         return next ln;
     end loop;
 end;
@@ -50,13 +49,10 @@ insert into t2 select 2 from generate_series(2,7)i;
 -- batch 3 falls back with 5 chunks with no unmatched tuples
 -- batch 4 does not fall back with no unmatched tuples
 select * from explain_multi_batch();
-select * from t1 left outer join t2 on a = b order by b;
-
+select * from t1 left outer join t2 on a = b order by b, a;
 select * from t1, t2 where a = b order by b;
-
-select * from t1 right outer join t2 on a = b order by b;
-
-select * from t1 full outer join t2 on a = b order by b;
+select * from t1 right outer join t2 on a = b order by a, b;
+select * from t1 full outer join t2 on a = b order by b, a;
 
 -- Serial_Test_1.2 setup
 analyze t1; analyze t2;
@@ -64,7 +60,6 @@ analyze t1; analyze t2;
 -- Serial_Test_1.2
 -- doesn't spill (happens to do a hash right join)
 select * from explain_multi_batch();
-select * from t1 left outer join t2 on a = b order by b;
 
 -- Serial_Test_2 reset
 update pg_class set reltuples = 0, relpages = 0 where relname = 't2';
@@ -85,28 +80,22 @@ insert into t2 values(2),(2),(3),(3),(4);
 -- batch 3 does not fall back with no unmatched tuples
 -- batch 4 does not fall back with no unmatched tuples
 select * from explain_multi_batch();
-select * from t1 left outer join t2 on a = b order by b;
+select * from t1 left outer join t2 on a = b order by b, a;
+select * from t1 right outer join t2 on a = b order by a, b;
 
 -- TODO: check coverage for emitting ummatched inner tuples
 -- Serial_Test_2.1.a
 -- results checking for inner join
+select * from t1 left outer join t2 on a = b order by b, a;
+select * from t1, t2 where a = b order by b;
+select * from t1 right outer join t2 on a = b order by a, b;
+select * from t1 full outer join t2 on a = b order by b, a;
 select * from t1, t2 where a = b order by b;
 
--- Serial_Test_2.1.b
--- results checking for right outer join
-select * from t1 right outer join t2 on a = b order by b;
-
--- Serial_Test_2.1.b
--- results checking for full outer join
-select * from t1 full outer join t2 on a = b order by b;
-
--- Serial_Test_2.2 setup
-analyze t1; analyze t2;
-
 -- Serial_Test_2.2
+analyze t1; analyze t2;
 -- doesn't spill (happens to do a hash right join)
 select * from explain_multi_batch();
-select * from t1 left outer join t2 on a = b order by b;
 
 -- Serial_Test_3 reset
 update pg_class set reltuples = 0, relpages = 0 where relname = 't2';
@@ -132,20 +121,18 @@ insert into t2 select i from generate_series(5,9)i;
 -- batch 3 falls back with 4 chunks with 1 unmatched tuple
 -- batch 4 does not fall back with no unmatched tuples
 select * from explain_multi_batch();
-select * from t1 left outer join t2 on a = b order by b;
-
+select * from t1 left outer join t2 on a = b order by b, a;
 select * from t1, t2 where a = b order by b;
-
-select * from t1 right outer join t2 on a = b order by b;
-
-select * from t1 full outer join t2 on a = b order by b;
+select * from t1 right outer join t2 on a = b order by a, b;
+select * from t1 full outer join t2 on a = b order by b, a;
+select * from t1, t2 where a = b order by b;
 
 -- Serial_Test_3.2 
 -- swap join order
-select * from t2 left outer join t1 on a = b order by a;
-select * from t2, t1 where a = b order by b;
-select * from t2 right outer join t1 on a = b order by b;
-select * from t2 full outer join t1 on a = b order by b;
+select * from t2 left outer join t1 on a = b order by a, b;
+select * from t2, t1 where a = b order by a;
+select * from t2 right outer join t1 on a = b order by b, a;
+select * from t2 full outer join t1 on a = b order by a, b;
 
 -- Serial_Test_3.3 setup
 analyze t1; analyze t2;
@@ -153,24 +140,22 @@ analyze t1; analyze t2;
 -- Serial_Test_3.3
 -- doesn't spill
 select * from explain_multi_batch();
-select * from t1 left outer join t2 on a = b order by b;
-
--- Serial_Test_4 reset 
-update pg_class set reltuples = 0, relpages = 0 where relname = 't2';
-update pg_class set reltuples = 0, relpages = 0 where relname = 't1';
-delete from pg_statistic where starelid = 't2'::regclass;
-delete from pg_statistic where starelid = 't1'::regclass;
 
 -- Serial_Test_4 setup
-truncate table t1;
+drop table t1;
+create table t1(b int);
 insert into t1 select i from generate_series(1,111)i;
 insert into t1 select 2 from generate_series(1,180)i;
-truncate table t2;
+analyze t1;
+
+drop table t2;
+create table t2(a int);
 insert into t2 select i from generate_series(20,25000)i;
 insert into t2 select 2 from generate_series(1,100)i;
-
--- Serial_Test_4.1 setup
-analyze t1; analyze t2;
+analyze t2;
+update pg_class
+  set reltuples = 10, relpages = pg_relation_size('t2') / 8192
+  where relname = 't2';
 
 -- Serial_Test_4.1
 -- spills in 32 batches
@@ -206,39 +191,13 @@ analyze t1; analyze t2;
 --batch 30 falls back with 404 chunks with 1 unmatched outer tuple (6)
 --batch 31 falls back with 396 chunks with 2 unmatched outer tuples (13,16)
 select * from explain_multi_batch();
-select * from t1 left outer join t2 on a = b order by a, b;
+select count(*) from t1 left outer join t2 on a = b;
 select count(a) from t1 left outer join t2 on a = b;
-
-select * from t1, t2 where a = b order by b;
-
-select * from t1 right outer join t2 on a = b order by b;
-
-select * from t1 full outer join t2 on a = b order by b;
-
--- Test_5
+select count(*) from t1, t2 where a = b;
 -- used to give wrong results because there is a whole batch of outer which is
 -- empty and so the inner doesn't emit unmatched tuples with ROJ
-
-drop table t1;
-create table t1(b int);
-alter table t1 set (parallel_workers = 1);
-
-insert into t1 select i from generate_series(1,111)i;
-insert into t1 select 2 from generate_series(1,180)i;
-analyze t1;
-
-drop table t2;
-create table t2(a int);
-alter table t2 set (parallel_workers = 1);
-
-insert into t2 select i from generate_series(20,25000)i;
-insert into t2 select 2 from generate_series(1,100)i;
-analyze t2;
-update pg_class
-  set reltuples = 10, relpages = pg_relation_size('t2') / 8192
-  where relname = 't2';
-
-select count(*) from t1 right outer join t2 on a = b order by b, a;
+select count(*) from t1 right outer join t2 on a = b;
+select count(*) from t1 full outer join t2 on a = b; 
 
 -- Test_6 non-negligible amount of data test case
 -- TODO: doesn't finish with my code when it is set to be serial
