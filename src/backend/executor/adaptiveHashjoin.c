@@ -63,10 +63,6 @@ ExecParallelHashJoinNewChunk(HashJoinState *hjstate, bool advance_from_probing)
 	Barrier *chunk_barrier =
 			&hashtable->batches[batchno].shared->fallback_chunk_barrier;
 
-	int phase;
-
-	elog(WARNING, "batch %i, advance_from_probing %i, pid %i.", batchno, advance_from_probing, MyProcPid);
-
 	if (batchno > 0 && advance_from_probing)
 	{
 		// the current chunk number can't be incremented if *any* worker isn't
@@ -77,20 +73,19 @@ ExecParallelHashJoinNewChunk(HashJoinState *hjstate, bool advance_from_probing)
 		if (BarrierArriveAndWait(chunk_barrier,
 								 WAIT_EVENT_HASH_CHUNK_FINISHING_PROBING))
 			phj_batch->current_chunk_num++;
-		phase = PHJ_CHUNK_DONE;
 
 		// Once the barrier is advanced we'll be in the DONE phase
 		// unfortunately, we are still attached to chunk barrier so we don't want to reattach
 		// and increase nparticipants or we will have deadlock
 	}
 	else
-		phase = BarrierAttach(chunk_barrier);
+		BarrierAttach(chunk_barrier);
 
 	// should only come here for batches after batch 0
 	// either I need a new batch (was on the last chunk or coming from batch 0)
 	// or I need the next chunk (exhausted outer)
 	// should we do this if we already had a barrier arrive and wait above?
-	switch (phase)
+	switch (BarrierPhase(chunk_barrier))
 	{
 		case PHJ_CHUNK_ELECTING:
 		phj_chunk_electing:
@@ -151,20 +146,12 @@ ExecParallelHashJoinNewChunk(HashJoinState *hjstate, bool advance_from_probing)
 
 			BarrierArriveAndWait(chunk_barrier, WAIT_EVENT_HASH_CHUNK_MORE_DONE);
 
-			Assert(BarrierPhase(chunk_barrier) == PHJ_CHUNK_FINAL);
-			BarrierDetach(chunk_barrier);
-			return false;
-
 			if (phj_batch->current_chunk_num > phj_batch->total_num_chunks)
 			{
 				Assert(BarrierPhase(chunk_barrier) == PHJ_CHUNK_FINAL);
 				BarrierDetach(chunk_barrier);
 				return false;
 			}
-
-			Assert(BarrierPhase(chunk_barrier) == PHJ_CHUNK_FINAL);
-			BarrierDetach(chunk_barrier);
-			return false;
 
 			// otherwise it is time for the next chunk
 			if (BarrierArriveExplicitAndWait(chunk_barrier, PHJ_CHUNK_ELECTING, WAIT_EVENT_CHUNK_FINAL))
