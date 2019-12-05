@@ -2083,6 +2083,7 @@ llvm_compile_expr(ExprState *state)
 				}
 
 			case EEOP_AGG_INIT_TRANS:
+			case EEOP_AGG_INIT_TRANS_SPILLED:
 				{
 					AggState   *aggstate;
 					AggStatePerTrans pertrans;
@@ -2093,6 +2094,7 @@ llvm_compile_expr(ExprState *state)
 					LLVMValueRef v_allpergroupsp;
 
 					LLVMValueRef v_pergroupp;
+					LLVMValueRef v_pergroup_allaggs;
 
 					LLVMValueRef v_setoff,
 								v_transno;
@@ -2120,11 +2122,32 @@ llvm_compile_expr(ExprState *state)
 										  "aggstate.all_pergroups");
 					v_setoff = l_int32_const(op->d.agg_init_trans.setoff);
 					v_transno = l_int32_const(op->d.agg_init_trans.transno);
-					v_pergroupp =
-						LLVMBuildGEP(b,
-									 l_load_gep1(b, v_allpergroupsp, v_setoff, ""),
-									 &v_transno, 1, "");
+					v_pergroup_allaggs = l_load_gep1(b, v_allpergroupsp, v_setoff, "");
 
+					/*
+					 * When no tuples at all have spilled, we avoid adding this
+					 * extra branch. But after some tuples have spilled, this
+					 * branch is necessary, so we recompile the expression
+					 * using a new opcode.
+					 */
+					if (opcode == EEOP_AGG_INIT_TRANS_SPILLED)
+					{
+						LLVMBasicBlockRef b_check_notransvalue = l_bb_before_v(
+							opblocks[i + 1], "op.%d.check_notransvalue", i);
+
+						LLVMBuildCondBr(
+							b,
+							LLVMBuildICmp(b, LLVMIntEQ,
+										  LLVMBuildPtrToInt(
+											  b, v_pergroup_allaggs, TypeSizeT, ""),
+										  l_sizet_const(0), ""),
+							opblocks[i + 1],
+							b_check_notransvalue);
+
+						LLVMPositionBuilderAtEnd(b, b_check_notransvalue);
+					}
+
+					v_pergroupp = LLVMBuildGEP(b, v_pergroup_allaggs, &v_transno, 1, "");
 					v_notransvalue =
 						l_load_struct_gep(b, v_pergroupp,
 										  FIELDNO_AGGSTATEPERGROUPDATA_NOTRANSVALUE,
@@ -2181,6 +2204,7 @@ llvm_compile_expr(ExprState *state)
 				}
 
 			case EEOP_AGG_STRICT_TRANS_CHECK:
+			case EEOP_AGG_STRICT_TRANS_CHECK_SPILLED:
 				{
 					AggState   *aggstate;
 					LLVMValueRef v_setoff,
@@ -2191,6 +2215,7 @@ llvm_compile_expr(ExprState *state)
 
 					LLVMValueRef v_transnull;
 					LLVMValueRef v_pergroupp;
+					LLVMValueRef v_pergroup_allaggs;
 
 					int			jumpnull = op->d.agg_strict_trans_check.jumpnull;
 
@@ -2210,11 +2235,32 @@ llvm_compile_expr(ExprState *state)
 						l_int32_const(op->d.agg_strict_trans_check.setoff);
 					v_transno =
 						l_int32_const(op->d.agg_strict_trans_check.transno);
-					v_pergroupp =
-						LLVMBuildGEP(b,
-									 l_load_gep1(b, v_allpergroupsp, v_setoff, ""),
-									 &v_transno, 1, "");
+					v_pergroup_allaggs = l_load_gep1(b, v_allpergroupsp, v_setoff, "");
 
+					/*
+					 * When no tuples at all have spilled, we avoid adding this
+					 * extra branch. But after some tuples have spilled, this
+					 * branch is necessary, so we recompile the expression
+					 * using a new opcode.
+					 */
+					if (opcode == EEOP_AGG_STRICT_TRANS_CHECK_SPILLED)
+					{
+						LLVMBasicBlockRef b_check_transnull = l_bb_before_v(
+							opblocks[i + 1], "op.%d.check_transnull", i);
+
+						LLVMBuildCondBr(
+							b,
+							LLVMBuildICmp(b, LLVMIntEQ,
+										  LLVMBuildPtrToInt(b, v_pergroup_allaggs,
+															TypeSizeT, ""),
+										  l_sizet_const(0), ""),
+							opblocks[jumpnull],
+							b_check_transnull);
+
+						LLVMPositionBuilderAtEnd(b, b_check_transnull);
+					}
+
+					v_pergroupp = LLVMBuildGEP(b, v_pergroup_allaggs, &v_transno, 1, "");
 					v_transnull =
 						l_load_struct_gep(b, v_pergroupp,
 										  FIELDNO_AGGSTATEPERGROUPDATA_TRANSVALUEISNULL,
@@ -2230,7 +2276,9 @@ llvm_compile_expr(ExprState *state)
 				}
 
 			case EEOP_AGG_PLAIN_TRANS_BYVAL:
+			case EEOP_AGG_PLAIN_TRANS_BYVAL_SPILLED:
 			case EEOP_AGG_PLAIN_TRANS:
+			case EEOP_AGG_PLAIN_TRANS_SPILLED:
 				{
 					AggState   *aggstate;
 					AggStatePerTrans pertrans;
@@ -2256,6 +2304,7 @@ llvm_compile_expr(ExprState *state)
 					LLVMValueRef v_pertransp;
 
 					LLVMValueRef v_pergroupp;
+					LLVMValueRef v_pergroup_allaggs;
 
 					LLVMValueRef v_retval;
 
@@ -2283,10 +2332,33 @@ llvm_compile_expr(ExprState *state)
 										  "aggstate.all_pergroups");
 					v_setoff = l_int32_const(op->d.agg_trans.setoff);
 					v_transno = l_int32_const(op->d.agg_trans.transno);
-					v_pergroupp =
-						LLVMBuildGEP(b,
-									 l_load_gep1(b, v_allpergroupsp, v_setoff, ""),
-									 &v_transno, 1, "");
+					v_pergroup_allaggs = l_load_gep1(b, v_allpergroupsp, v_setoff, "");
+
+					/*
+					 * When no tuples at all have spilled, we avoid adding this
+					 * extra branch. But after some tuples have spilled, this
+					 * branch is necessary, so we recompile the expression
+					 * using a new opcode.
+					 */
+					if (opcode == EEOP_AGG_PLAIN_TRANS_BYVAL_SPILLED ||
+						opcode == EEOP_AGG_PLAIN_TRANS_SPILLED)
+					{
+						LLVMBasicBlockRef b_advance_transval = l_bb_before_v(
+							opblocks[i + 1], "op.%d.advance_transval", i);
+
+						LLVMBuildCondBr(
+							b,
+							LLVMBuildICmp(b, LLVMIntEQ,
+										  LLVMBuildPtrToInt(b, v_pergroup_allaggs,
+															TypeSizeT, ""),
+										  l_sizet_const(0), ""),
+							opblocks[i + 1],
+							b_advance_transval);
+
+						LLVMPositionBuilderAtEnd(b, b_advance_transval);
+					}
+
+					v_pergroupp = LLVMBuildGEP(b, v_pergroup_allaggs, &v_transno, 1, "");
 
 					v_fcinfo = l_ptr_const(fcinfo,
 										   l_ptr(StructFunctionCallInfoData));
