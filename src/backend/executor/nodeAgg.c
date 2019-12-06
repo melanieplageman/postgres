@@ -1860,6 +1860,22 @@ lookup_hash_entries(AggState *aggstate)
 			if (spill->partitions == NULL)
 				hash_spill_init(spill, 0, perhash->aggnode->numGroups,
 								aggstate->hashentrysize);
+			AggStatePerHash perhash = &aggstate->perhash[aggstate->current_set];
+			slot_getallattrs(slot);
+			slot->tts_flags |= TTS_FLAG_EMPTY;
+			ExecStoreVirtualTuple(slot);
+			for (int j = 0; j < slot->tts_nvalid; j++)
+			{
+				bool found = false;
+				for (int i = 0; i < perhash->numhashGrpCols; i++)
+				{
+					int varNumber = perhash->hashGrpColIdxInput[i] - 1;
+					if (varNumber == j)
+						found = true;
+				}
+				if (!found)
+					slot->tts_isnull[j] = true;
+			}
 
 			aggstate->hash_disk_used += hash_spill_tuple(spill, 0, slot, hash);
 		}
@@ -2619,12 +2635,10 @@ hash_spill_tuple(HashAggSpill *spill, int input_bits, TupleTableSlot *slot,
 	BufFile				*file;
 	int					 written;
 	int					 total_written = 0;
-	bool				 shouldFree;
 
 	Assert(spill->partitions != NULL);
 
-	/*TODO: project needed attributes only */
-	tuple = ExecFetchSlotMinimalTuple(slot, &shouldFree);
+	tuple = heap_form_minimal_tuple(slot->tts_tupleDescriptor, slot->tts_values, slot->tts_isnull);
 
 	if (spill->partition_bits == 0)
 		partition = 0;
@@ -2651,9 +2665,6 @@ hash_spill_tuple(HashAggSpill *spill, int input_bits, TupleTableSlot *slot,
 				(errcode_for_file_access(),
 				 errmsg("could not write to HashAgg temporary file: %m")));
 	total_written += written;
-
-	if (shouldFree)
-		pfree(tuple);
 
 	return total_written;
 }
