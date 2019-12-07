@@ -1099,9 +1099,9 @@ set work_mem to default;
   union all
 (select * from agg_group_3 except select * from agg_hash_3);
 
-drop table agg_group_1;
+--drop table agg_group_1;
 drop table agg_group_2;
 drop table agg_group_3;
-drop table agg_hash_1;
+--drop table agg_hash_1;
 drop table agg_hash_2;
 drop table agg_hash_3;

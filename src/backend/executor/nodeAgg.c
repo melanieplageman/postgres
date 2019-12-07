@@ -1291,6 +1291,66 @@ project_aggregates(AggState *aggstate)
 	return NULL;
 }
 
+
+static bool
+find_aggregated_cols_walker(Node *node, Bitmapset **colnos)
+{
+	if (node == NULL)
+		return false;
+	if (IsA(node, Aggref) )
+	{
+		Aggref *aggref = (Aggref *)node;
+		ListCell *lc;
+		foreach(lc, aggref->args)
+		{
+			if (IsA(lfirst(lc), TargetEntry))
+			{
+				TargetEntry *te = lfirst(lc);
+				if (IsA(te->expr, FuncExpr))
+				{
+					FuncExpr *funcExpr = (FuncExpr *) te->expr;
+					ListCell *lc1;
+					foreach(lc1, funcExpr->args)
+					{
+						Node *node1 = lfirst(lc1);
+						if (IsA(node1, Var))
+						{
+							Var *var1 = (Var *) node1;
+							*colnos = bms_add_member(*colnos, var1->varattno);
+						}
+					}
+				}
+				else if (IsA(te->expr, Var))
+				{
+					Var		   *var = (Var *) te->expr;
+
+					/* setrefs.c should have set the varno to OUTER_VAR */
+				//	Assert(var->varno == OUTER_VAR);
+					//Assert(var->varlevelsup == 0);
+					*colnos = bms_add_member(*colnos, var->varattno);
+				}
+			}
+		}
+		return false;
+	}
+	return expression_tree_walker(node, find_aggregated_cols_walker,
+	                              (void *) colnos);
+}
+
+static Bitmapset *
+find_aggregated_cols(AggState *aggstate)
+{
+	Agg		   *node = (Agg *) aggstate->ss.ps.plan;
+	Bitmapset  *colnos;
+
+	colnos = NULL;
+	(void) find_aggregated_cols_walker((Node *) node->plan.targetlist,
+	                                   &colnos);
+	(void) find_aggregated_cols_walker((Node *) node->plan.qual,
+	                                   &colnos);
+	return colnos;
+}
+
 /*
  * find_unaggregated_cols
  *	  Construct a bitmapset of the column numbers of un-aggregated Vars
@@ -1864,6 +1924,7 @@ lookup_hash_entries(AggState *aggstate)
 			slot_getallattrs(slot);
 			slot->tts_flags |= TTS_FLAG_EMPTY;
 			ExecStoreVirtualTuple(slot);
+			Bitmapset *colnos = find_aggregated_cols(aggstate);
 			for (int j = 0; j < slot->tts_nvalid; j++)
 			{
 				bool found = false;
@@ -1873,6 +1934,26 @@ lookup_hash_entries(AggState *aggstate)
 					if (varNumber == j)
 						found = true;
 				}
+
+				if (!found && bms_is_member(j+1, colnos))
+					found = true;
+
+				//if (!found)
+				//{
+				//	ListCell *l1;
+				//	ListCell *l2;
+				//	foreach(l1, aggstate->aggs)
+				//	{
+				//		Aggref *ref = lfirst(l1);
+				//		foreach(l2, ref->args)
+				//		{
+				//			TargetEntry *tle = lfirst(l2);
+				//			if (tle->resno == j)
+				//				found = true;
+				//		}
+				//	}
+				//}
+
 				if (!found)
 					slot->tts_isnull[j] = true;
 			}
@@ -2639,6 +2720,10 @@ hash_spill_tuple(HashAggSpill *spill, int input_bits, TupleTableSlot *slot,
 	Assert(spill->partitions != NULL);
 
 	tuple = heap_form_minimal_tuple(slot->tts_tupleDescriptor, slot->tts_values, slot->tts_isnull);
+	int val1 = DatumGetInt32(slot->tts_values[0]);
+	int val2 = DatumGetInt32(slot->tts_values[1]);
+	//if (val1 != val2)
+		//elog(NOTICE, "g10000 is %i. g is %i.", val1, val2 );
 
 	if (spill->partition_bits == 0)
 		partition = 0;
