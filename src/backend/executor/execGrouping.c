@@ -465,6 +465,14 @@ LookupTupleHashEntry_internal(TupleHashTable hashtable, TupleTableSlot *slot,
 	TupleHashEntryData *entry;
 	bool		found;
 	MinimalTuple key;
+	TupleTableSlot *new_slot = MakeTupleTableSlot(slot->tts_tupleDescriptor, &TTSOpsMinimalTuple);
+
+	new_slot = ExecCopySlot(new_slot, slot);
+	slot_getallattrs(slot);
+	slot->tts_flags |= TTS_FLAG_EMPTY;
+	ExecStoreVirtualTuple(slot);
+	MinimalTuple tuple = heap_form_minimal_tuple(slot->tts_tupleDescriptor, slot->tts_values, slot->tts_isnull);
+	ExecStoreMinimalTuple(tuple, new_slot, true);
 
 	/* set up data needed by hash and match functions */
 	hashtable->inputslot = slot;

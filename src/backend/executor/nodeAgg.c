@@ -2722,8 +2722,8 @@ hash_spill_tuple(HashAggSpill *spill, int input_bits, TupleTableSlot *slot,
 	tuple = heap_form_minimal_tuple(slot->tts_tupleDescriptor, slot->tts_values, slot->tts_isnull);
 	int val1 = DatumGetInt32(slot->tts_values[0]);
 	int val2 = DatumGetInt32(slot->tts_values[1]);
-	//if (val1 != val2)
-		//elog(NOTICE, "g10000 is %i. g is %i.", val1, val2 );
+	if (val1 != val2)
+		elog(NOTICE, "g10000 is %i. g is %i.", val1, val2 );
 
 	if (spill->partition_bits == 0)
 		partition = 0;
