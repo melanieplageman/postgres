@@ -457,7 +457,6 @@ ExecHashJoinImpl(PlanState *pstate, bool parallel)
 					break;
 				}
 
-				// TODO: why is both this and the thing above it here??
 				BufFile *outerFile = hashtable->outerBatchFile[batchno];
 				if (outerFile == NULL)
 				{
@@ -722,9 +721,7 @@ ExecHashJoinImpl(PlanState *pstate, bool parallel)
 					// if it is a ROJ and there are inner tuples in the batch -- should never have no tuples in either batch...
 					if (BufFileRewindIfExists(node->hj_HashTable->outerBatchFile[node->hj_HashTable->curbatch]) != NULL ||
 							(node->hj_HashTable->innerBatchFile[node->hj_HashTable->curbatch] != NULL && HJ_FILL_INNER(node)))
-					{
 						ExecHashJoinLoadInnerBatch(node); /* TODO: should I ever load inner when outer file is not present? */
-					}
 
 				}
 				node->hj_JoinState = HJ_NEED_NEW_OUTER;
