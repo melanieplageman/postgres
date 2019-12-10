@@ -1951,7 +1951,6 @@ typedef struct HashJoinState
 	bool hj_InnerFirstChunk;
 	bool hj_InnerExhausted;
 	off_t hj_InnerPageOffset;
-	int serial_chunk_count;
 
 	/* hashloop fallback outer side */
 	unsigned char hj_OuterCurrentByte;
@@ -1961,7 +1960,6 @@ typedef struct HashJoinState
 	/* parallel hashloop fallback outer side */
 	bool last_worker; // TODO: initialize these
 	BufFile *combined_bitmap; // TODO: initialize this and clean it up
-	int64 local_matched_tuple_count;
 } HashJoinState;
 
 
