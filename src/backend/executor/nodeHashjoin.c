@@ -224,7 +224,6 @@ ExecHashJoinImpl(PlanState *pstate, bool parallel)
 		{
 			case HJ_BUILD_HASHTABLE:
 
-				elog(DEBUG3, "HJ_BUILD_HASHTABLE. pid %i.", MyProcPid);
 				/*
 				 * First time through: build hash table for inner relation.
 				 */
@@ -253,7 +252,6 @@ ExecHashJoinImpl(PlanState *pstate, bool parallel)
 				 * from the outer plan node.  If we succeed, we have to stash
 				 * it away for later consumption by ExecHashJoinOuterGetTuple.
 				 */
-				//volatile int mybp = 0; while (mybp == 0);
 				if (HJ_FILL_INNER(node))
 				{
 					/* no chance to not build the hash table */
@@ -359,7 +357,6 @@ ExecHashJoinImpl(PlanState *pstate, bool parallel)
 
 			case HJ_NEED_NEW_OUTER:
 
-				elog(DEBUG3, "HJ_NEED_NEW_OUTER. pid %i.", MyProcPid);
 				/*
 				 * We don't have an outer tuple, try to get the next one
 				 */
@@ -508,11 +505,11 @@ ExecHashJoinImpl(PlanState *pstate, bool parallel)
 
 			case HJ_SCAN_BUCKET:
 
-				elog(DEBUG3, "HJ_SCAN_BUCKET. pid %i.", MyProcPid);
 				/*
 				 * Scan the selected hash bucket for matches to current outer
 				 */
 
+				elog(DEBUG3, "dummy code to protect this declaration.");
 				bool outerTupleMatchesExhausted;
 				if (parallel)
 					outerTupleMatchesExhausted = !ExecParallelScanHashBucket(node, econtext);
@@ -628,14 +625,7 @@ ExecHashJoinImpl(PlanState *pstate, bool parallel)
 						BufFileWrite(node->hj_OuterMatchStatusesFile, &node->hj_OuterCurrentByte, 1);
 					}
 					if (otherqual == NULL || ExecQual(otherqual, econtext))
-					{
-						// LOG_NOW inner and outer tuples here
-						elog(DEBUG3, "match o.%i.i.%i.",
-							DatumGetInt32(econtext->ecxt_outertuple->tts_values[0]),
-							DatumGetInt32(econtext->ecxt_innertuple->tts_values[0]));
-						node->local_matched_tuple_count++;
 						return ExecProject(node->js.ps.ps_ProjInfo);
-					}
 					else
 						InstrCountFiltered2(node, 1);
 				}
@@ -645,7 +635,6 @@ ExecHashJoinImpl(PlanState *pstate, bool parallel)
 
 			case HJ_FILL_INNER_TUPLES:
 
-				elog(DEBUG3, "HJ_FILL_INNER_TUPLES. pid %i.", MyProcPid);
 				/*
 				 * We have finished a batch, but we are doing right/full join,
 				 * so any unmatched inner tuples in the hashtable have to be
@@ -666,29 +655,20 @@ ExecHashJoinImpl(PlanState *pstate, bool parallel)
 				econtext->ecxt_outertuple = node->hj_NullOuterTupleSlot;
 
 				if (otherqual == NULL || ExecQual(otherqual, econtext))
-				{
-					// LOG_NOW inner tuple and NULL
-					elog(DEBUG3, "nomatch o.NULL.i.%i.",
-						 DatumGetInt32(econtext->ecxt_innertuple->tts_values[0]));
 					return ExecProject(node->js.ps.ps_ProjInfo);
-				}
 				else
 					InstrCountFiltered2(node, 1);
 				break;
 
 			case HJ_NEED_NEW_BATCH:
 
-				elog(DEBUG3, "HJ_NEED_NEW_BATCH. pid %i.", MyProcPid);
 				/*
 				 * Try to advance to next batch.  Done if there are no more.
 				 */
 				if (parallel)
 				{
 					if (!ExecParallelHashJoinNewBatch(node))
-					{
-						elog(DEBUG3, "%i.%li.", MyProcPid, node->local_matched_tuple_count);
 						return NULL;	/* end of parallel-aware join */
-					}
 					bool fallback = node->hj_HashTable->batches[node->hj_HashTable->curbatch].shared->parallel_hashloop_fallback;
 
 					// TODO: does this need to be parallel-safe?
@@ -751,8 +731,6 @@ ExecHashJoinImpl(PlanState *pstate, bool parallel)
 				break;
 
 			case HJ_NEED_NEW_INNER_CHUNK:
-
-				elog(DEBUG3, "HJ_NEED_NEW_INNER_CHUNK. pid %i.", MyProcPid);
 
 				if (parallel)
 				{
@@ -834,16 +812,10 @@ ExecHashJoinImpl(PlanState *pstate, bool parallel)
 					node->hj_OuterTupleCount = 0;
 					ExecHashJoinLoadInnerBatch(node);
 				}
-				else
-				{
-					if (node->hj_HashTable->curbatch == 21)
-						elog(WARNING, "HJ_NEED_NEW_INNER_CHUNK. skipping loading batch 21");
-				}
 				break;
 
 			case HJ_ADAPTIVE_EMIT_UNMATCHED_OUTER_INIT:
 
-				elog(DEBUG3, "HJ_ADAPTIVE_EMIT_UNMATCHED_OUTER_INIT. pid %i.", MyProcPid);
 
 				if (parallel)
 				{
@@ -861,7 +833,6 @@ ExecHashJoinImpl(PlanState *pstate, bool parallel)
 				else
 				{
 					// AHJ debugging
-					elog(DEBUG3, "HJ_ADAPTIVE_EMIT_UNMATCHED_OUTER_INIT: serial. batch %i falls back with %i chunks.", hashtable->curbatch, node->serial_chunk_count);
 					node->hj_OuterTupleCount = 0;
 					BufFileRewindIfExists(node->hj_OuterMatchStatusesFile);
 
@@ -880,7 +851,6 @@ ExecHashJoinImpl(PlanState *pstate, bool parallel)
 
 			case HJ_ADAPTIVE_EMIT_UNMATCHED_OUTER:
 
-				elog(DEBUG3, "HJ_ADAPTIVE_EMIT_UNMATCHED_OUTER. pid %i.", MyProcPid);
 				if (parallel)
 				{
 					if (node->combined_bitmap == NULL)
@@ -931,9 +901,6 @@ ExecHashJoinImpl(PlanState *pstate, bool parallel)
 											   econtext->ecxt_outertuple,
 											   false);
 					econtext->ecxt_innertuple = node->hj_NullInnerTupleSlot;
-					// LOG_NOW outer tuple and NULL
-					elog(DEBUG3, "nomatch o.%i.i.NULL.",
-						 DatumGetInt32(econtext->ecxt_outertuple->tts_values[0]));
 
 					return ExecProject(node->js.ps.ps_ProjInfo);
 
@@ -1061,7 +1028,6 @@ ExecInitHashJoin(HashJoin *node, EState *estate, int eflags)
 
 	hjstate->hj_OuterMatchStatusesFile = NULL;
 	hjstate->hj_OuterTupleCount  = 0;
-	hjstate->local_matched_tuple_count = 0;
 	hjstate->hj_InnerExhausted = false;
 
 	hjstate->last_worker = false;
@@ -1237,17 +1203,9 @@ emitUnmatchedOuterTuple(ExprState *otherqual, ExprContext *econtext, HashJoinSta
 	// re-enable for testing -- tells us for both serial and parallel which unmatched outer tuples are emitted during execution
 	// as opposed to waiting to emit until the end of the batch in fallback case
 	// will only log when there is an unmatched tuple
-	elog(DEBUG3, "emitting outer tuple. fall back is false. value %i. batch %i. pid %i..", DatumGetInt32(econtext->ecxt_outertuple->tts_values[0]), hjstate->hj_HashTable->curbatch, MyProcPid);
 
 	if (otherqual == NULL || ExecQual(otherqual, econtext))
-	{
-		// LOG_NOW outer tuple and NULL
-		// (parallel and serial case come here)
-		// VIP
-		elog(DEBUG3, "nomatch o.%i.i.NULL.",
-			 DatumGetInt32(econtext->ecxt_outertuple->tts_values[0]));
 		return ExecProject(hjstate->js.ps.ps_ProjInfo);
-	}
 
 	InstrCountFiltered2(hjstate, 1);
 	return NULL;
