@@ -150,7 +150,6 @@ static TupleTableSlot *ExecHashJoinGetSavedTuple(HashJoinState *hjstate,
 
 static bool ExecHashJoinAdvanceBatch(HashJoinState *hjstate);
 static bool ExecHashJoinLoadInnerBatch(HashJoinState *hjstate);
-static bool ExecParallelCheckHashloopFallback(HashJoinState *hjstate, int batchno);
 static void ExecParallelHashJoinPartitionOuter(HashJoinState *node);
 
 static TupleTableSlot *emitUnmatchedOuterTuple(ExprState *otherqual,
@@ -345,6 +344,7 @@ ExecHashJoinImpl(PlanState *pstate, bool parallel)
 					}
 					Assert(BarrierPhase(build_barrier) == PHJ_BUILD_DONE);
 
+					/* Each backend should now select a batch to work on. */
 					hashtable->curbatch = -1;
 					node->hj_JoinState = HJ_NEED_NEW_BATCH;
 
@@ -386,6 +386,9 @@ ExecHashJoinImpl(PlanState *pstate, bool parallel)
 					node->hj_JoinState = HJ_NEED_NEW_INNER_CHUNK;
 					break;
 				}
+
+				econtext->ecxt_outertuple = outerTupleSlot;
+
 				/*
 				 * for the hashloop fallback case,
 				 * only initialize hj_MatchedOuter to false during the first chunk.
@@ -409,7 +412,6 @@ ExecHashJoinImpl(PlanState *pstate, bool parallel)
 					if (node->hashloop_fallback == false || node->hj_InnerFirstChunk || hashtable->curbatch == 0)
 						node->hj_MatchedOuter = false;
 				}
-				econtext->ecxt_outertuple = outerTupleSlot;
 
 				/*
 				 * Find the corresponding bucket for this tuple in the main
@@ -420,7 +422,6 @@ ExecHashJoinImpl(PlanState *pstate, bool parallel)
 										  &node->hj_CurBucketNo, &batchno);
 				node->hj_CurSkewBucketNo = ExecHashGetSkewBucket(hashtable,
 																 hashvalue);
-
 				node->hj_CurTuple = NULL;
 
 				/*
@@ -464,9 +465,9 @@ ExecHashJoinImpl(PlanState *pstate, bool parallel)
 					break;
 				}
 
-				// TODO: make this clear this not for parallel fallback
 				if (node->hashloop_fallback == true)
 				{
+					Assert(!parallel);
 					/* first tuple of new batch */
 					if (node->hj_OuterMatchStatusesFile == NULL)
 					{
@@ -1534,18 +1535,6 @@ static bool ExecHashJoinLoadInnerBatch(HashJoinState *hjstate)
 	}
 
 	return false;
-}
-
-static bool
-ExecParallelCheckHashloopFallback(HashJoinState *hjstate, int batchno)
-{
-	HashJoinTable hashtable = hjstate->hj_HashTable;
-	int curbatch = hashtable->curbatch;
-	if (curbatch != batchno)
-		elog(ERROR, "curbatch != batchno in ExecParallelCheckHashloopFallback");
-	ParallelHashJoinBatchAccessor *accessor = hashtable->batches + curbatch;
-	ParallelHashJoinBatch *batch = accessor->shared;
-	return batch->parallel_hashloop_fallback;
 }
 
 
