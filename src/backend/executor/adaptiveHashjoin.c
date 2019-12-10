@@ -284,7 +284,6 @@ ExecParallelHashJoinNewBatch(HashJoinState *hjstate)
 
 				hjstate->combined_bitmap = combined_bitmap_file;
 				hjstate->last_worker = true;
-				hjstate->num_outer_read_files = length;
 				pfree(outer_match_statuses);
 				return true;
 			}

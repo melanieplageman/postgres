@@ -1453,7 +1453,6 @@ ExecHashJoinAdvanceBatch(HashJoinState *hjstate)
 	hjstate->hj_InnerPageOffset = 0L;
 	hjstate->hj_InnerFirstChunk = true;
 	hjstate->hashloop_fallback = false; /* new batch, so start it off false */
-	hjstate->serial_chunk_count = 1;
 	if (hjstate->hj_OuterMatchStatusesFile != NULL)
 		BufFileClose(hjstate->hj_OuterMatchStatusesFile);
 	hjstate->hj_OuterMatchStatusesFile = NULL;
@@ -1515,7 +1514,6 @@ static bool ExecHashJoinLoadInnerBatch(HashJoinState *hjstate)
 			{
 				hjstate->hj_InnerPageOffset = tup_start_offset;
 				hjstate->hashloop_fallback = true;
-				hjstate->serial_chunk_count++;
 				return true;
 			}
 			hjstate->hj_InnerPageOffset = tup_end_offset;
