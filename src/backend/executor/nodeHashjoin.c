@@ -1066,7 +1066,6 @@ ExecInitHashJoin(HashJoin *node, EState *estate, int eflags)
 
 	hjstate->last_worker = false;
 	hjstate->combined_bitmap = NULL;
-	hjstate->current_outer_read_file = 0;
 	/*
 	 * Miscellaneous initialization
 	 *
