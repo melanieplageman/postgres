@@ -389,6 +389,19 @@ ExecHashJoinImpl(PlanState *pstate, bool parallel)
 
 				econtext->ecxt_outertuple = outerTupleSlot;
 
+
+
+				/*
+				 * Find the corresponding bucket for this tuple in the main
+				 * hash table or skew hash table.
+				 */
+				node->hj_CurHashValue = hashvalue;
+				ExecHashGetBucketAndBatch(hashtable, hashvalue,
+										  &node->hj_CurBucketNo, &batchno);
+				node->hj_CurSkewBucketNo = ExecHashGetSkewBucket(hashtable,
+																 hashvalue);
+				node->hj_CurTuple = NULL;
+
 				/*
 				 * for the hashloop fallback case,
 				 * only initialize hj_MatchedOuter to false during the first chunk.
@@ -406,28 +419,16 @@ ExecHashJoinImpl(PlanState *pstate, bool parallel)
 
 					if (phj_batch->parallel_hashloop_fallback == false || phj_batch->current_chunk_num == 1)
 						node->hj_MatchedOuter = false;
-				}
-				else
-				{
-					if (node->hashloop_fallback == false || node->hj_InnerFirstChunk || hashtable->curbatch == 0)
-						node->hj_MatchedOuter = false;
+					node->hj_JoinState = HJ_SCAN_BUCKET;
+					break;
 				}
 
-				/*
-				 * Find the corresponding bucket for this tuple in the main
-				 * hash table or skew hash table.
-				 */
-				node->hj_CurHashValue = hashvalue;
-				ExecHashGetBucketAndBatch(hashtable, hashvalue,
-										  &node->hj_CurBucketNo, &batchno);
-				node->hj_CurSkewBucketNo = ExecHashGetSkewBucket(hashtable,
-																 hashvalue);
-				node->hj_CurTuple = NULL;
+				if (node->hashloop_fallback == false || node->hj_InnerFirstChunk || hashtable->curbatch == 0)
+					node->hj_MatchedOuter = false;
 
 				/*
 				 * The tuple might not belong to the current batch (where
 				 * "current batch" includes the skew buckets if any).
-				 * This should never happen for parallel hashjoin
 				 */
 				if (batchno != hashtable->curbatch &&
 					node->hj_CurSkewBucketNo == INVALID_SKEW_BUCKET_NO)
