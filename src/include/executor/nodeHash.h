@@ -41,7 +41,7 @@ extern void ExecParallelHashTableInsert(HashJoinTable hashtable,
 										TupleTableSlot *slot,
 										uint32 hashvalue);
 extern void
-ExecParallelHashTableInsertCurrentBatch(HashJoinTable hashtable, TupleTableSlot *slot, uint32 hashvalue, int chunk_num);
+ExecParallelHashTableInsertCurrentBatch(HashJoinTable hashtable, TupleTableSlot *slot, uint32 hashvalue);
 extern bool ExecHashGetHashValue(HashJoinTable hashtable,
 								 ExprContext *econtext,
 								 List *hashkeys,
