@@ -581,26 +581,22 @@ ExecHashJoinImpl(PlanState *pstate, bool parallel)
 					 * Set the match bit for this outer tuple in the match
 					 * status file
 					 */
-					// TODO: for parallel, do I still need to do this for batch 0
-					//if (parallel && batchno > 0)
 					bool fallback = false;
 					if (parallel)
 						fallback = node->hj_HashTable->batches[node->hj_HashTable->curbatch].shared->parallel_hashloop_fallback;
 					if (parallel && fallback)
 					{
 						unsigned char current_outer_byte;
-						// TODO: is this parallel-safe
-						// TODO: should I instead get it from node->hj_OuterTupleSlot->tuplenum or add something else altogether?
+						// TODO: it is very unclear here that this slot is current, and, thus, that this tuplenum is up-to-date
+						// also, it is unclear if node->hj_OuterTupleSlot->tuplenum should be used
 						uint32 tupleid = econtext->ecxt_outertuple->tuplenum;
 						SharedTuplestoreAccessor *outer_acc = hashtable->batches[hashtable->curbatch].outer_tuples;
-						BufFile *parallel_outer_matchstatuses = sts_get_my_STA_outerMatchStatuses(outer_acc); // TODO: make sure I always want to get my own file here
+						BufFile *parallel_outer_matchstatuses = sts_get_my_STA_outerMatchStatuses(outer_acc);
 
-						// TODO: make sure this logic is right for tuplenum -- ugh seems like no +1 ?
 						if (BufFileSeek(parallel_outer_matchstatuses, 0, (tupleid / 8), SEEK_SET) != 0)
 							elog(DEBUG1, "HJ_SCAN_BUCKET for batchno %i. at beginning of file. pid %i.", batchno, MyProcPid);
 						BufFileRead(parallel_outer_matchstatuses, &current_outer_byte, 1);
 
-						// I think I don't need to subtract 1 for parallel case because tuplenums are not off by one?
 						int bit_to_set_in_byte = tupleid % 8;
 
 						current_outer_byte = current_outer_byte | (1 << bit_to_set_in_byte);
@@ -611,9 +607,9 @@ ExecHashJoinImpl(PlanState *pstate, bool parallel)
 						BufFileWrite(parallel_outer_matchstatuses, &current_outer_byte, 1);
 					}
 
-					// TODO: make it clear this is just for serial fallback case
 					else if (node->hj_OuterMatchStatusesFile != NULL)
 					{
+						Assert(!parallel);
 						Assert(node->hashloop_fallback == true);
 						int byte_to_set = (node->hj_OuterTupleCount - 1) / 8;
 						int bit_to_set_in_byte = (node->hj_OuterTupleCount - 1) % 8;
@@ -762,7 +758,7 @@ ExecHashJoinImpl(PlanState *pstate, bool parallel)
 				 * curbatch is 0 here. proceed to HJ_NEED_NEW_BATCH to either
 				 * advance to the next batch or complete the join
 				 */
-				if (node->hj_HashTable->curbatch == 0) // don't do this check for parallel
+				if (node->hj_HashTable->curbatch == 0)
 				{
 					Assert(node->hashloop_fallback == false);
 					if(node->hj_InnerPageOffset != 0L)
@@ -1350,7 +1346,6 @@ ExecParallelHashJoinOuterGetTuple(PlanState *outerNode,
 			ExecForceStoreMinimalTuple(tuple,
 									   hjstate->hj_OuterTupleSlot,
 									   false);
-			// TODO: are either of these parallel-safe
 			hjstate->hj_OuterTupleSlot->tuplenum = tupleid;
 			slot = hjstate->hj_OuterTupleSlot;
 			return slot;

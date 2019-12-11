@@ -270,10 +270,7 @@ MultiExecParallelHash(HashState *node)
 			 */
 			if (PHJ_GROW_BATCHES_PHASE(BarrierAttach(&pstate->grow_batches_barrier)) !=
 				PHJ_GROW_BATCHES_ELECTING)
-			{
-				elog(DEBUG3, "Increase nbatches during initial hashtable build. batch %i. pid %i.", hashtable->curbatch, MyProcPid);
 				ExecParallelHashIncreaseNumBatches(hashtable);
-			}
 			if (PHJ_GROW_BUCKETS_PHASE(BarrierAttach(&pstate->grow_buckets_barrier)) !=
 				PHJ_GROW_BUCKETS_ELECTING)
 				ExecParallelHashIncreaseNumBuckets(hashtable);
@@ -297,9 +294,7 @@ MultiExecParallelHash(HashState *node)
 			 * others before anyone tries to load them.
 			 */
 			for (i = 0; i < hashtable->nbatch; ++i)
-			{
 				sts_end_write(hashtable->batches[i].inner_tuples);
-			}
 
 			/*
 			 * Update shared counters.  We need an accurate total tuple count
@@ -1066,8 +1061,6 @@ ExecParallelHashIncreaseNumBatches(HashJoinTable hashtable)
 
 	Assert(BarrierPhase(&pstate->build_barrier) == PHJ_BUILD_HASHING_INNER);
 	pstate->num_batch_increases++;
-	elog(DEBUG3, "ExecParallelHashIncreaseNumBatches. pstate->num_batch_increases for this parallel hashjoin %i. pid %i.",
-			pstate->num_batch_increases, MyProcPid);
 	/*
 	 * It's unlikely, but we need to be prepared for new participants to show
 	 * up while we're in the middle of this operation so we need to switch on
@@ -1091,8 +1084,8 @@ ExecParallelHashIncreaseNumBatches(HashJoinTable hashtable)
 				int			new_nbatch;
 				int			i;
 
-				old_batch0 = hashtable->batches[0].shared;
 				/* Move the old batch out of the way. */
+				old_batch0 = hashtable->batches[0].shared;
 				pstate->old_batches = pstate->batches;
 				pstate->old_nbatch = hashtable->nbatch;
 				pstate->batches = InvalidDsaPointer;
@@ -1229,43 +1222,27 @@ ExecParallelHashIncreaseNumBatches(HashJoinTable hashtable)
 				ExecParallelHashTableSetCurrentBatch(hashtable, 0);
 
 				if (pstate->num_batch_increases >= 2)
-				{
 					excessive_batch_num_increases = true;
-				}
 				/* Are any of the new generation of batches exhausted? */
 				for (i = 0; i < hashtable->nbatch; ++i)
 				{
 					ParallelHashJoinBatch *batch = hashtable->batches[i].shared;
-					if (i == 7)
-					{
-						elog(DEBUG3, "in ExecParallelHashIncreaseNumBatches PHJ_GROW_BATCHES_DECIDING. batchno 7. batch->estimated_size is %zu. pid %i.", batch->estimated_size, MyProcPid);
-					}
 
-					// TODO: hardcode this to make batch 7 have this property and then fix later
-					// TODO: need to make sure I have a test case that can exercise this (what happened to it)
 					if (batch->space_exhausted ||
 						batch->estimated_size > pstate->space_allowed)
 					{
 						int			parent;
 
 						space_exhausted = true;
-						elog(DEBUG3, "in ExecParallelHashIncreaseNumBatches PHJ_GROW_BATCHES_DECIDING and space_exhausted.");
 
 						// only once we've increased the number of batches overall many times should we start setting
 						// some batches to use the fallback strategy. Those that are still too big will have this option set
+						// we better not repartition again (growth should be disabled), so that we don't overwrite this value
+						// this tells us if we have set fallback to true or not and how many chunks -- useful for seeing how many chunks
+						// we can get to before setting it to true (since we still mark chunks (work_mem sized chunks)) in batches even if we don't fall back
+						// same for below but opposite
 						if (excessive_batch_num_increases == true)
-						{
 							batch->parallel_hashloop_fallback = true;
-							// we better not repartition again (growth should be disabled), so that we don't overwrite this value
-							// this tells us if we have set fallback to true or not and how many chunks -- useful for seeing how many chunks
-							// we can get to before setting it to true (since we still mark chunks (work_mem sized chunks)) in batches even if we don't fall back
-							// same for below but opposite
-							elog(DEBUG3, "ExecParallelHashIncreaseNumBatches PHJ_GROW_BATCHES_DECIDING. set parallel_hashloop_fallback to true for batch %i with chunks %i. pid %i.", i, batch->total_num_chunks, MyProcPid);
-						}
-						else
-						{
-							elog(DEBUG3, "ExecParallelHashIncreaseNumBatches PHJ_GROW_BATCHES_DECIDING. fall back is false for batch %i with chunks %i. pid %i.", i, batch->total_num_chunks, MyProcPid);
-						}
 						/*
 						 * Did this batch receive ALL of the tuples from its
 						 * parent batch?  That would indicate that further
@@ -1332,7 +1309,6 @@ ExecParallelHashRepartitionFirst(HashJoinTable hashtable)
 									  &bucketno, &batchno);
 
 			Assert(batchno < hashtable->nbatch);
-			// maybe chunk batch 0 -- but shouldn't need to since it is the hashtable
 			if (batchno == 0)
 			{
 				/* It still belongs in batch 0.  Copy to a new chunk. */
@@ -1428,9 +1404,7 @@ ExecParallelHashRepartitionRest(HashJoinTable hashtable)
 
 		/* Scan one partition from the previous generation. */
 		sts_begin_parallel_scan(old_inner_tuples[i]);
-		// should I check the old chunk number?
 		tupleMetadata metadata;
-		int old_chunk_num = 0;
 		while ((tuple = sts_parallel_scan_next(old_inner_tuples[i], &metadata, false)))
 		{
 			size_t		tuple_size = MAXALIGN(HJTUPLE_OVERHEAD + tuple->t_len);
@@ -1438,7 +1412,6 @@ ExecParallelHashRepartitionRest(HashJoinTable hashtable)
 			int			batchno;
 
 			hashvalue = metadata.hashvalue;
-			old_chunk_num = metadata.tuplenum;
 			/* Decide which partition it goes to in the new generation. */
 			ExecHashGetBucketAndBatch(hashtable, hashvalue, &bucketno,
 									  &batchno);
@@ -1452,7 +1425,6 @@ ExecParallelHashRepartitionRest(HashJoinTable hashtable)
 			// TODO: *** does having a lock on the pstate->lock help me at all with concurrent access to the chunk_num info?
 			LWLockAcquire(&pstate->lock, LW_EXCLUSIVE);
 
-
 			// TODO: should I check batch estimated size here at all? do I care about that in the other place
 			if (phj_batch->parallel_hashloop_fallback == true && (phj_batch->estimated_chunk_size + tuple_size > pstate->space_allowed))
 			{
@@ -1460,9 +1432,7 @@ ExecParallelHashRepartitionRest(HashJoinTable hashtable)
 				phj_batch->estimated_chunk_size = tuple_size;
 			}
 			else
-			{
 				phj_batch->estimated_chunk_size += tuple_size;
-			}
 			LWLockRelease(&pstate->lock);
 			metadata.tuplenum = phj_batch->total_num_chunks;
 			/* Store the tuple its new batch. */
@@ -1775,9 +1745,6 @@ ExecParallelHashTableInsert(HashJoinTable hashtable,
 retry:
 	ExecHashGetBucketAndBatch(hashtable, hashvalue, &bucketno, &batchno);
 
-	// TODO: figure out if I want to be able to chunk batch 0 for parallel
-	// Is this only for batch 0 before we've done any resizing?
-	// TODO: do I want the chunks for batch 0?
 	if (batchno == 0)
 	{
 		HashJoinTuple hashTuple;
@@ -1819,25 +1786,14 @@ retry:
 		// TODO: *** does having a lock on the pstate->lock help me at all with concurrent access to the chunk_num info?
 		LWLockAcquire(&pstate->lock, LW_EXCLUSIVE);
 
-		if (batchno == 7)
-		{
-			ParallelHashJoinBatchAccessor phj_batch_acc = hashtable->batches[batchno];
-			elog(DEBUG3, "in ExecParallelHashTableInsert. batchno 7. estimated_size %zu. size %zu. estimated_chunk_size %zu . space_allowed %zu. ntuples %zu. old_ntuples %zu. pid %i. parallel_hashloop_fallback is %i. tupleval %i.",
-					phj_batch->estimated_size, phj_batch->size, phj_batch->estimated_chunk_size, pstate->space_allowed, phj_batch_acc.ntuples, phj_batch_acc.old_ntuples,  MyProcPid, phj_batch->parallel_hashloop_fallback, DatumGetInt32(slot->tts_values[0]));
-		}
 		// TODO: should I check batch estimated size here at all? do I care about that in the other place
 		if (phj_batch->parallel_hashloop_fallback == true && (phj_batch->estimated_chunk_size + tuple_size > pstate->space_allowed))
 		{
-			// FAVE_LOG
-			if (batchno == 7)
-				elog(DEBUG3, "increasing total_num_chunks from %i to %i for batchno 7. pid %i. tupleval %i.", phj_batch->total_num_chunks, phj_batch->total_num_chunks + 1, MyProcPid, DatumGetInt32(slot->tts_values[0]));
 			phj_batch->total_num_chunks++;
 			phj_batch->estimated_chunk_size = tuple_size;
 		}
 		else
-		{
 			phj_batch->estimated_chunk_size += tuple_size;
-		}
 		LWLockRelease(&pstate->lock);
 
 		tupleMetadata metadata;
@@ -1859,7 +1815,9 @@ retry:
  * tuples that belong in the current batch once growth has been disabled.
  */
 void
-ExecParallelHashTableInsertCurrentBatch(HashJoinTable hashtable, TupleTableSlot *slot, uint32 hashvalue, int chunk_num)
+ExecParallelHashTableInsertCurrentBatch(HashJoinTable hashtable,
+										TupleTableSlot *slot,
+										uint32 hashvalue)
 {
 	bool		shouldFree;
 	MinimalTuple tuple = ExecFetchSlotMinimalTuple(slot, &shouldFree);
@@ -1868,22 +1826,11 @@ ExecParallelHashTableInsertCurrentBatch(HashJoinTable hashtable, TupleTableSlot 
 	int			batchno;
 	int			bucketno;
 
-
 	ExecHashGetBucketAndBatch(hashtable, hashvalue, &bucketno, &batchno);
-	ParallelHashJoinBatch *phj_batch = hashtable->batches[batchno].shared;
-
 	Assert(batchno == hashtable->curbatch);
-	//ParallelHashJoinBatch *phj_batch = hashtable->batches[batchno].shared;
-	// TODO: add some logic if the chunk num is different than the current chunk num
 	hashTuple = ExecParallelHashTupleAlloc(hashtable,
 										   HJTUPLE_OVERHEAD + tuple->t_len,
 										   &shared);
-	size_t size = phj_batch->estimated_size;
-	// PAHJ_debugging
-	// used this to determine if there were any tuples on the inner side
-	if (batchno == 20)
-		elog(DEBUG3, "In ExecParallelHashTableInsertCurrentBatch. For batchno 20, the estimated size of the inner file is %zu. fallback is %i. total_num_chunks is %i . pid %i.",
-		 size, phj_batch->parallel_hashloop_fallback, phj_batch->total_num_chunks, MyProcPid);
 	hashTuple->hashvalue = hashvalue;
 	memcpy(HJTUPLE_MINTUPLE(hashTuple), tuple, tuple->t_len);
 	HeapTupleHeaderClearMatch(HJTUPLE_MINTUPLE(hashTuple));
@@ -2121,7 +2068,6 @@ ExecParallelScanHashBucket(HashJoinState *hjstate,
 	 * hj_CurTuple is the address of the tuple last returned from the current
 	 * bucket, or NULL if it's time to start scanning a new bucket.
 	 */
-	elog(DEBUG3, "ExecParallelScanHashBucket. batch %i. pid %i.", hashtable->curbatch, MyProcPid);
 	if (hashTuple != NULL)
 		hashTuple = ExecParallelHashNextTuple(hashtable, hashTuple);
 	else
@@ -2957,7 +2903,6 @@ ExecParallelHashTupleAlloc(HashJoinTable hashtable, size_t size,
 			chunk_size > pstate->space_allowed)
 		{
 			pstate->growth = PHJ_GROWTH_NEED_MORE_BATCHES;
-			//hashtable->batches[0].shared->batch_num_increases++; do it here later
 			hashtable->batches[0].shared->space_exhausted = true;
 			LWLockRelease(&pstate->lock);
 
@@ -3057,15 +3002,13 @@ ExecParallelHashJoinSetUpBatches(HashJoinTable hashtable, int nbatch)
 		ParallelHashJoinBatch *shared = NthParallelHashJoinBatch(batches, i);
 		char		name[MAXPGPATH];
 
-		// TODO: This gets called every time we repartition, so it doesn't count as initialization so can't do here
+		/*
+		 * TODO: can this be initialized elsewhere? ExecParallelHashJoinSetUpBatches
+		 * is called whenever we repartition; is there a case where a batch would have
+		 * had it set to true and we reset it to false?
+		 */
 		if (pstate->num_batch_increases == 0)
-		{
 			shared->parallel_hashloop_fallback = false;
-			shared->batch_num_increases = 0;
-//			shared->estimated_chunk_size = 0;
-//			shared->current_chunk_num = 0;
-//			shared->total_num_chunks = 0;
-		}
 		shared->current_chunk_num = 0;
 		shared->total_num_chunks = 1;
 		shared->estimated_chunk_size = 0;
@@ -3107,8 +3050,6 @@ ExecParallelHashJoinSetUpBatches(HashJoinTable hashtable, int nbatch)
 						   SHARED_TUPLESTORE_SINGLE_PASS,
 						   &pstate->fileset,
 						   name);
-		elog(DEBUG3, "ExecParallelHashJoinSetUpBatches. just made a new batch batchno %i. estimated_size is %zu. pid %i.",
-				i, batches[i].estimated_size, MyProcPid);
 	}
 
 	MemoryContextSwitchTo(oldcxt);
@@ -3124,13 +3065,11 @@ ExecParallelHashCloseBatchAccessors(HashJoinTable hashtable)
 
 	for (i = 0; i < hashtable->nbatch; ++i)
 	{
-		char *outer_match_status_filename = "";
 		/* Make sure no files are left open. */
 		sts_end_write(hashtable->batches[i].inner_tuples);
 		sts_end_write(hashtable->batches[i].outer_tuples);
 		sts_end_parallel_scan(hashtable->batches[i].inner_tuples);
 		sts_end_parallel_scan(hashtable->batches[i].outer_tuples);
-		elog(DEBUG1, "in ExecParallelHashCloseBatchAccessors. batchno %i. filename %s. pid %i.", i, outer_match_status_filename, MyProcPid);
 	}
 	pfree(hashtable->batches);
 	hashtable->batches = NULL;
@@ -3233,7 +3172,6 @@ ExecHashTableDetachBatch(HashJoinTable hashtable)
 		ParallelHashJoinBatch *batch = hashtable->batches[curbatch].shared;
 
 		/* Make sure any temporary files are closed. */
-		// inner scan end not needed for batch 0
 		sts_end_parallel_scan(hashtable->batches[curbatch].inner_tuples);
 		sts_end_parallel_scan(hashtable->batches[curbatch].outer_tuples);
 
@@ -3294,12 +3232,10 @@ ExecHashTableDetach(HashJoinTable hashtable)
 		{
 			for (i = 0; i < hashtable->nbatch; ++i)
 			{
-				char *outer_match_status_filename = "";
 				sts_end_write(hashtable->batches[i].inner_tuples);
 				sts_end_write(hashtable->batches[i].outer_tuples);
 				sts_end_parallel_scan(hashtable->batches[i].inner_tuples);
 				sts_end_parallel_scan(hashtable->batches[i].outer_tuples);
-				elog(DEBUG1, "in ExecHashTableDetach. batchno %i. filename %s. pid %i.", i, outer_match_status_filename, MyProcPid);
 			}
 		}
 
@@ -3443,11 +3379,6 @@ ExecParallelHashTuplePrealloc(HashJoinTable hashtable, int batchno, size_t size)
 
 	LWLockAcquire(&pstate->lock, LW_EXCLUSIVE);
 
-	if (batch->shared->estimated_size + want + HASH_CHUNK_HEADER_SIZE > pstate->space_allowed)
-	{
-		elog(DEBUG3, "ExecParallelHashTuplePrealloc. batch estimated size + want exceeds space allowed. batch estimated size %zu. pid %i",
-			 batch->shared->estimated_size, MyProcPid);
-	}
 	/* Has another participant commanded us to help grow? */
 	if (pstate->growth == PHJ_GROWTH_NEED_MORE_BATCHES ||
 		pstate->growth == PHJ_GROWTH_NEED_MORE_BUCKETS)
@@ -3474,7 +3405,6 @@ ExecParallelHashTuplePrealloc(HashJoinTable hashtable, int batchno, size_t size)
 		 */
 		batch->shared->space_exhausted = true;
 		pstate->growth = PHJ_GROWTH_NEED_MORE_BATCHES;
-		//batch->shared->batch_num_increases++; do it here later
 		LWLockRelease(&pstate->lock);
 
 		return false;
