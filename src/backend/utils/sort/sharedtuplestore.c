@@ -412,14 +412,15 @@ sts_puttuple(SharedTuplestoreAccessor *accessor, void *meta_data, MinimalTuple t
 			Assert(accessor->write_pointer + accessor->sts->meta_data_size +
 				   sizeof(uint32) < accessor->write_end);
 
-			// TODO: exercise this code with a test in adaptive_hj test file
+			// TODO: exercise this code with a test (over-sized tuple)
 			if (count_tuples == true)
-				((tupleMetadata *) meta_data)->tuplenum = pg_atomic_fetch_add_u32(&accessor->sts->exact_tuplenum, 1);
+				((tupleMetadata *) meta_data)->tupleid = pg_atomic_fetch_add_u32(&accessor->sts->exact_tuplenum, 1);
 			else
 			{
 				// TODO: fix the function signature and the code so that we are not using the count_tuples false to indicate inner or outer
 				// currently this means this is an inner side tuplestore and we want to store the chunk number in the metadata
-				((tupleMetadata *) meta_data)->tuplenum = chunk_num;
+				// TODO: meta_data already had chunk_num set in it, need to take it out from here
+				((tupleMetadata *) meta_data)->tupleid = chunk_num;
 			}
 
 			/* Write the meta-data as one chunk. */
@@ -463,12 +464,12 @@ sts_puttuple(SharedTuplestoreAccessor *accessor, void *meta_data, MinimalTuple t
 		}
 	}
 	if (count_tuples == true)
-		((tupleMetadata *) meta_data)->tuplenum = pg_atomic_fetch_add_u32(&accessor->sts->exact_tuplenum, 1);
+		((tupleMetadata *) meta_data)->tupleid = pg_atomic_fetch_add_u32(&accessor->sts->exact_tuplenum, 1);
 	else
 	{
 		// TODO: fix the function signature and the code so that we are not using the count_tuples false to indicate inner or outer
 		// currently this means this is an inner side tuplestore and we want to store the chunk number in the metadata
-		((tupleMetadata *) meta_data)->tuplenum = chunk_num;
+		((tupleMetadata *) meta_data)->tupleid = chunk_num;
 	}
 	/* Copy meta-data and tuple into buffer. */
 	if (accessor->sts->meta_data_size > 0)
