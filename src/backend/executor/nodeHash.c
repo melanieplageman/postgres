@@ -1357,7 +1357,7 @@ ExecParallelHashRepartitionFirst(HashJoinTable hashtable)
 				metadata.tupleid = phj_batch->total_num_chunks;
 				hashtable->batches[batchno].estimated_size += tuple_size;
 				sts_puttuple(hashtable->batches[batchno].inner_tuples,
-							 &metadata, tuple, false, phj_batch->total_num_chunks);
+							 &metadata, tuple);
 			}
 
 			/* Count this tuple. */
@@ -1442,7 +1442,7 @@ ExecParallelHashRepartitionRest(HashJoinTable hashtable)
 			metadata.tupleid = phj_batch->total_num_chunks;
 			/* Store the tuple its new batch. */
 			sts_puttuple(hashtable->batches[batchno].inner_tuples,
-						 &metadata, tuple, false, phj_batch->total_num_chunks);
+						 &metadata, tuple);
 
 			CHECK_FOR_INTERRUPTS();
 		}
@@ -1807,7 +1807,7 @@ retry:
 		metadata.hashvalue = hashvalue;
 		metadata.tupleid = phj_batch->total_num_chunks;
 		sts_puttuple(hashtable->batches[batchno].inner_tuples, &metadata,
-					 tuple, false, phj_batch->total_num_chunks);
+					 tuple);
 	}
 	++hashtable->batches[batchno].ntuples;
 

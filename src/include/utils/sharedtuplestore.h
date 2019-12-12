@@ -23,6 +23,7 @@ typedef struct SharedTuplestore SharedTuplestore;
 
 struct SharedTuplestoreAccessor;
 typedef struct SharedTuplestoreAccessor SharedTuplestoreAccessor;
+// TODO: using a struct for this is probably wasteful
 struct tupleMetadata;
 typedef struct tupleMetadata tupleMetadata;
 struct tupleMetadata
@@ -59,11 +60,10 @@ extern void sts_begin_parallel_scan(SharedTuplestoreAccessor *accessor);
 
 extern void sts_end_parallel_scan(SharedTuplestoreAccessor *accessor);
 
-// TODO: this API is not great -- passing count_tuples flag. However, I don't want to count tuples for the inner side
-extern void
-sts_puttuple(SharedTuplestoreAccessor *accessor, void *meta_data, MinimalTuple tuple, bool count_tuples, int chunk_num);
+extern void sts_puttuple(SharedTuplestoreAccessor *accessor, void *meta_data, MinimalTuple tuple);
 extern uint32 sts_gettuplenum(SharedTuplestoreAccessor *accessor);
 extern int sts_get_my_participant_number(SharedTuplestoreAccessor *accessor);
+extern int sts_increment_tuplenum(SharedTuplestoreAccessor *accessor);
 extern void sts_make_STA_outerMatchStatuses(SharedTuplestoreAccessor *accessor, int batchno, char *name);
 extern BufFile *sts_get_my_STA_outerMatchStatuses(SharedTuplestoreAccessor *accessor);
 extern MinimalTuple sts_parallel_scan_next(SharedTuplestoreAccessor *accessor, void *meta_data, bool is_outer);

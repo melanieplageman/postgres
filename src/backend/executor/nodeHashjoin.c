@@ -1747,8 +1747,9 @@ ExecParallelHashJoinPartitionOuter(HashJoinState *hjstate)
 			ExecHashGetBucketAndBatch(hashtable, hashvalue, &bucketno,
 									  &batchno);
 			metadata.hashvalue = hashvalue;
-			sts_puttuple(hashtable->batches[batchno].outer_tuples,
-						 &metadata, mintup, true, 0);
+			SharedTuplestoreAccessor *accessor = hashtable->batches[batchno].outer_tuples;
+			metadata.tupleid = sts_increment_tuplenum(accessor);
+			sts_puttuple(accessor, &metadata, mintup);
 
 			if (shouldFree)
 				heap_free_minimal_tuple(mintup);
