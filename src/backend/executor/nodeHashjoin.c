@@ -390,8 +390,6 @@ ExecHashJoinImpl(PlanState *pstate, bool parallel)
 
 				econtext->ecxt_outertuple = outerTupleSlot;
 
-
-
 				/*
 				 * Find the corresponding bucket for this tuple in the main
 				 * hash table or skew hash table.
@@ -454,14 +452,7 @@ ExecHashJoinImpl(PlanState *pstate, bool parallel)
 					continue;
 				}
 
-				if (hashtable->outerBatchFile == NULL)
-				{
-					node->hj_JoinState = HJ_SCAN_BUCKET;
-					break;
-				}
-
-				BufFile *outerFile = hashtable->outerBatchFile[batchno];
-				if (outerFile == NULL)
+				if (hashtable->outerBatchFile == NULL || hashtable->outerBatchFile[batchno] == NULL)
 				{
 					node->hj_JoinState = HJ_SCAN_BUCKET;
 					break;
@@ -469,7 +460,6 @@ ExecHashJoinImpl(PlanState *pstate, bool parallel)
 
 				if (node->hashloop_fallback == true)
 				{
-					Assert(!parallel);
 					/* first tuple of new batch */
 					if (node->hj_OuterMatchStatusesFile == NULL)
 					{
