@@ -122,7 +122,7 @@ ExecParallelHashJoinNewChunk(HashJoinState *hjstate, bool advance_from_probing)
 				slot = hjstate->hj_HashTupleSlot;
 				if (chunk_num == phj_batch->current_chunk_num)
 					ExecParallelHashTableInsertCurrentBatch(hashtable, slot,
-															hashvalue, chunk_num);
+															hashvalue);
 			}
 			sts_end_parallel_scan(inner_tuples);
 			BarrierArriveAndWait(chunk_barrier,

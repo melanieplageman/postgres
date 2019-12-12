@@ -152,12 +152,18 @@ typedef struct ParallelHashJoinBatch
 {
 	dsa_pointer buckets;		/* array of hash table buckets */
 	Barrier		batch_barrier;	/* synchronization for joining this batch */
-	bool		parallel_hashloop_fallback;
 
+	/* Parallel Adaptive Hash Join members */
+	/*
+	 * after finishing build phase, parallel_hashloop_fallback cannot change,
+	 * and does not require a lock to read
+	 */
+	bool		parallel_hashloop_fallback;
 	int 	total_num_chunks;
 	int		current_chunk_num;
 	size_t	estimated_chunk_size;
 	Barrier fallback_chunk_barrier;
+	LWLock  lock;
 
 	dsa_pointer chunks;			/* chunks of tuples loaded */
 	size_t		size;			/* size of buckets + chunks in memory */
