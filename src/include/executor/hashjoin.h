@@ -255,6 +255,7 @@ typedef struct ParallelHashJoinState
 	int			nparticipants;
 	size_t		space_allowed;
 	size_t		total_tuples;	/* total number of inner tuples */
+	int num_batch_increases; // TODO: make this an atomic so I don't need lock to increment it?
 	LWLock		lock;			/* lock protecting the above */
 
 	Barrier		build_barrier;	/* synchronization for the build phases */
@@ -263,7 +264,6 @@ typedef struct ParallelHashJoinState
 	pg_atomic_uint32 distributor;	/* counter for load balancing */
 
 	SharedFileSet fileset;		/* space for shared temporary files */
-	int num_batch_increases;
 } ParallelHashJoinState;
 
 /* The phases for building batches, used by build_barrier. */

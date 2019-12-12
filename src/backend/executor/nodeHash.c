@@ -1060,7 +1060,9 @@ ExecParallelHashIncreaseNumBatches(HashJoinTable hashtable)
 	int			i;
 
 	Assert(BarrierPhase(&pstate->build_barrier) == PHJ_BUILD_HASHING_INNER);
+	LWLockAcquire(&pstate->lock, LW_EXCLUSIVE);
 	pstate->num_batch_increases++;
+	LWLockRelease(&pstate->lock);
 	/*
 	 * It's unlikely, but we need to be prepared for new participants to show
 	 * up while we're in the middle of this operation so we need to switch on
@@ -1221,8 +1223,11 @@ ExecParallelHashIncreaseNumBatches(HashJoinTable hashtable)
 				ExecParallelHashEnsureBatchAccessors(hashtable);
 				ExecParallelHashTableSetCurrentBatch(hashtable, 0);
 
+				LWLockAcquire(&pstate->lock, LW_EXCLUSIVE);
 				if (pstate->num_batch_increases >= 2)
 					excessive_batch_num_increases = true;
+				LWLockRelease(&pstate->lock);
+
 				/* Are any of the new generation of batches exhausted? */
 				for (i = 0; i < hashtable->nbatch; ++i)
 				{
@@ -1456,6 +1461,9 @@ ExecParallelHashMergeCounters(HashJoinTable hashtable)
 	ParallelHashJoinState *pstate = hashtable->parallel_state;
 	int			i;
 
+	// TODO: looks like the pstate->lock is used to synchronize access to ParallelHashJoinBatches by
+	// ParallelHashJoinBatchAccessors -- maybe I should remove the lock from ParallelHashJoinBatch and
+	// use the pstate->lock and the accessor...
 	LWLockAcquire(&pstate->lock, LW_EXCLUSIVE);
 	pstate->total_tuples = 0;
 	for (i = 0; i < hashtable->nbatch; ++i)
@@ -3006,6 +3014,7 @@ ExecParallelHashJoinSetUpBatches(HashJoinTable hashtable, int nbatch)
 		 * is called whenever we repartition; is there a case where a batch would have
 		 * had it set to true and we reset it to false?
 		 */
+		/* it is okay to access this here because only one worker can come here */
 		if (pstate->num_batch_increases == 0)
 		{
 			shared->parallel_hashloop_fallback = false;

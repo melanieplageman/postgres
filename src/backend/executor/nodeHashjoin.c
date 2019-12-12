@@ -227,6 +227,7 @@ ExecHashJoinImpl(PlanState *pstate, bool parallel)
 				 * First time through: build hash table for inner relation.
 				 */
 				Assert(hashtable == NULL);
+				//volatile int mybp = 0; while (mybp == 0);
 
 				/*
 				 * If the outer relation is completely empty, and it's not
