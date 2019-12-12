@@ -115,7 +115,7 @@ ExecParallelHashJoinNewChunk(HashJoinState *hjstate, bool advance_from_probing)
 												   &metadata, false)))
 			{
 				hashvalue = metadata.hashvalue;
-				int chunk_num = metadata.tuplenum;
+				int chunk_num = metadata.tupleid;
 				ExecForceStoreMinimalTuple(tuple,
 										   hjstate->hj_HashTupleSlot,
 										   false);

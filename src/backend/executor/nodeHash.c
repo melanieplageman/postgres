@@ -1354,7 +1354,7 @@ ExecParallelHashRepartitionFirst(HashJoinTable hashtable)
 
 				tupleMetadata metadata;
 				metadata.hashvalue = hashTuple->hashvalue;
-				metadata.tuplenum = phj_batch->total_num_chunks;
+				metadata.tupleid = phj_batch->total_num_chunks;
 				hashtable->batches[batchno].estimated_size += tuple_size;
 				sts_puttuple(hashtable->batches[batchno].inner_tuples,
 							 &metadata, tuple, false, phj_batch->total_num_chunks);
@@ -1439,7 +1439,7 @@ ExecParallelHashRepartitionRest(HashJoinTable hashtable)
 			else
 				phj_batch->estimated_chunk_size += tuple_size;
 			LWLockRelease(&pstate->lock);
-			metadata.tuplenum = phj_batch->total_num_chunks;
+			metadata.tupleid = phj_batch->total_num_chunks;
 			/* Store the tuple its new batch. */
 			sts_puttuple(hashtable->batches[batchno].inner_tuples,
 						 &metadata, tuple, false, phj_batch->total_num_chunks);
@@ -1805,7 +1805,7 @@ retry:
 
 		tupleMetadata metadata;
 		metadata.hashvalue = hashvalue;
-		metadata.tuplenum = phj_batch->total_num_chunks;
+		metadata.tupleid = phj_batch->total_num_chunks;
 		sts_puttuple(hashtable->batches[batchno].inner_tuples, &metadata,
 					 tuple, false, phj_batch->total_num_chunks);
 	}

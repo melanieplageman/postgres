@@ -862,8 +862,8 @@ ExecHashJoinImpl(PlanState *pstate, bool parallel)
 						if (tuple == NULL)
 							break;
 
-						int bytenum = metadata.tuplenum / 8;
-						unsigned char bit = metadata.tuplenum % 8;
+						int bytenum = metadata.tupleid / 8;
+						unsigned char bit = metadata.tupleid % 8;
 						unsigned char byte_to_check = 0;
 
 						// seek to byte to check
@@ -1343,7 +1343,7 @@ ExecParallelHashJoinOuterGetTuple(PlanState *outerNode,
 		{
 			// where is this hashvalue being used?
 			*hashvalue = metadata.hashvalue;
-			tupleid = metadata.tuplenum; // change tuplenums to tupleid or similar to make less confusing that it is used for inner and outer
+			tupleid = metadata.tupleid;
 			ExecForceStoreMinimalTuple(tuple,
 									   hjstate->hj_OuterTupleSlot,
 									   false);

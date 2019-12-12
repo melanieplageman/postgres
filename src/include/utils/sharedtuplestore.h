@@ -28,7 +28,7 @@ typedef struct tupleMetadata tupleMetadata;
 struct tupleMetadata
 {
 	uint32 hashvalue;
-	int tuplenum; // reuse this as chunk number for inner side
+	int tupleid; /* tuple id on outer side and chunk number for inner side */
 } __attribute__((packed));
 
 /*
