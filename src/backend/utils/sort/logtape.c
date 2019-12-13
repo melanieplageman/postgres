@@ -431,7 +431,7 @@ ltsConcatWorkerTapes(LogicalTapeSet *lts, TapeShare *shared,
 		lt = &lts->tapes[i];
 
 		pg_itoa(i, filename);
-		file = BufFileOpenShared(fileset, filename, 0);
+		file = BufFileOpenShared(fileset, filename);
 		filesize = BufFileSize(file);
 
 		/*

@@ -62,7 +62,6 @@ extern void sts_end_parallel_scan(SharedTuplestoreAccessor *accessor);
 
 extern void sts_puttuple(SharedTuplestoreAccessor *accessor, void *meta_data, MinimalTuple tuple);
 extern uint32 sts_gettuplenum(SharedTuplestoreAccessor *accessor);
-extern int sts_get_my_participant_number(SharedTuplestoreAccessor *accessor);
 extern int sts_increment_tuplenum(SharedTuplestoreAccessor *accessor);
 extern void sts_make_STA_outerMatchStatuses(SharedTuplestoreAccessor *accessor, int batchno, char *name);
 extern BufFile *sts_get_my_STA_outerMatchStatuses(SharedTuplestoreAccessor *accessor);

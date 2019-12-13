@@ -36,16 +36,12 @@ typedef struct BufFile BufFile;
  * prototypes for functions in buffile.c
  */
 
-extern int get_0_fileno(BufFile *bufFile);
-
 extern BufFile *BufFileCreateTemp(bool interXact);
 extern void BufFileClose(BufFile *file);
 extern size_t BufFileRead(BufFile *file, void *ptr, size_t size);
 extern size_t BufFileWrite(BufFile *file, void *ptr, size_t size);
 extern int	BufFileSeek(BufFile *file, int fileno, off_t offset, int whence);
 extern void BufFileTell(BufFile *file, int *fileno, off_t *offset);
-extern int BufFileTellPos(BufFile *file);
-extern off_t BufFileTellOffset(BufFile *file);
 extern int	BufFileSeekBlock(BufFile *file, long blknum);
 extern int64 BufFileSize(BufFile *file);
 int64 BufFileBytesUsed(BufFile *file);
@@ -54,11 +50,8 @@ extern long BufFileAppend(BufFile *target, BufFile *source);
 extern BufFile *BufFileCreateShared(SharedFileSet *fileset, const char *name);
 extern void BufFileExportShared(BufFile *file);
 extern BufFile *BufFileOpenSharedIfExists(SharedFileSet *fileset, const char *name);
-extern BufFile *BufFileOpenShared(SharedFileSet *fileset, const char *name, bool from_outer_codepath);
-extern void BufFileCloseShared(BufFile *file);
+extern BufFile *BufFileOpenShared(SharedFileSet *fileset, const char *name);
 extern void BufFileDeleteShared(SharedFileSet *fileset, const char *name);
-extern void BufFileDeleteSharedIfExists(SharedFileSet *fileset, const char *name);
-extern char *BufFileGetName(BufFile *file);
 
 extern int	BufFileFlush(BufFile *file);
 
