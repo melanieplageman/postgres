@@ -1344,11 +1344,12 @@ ExecParallelHashRepartitionFirst(HashJoinTable hashtable)
 				}
 				else
 					phj_batch->estimated_chunk_size += tuple_size;
-				LWLockRelease(&phj_batch->lock);
 
 				tupleMetadata metadata;
 				metadata.hashvalue = hashTuple->hashvalue;
 				metadata.tupleid = phj_batch->total_num_chunks;
+				LWLockRelease(&phj_batch->lock);
+
 				hashtable->batches[batchno].estimated_size += tuple_size;
 				sts_puttuple(hashtable->batches[batchno].inner_tuples,
 							 &metadata, tuple);
@@ -1420,10 +1421,7 @@ ExecParallelHashRepartitionRest(HashJoinTable hashtable)
 			++hashtable->batches[i].old_ntuples;
 
 			ParallelHashJoinBatch *phj_batch = hashtable->batches[batchno].shared;
-			// TODO: do I need this lock?
-			// TODO: *** does having a lock on the pstate->lock help me at all with concurrent access to the chunk_num info?
-			LWLockAcquire(&pstate->lock, LW_EXCLUSIVE);
-
+			LWLockAcquire(&phj_batch->lock, LW_EXCLUSIVE);
 			// TODO: should I check batch estimated size here at all? do I care about that in the other place
 			if (phj_batch->parallel_hashloop_fallback == true && (phj_batch->estimated_chunk_size + tuple_size > pstate->space_allowed))
 			{
@@ -1432,12 +1430,13 @@ ExecParallelHashRepartitionRest(HashJoinTable hashtable)
 			}
 			else
 				phj_batch->estimated_chunk_size += tuple_size;
-			LWLockRelease(&pstate->lock);
 			metadata.tupleid = phj_batch->total_num_chunks;
+			LWLockRelease(&phj_batch->lock);
 			/* Store the tuple its new batch. */
 			sts_puttuple(hashtable->batches[batchno].inner_tuples,
 						 &metadata, tuple);
 
+			// TODO: should I zero out metadata here to make sure old values aren't reused?
 			CHECK_FOR_INTERRUPTS();
 		}
 		sts_end_parallel_scan(old_inner_tuples[i]);
@@ -1795,11 +1794,12 @@ retry:
 		}
 		else
 			phj_batch->estimated_chunk_size += tuple_size;
-		LWLockRelease(&phj_batch->lock);
 
 		tupleMetadata metadata;
 		metadata.hashvalue = hashvalue;
 		metadata.tupleid = phj_batch->total_num_chunks;
+		LWLockRelease(&phj_batch->lock);
+
 		sts_puttuple(hashtable->batches[batchno].inner_tuples, &metadata,
 					 tuple);
 	}
