@@ -122,29 +122,6 @@ makeBufFileCommon(int nfiles)
 	return file;
 }
 
-int get_0_fileno(BufFile *bufFile)
-{
-	return bufFile->files[0];
-}
-
-char *
-BufFileGetName(BufFile *file)
-{
-	if (file->name)
-		return (char *)file->name;
-	else
-	{
-		File curfile;
-		for (int i = 0; i < file->numFiles; i++)
-		{
-			curfile = file->files[i];
-			if (curfile)
-				elog(DEBUG1, "fileno %i number %i of %i.", curfile, i + 1, file->numFiles);
-		}
-		return "";
-	}
-}
-
 /*
  * Create a BufFile given the first underlying physical file.
  * NOTE: caller must set isInterXact if appropriate.
@@ -361,7 +338,7 @@ BufFileOpenSharedIfExists(SharedFileSet *fileset, const char *name)
  * backends and render it read-only.
  */
 BufFile *
-BufFileOpenShared(SharedFileSet *fileset, const char *name, bool from_outer_codepath)
+BufFileOpenShared(SharedFileSet *fileset, const char *name)
 {
 	BufFile    *file;
 	char		segment_name[MAXPGPATH];
@@ -385,8 +362,6 @@ BufFileOpenShared(SharedFileSet *fileset, const char *name, bool from_outer_code
 		}
 		/* Try to load a segment. */
 		SharedSegmentName(segment_name, name, nfiles);
-		elog(LOG, "in BufFileOpenShared. sharedsegment name %s. filename %s. pid %i. from_outer_codepath: %i.",
-				segment_name, name, MyProcPid, from_outer_codepath);
 		files[nfiles] = SharedFileSetOpen(fileset, segment_name);
 		if (files[nfiles] <= 0)
 			break;
@@ -451,29 +426,6 @@ BufFileDeleteShared(SharedFileSet *fileset, const char *name)
 	if (!found)
 		elog(ERROR, "could not delete unknown shared BufFile \"%s\"", name);
 }
-void
-BufFileDeleteSharedIfExists(SharedFileSet *fileset, const char *name)
-{
-	char		segment_name[MAXPGPATH];
-	int			segment = 0;
-	bool		found = false;
-
-	/*
-	 * We don't know how many segments the file has.  We'll keep deleting
-	 * until we run out.  If we don't manage to find even an initial segment,
-	 * raise an error.
-	 */
-	for (;;)
-	{
-		SharedSegmentName(segment_name, name, segment);
-		if (!SharedFileSetDelete(fileset, segment_name, true))
-			break;
-		found = true;
-		++segment;
-
-		CHECK_FOR_INTERRUPTS();
-	}
-}
 
 /*
  * BufFileExportShared --- flush and make read-only, in preparation for sharing.
@@ -503,19 +455,6 @@ BufFileClose(BufFile *file)
 
 	/* flush any unwritten data */
 	BufFileFlush(file);
-	/* close and delete the underlying file(s) */
-	for (i = 0; i < file->numFiles; i++)
-		FileClose(file->files[i]);
-	/* release the buffer space */
-	pfree(file->files);
-	pfree(file);
-}
-
-void
-BufFileCloseShared(BufFile *file)
-{
-	int i;
-
 	/* close and delete the underlying file(s) */
 	for (i = 0; i < file->numFiles; i++)
 		FileClose(file->files[i]);
@@ -857,18 +796,6 @@ BufFileTell(BufFile *file, int *fileno, off_t *offset)
 {
 	*fileno = file->curFile;
 	*offset = file->curOffset + file->pos;
-}
-
-int
-BufFileTellPos(BufFile *file)
-{
-	return file->pos;
-}
-
-off_t
-BufFileTellOffset(BufFile *file)
-{
-	return file->curOffset;
 }
 
 /*

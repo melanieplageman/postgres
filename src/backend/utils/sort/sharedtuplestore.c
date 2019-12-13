@@ -323,8 +323,6 @@ sts_make_STA_outerMatchStatuses(SharedTuplestoreAccessor *accessor, int batchno,
 	sts_bitmap_filename(name, accessor, accessor->participant);
 
 	accessor->outer_match_status_file = BufFileCreateShared(sts_get_fileset(accessor), name);
-	elog(DEBUG3, "sts_make_STA_outerMatchStatuses. just BufFileCreateShared accessor->outer_match_status_file participant %i. pid %i. File %i .",
-			accessor->participant, MyProcPid, get_0_fileno(accessor->outer_match_status_file));
 
 	uint32 num_to_write = tuplenum / 8 + 1;
 
@@ -335,19 +333,11 @@ sts_make_STA_outerMatchStatuses(SharedTuplestoreAccessor *accessor, int batchno,
 		ereport(ERROR,
 				(errcode_for_file_access(),
 						errmsg("could not rewind hash-join temporary file: %m")));
-	elog(DEBUG3, "sts_make_STA_outerMatchStatuses. batchno %i. final_tuplenum %i. pid %i.", batchno, tuplenum, MyProcPid);
 }
+
 BufFile *sts_get_my_STA_outerMatchStatuses(SharedTuplestoreAccessor *accessor)
 {
 	return accessor->outer_match_status_file;
-}
-
-/*
- * Used only for logging in nodeHash.c
- */
-int sts_get_my_participant_number(SharedTuplestoreAccessor *accessor)
-{
-	return accessor->participant;
 }
 
 int sts_increment_tuplenum(SharedTuplestoreAccessor *accessor)
@@ -647,7 +637,7 @@ sts_parallel_scan_next(SharedTuplestoreAccessor *accessor, void *meta_data, bool
 
 				sts_filename(name, accessor, accessor->read_participant);
 				accessor->read_file =
-						BufFileOpenShared(accessor->fileset, name, is_outer);
+						BufFileOpenShared(accessor->fileset, name);
 			}
 
 			/* Seek and load the chunk header. */
