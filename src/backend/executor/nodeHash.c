@@ -1334,23 +1334,16 @@ ExecParallelHashRepartitionFirst(HashJoinTable hashtable)
 				/* It belongs in a later batch. */
 				ParallelHashJoinBatch *phj_batch = hashtable->batches[batchno].shared;
 
-				ParallelHashJoinState *pstate = hashtable->parallel_state;
-
-// TODO: do I need this lock?
-// TODO: *** does having a lock on the pstate->lock help me at all with concurrent access to the chunk_num info?
-				LWLockAcquire(&pstate->lock, LW_EXCLUSIVE);
-
+				LWLockAcquire(&phj_batch->lock, LW_EXCLUSIVE);
 				// TODO: should I check batch estimated size here at all? do I care about that in the other place
-				if (phj_batch->parallel_hashloop_fallback == true && (phj_batch->estimated_chunk_size + tuple_size > pstate->space_allowed))
+				if (phj_batch->parallel_hashloop_fallback == true && (phj_batch->estimated_chunk_size + tuple_size > hashtable->parallel_state->space_allowed))
 				{
 					phj_batch->total_num_chunks++;
 					phj_batch->estimated_chunk_size = tuple_size;
 				}
 				else
-				{
 					phj_batch->estimated_chunk_size += tuple_size;
-				}
-				LWLockRelease(&pstate->lock);
+				LWLockRelease(&phj_batch->lock);
 
 				tupleMetadata metadata;
 				metadata.hashvalue = hashTuple->hashvalue;
@@ -3009,16 +3002,7 @@ ExecParallelHashJoinSetUpBatches(HashJoinTable hashtable, int nbatch)
 		ParallelHashJoinBatch *shared = NthParallelHashJoinBatch(batches, i);
 		char		name[MAXPGPATH];
 
-		/*
-		 * TODO: can this be initialized elsewhere? ExecParallelHashJoinSetUpBatches
-		 * is called whenever we repartition; is there a case where a batch would have
-		 * had it set to true and we reset it to false?
-		 */
-		/* it is okay to access this here because only one worker can come here */
-		if (pstate->num_batch_increases == 0)
-		{
-			shared->parallel_hashloop_fallback = false;
-		}
+		shared->parallel_hashloop_fallback = false;
 		LWLockInitialize(&shared->lock,
 		                 LWTRANCHE_PARALLEL_HASH_JOIN_BATCH);
 		shared->current_chunk_num = 0;

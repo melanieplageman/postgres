@@ -33,7 +33,8 @@ combine_outer_match_statuses(BufFile *outer_match_statuses[], int length, size_t
 		for (int k = 1; k < length; k++)
 		{
 			file1 = outer_match_statuses[k];
-			elog(DEBUG3, "in combine_outer_match_statuses. batchno %i. pid %i.", batchno, MyProcPid);
+			if (!file1)
+				continue;
 			BufFileRead(file1, &current_byte_to_read, 1);
 			current_byte_to_write = current_byte_to_write | current_byte_to_read;
 		}
@@ -45,7 +46,10 @@ combine_outer_match_statuses(BufFile *outer_match_statuses[], int length, size_t
 						errmsg("could not rewind hash-join temporary file: %m")));
 
 	for (int j = 0; j < length; j++)
-		BufFileClose(outer_match_statuses[j]);
+	{
+		if (outer_match_statuses[j])
+			BufFileClose(outer_match_statuses[j]);
+	}
 }
 
 bool
@@ -270,7 +274,7 @@ ExecParallelHashJoinNewBatch(HashJoinState *hjstate)
 				BufFile **outer_match_statuses = palloc(sizeof(BufFile *) * length);
 				char **outer_match_status_filenames = alloca(sizeof(char *) * length);
 
-				//elog(DEBUG3, "batch %i. sts participants %i. barrier participants %i. pid %i.", curbatch, sts_participants(outer_acc), length, MyProcPid);
+				// TODO: improve this code
 				populate_outer_match_statuses(outer_acc, outer_match_statuses, outer_match_status_filenames);
 
 				BufFile *combined_bitmap_file = BufFileCreateTemp(false);
