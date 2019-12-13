@@ -380,7 +380,9 @@ ExecParallelHashJoinNewBatch(HashJoinState *hjstate)
 					}
 					if (batchno == 0)
 					{
+						LWLockAcquire(&hashtable->batches[batchno].shared->lock, LW_EXCLUSIVE);
 						hashtable->batches[batchno].shared->current_chunk_num = 1;
+						LWLockRelease(&hashtable->batches[batchno].shared->lock);
 						// is this right place to do this
 						sts_begin_parallel_scan(hashtable->batches[batchno].outer_tuples);
 					}
