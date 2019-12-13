@@ -646,13 +646,8 @@ sts_parallel_scan_next(SharedTuplestoreAccessor *accessor, void *meta_data, bool
 				char		name[MAXPGPATH];
 
 				sts_filename(name, accessor, accessor->read_participant);
-				elog(DEBUG3, "sts_parallel_scan_next. participant %i. opening read file %s. pid %i. is_outer: %i",
-						accessor->participant, name, MyProcPid, is_outer);
 				accessor->read_file =
 						BufFileOpenShared(accessor->fileset, name, is_outer);
-				if (accessor->read_file != NULL)
-					elog(DEBUG3, "sts_parallel_scan_next. just BufFileOpenShared accessor->read_file for my own outer_match_status file. I am participant %i. pid %i. File %i .",
-						 accessor->participant, MyProcPid, get_0_fileno(accessor->read_file));
 			}
 
 			/* Seek and load the chunk header. */
