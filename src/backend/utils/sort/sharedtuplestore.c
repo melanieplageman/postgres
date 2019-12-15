@@ -596,7 +596,7 @@ sts_participants(SharedTuplestoreAccessor *accessor)
  * Get the next tuple in the current parallel scan.
  */
 MinimalTuple
-sts_parallel_scan_next(SharedTuplestoreAccessor *accessor, void *meta_data, bool is_outer)
+sts_parallel_scan_next(SharedTuplestoreAccessor *accessor, void *meta_data)
 {
 	SharedTuplestoreParticipant *p;
 	BlockNumber read_page;

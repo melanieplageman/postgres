@@ -1405,7 +1405,7 @@ ExecParallelHashRepartitionRest(HashJoinTable hashtable)
 		/* Scan one partition from the previous generation. */
 		sts_begin_parallel_scan(old_inner_tuples[i]);
 		tupleMetadata metadata;
-		while ((tuple = sts_parallel_scan_next(old_inner_tuples[i], &metadata, false)))
+		while ((tuple = sts_parallel_scan_next(old_inner_tuples[i], &metadata)))
 		{
 			size_t		tuple_size = MAXALIGN(HJTUPLE_OVERHEAD + tuple->t_len);
 			int			bucketno;

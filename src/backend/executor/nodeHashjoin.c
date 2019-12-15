@@ -572,10 +572,7 @@ ExecHashJoinImpl(PlanState *pstate, bool parallel)
 					 * Set the match bit for this outer tuple in the match
 					 * status file
 					 */
-					bool fallback = false;
-					if (parallel)
-						fallback = node->hj_HashTable->batches[node->hj_HashTable->curbatch].shared->parallel_hashloop_fallback;
-					if (parallel && fallback)
+					if (parallel && node->hj_HashTable->batches[node->hj_HashTable->curbatch].shared->parallel_hashloop_fallback)
 					{
 						unsigned char current_outer_byte;
 						// TODO: it is very unclear here that this slot is current, and, thus, that this tuplenum is up-to-date
@@ -584,8 +581,7 @@ ExecHashJoinImpl(PlanState *pstate, bool parallel)
 						SharedTuplestoreAccessor *outer_acc = hashtable->batches[hashtable->curbatch].outer_tuples;
 						BufFile *parallel_outer_matchstatuses = sts_get_my_STA_outerMatchStatuses(outer_acc);
 
-						if (BufFileSeek(parallel_outer_matchstatuses, 0, (tupleid / 8), SEEK_SET) != 0)
-							elog(DEBUG1, "HJ_SCAN_BUCKET for batchno %i. at beginning of file. pid %i.", batchno, MyProcPid);
+						BufFileSeek(parallel_outer_matchstatuses, 0, (tupleid / 8), SEEK_SET);
 						BufFileRead(parallel_outer_matchstatuses, &current_outer_byte, 1);
 
 						int bit_to_set_in_byte = tupleid % 8;
@@ -605,8 +601,7 @@ ExecHashJoinImpl(PlanState *pstate, bool parallel)
 						int byte_to_set = (node->hj_OuterTupleCount - 1) / 8;
 						int bit_to_set_in_byte = (node->hj_OuterTupleCount - 1) % 8;
 
-						if (BufFileSeek(node->hj_OuterMatchStatusesFile, 0, byte_to_set, SEEK_SET) != 0)
-							elog(DEBUG1, "at beginning of file");
+						BufFileSeek(node->hj_OuterMatchStatusesFile, 0, byte_to_set, SEEK_SET);
 
 						node->hj_OuterCurrentByte = node->hj_OuterCurrentByte | (1 << bit_to_set_in_byte);
 
@@ -848,7 +843,7 @@ ExecHashJoinImpl(PlanState *pstate, bool parallel)
 					do
 					{
 						tupleMetadata metadata;
-						tuple = sts_parallel_scan_next(outer_acc, &metadata, true);
+						tuple = sts_parallel_scan_next(outer_acc, &metadata);
 						if (tuple == NULL)
 							break;
 
@@ -1328,7 +1323,7 @@ ExecParallelHashJoinOuterGetTuple(PlanState *outerNode,
 		tupleMetadata metadata;
 		int tupleid;
 		tuple = sts_parallel_scan_next(hashtable->batches[curbatch].outer_tuples,
-									   &metadata, true);
+									   &metadata);
 		if (tuple != NULL)
 		{
 			// where is this hashvalue being used?

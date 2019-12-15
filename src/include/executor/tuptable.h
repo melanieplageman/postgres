@@ -129,7 +129,7 @@ typedef struct TupleTableSlot
 	MemoryContext tts_mcxt;		/* slot itself is in this context */
 	ItemPointerData tts_tid;	/* stored tuple's tid */
 	Oid			tts_tableOid;	/* table oid of tuple */
-	uint32 		tuplenum; // TODO: is this parallel-safe?
+	uint32 		tuplenum;
 } TupleTableSlot;
 
 /* routines for a TupleTableSlot implementation */

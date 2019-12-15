@@ -65,7 +65,7 @@ extern uint32 sts_gettuplenum(SharedTuplestoreAccessor *accessor);
 extern int sts_increment_tuplenum(SharedTuplestoreAccessor *accessor);
 extern void sts_make_STA_outerMatchStatuses(SharedTuplestoreAccessor *accessor, int batchno, char *name);
 extern BufFile *sts_get_my_STA_outerMatchStatuses(SharedTuplestoreAccessor *accessor);
-extern MinimalTuple sts_parallel_scan_next(SharedTuplestoreAccessor *accessor, void *meta_data, bool is_outer);
+extern MinimalTuple sts_parallel_scan_next(SharedTuplestoreAccessor *accessor, void *meta_data);
 extern void sts_bitmap_filename(char *name, SharedTuplestoreAccessor *accessor, int participant);
 extern SharedFileSet *sts_get_fileset(SharedTuplestoreAccessor *accessor);
 extern void populate_outer_match_statuses(SharedTuplestoreAccessor *accessor, BufFile *outer_match_statuses[], char **outer_match_status_filenames);
