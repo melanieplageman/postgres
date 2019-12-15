@@ -276,17 +276,15 @@ typedef struct ParallelHashJoinState
 /* The phases for probing each batch, used by for batch_barrier. */
 #define PHJ_BATCH_ELECTING				0
 #define PHJ_BATCH_ALLOCATING			1
-#define PHJ_BATCH_LOADING				2
-#define PHJ_BATCH_CHUNKING				3
-#define PHJ_BATCH_OUTER_MATCH_STATUS_PROCESSING 4
-#define PHJ_BATCH_DONE					5
+#define PHJ_BATCH_CHUNKING				2
+#define PHJ_BATCH_OUTER_MATCH_STATUS_PROCESSING 3
+#define PHJ_BATCH_DONE					4
 
 #define PHJ_CHUNK_ELECTING				0
-#define PHJ_CHUNK_ALLOCATING			1
-#define PHJ_CHUNK_LOADING				2
-#define PHJ_CHUNK_PROBING				3
-#define PHJ_CHUNK_DONE					4
-#define PHJ_CHUNK_FINAL					5
+#define PHJ_CHUNK_LOADING				1
+#define PHJ_CHUNK_PROBING				2
+#define PHJ_CHUNK_DONE					3
+#define PHJ_CHUNK_FINAL					4
 
 /* The phases of batch growth while hashing, for grow_batches_barrier. */
 #define PHJ_GROW_BATCHES_ELECTING		0
