@@ -98,12 +98,6 @@ ExecParallelHashJoinNewChunk(HashJoinState *hjstate, bool advance_from_probing)
 									 WAIT_EVENT_HASH_CHUNK_ELECTING);
 			/* Fall through. */
 
-		case PHJ_CHUNK_ALLOCATING: // delete me
-			/* Wait for allocation to complete. */
-			BarrierArriveAndWait(chunk_barrier,
-								 WAIT_EVENT_HASH_CHUNK_ALLOCATING);
-			/* Fall through. */
-
 		case PHJ_CHUNK_LOADING:
 			/* Start (or join in) loading tuples. */
 			// load the next chunk of inner tuples into the hashtable
@@ -346,14 +340,6 @@ ExecParallelHashJoinNewBatch(HashJoinState *hjstate)
 										 WAIT_EVENT_HASH_BATCH_ALLOCATING);
 					/* Fall through. */
 
-				case PHJ_BATCH_LOADING: // delete me
-					/* Start (or join in) loading tuples. */
-					ExecParallelHashTableSetCurrentBatch(hashtable, batchno);
-					hjstate->hj_InnerExhausted = false;
-					BarrierArriveAndWait(batch_barrier,
-										 WAIT_EVENT_HASH_BATCH_LOADING);
-					/* Fall through. */
-
 				case PHJ_BATCH_CHUNKING:
 					/*
 					 * This batch is ready to probe.  Return control to
@@ -379,6 +365,7 @@ ExecParallelHashJoinNewBatch(HashJoinState *hjstate)
 					}
 					if (batchno == 0)
 					{
+						// TODO: does this need to be set here also? (it is set above)
 						LWLockAcquire(&hashtable->batches[batchno].shared->lock, LW_EXCLUSIVE);
 						hashtable->batches[batchno].shared->current_chunk_num = 1;
 						LWLockRelease(&hashtable->batches[batchno].shared->lock);
