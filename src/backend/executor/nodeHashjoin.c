@@ -501,6 +501,7 @@ ExecHashJoinImpl(PlanState *pstate, bool parallel)
 				 * Scan the selected hash bucket for matches to current outer
 				 */
 
+				// TODO: refactor the below to not be terrible
 				elog(DEBUG3, "dummy code to protect this declaration.");
 				bool outerTupleMatchesExhausted;
 				if (parallel)
