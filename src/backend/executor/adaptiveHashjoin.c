@@ -115,8 +115,7 @@ ExecParallelHashJoinNewChunk(HashJoinState *hjstate, bool advance_from_probing)
 			tupleMetadata metadata;
 			uint32		hashvalue;
 
-			while ((tuple = sts_parallel_scan_next(inner_tuples,
-												   &metadata, false)))
+			while ((tuple = sts_parallel_scan_next(inner_tuples, &metadata)))
 			{
 				hashvalue = metadata.hashvalue;
 				int chunk_num = metadata.tupleid;
