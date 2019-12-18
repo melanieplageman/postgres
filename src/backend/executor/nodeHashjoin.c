@@ -1761,6 +1761,7 @@ ExecParallelHashJoin(PlanState *pstate)
 
 			case HJ_NEED_NEW_BATCH:
 
+				phj_batch = node->hj_HashTable->batches[node->hj_HashTable->curbatch].shared;
 				/*
 				 * Try to advance to next batch.  Done if there are no more.
 				 */
@@ -1810,137 +1811,74 @@ ExecParallelHashJoin(PlanState *pstate)
 
 			case HJ_ADAPTIVE_EMIT_UNMATCHED_OUTER_INIT:
 
+				phj_batch = node->hj_HashTable->batches[node->hj_HashTable->curbatch].shared;
 
-				if (parallel)
+				if (!phj_batch->parallel_hashloop_fallback)
 				{
-					ParallelHashJoinBatch *phj_batch = node->hj_HashTable->batches[node->hj_HashTable->curbatch].shared;
-
-					if (!phj_batch->parallel_hashloop_fallback)
-					{
-						node->hj_JoinState = HJ_NEED_NEW_BATCH;
-						break;
-					}
-					SharedTuplestoreAccessor *outer_acc = hashtable->batches[hashtable->curbatch].outer_tuples;
-					sts_reinitialize(outer_acc);
-					sts_begin_parallel_scan(outer_acc);
+					// TODO: do I need to do sts_end_parallel_scan(outer_acc) ?
+					node->hj_JoinState = HJ_NEED_NEW_BATCH;
+					break;
 				}
-				else
-				{
-					// AHJ debugging
-					node->hj_OuterTupleCount = 0;
-					BufFileRewindIfExists(node->hj_OuterMatchStatusesFile);
-
-					/* TODO: is it okay to use the hashtable to get the outer batch file here? */
-					outerFileForAdaptiveRead = hashtable->outerBatchFile[hashtable->curbatch];
-					if (outerFileForAdaptiveRead == NULL) /* TODO: could this happen */
-					{
-						node->hj_JoinState = HJ_NEED_NEW_BATCH;
-						break;
-					}
-					BufFileRewindIfExists(outerFileForAdaptiveRead);
-				}
+				SharedTuplestoreAccessor *outer_acc = hashtable->batches[hashtable->curbatch].outer_tuples;
+				sts_reinitialize(outer_acc);
+				sts_begin_parallel_scan(outer_acc);
 
 				node->hj_JoinState = HJ_ADAPTIVE_EMIT_UNMATCHED_OUTER;
 				/* fall through */
 
 			case HJ_ADAPTIVE_EMIT_UNMATCHED_OUTER:
 
-				if (parallel)
+
+				if (node->combined_bitmap == NULL)
+					// TODO: make this an error for now, since all outer match status files have to exist bc we always make them
+					elog(ERROR, "ExecParallelHashJoinNewBatch. outermatchstatus file is NULL. pid %i.", MyProcPid);
+
+				outer_acc = node->hj_HashTable->batches[node->hj_HashTable->curbatch].outer_tuples;
+				MinimalTuple tuple;
+				do
 				{
-					if (node->combined_bitmap == NULL)
-						// TODO: make this an error for now, since all outer match status files have to exist bc we always make them
-						elog(ERROR, "ExecParallelHashJoinNewBatch. outermatchstatus file is NULL. pid %i.", MyProcPid);
-
-					SharedTuplestoreAccessor *outer_acc = node->hj_HashTable->batches[node->hj_HashTable->curbatch].outer_tuples;
-					MinimalTuple tuple;
-					do
-					{
-						tupleMetadata metadata;
-						tuple = sts_parallel_scan_next(outer_acc, &metadata);
-						if (tuple == NULL)
-							break;
-
-						int bytenum = metadata.tupleid / 8;
-						unsigned char bit = metadata.tupleid % 8;
-						unsigned char byte_to_check = 0;
-
-						// seek to byte to check
-						if (BufFileSeek(node->combined_bitmap, 0, bytenum, SEEK_SET))
-							ereport(ERROR,
-							        (errcode_for_file_access(),
-								        errmsg("could not rewind shared outer temporary file: %m")));
-						// read byte containing ntuple bit
-						if (BufFileRead(node->combined_bitmap, &byte_to_check, 1) == 0)
-							ereport(ERROR,
-							        (errcode_for_file_access(),
-								        errmsg("could not read byte in outer match status bitmap: %m.")));
-						// if bit is set
-						bool match = false;
-						if (((byte_to_check) >> bit) & 1)
-							match = true;
-
-						if (!match)
-							break;
-					} while (1);
-
+					tupleMetadata metadata;
+					tuple = sts_parallel_scan_next(outer_acc, &metadata);
 					if (tuple == NULL)
-					{
-						// TODO: do I need to do any of this for the parallel non-fallback case?
-						sts_end_parallel_scan(outer_acc);
-						node->hj_JoinState = HJ_NEED_NEW_BATCH;
 						break;
-					}
 
-					ExecForceStoreMinimalTuple(tuple,
-					                           econtext->ecxt_outertuple,
-					                           false);
-					econtext->ecxt_innertuple = node->hj_NullInnerTupleSlot;
+					int bytenum = metadata.tupleid / 8;
+					unsigned char bit = metadata.tupleid % 8;
+					unsigned char byte_to_check = 0;
 
-					return ExecProject(node->js.ps.ps_ProjInfo);
+					// seek to byte to check
+					if (BufFileSeek(node->combined_bitmap, 0, bytenum, SEEK_SET))
+						ereport(ERROR,
+						        (errcode_for_file_access(),
+							        errmsg("could not rewind shared outer temporary file: %m")));
+					// read byte containing ntuple bit
+					if (BufFileRead(node->combined_bitmap, &byte_to_check, 1) == 0)
+						ereport(ERROR,
+						        (errcode_for_file_access(),
+							        errmsg("could not read byte in outer match status bitmap: %m.")));
+					// if bit is set
+					bool match = false;
+					if (((byte_to_check) >> bit) & 1)
+						match = true;
 
-				}
-				else
+					if (!match)
+						break;
+				} while (1);
+
+				if (tuple == NULL)
 				{
-					outerFileForAdaptiveRead = hashtable->outerBatchFile[hashtable->curbatch];
-
-					while (true)
-					{
-						uint32 unmatchedOuterHashvalue;
-						TupleTableSlot *temp = ExecHashJoinGetSavedTuple(node, outerFileForAdaptiveRead, &unmatchedOuterHashvalue, node->hj_OuterTupleSlot);
-						node->hj_OuterTupleCount++;
-
-						if (temp == NULL)
-						{
-							node->hj_JoinState = HJ_NEED_NEW_BATCH;
-							break;
-						}
-
-						unsigned char bit = (node->hj_OuterTupleCount - 1) % 8;
-
-						/* need to read the next byte */
-						if (bit == 0)
-							BufFileRead(node->hj_OuterMatchStatusesFile, &node->hj_OuterCurrentByte, 1);
-
-						/* if the match bit is set for this tuple, continue */
-						if ((node->hj_OuterCurrentByte >> bit) & 1)
-							continue;
-						/*
-						 * if it is not a match
-						 * emit it NULL-extended
-						 */
-						econtext->ecxt_outertuple = temp;
-						econtext->ecxt_innertuple = node->hj_NullInnerTupleSlot;
-						return ExecProject(node->js.ps.ps_ProjInfo);
-					}
+					sts_end_parallel_scan(outer_acc);
+					node->hj_JoinState = HJ_NEED_NEW_BATCH;
+					break;
 				}
-				/* came here from HJ_NEED_NEW_BATCH, so go back there */
-				if (parallel)
-				{
-					sts_end_parallel_scan(hashtable->batches[hashtable->curbatch].outer_tuples);
-					sts_end_parallel_scan(hashtable->batches[hashtable->curbatch].inner_tuples);
-				}
-				node->hj_JoinState = HJ_NEED_NEW_BATCH;
-				break;
+
+				ExecForceStoreMinimalTuple(tuple,
+				                           econtext->ecxt_outertuple,
+				                           false);
+				econtext->ecxt_innertuple = node->hj_NullInnerTupleSlot;
+
+				return ExecProject(node->js.ps.ps_ProjInfo);
+
 
 			default:
 				elog(ERROR, "unrecognized hashjoin state: %d",
