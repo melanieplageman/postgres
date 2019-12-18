@@ -1958,7 +1958,7 @@ typedef struct HashJoinState
 
 	/* hashloop fallback outer side */
 	unsigned char hj_OuterCurrentByte;
-	BufFile *hj_OuterMatchStatusesFile;
+	BufFile *hj_OuterMatchStatusesFile; /* serial AHJ */
 	int64 hj_OuterTupleCount;
 
 	/* parallel hashloop fallback outer side */
