@@ -1647,6 +1647,7 @@ ExecParallelHashJoin(PlanState *pstate)
 				/*
 				 * Scan the selected hash bucket for matches to current outer
 				 */
+				phj_batch = node->hj_HashTable->batches[node->hj_HashTable->curbatch].shared;
 
 				if (!ExecParallelScanHashBucket(node, econtext))
 				{
@@ -1656,18 +1657,7 @@ ExecParallelHashJoin(PlanState *pstate)
 					 * one or not, the next state is NEED_NEW_OUTER.
 					 */
 					node->hj_JoinState = HJ_NEED_NEW_OUTER;
-					if (parallel)
-					{
-						ParallelHashJoinBatch *phj_batch = node->hj_HashTable->batches[node->hj_HashTable->curbatch].shared;
-						if (!phj_batch->parallel_hashloop_fallback)
-						{
-
-							TupleTableSlot *slot = emitUnmatchedOuterTuple(otherqual, econtext, node);
-							if (slot != NULL)
-								return slot;
-						}
-					}
-					else if (node->hj_HashTable->curbatch == 0 || node->hashloop_fallback == false)
+					if (!phj_batch->parallel_hashloop_fallback)
 					{
 						TupleTableSlot *slot = emitUnmatchedOuterTuple(otherqual, econtext, node);
 						if (slot != NULL)
@@ -1712,10 +1702,10 @@ ExecParallelHashJoin(PlanState *pstate)
 					 * Set the match bit for this outer tuple in the match
 					 * status file
 					 */
-					if (parallel && node->hj_HashTable->batches[node->hj_HashTable->curbatch].shared->parallel_hashloop_fallback)
+					if (phj_batch->parallel_hashloop_fallback)
 					{
 						unsigned char current_outer_byte;
-						// TODO: it is very unclear here that this slot is current, and, thus, that this tuplenum is up-to-date
+						// TODO: it is unclear here that this slot is current, and, thus, that this tuplenum is up-to-date
 						// also, it is unclear if node->hj_OuterTupleSlot->tuplenum should be used
 						uint32 tupleid = econtext->ecxt_outertuple->tuplenum;
 						SharedTuplestoreAccessor *outer_acc = hashtable->batches[hashtable->curbatch].outer_tuples;
@@ -1732,20 +1722,6 @@ ExecParallelHashJoin(PlanState *pstate)
 							elog(ERROR, "there is a problem with outer match status file. pid %i.", MyProcPid);
 
 						BufFileWrite(parallel_outer_matchstatuses, &current_outer_byte, 1);
-					}
-
-					else if (node->hj_OuterMatchStatusesFile != NULL)
-					{
-						Assert(!parallel);
-						Assert(node->hashloop_fallback == true);
-						int byte_to_set = (node->hj_OuterTupleCount - 1) / 8;
-						int bit_to_set_in_byte = (node->hj_OuterTupleCount - 1) % 8;
-
-						BufFileSeek(node->hj_OuterMatchStatusesFile, 0, byte_to_set, SEEK_SET);
-
-						node->hj_OuterCurrentByte = node->hj_OuterCurrentByte | (1 << bit_to_set_in_byte);
-
-						BufFileWrite(node->hj_OuterMatchStatusesFile, &node->hj_OuterCurrentByte, 1);
 					}
 					if (otherqual == NULL || ExecQual(otherqual, econtext))
 						return ExecProject(node->js.ps.ps_ProjInfo);
@@ -1788,150 +1764,47 @@ ExecParallelHashJoin(PlanState *pstate)
 				/*
 				 * Try to advance to next batch.  Done if there are no more.
 				 */
-				if (parallel)
-				{
-					if (!ExecParallelHashJoinNewBatch(node))
-						return NULL;	/* end of parallel-aware join */
-					bool fallback = node->hj_HashTable->batches[node->hj_HashTable->curbatch].shared->parallel_hashloop_fallback;
+				if (!ExecParallelHashJoinNewBatch(node))
+					return NULL;	/* end of parallel-aware join */
 
-					// TODO: does this need to be parallel-safe?
-					if (node->last_worker == true
-						&& HJ_FILL_OUTER(node) && fallback == true
-						&& node->hj_InnerExhausted == true)
-					{
-						node->last_worker = false;
-						node->hj_JoinState = HJ_ADAPTIVE_EMIT_UNMATCHED_OUTER_INIT;
-						break;
-					}
-					if (node->hj_HashTable->curbatch == 0)
-					{
-						node->hj_JoinState = HJ_NEED_NEW_OUTER;
-						break;
-					}
-					advance_from_probing = false;
-					node->hj_JoinState = HJ_NEED_NEW_INNER_CHUNK;
+				// TODO: does this need to be parallel-safe?
+				if (node->last_worker == true
+					&& HJ_FILL_OUTER(node) && phj_batch->parallel_hashloop_fallback == true
+					&& node->hj_InnerExhausted == true)
+				{
+					node->last_worker = false;
+					node->hj_JoinState = HJ_ADAPTIVE_EMIT_UNMATCHED_OUTER_INIT;
 					break;
 				}
-				else
+				if (node->hj_HashTable->curbatch == 0)
 				{
-					/*
-					 * for batches after batch 0 for which hashloop_fallback is
-					 * true, if inner is exhausted, need to consider emitting
-					 * unmatched tuples we should never get here when
-					 * hashloop_fallback is false but hj_InnerExhausted is true,
-					 * however, it felt more clear to check for
-					 * hashloop_fallback explicitly
-					 */
-					if (node->hashloop_fallback == true && HJ_FILL_OUTER(node) && node->hj_InnerExhausted == true)
-					{
-						/*
-						 * For hashloop fallback, outer tuples are not emitted
-						 * until directly before advancing the batch (after all
-						 * inner chunks have been processed).
-						 * node->hashloop_fallback should be true because it is
-						 * not reset to false until advancing the batches
-						 */
-						node->hj_InnerExhausted = false;
-						node->hj_JoinState = HJ_ADAPTIVE_EMIT_UNMATCHED_OUTER_INIT;
-						break;
-					}
-
-					if (!ExecHashJoinAdvanceBatch(node))
-						return NULL;    /* end of parallel-oblivious join */
-
-					// TODO: need to find a better way to distinguish if I should load inner batch again than checking for outer batch file
-					// I need to also do this even if it is NULL when it is a ROJ
-					// need to load inner again if it is an inner or left outer join and there are outer tuples in the batch OR
-					// if it is a ROJ and there are inner tuples in the batch -- should never have no tuples in either batch...
-					if (BufFileRewindIfExists(node->hj_HashTable->outerBatchFile[node->hj_HashTable->curbatch]) != NULL ||
-						(node->hj_HashTable->innerBatchFile[node->hj_HashTable->curbatch] != NULL && HJ_FILL_INNER(node)))
-						ExecHashJoinLoadInnerBatch(node); /* TODO: should I ever load inner when outer file is not present? */
-
+					node->hj_JoinState = HJ_NEED_NEW_OUTER;
+					break;
 				}
-				node->hj_JoinState = HJ_NEED_NEW_OUTER;
-				break;
+				advance_from_probing = false;
+				node->hj_JoinState = HJ_NEED_NEW_INNER_CHUNK;
+
+				/* FALL THRU */
 
 			case HJ_NEED_NEW_INNER_CHUNK:
 
-				if (parallel)
+				// If we're not attached to a batch at all then we need to go to HJ_NEED_NEW_BATCH
+				if (node->hj_HashTable->curbatch == -1 || node->hj_HashTable->curbatch == 0)
 				{
-					// If we're not attached to a batch at all then we need to go to HJ_NEED_NEW_BATCH
-					if (node->hj_HashTable->curbatch == -1 || node->hj_HashTable->curbatch == 0)
-					{
-						node->hj_InnerExhausted = true; // TODO: do I want this backend local variable for this?
-						node->hj_JoinState = HJ_NEED_NEW_BATCH;
-					}
-					else if (!ExecParallelHashJoinNewChunk(node, advance_from_probing))
-					{
-						// If there's no next chunk available then detach from the chunk and go to HJ_NEED_NEW_BATCH
-						node->hj_InnerExhausted = true; // TODO: do I want this backend local variable for this?
-						node->hj_JoinState = HJ_NEED_NEW_BATCH;
-					}
-					else
-					{
-						// There's another chunk available in the batch and we're attached to it
-						node->hj_InnerExhausted = false;
-						node->hj_JoinState = HJ_NEED_NEW_OUTER;
-					}
-					break;
-				}
-
-				// serial case (parallel case should never come here) and should be done with this phase for now
-				/*
-				 * there were never chunks because this is the normal case (not
-				 * hashloop fallback) or this is batch 0. batch 0 cannot have
-				 * chunks. hashloop_fallback should always be false when
-				 * curbatch is 0 here. proceed to HJ_NEED_NEW_BATCH to either
-				 * advance to the next batch or complete the join
-				 */
-				if (node->hj_HashTable->curbatch == 0)
-				{
-					Assert(node->hashloop_fallback == false);
-					if(node->hj_InnerPageOffset != 0L)
-						elog(DEBUG1, "hj_InnerPageOffset is not reset to 0 on batch 0");
-				}
-
-				if (node->hashloop_fallback == false)
-				{
+					node->hj_InnerExhausted = true; // TODO: do I want this backend local variable for this?
 					node->hj_JoinState = HJ_NEED_NEW_BATCH;
-					break;
 				}
-
-				/*
-				 * it is the hashloop fallback case and there are no more chunks
-				 * inner is exhausted, so we must advance the batches
-				 */
-				if (node->hj_InnerPageOffset == 0L)
+				else if (!ExecParallelHashJoinNewChunk(node, advance_from_probing))
 				{
-					node->hj_InnerExhausted = true;
+					// If there's no next chunk available then detach from the chunk and go to HJ_NEED_NEW_BATCH
+					node->hj_InnerExhausted = true; // TODO: do I want this backend local variable for this?
 					node->hj_JoinState = HJ_NEED_NEW_BATCH;
-					break;
 				}
-
-				/*
-				 * This is the hashloop fallback case and we have more chunks in
-				 * inner. curbatch > 0. Rewind outer batch file (if present) so
-				 * that we can start reading it. Rewind outer match statuses
-				 * file if present so that we can set match bits as needed Reset
-				 * the tuple count and load the next chunk of inner. Then
-				 * proceed to get a new outer tuple from our rewound outer batch
-				 * file
-				 */
-				node->hj_JoinState = HJ_NEED_NEW_OUTER;
-
-
-				// TODO: need to find a better way to distinguish if I should load inner batch again than checking for outer batch file
-				// I need to also do this even if it is NULL when it is a ROJ
-				// need to load inner again if it is an inner or left outer join and there are outer tuples in the batch OR
-				// if it is a ROJ and there are inner tuples in the batch -- should never have no tuples in either batch...
-				// TODO: is this right?
-				// if outer is not null or if it is a ROJ and inner is not null, must rewind outer match status and load inner
-				if (BufFileRewindIfExists(node->hj_HashTable->outerBatchFile[node->hj_HashTable->curbatch]) != NULL ||
-					(node->hj_HashTable->innerBatchFile[node->hj_HashTable->curbatch] != NULL && HJ_FILL_INNER(node)))
+				else
 				{
-					BufFileRewindIfExists(node->hj_OuterMatchStatusesFile);
-					node->hj_OuterTupleCount = 0;
-					ExecHashJoinLoadInnerBatch(node);
+					// There's another chunk available in the batch and we're attached to it
+					node->hj_InnerExhausted = false;
+					node->hj_JoinState = HJ_NEED_NEW_OUTER;
 				}
 				break;
 
