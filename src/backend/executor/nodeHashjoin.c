@@ -1709,6 +1709,7 @@ ExecParallelHashJoin(PlanState *pstate)
 						// also, it is unclear if node->hj_OuterTupleSlot->tuplenum should be used
 						uint32 tupleid = econtext->ecxt_outertuple->tuplenum;
 						SharedTuplestoreAccessor *outer_acc = hashtable->batches[hashtable->curbatch].outer_tuples;
+						// TODO: put this operation on the outer match status file in the sts API
 						BufFile *parallel_outer_matchstatuses = sts_get_my_STA_outerMatchStatuses(outer_acc);
 
 						BufFileSeek(parallel_outer_matchstatuses, 0, (tupleid / 8), SEEK_SET);

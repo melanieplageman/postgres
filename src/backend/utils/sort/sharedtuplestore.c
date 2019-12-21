@@ -318,11 +318,11 @@ sts_make_STA_outerMatchStatuses(SharedTuplestoreAccessor *accessor, int batchno,
 {
 	uint32 tuplenum = sts_gettuplenum(accessor);
 	// don't make a file if there are no tuples
-//	if (tuplenum == 0)
-//		return;
+	if (tuplenum == 0)
+		return;
 	sts_bitmap_filename(name, accessor, accessor->participant);
 
-	accessor->outer_match_status_file = BufFileCreateShared(sts_get_fileset(accessor), name);
+	accessor->outer_match_status_file = BufFileCreateShared(accessor->fileset, name);
 
 	uint32 num_to_write = tuplenum / 8 + 1;
 
@@ -695,10 +695,6 @@ sts_parallel_scan_next(SharedTuplestoreAccessor *accessor, void *meta_data)
 	return NULL;
 }
 
-SharedFileSet *sts_get_fileset(SharedTuplestoreAccessor *accessor)
-{
-	return accessor->fileset;
-}
 void
 sts_bitmap_filename(char *name, SharedTuplestoreAccessor *accessor, int participant)
 {
