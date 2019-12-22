@@ -361,7 +361,7 @@ ExecParallelHashJoinNewBatch(HashJoinState *hjstate)
 					if (hashtable->batches[batchno].shared->parallel_hashloop_fallback)
 					{
 						char outer_match_status_filename[MAXPGPATH];
-						sts_make_STA_outerMatchStatuses(hashtable->batches[batchno].outer_tuples, batchno, outer_match_status_filename);
+						sts_make_STA_outerMatchStatuses(hashtable->batches[batchno].outer_tuples, outer_match_status_filename);
 					}
 					if (batchno == 0)
 					{
@@ -369,7 +369,7 @@ ExecParallelHashJoinNewBatch(HashJoinState *hjstate)
 						LWLockAcquire(&hashtable->batches[batchno].shared->lock, LW_EXCLUSIVE);
 						hashtable->batches[batchno].shared->current_chunk_num = 1;
 						LWLockRelease(&hashtable->batches[batchno].shared->lock);
-						// is this right place to do this
+						// TODO: is this the right place to do this
 						sts_begin_parallel_scan(hashtable->batches[batchno].outer_tuples);
 					}
 					return true;

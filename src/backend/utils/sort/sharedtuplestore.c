@@ -169,8 +169,7 @@ sts_initialize(SharedTuplestore *sts, int participants,
 	accessor->sts = sts;
 	accessor->fileset = fileset;
 	accessor->context = CurrentMemoryContext;
-	// TODO: should I initialize this here
-	// also, if read_file isn't set to NULL here, why?
+	// Why isn't read_file set to NULL here?
 	accessor->outer_match_status_file = NULL;
 
 	return accessor;
@@ -304,20 +303,12 @@ sts_end_parallel_scan(SharedTuplestoreAccessor *accessor)
 	}
 }
 
-/*
- * Used in this file for convenience
- * Used in nodeHashjoin.c only for debugging purposes -- TODO: delete later
- */
-uint32 sts_gettuplenum(SharedTuplestoreAccessor *accessor)
-{
-	 return pg_atomic_read_u32(&accessor->sts->exact_tuplenum);
-}
 
 void
-sts_make_STA_outerMatchStatuses(SharedTuplestoreAccessor *accessor, int batchno, char *name)
+sts_make_STA_outerMatchStatuses(SharedTuplestoreAccessor *accessor, char *name)
 {
-	uint32 tuplenum = sts_gettuplenum(accessor);
-	// don't make a file if there are no tuples
+	uint32 tuplenum = pg_atomic_read_u32(&accessor->sts->exact_tuplenum);
+	/* don't make the outer match status file if there are no tuples */
 	if (tuplenum == 0)
 		return;
 	sts_bitmap_filename(name, accessor, accessor->participant);
