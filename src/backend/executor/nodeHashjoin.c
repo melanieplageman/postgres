@@ -939,25 +939,12 @@ ExecParallelHashJoin(PlanState *pstate)
 				 */
 				if (phj_batch->parallel_hashloop_fallback)
 				{
-					unsigned char current_outer_byte;
 					// TODO: it is unclear here that this slot is current, and, thus, that this tuplenum is up-to-date
 					// also, it is unclear if node->hj_OuterTupleSlot->tuplenum should be used
-					uint32 tupleid = econtext->ecxt_outertuple->tuplenum;
 					SharedTuplestoreAccessor *outer_acc = hashtable->batches[hashtable->curbatch].outer_tuples;
-					// TODO: put this operation on the outer match status file in the sts API
-					BufFile *parallel_outer_matchstatuses = sts_get_my_STA_outerMatchStatuses(outer_acc);
+					sts_set_outer_match_status(hashtable->batches[hashtable->curbatch].outer_tuples,
+					                           econtext->ecxt_outertuple->tuplenum);
 
-					BufFileSeek(parallel_outer_matchstatuses, 0, (tupleid / 8), SEEK_SET);
-					BufFileRead(parallel_outer_matchstatuses, &current_outer_byte, 1);
-
-					int bit_to_set_in_byte = tupleid % 8;
-
-					current_outer_byte = current_outer_byte | (1 << bit_to_set_in_byte);
-
-					if (BufFileSeek(parallel_outer_matchstatuses, 0, -1, SEEK_CUR) != 0)
-						elog(ERROR, "there is a problem with outer match status file. pid %i.", MyProcPid);
-
-					BufFileWrite(parallel_outer_matchstatuses, &current_outer_byte, 1);
 				}
 				if (otherqual == NULL || ExecQual(otherqual, econtext))
 					return ExecProject(node->js.ps.ps_ProjInfo);

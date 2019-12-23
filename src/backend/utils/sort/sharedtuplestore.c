@@ -99,7 +99,8 @@ struct SharedTuplestoreAccessor
 
 static void sts_filename(char *name, SharedTuplestoreAccessor *accessor,
 						 int participant);
-
+static void
+sts_bitmap_filename(char *name, SharedTuplestoreAccessor *accessor, int participant);
 
 /*
  * Return the amount of shared memory required to hold SharedTuplestore for a
@@ -304,7 +305,24 @@ sts_end_parallel_scan(SharedTuplestoreAccessor *accessor)
 		accessor->read_file = NULL;
 	}
 }
+void
+sts_set_outer_match_status(SharedTuplestoreAccessor *accessor, uint32 tuplenum)
+{
+	BufFile *parallel_outer_matchstatuses = accessor->outer_match_status_file;
+	unsigned char current_outer_byte;
 
+	BufFileSeek(parallel_outer_matchstatuses, 0, (tuplenum / 8), SEEK_SET);
+	BufFileRead(parallel_outer_matchstatuses, &current_outer_byte, 1);
+
+	int bit_to_set_in_byte = tuplenum % 8;
+
+	current_outer_byte = current_outer_byte | (1 << bit_to_set_in_byte);
+
+	if (BufFileSeek(parallel_outer_matchstatuses, 0, -1, SEEK_CUR) != 0)
+		elog(ERROR, "there is a problem with outer match status file. pid %i.", MyProcPid);
+
+	BufFileWrite(parallel_outer_matchstatuses, &current_outer_byte, 1);
+}
 
 void
 sts_make_outer_match_status_file(SharedTuplestoreAccessor *accessor, char *name)
@@ -342,7 +360,7 @@ BufFile *sts_combine_outer_match_status_files(SharedTuplestoreAccessor *accessor
 	// all but one participant continue on and detach from the barrier
 	// so we won't have a reliable way to close only files for those attached
 	// to the barrier
-	int length = sts_participants(accessor);
+	int length = accessor->sts->nparticipants;
 	BufFile **outer_match_statuses = palloc(sizeof(BufFile *) * length);
 	char **outer_match_status_filenames = alloca(sizeof(char *) * length);
 
@@ -623,18 +641,6 @@ sts_read_tuple(SharedTuplestoreAccessor *accessor, void *meta_data)
 	return tuple;
 }
 
-void
-populate_outer_match_statuses(SharedTuplestoreAccessor *accessor, BufFile *outer_match_statuses[], char **outer_match_status_filenames)
-{
-
-}
-
-int
-sts_participants(SharedTuplestoreAccessor *accessor)
-{
-	return accessor->sts->nparticipants;
-}
-
 /*
  * Get the next tuple in the current parallel scan.
  */
@@ -738,7 +744,7 @@ sts_parallel_scan_next(SharedTuplestoreAccessor *accessor, void *meta_data)
 	return NULL;
 }
 
-void
+static void
 sts_bitmap_filename(char *name, SharedTuplestoreAccessor *accessor, int participant)
 {
 	snprintf(name, MAXPGPATH, "%s.p%d.bitmap", accessor->sts->name, participant);
