@@ -68,6 +68,12 @@ extern MinimalTuple sts_parallel_scan_next(SharedTuplestoreAccessor *accessor, v
 extern void sts_bitmap_filename(char *name, SharedTuplestoreAccessor *accessor, int participant);
 extern void populate_outer_match_statuses(SharedTuplestoreAccessor *accessor, BufFile *outer_match_statuses[], char **outer_match_status_filenames);
 
+extern void
+combine_outer_match_statuses(BufFile *outer_match_statuses[],
+                             int length,
+                             size_t num_bytes,
+                             BufFile **combined_bitmap_file);
+extern BufFile *sts_combine_outer_match_status_files(SharedTuplestoreAccessor *accessor);
 extern int sts_participants(SharedTuplestoreAccessor *accessor);
 
 

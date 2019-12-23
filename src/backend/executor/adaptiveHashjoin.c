@@ -14,43 +14,7 @@
 #include "executor/adaptiveHashjoin.h"
 
 
-/*
- * Only the elected worker will be calling this
- */
-void
-combine_outer_match_statuses(BufFile *outer_match_statuses[], int length, size_t num_bytes, int batchno, BufFile **combined_bitmap_file)
-{
-	BufFile *first_file = outer_match_statuses[0];
-	// make an output file for now
-	BufFile *combined_file = *combined_bitmap_file;
 
-	unsigned char current_byte_to_write = 0;
-	unsigned char current_byte_to_read = 0;
-	for(int64 cur = 0; cur < num_bytes; cur++) // make it while not EOF
-	{
-		BufFileRead(first_file, &current_byte_to_write, 1);
-		BufFile *file1 = NULL;
-		for (int k = 1; k < length; k++)
-		{
-			file1 = outer_match_statuses[k];
-			if (!file1)
-				continue;
-			BufFileRead(file1, &current_byte_to_read, 1);
-			current_byte_to_write = current_byte_to_write | current_byte_to_read;
-		}
-		BufFileWrite(combined_file, &current_byte_to_write, 1);
-	}
-	if (BufFileSeek(combined_file, 0, 0L, SEEK_SET))
-		ereport(ERROR,
-				(errcode_for_file_access(),
-						errmsg("could not rewind hash-join temporary file: %m")));
-
-	for (int j = 0; j < length; j++)
-	{
-		if (outer_match_statuses[j])
-			BufFileClose(outer_match_statuses[j]);
-	}
-}
 
 bool
 ExecParallelHashJoinNewChunk(HashJoinState *hjstate, bool advance_from_probing)
@@ -252,36 +216,11 @@ ExecParallelHashJoinNewBatch(HashJoinState *hjstate)
 			 * Use the bitmap, loop through the outer batch file again, and emit unmatched tuples
 			 */
 
-			// The batch files and outer match status files can be closed then
-
 			if (BarrierArriveAndWait(&batch->batch_barrier,
 									 WAIT_EVENT_HASH_BATCH_PROBING))
 			{
-				// on the elected combining worker should do this
-				SharedTuplestoreAccessor *outer_acc = accessor->outer_tuples;
-
-				//TODO: right? This doesn't work if I let the other workers move on -- the number of participants won't be right
-				// problem, there are sts participants that detach from the barrier below before we have a chance to get their match status files
-				//int length = BarrierParticipants(&batch->batch_barrier);
-				int length = sts_participants(outer_acc);
-				BufFile **outer_match_statuses = palloc(sizeof(BufFile *) * length);
-				char **outer_match_status_filenames = alloca(sizeof(char *) * length);
-
-				// TODO: improve this code
-				populate_outer_match_statuses(outer_acc, outer_match_statuses, outer_match_status_filenames);
-
-				BufFile *combined_bitmap_file = BufFileCreateTemp(false);
-				// This also closes the files opened in populate_outer_match_statuses
-				combine_outer_match_statuses(
-						outer_match_statuses,
-						length,
-						BufFileBytesUsed(outer_match_statuses[0]),
-						curbatch,
-						&combined_bitmap_file);
-
-				hjstate->combined_bitmap = combined_bitmap_file;
+				hjstate->combined_bitmap = sts_combine_outer_match_status_files(accessor->outer_tuples);
 				hjstate->last_worker = true;
-				pfree(outer_match_statuses);
 				return true;
 			}
 
