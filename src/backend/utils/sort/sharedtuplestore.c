@@ -635,16 +635,19 @@ int sts_increment_tuplenum(SharedTuplestoreAccessor *accessor)
 }
 
 void
-sts_make_outer_match_status_file(SharedTuplestoreAccessor *accessor, char *name)
+sts_make_outer_match_status_file(SharedTuplestoreAccessor *accessor)
 {
 	uint32 tuplenum = pg_atomic_read_u32(&accessor->sts->exact_tuplenum);
 	/* don't make the outer match status file if there are no tuples */
 	if (tuplenum == 0)
 		return;
+
+	char name[MAXPGPATH];
 	sts_bitmap_filename(name, accessor, accessor->participant);
 
 	accessor->outer_match_status_file = BufFileCreateShared(accessor->fileset, name);
 
+	// TODO: check this math
 	uint32 num_to_write = tuplenum / 8 + 1;
 
 	unsigned char byteToWrite = 0;
@@ -662,16 +665,13 @@ sts_set_outer_match_status(SharedTuplestoreAccessor *accessor, uint32 tuplenum)
 	BufFile *parallel_outer_matchstatuses = accessor->outer_match_status_file;
 	unsigned char current_outer_byte;
 
-	BufFileSeek(parallel_outer_matchstatuses, 0, (tuplenum / 8), SEEK_SET);
+	BufFileSeek(parallel_outer_matchstatuses, 0, tuplenum / 8, SEEK_SET);
 	BufFileRead(parallel_outer_matchstatuses, &current_outer_byte, 1);
 
-	int bit_to_set_in_byte = tuplenum % 8;
-
-	current_outer_byte = current_outer_byte | (1 << bit_to_set_in_byte);
+	current_outer_byte |= 1U << (tuplenum % 8);
 
 	if (BufFileSeek(parallel_outer_matchstatuses, 0, -1, SEEK_CUR) != 0)
 		elog(ERROR, "there is a problem with outer match status file. pid %i.", MyProcPid);
-
 	BufFileWrite(parallel_outer_matchstatuses, &current_outer_byte, 1);
 }
 
@@ -689,12 +689,10 @@ BufFile *sts_combine_outer_match_status_files(SharedTuplestoreAccessor *accessor
 	// all but one participant continue on and detach from the barrier
 	// so we won't have a reliable way to close only files for those attached
 	// to the barrier
-	int length = accessor->sts->nparticipants;
-	BufFile **outer_match_statuses = palloc(sizeof(BufFile *) * length);
-	char **outer_match_status_filenames = alloca(sizeof(char *) * length);
+	BufFile **statuses = palloc(sizeof(BufFile *) * accessor->sts->nparticipants);
 
-	// TODO: improve this code
-	int j = 0;
+	// Open the bitmap shared BufFile from each participant. TODO: explain why file can be NULLs
+	int statuses_length = 0;
 	for (int i = 0; i < accessor->sts->nparticipants; i++)
 	{
 		char bitmap_filename[MAXPGPATH];
@@ -702,42 +700,34 @@ BufFile *sts_combine_outer_match_status_files(SharedTuplestoreAccessor *accessor
 		BufFile *file = BufFileOpenSharedIfExists(accessor->fileset, bitmap_filename);
 
 		if (file != NULL)
-		{
-			outer_match_statuses[j] = file;
-			outer_match_status_filenames[j] = bitmap_filename;
-			j++;
-		}
+			statuses[statuses_length++] = file;
 	}
 
-	BufFile       *combined_bitmap_file = BufFileCreateTemp(false);
-	BufFile       *first_file           = outer_match_statuses[0];
-	unsigned char write_byte            = 0;
-	unsigned char read_byte             = 0;
-	for(int64 cur  = 0; cur < BufFileBytesUsed(outer_match_statuses[0]); cur++) // make it while not EOF
+	BufFile *combined_bitmap_file = BufFileCreateTemp(false);
+
+	for (int64 cur = 0; cur < BufFileBytesUsed(statuses[0]); cur++) // make it while not EOF
 	{
-		BufFileRead(first_file, &write_byte, 1);
-		BufFile *file1 = NULL;
-		for (int k = 1; k < length; k++)
+		unsigned char combined_byte = 0;
+
+		for (int i = 0; i < statuses_length; i++)
 		{
-			file1 = outer_match_statuses[k];
-			if (!file1)
-				continue;
-			BufFileRead(file1, &read_byte, 1);
-			write_byte = write_byte | read_byte;
+			unsigned char read_byte;
+			BufFileRead(statuses[i], &read_byte, 1);
+			combined_byte |= read_byte;
 		}
-		BufFileWrite(combined_bitmap_file, &write_byte, 1);
+
+		BufFileWrite(combined_bitmap_file, &combined_byte, 1);
 	}
+
 	if (BufFileSeek(combined_bitmap_file, 0, 0L, SEEK_SET))
 		ereport(ERROR,
 		        (errcode_for_file_access(),
 			        errmsg("could not rewind hash-join temporary file: %m")));
 
-	for (int m = 0; m < length; m++)
-	{
-		if (outer_match_statuses[m])
-			BufFileClose(outer_match_statuses[m]);
-	}
-	pfree(outer_match_statuses);
+	for (int i = 0; i < statuses_length; i++)
+		BufFileClose(statuses[i]);
+	pfree(statuses);
+
 	return combined_bitmap_file;
 }
 
