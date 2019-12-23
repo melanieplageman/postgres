@@ -332,16 +332,7 @@ BufFile *sts_get_my_STA_outerMatchStatuses(SharedTuplestoreAccessor *accessor)
 {
 	return accessor->outer_match_status_file;
 }
-/*
- * Only the elected worker will be calling this
- */
-BufFile
-*
-combine_outer_match_statuses(BufFile *outer_match_statuses[], int length)
-{
 
-
-}
 
 BufFile *sts_combine_outer_match_status_files(SharedTuplestoreAccessor *accessor)
 {
@@ -351,32 +342,44 @@ BufFile *sts_combine_outer_match_status_files(SharedTuplestoreAccessor *accessor
 	// all but one participant continue on and detach from the barrier
 	// so we won't have a reliable way to close only files for those attached
 	// to the barrier
-	//
 	int length = sts_participants(accessor);
 	BufFile **outer_match_statuses = palloc(sizeof(BufFile *) * length);
 	char **outer_match_status_filenames = alloca(sizeof(char *) * length);
 
 	// TODO: improve this code
-	populate_outer_match_statuses(accessor, outer_match_statuses, outer_match_status_filenames);
-
-	BufFile *combined_bitmap_file = BufFileCreateTemp(false);
-	BufFile *first_file = outer_match_statuses[0];
-	// make an output file for now
-	unsigned char current_byte_to_write = 0;
-	unsigned char current_byte_to_read = 0;
-	for(int64 cur = 0; cur < BufFileBytesUsed(outer_match_statuses[0]); cur++) // make it while not EOF
+	int j = 0;
+	for (int i = 0; i < accessor->sts->nparticipants; i++)
 	{
-		BufFileRead(first_file, &current_byte_to_write, 1);
+		char bitmap_filename[MAXPGPATH];
+		sts_bitmap_filename(bitmap_filename, accessor, i);
+		BufFile *file = BufFileOpenSharedIfExists(accessor->fileset, bitmap_filename);
+
+		if (file != NULL)
+		{
+			outer_match_statuses[j] = file;
+			outer_match_status_filenames[j] = bitmap_filename;
+			j++;
+		}
+	}
+
+	BufFile       *combined_bitmap_file = BufFileCreateTemp(false);
+	BufFile       *first_file           = outer_match_statuses[0];
+	// make an output file for now
+	unsigned char write_byte            = 0;
+	unsigned char read_byte             = 0;
+	for(int64 cur  = 0; cur < BufFileBytesUsed(outer_match_statuses[0]); cur++) // make it while not EOF
+	{
+		BufFileRead(first_file, &write_byte, 1);
 		BufFile *file1 = NULL;
 		for (int k = 1; k < length; k++)
 		{
 			file1 = outer_match_statuses[k];
 			if (!file1)
 				continue;
-			BufFileRead(file1, &current_byte_to_read, 1);
-			current_byte_to_write = current_byte_to_write | current_byte_to_read;
+			BufFileRead(file1, &read_byte, 1);
+			write_byte = write_byte | read_byte;
 		}
-		BufFileWrite(combined_bitmap_file, &current_byte_to_write, 1);
+		BufFileWrite(combined_bitmap_file, &write_byte, 1);
 	}
 	if (BufFileSeek(combined_bitmap_file, 0, 0L, SEEK_SET))
 		ereport(ERROR,
@@ -623,20 +626,7 @@ sts_read_tuple(SharedTuplestoreAccessor *accessor, void *meta_data)
 void
 populate_outer_match_statuses(SharedTuplestoreAccessor *accessor, BufFile *outer_match_statuses[], char **outer_match_status_filenames)
 {
-	int j = 0;
-	for (int i = 0; i < accessor->sts->nparticipants; i++)
-	{
-		char bitmap_filename[MAXPGPATH];
-		sts_bitmap_filename(bitmap_filename, accessor, i);
-		BufFile *file = BufFileOpenSharedIfExists(accessor->fileset, bitmap_filename);
 
-		if (file != NULL)
-		{
-			outer_match_statuses[j] = file;
-			outer_match_status_filenames[j] = bitmap_filename;
-			j++;
-		}
-	}
 }
 
 int
