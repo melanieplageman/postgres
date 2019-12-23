@@ -1333,11 +1333,6 @@ emitUnmatchedOuterTuple(ExprState *otherqual, ExprContext *econtext, HashJoinSta
 	 * Generate a fake join tuple with nulls for the inner
 	 * tuple, and return it if it passes the non-join quals.
 	 */
-	// PAHJ_VIP_debugging
-	// AHJ_VIP_debugging
-	// re-enable for testing -- tells us for both serial and parallel which unmatched outer tuples are emitted during execution
-	// as opposed to waiting to emit until the end of the batch in fallback case
-	// will only log when there is an unmatched tuple
 
 	if (otherqual == NULL || ExecQual(otherqual, econtext))
 		return ExecProject(hjstate->js.ps.ps_ProjInfo);
@@ -1446,7 +1441,6 @@ ExecParallelHashJoinOuterGetTuple(PlanState *outerNode,
 	 * single-batch hash joins.  Otherwise we have to go to batch files, even
 	 * for batch 0.
 	 */
-
 	if (curbatch == 0 && hashtable->nbatch == 1)
 	{
 		slot = ExecProcNode(outerNode);

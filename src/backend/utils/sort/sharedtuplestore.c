@@ -80,7 +80,6 @@ struct SharedTuplestoreAccessor
 	/* State for reading. */
 	int			read_participant;	/* The current participant to read from. */
 	BufFile    *read_file;		/* The current file to read from. */
-	BufFile *outer_match_status_file; /* currently just used for outermatchstatus file */
 	int			read_ntuples_available; /* The number of tuples in chunk. */
 	int			read_ntuples;	/* How many tuples have we read from chunk? */
 	size_t		read_bytes;		/* How many bytes have we read from chunk? */
@@ -94,10 +93,13 @@ struct SharedTuplestoreAccessor
 	BlockNumber write_page;		/* The next page to write to. */
 	char	   *write_pointer;	/* Current write pointer within chunk. */
 	char	   *write_end;		/* One past the end of the current chunk. */
+
+	BufFile *outer_match_status_file; /* currently just used for outermatchstatus file */
 };
 
 static void sts_filename(char *name, SharedTuplestoreAccessor *accessor,
 						 int participant);
+
 
 /*
  * Return the amount of shared memory required to hold SharedTuplestore for a

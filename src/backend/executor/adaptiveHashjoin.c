@@ -285,15 +285,13 @@ ExecParallelHashJoinNewBatch(HashJoinState *hjstate)
 				return true;
 			}
 
-			/*
-			 * the elected combining worker should not reach here
-			 */
+			/* the elected combining worker should not reach here */
 			hashtable->batches[curbatch].done = true;
 			ExecHashTableDetachBatch(hashtable);
 		}
 		else
 		{
-			// non fallback case
+			/* non-fallback case */
 			BarrierArriveAndWait(&batch->batch_barrier,
 								 WAIT_EVENT_HASH_BATCH_PROBING);
 			hashtable->batches[curbatch].done = true;
