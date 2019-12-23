@@ -335,42 +335,12 @@ BufFile *sts_get_my_STA_outerMatchStatuses(SharedTuplestoreAccessor *accessor)
 /*
  * Only the elected worker will be calling this
  */
-void
-combine_outer_match_statuses(BufFile *outer_match_statuses[],
-                             int length,
-                             size_t num_bytes,
-                             BufFile **combined_bitmap_file)
+BufFile
+*
+combine_outer_match_statuses(BufFile *outer_match_statuses[], int length)
 {
-	BufFile *first_file = outer_match_statuses[0];
-	// make an output file for now
-	BufFile *combined_file = *combined_bitmap_file;
 
-	unsigned char current_byte_to_write = 0;
-	unsigned char current_byte_to_read = 0;
-	for(int64 cur = 0; cur < num_bytes; cur++) // make it while not EOF
-	{
-		BufFileRead(first_file, &current_byte_to_write, 1);
-		BufFile *file1 = NULL;
-		for (int k = 1; k < length; k++)
-		{
-			file1 = outer_match_statuses[k];
-			if (!file1)
-				continue;
-			BufFileRead(file1, &current_byte_to_read, 1);
-			current_byte_to_write = current_byte_to_write | current_byte_to_read;
-		}
-		BufFileWrite(combined_file, &current_byte_to_write, 1);
-	}
-	if (BufFileSeek(combined_file, 0, 0L, SEEK_SET))
-		ereport(ERROR,
-		        (errcode_for_file_access(),
-			        errmsg("could not rewind hash-join temporary file: %m")));
 
-	for (int j = 0; j < length; j++)
-	{
-		if (outer_match_statuses[j])
-			BufFileClose(outer_match_statuses[j]);
-	}
 }
 
 BufFile *sts_combine_outer_match_status_files(SharedTuplestoreAccessor *accessor)
@@ -390,12 +360,34 @@ BufFile *sts_combine_outer_match_status_files(SharedTuplestoreAccessor *accessor
 	populate_outer_match_statuses(accessor, outer_match_statuses, outer_match_status_filenames);
 
 	BufFile *combined_bitmap_file = BufFileCreateTemp(false);
-	// This also closes the files opened in populate_outer_match_statuses
-	combine_outer_match_statuses(
-		outer_match_statuses,
-		length,
-		BufFileBytesUsed(outer_match_statuses[0]),
-		&combined_bitmap_file);
+	BufFile *first_file = outer_match_statuses[0];
+	// make an output file for now
+	unsigned char current_byte_to_write = 0;
+	unsigned char current_byte_to_read = 0;
+	for(int64 cur = 0; cur < BufFileBytesUsed(outer_match_statuses[0]); cur++) // make it while not EOF
+	{
+		BufFileRead(first_file, &current_byte_to_write, 1);
+		BufFile *file1 = NULL;
+		for (int k = 1; k < length; k++)
+		{
+			file1 = outer_match_statuses[k];
+			if (!file1)
+				continue;
+			BufFileRead(file1, &current_byte_to_read, 1);
+			current_byte_to_write = current_byte_to_write | current_byte_to_read;
+		}
+		BufFileWrite(combined_bitmap_file, &current_byte_to_write, 1);
+	}
+	if (BufFileSeek(combined_bitmap_file, 0, 0L, SEEK_SET))
+		ereport(ERROR,
+		        (errcode_for_file_access(),
+			        errmsg("could not rewind hash-join temporary file: %m")));
+
+	for (int j = 0; j < length; j++)
+	{
+		if (outer_match_statuses[j])
+			BufFileClose(outer_match_statuses[j]);
+	}
 	pfree(outer_match_statuses);
 	return combined_bitmap_file;
 }
