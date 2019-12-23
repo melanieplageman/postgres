@@ -941,7 +941,6 @@ ExecParallelHashJoin(PlanState *pstate)
 				{
 					// TODO: it is unclear here that this slot is current, and, thus, that this tuplenum is up-to-date
 					// also, it is unclear if node->hj_OuterTupleSlot->tuplenum should be used
-					SharedTuplestoreAccessor *outer_acc = hashtable->batches[hashtable->curbatch].outer_tuples;
 					sts_set_outer_match_status(hashtable->batches[hashtable->curbatch].outer_tuples,
 					                           econtext->ecxt_outertuple->tuplenum);
 
