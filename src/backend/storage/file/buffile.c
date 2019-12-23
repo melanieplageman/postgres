@@ -99,7 +99,7 @@ static BufFile *makeBufFile(File firstfile);
 static void extendBufFile(BufFile *file);
 static void BufFileLoadBuffer(BufFile *file);
 static void BufFileDumpBuffer(BufFile *file);
-int	BufFileFlush(BufFile *file);
+static int	BufFileFlush(BufFile *file);
 static File MakeNewSharedSegment(BufFile *file, int segment);
 
 /*
@@ -315,9 +315,7 @@ BufFileOpenSharedIfExists(SharedFileSet *fileset, const char *name)
 		return NULL;
 	}
 	else
-	{
 		elog(DEBUG1, "in BufFileOpenSharedIfExists. sharedsegment name %s exists. filename %s. pid %i.", segment_name, name, MyProcPid);
-	}
 	file = makeBufFileCommon(nfiles);
 	file->files = files;
 	file->readOnly = true;		/* Can't write to files opened this way */
@@ -681,7 +679,7 @@ BufFileWrite(BufFile *file, void *ptr, size_t size)
  *
  * Like fflush()
  */
-int
+static int
 BufFileFlush(BufFile *file)
 {
 	if (file->dirty)
