@@ -14,7 +14,6 @@
 #define SHAREDTUPLESTORE_H
 
 #include "access/htup.h"
-#include "nodes/execnodes.h"
 #include "storage/fd.h"
 #include "storage/sharedfileset.h"
 
@@ -26,6 +25,7 @@ typedef struct SharedTuplestoreAccessor SharedTuplestoreAccessor;
 // TODO: can I use something less wasteful?
 struct tupleMetadata;
 typedef struct tupleMetadata tupleMetadata;
+// TODO: conflicting types for tupleid with tuplenum (uint32)
 struct tupleMetadata
 {
 	uint32 hashvalue;
