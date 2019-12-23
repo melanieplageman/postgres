@@ -60,7 +60,7 @@ typedef struct SharedTuplestoreParticipant
 struct SharedTuplestore
 {
 	int			nparticipants;	/* Number of participants that can write. */
-	pg_atomic_uint32 exact_tuplenum;
+	pg_atomic_uint32 exact_tuplenum; // TODO: does this belong elsewhere
 	int			flags;			/* Flag bits from SHARED_TUPLESTORE_XXX */
 	size_t		meta_data_size; /* Size of per-tuple header. */
 	char		name[NAMEDATALEN];	/* A name for this tuplestore. */
@@ -172,7 +172,6 @@ sts_initialize(SharedTuplestore *sts, int participants,
 	accessor->sts = sts;
 	accessor->fileset = fileset;
 	accessor->context = CurrentMemoryContext;
-	// Why isn't read_file set to NULL here?
 	accessor->outer_match_status_file = NULL;
 
 	return accessor;
@@ -284,7 +283,6 @@ sts_begin_parallel_scan(SharedTuplestoreAccessor *accessor)
 	 */
 	accessor->read_participant = accessor->participant;
 	accessor->read_file = NULL;
-	//accessor->outer_match_status_file = NULL; // TODO: re-enable
 	accessor->read_next_page = 0;
 }
 
@@ -305,127 +303,14 @@ sts_end_parallel_scan(SharedTuplestoreAccessor *accessor)
 		accessor->read_file = NULL;
 	}
 }
-void
-sts_set_outer_match_status(SharedTuplestoreAccessor *accessor, uint32 tuplenum)
-{
-	BufFile *parallel_outer_matchstatuses = accessor->outer_match_status_file;
-	unsigned char current_outer_byte;
-
-	BufFileSeek(parallel_outer_matchstatuses, 0, (tuplenum / 8), SEEK_SET);
-	BufFileRead(parallel_outer_matchstatuses, &current_outer_byte, 1);
-
-	int bit_to_set_in_byte = tuplenum % 8;
-
-	current_outer_byte = current_outer_byte | (1 << bit_to_set_in_byte);
-
-	if (BufFileSeek(parallel_outer_matchstatuses, 0, -1, SEEK_CUR) != 0)
-		elog(ERROR, "there is a problem with outer match status file. pid %i.", MyProcPid);
-
-	BufFileWrite(parallel_outer_matchstatuses, &current_outer_byte, 1);
-}
-
-void
-sts_make_outer_match_status_file(SharedTuplestoreAccessor *accessor, char *name)
-{
-	uint32 tuplenum = pg_atomic_read_u32(&accessor->sts->exact_tuplenum);
-	/* don't make the outer match status file if there are no tuples */
-	if (tuplenum == 0)
-		return;
-	sts_bitmap_filename(name, accessor, accessor->participant);
-
-	accessor->outer_match_status_file = BufFileCreateShared(accessor->fileset, name);
-
-	uint32 num_to_write = tuplenum / 8 + 1;
-
-	unsigned char byteToWrite = 0;
-	BufFileWrite(accessor->outer_match_status_file, &byteToWrite, num_to_write);
-
-	if (BufFileSeek(accessor->outer_match_status_file, 0, 0L, SEEK_SET))
-		ereport(ERROR,
-				(errcode_for_file_access(),
-						errmsg("could not rewind hash-join temporary file: %m")));
-}
-
-void
-sts_close_outer_match_status_file(SharedTuplestoreAccessor *accessor)
-{
-	BufFileClose(accessor->outer_match_status_file);
-}
-
-
-BufFile *sts_combine_outer_match_status_files(SharedTuplestoreAccessor *accessor)
-{
-	// TODO: this tries to close an outer match status file for
-	// each participant in the tuplestore. technically, only participants
-	// in the barrier could have outer match status files, however,
-	// all but one participant continue on and detach from the barrier
-	// so we won't have a reliable way to close only files for those attached
-	// to the barrier
-	int length = accessor->sts->nparticipants;
-	BufFile **outer_match_statuses = palloc(sizeof(BufFile *) * length);
-	char **outer_match_status_filenames = alloca(sizeof(char *) * length);
-
-	// TODO: improve this code
-	int j = 0;
-	for (int i = 0; i < accessor->sts->nparticipants; i++)
-	{
-		char bitmap_filename[MAXPGPATH];
-		sts_bitmap_filename(bitmap_filename, accessor, i);
-		BufFile *file = BufFileOpenSharedIfExists(accessor->fileset, bitmap_filename);
-
-		if (file != NULL)
-		{
-			outer_match_statuses[j] = file;
-			outer_match_status_filenames[j] = bitmap_filename;
-			j++;
-		}
-	}
-
-	BufFile       *combined_bitmap_file = BufFileCreateTemp(false);
-	BufFile       *first_file           = outer_match_statuses[0];
-	// make an output file for now
-	unsigned char write_byte            = 0;
-	unsigned char read_byte             = 0;
-	for(int64 cur  = 0; cur < BufFileBytesUsed(outer_match_statuses[0]); cur++) // make it while not EOF
-	{
-		BufFileRead(first_file, &write_byte, 1);
-		BufFile *file1 = NULL;
-		for (int k = 1; k < length; k++)
-		{
-			file1 = outer_match_statuses[k];
-			if (!file1)
-				continue;
-			BufFileRead(file1, &read_byte, 1);
-			write_byte = write_byte | read_byte;
-		}
-		BufFileWrite(combined_bitmap_file, &write_byte, 1);
-	}
-	if (BufFileSeek(combined_bitmap_file, 0, 0L, SEEK_SET))
-		ereport(ERROR,
-		        (errcode_for_file_access(),
-			        errmsg("could not rewind hash-join temporary file: %m")));
-
-	for (int j = 0; j < length; j++)
-	{
-		if (outer_match_statuses[j])
-			BufFileClose(outer_match_statuses[j]);
-	}
-	pfree(outer_match_statuses);
-	return combined_bitmap_file;
-}
-
-
-int sts_increment_tuplenum(SharedTuplestoreAccessor *accessor)
-{
-	return pg_atomic_fetch_add_u32(&accessor->sts->exact_tuplenum, 1);
-}
 
 /*
  * Write a tuple.  If a meta-data size was provided to sts_initialize, then a
  * pointer to meta data of that size must be provided.
  */
 void
-sts_puttuple(SharedTuplestoreAccessor *accessor, void *meta_data, MinimalTuple tuple)
+sts_puttuple(SharedTuplestoreAccessor *accessor, void *meta_data,
+			 MinimalTuple tuple)
 {
 	size_t		size;
 
@@ -482,7 +367,6 @@ sts_puttuple(SharedTuplestoreAccessor *accessor, void *meta_data, MinimalTuple t
 			 */
 			Assert(accessor->write_pointer + accessor->sts->meta_data_size +
 				   sizeof(uint32) < accessor->write_end);
-
 
 			/* Write the meta-data as one chunk. */
 			if (accessor->sts->meta_data_size > 0)
@@ -687,7 +571,7 @@ sts_parallel_scan_next(SharedTuplestoreAccessor *accessor, void *meta_data)
 
 				sts_filename(name, accessor, accessor->read_participant);
 				accessor->read_file =
-						BufFileOpenShared(accessor->fileset, name);
+					BufFileOpenShared(accessor->fileset, name);
 			}
 
 			/* Seek and load the chunk header. */
@@ -744,6 +628,119 @@ sts_parallel_scan_next(SharedTuplestoreAccessor *accessor, void *meta_data)
 
 	return NULL;
 }
+
+int sts_increment_tuplenum(SharedTuplestoreAccessor *accessor)
+{
+	return pg_atomic_fetch_add_u32(&accessor->sts->exact_tuplenum, 1);
+}
+
+void
+sts_make_outer_match_status_file(SharedTuplestoreAccessor *accessor, char *name)
+{
+	uint32 tuplenum = pg_atomic_read_u32(&accessor->sts->exact_tuplenum);
+	/* don't make the outer match status file if there are no tuples */
+	if (tuplenum == 0)
+		return;
+	sts_bitmap_filename(name, accessor, accessor->participant);
+
+	accessor->outer_match_status_file = BufFileCreateShared(accessor->fileset, name);
+
+	uint32 num_to_write = tuplenum / 8 + 1;
+
+	unsigned char byteToWrite = 0;
+	BufFileWrite(accessor->outer_match_status_file, &byteToWrite, num_to_write);
+
+	if (BufFileSeek(accessor->outer_match_status_file, 0, 0L, SEEK_SET))
+		ereport(ERROR,
+		        (errcode_for_file_access(),
+			        errmsg("could not rewind hash-join temporary file: %m")));
+}
+
+void
+sts_set_outer_match_status(SharedTuplestoreAccessor *accessor, uint32 tuplenum)
+{
+	BufFile *parallel_outer_matchstatuses = accessor->outer_match_status_file;
+	unsigned char current_outer_byte;
+
+	BufFileSeek(parallel_outer_matchstatuses, 0, (tuplenum / 8), SEEK_SET);
+	BufFileRead(parallel_outer_matchstatuses, &current_outer_byte, 1);
+
+	int bit_to_set_in_byte = tuplenum % 8;
+
+	current_outer_byte = current_outer_byte | (1 << bit_to_set_in_byte);
+
+	if (BufFileSeek(parallel_outer_matchstatuses, 0, -1, SEEK_CUR) != 0)
+		elog(ERROR, "there is a problem with outer match status file. pid %i.", MyProcPid);
+
+	BufFileWrite(parallel_outer_matchstatuses, &current_outer_byte, 1);
+}
+
+void
+sts_close_outer_match_status_file(SharedTuplestoreAccessor *accessor)
+{
+	BufFileClose(accessor->outer_match_status_file);
+}
+
+BufFile *sts_combine_outer_match_status_files(SharedTuplestoreAccessor *accessor)
+{
+	// TODO: this tries to close an outer match status file for
+	// each participant in the tuplestore. technically, only participants
+	// in the barrier could have outer match status files, however,
+	// all but one participant continue on and detach from the barrier
+	// so we won't have a reliable way to close only files for those attached
+	// to the barrier
+	int length = accessor->sts->nparticipants;
+	BufFile **outer_match_statuses = palloc(sizeof(BufFile *) * length);
+	char **outer_match_status_filenames = alloca(sizeof(char *) * length);
+
+	// TODO: improve this code
+	int j = 0;
+	for (int i = 0; i < accessor->sts->nparticipants; i++)
+	{
+		char bitmap_filename[MAXPGPATH];
+		sts_bitmap_filename(bitmap_filename, accessor, i);
+		BufFile *file = BufFileOpenSharedIfExists(accessor->fileset, bitmap_filename);
+
+		if (file != NULL)
+		{
+			outer_match_statuses[j] = file;
+			outer_match_status_filenames[j] = bitmap_filename;
+			j++;
+		}
+	}
+
+	BufFile       *combined_bitmap_file = BufFileCreateTemp(false);
+	BufFile       *first_file           = outer_match_statuses[0];
+	unsigned char write_byte            = 0;
+	unsigned char read_byte             = 0;
+	for(int64 cur  = 0; cur < BufFileBytesUsed(outer_match_statuses[0]); cur++) // make it while not EOF
+	{
+		BufFileRead(first_file, &write_byte, 1);
+		BufFile *file1 = NULL;
+		for (int k = 1; k < length; k++)
+		{
+			file1 = outer_match_statuses[k];
+			if (!file1)
+				continue;
+			BufFileRead(file1, &read_byte, 1);
+			write_byte = write_byte | read_byte;
+		}
+		BufFileWrite(combined_bitmap_file, &write_byte, 1);
+	}
+	if (BufFileSeek(combined_bitmap_file, 0, 0L, SEEK_SET))
+		ereport(ERROR,
+		        (errcode_for_file_access(),
+			        errmsg("could not rewind hash-join temporary file: %m")));
+
+	for (int m = 0; m < length; m++)
+	{
+		if (outer_match_statuses[m])
+			BufFileClose(outer_match_statuses[m]);
+	}
+	pfree(outer_match_statuses);
+	return combined_bitmap_file;
+}
+
 
 static void
 sts_bitmap_filename(char *name, SharedTuplestoreAccessor *accessor, int participant)
