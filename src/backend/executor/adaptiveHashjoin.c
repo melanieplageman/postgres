@@ -359,7 +359,7 @@ ExecParallelHashJoinNewBatch(HashJoinState *hjstate)
 					if (hashtable->batches[batchno].shared->parallel_hashloop_fallback)
 					{
 						char outer_match_status_filename[MAXPGPATH];
-						sts_make_STA_outerMatchStatuses(hashtable->batches[batchno].outer_tuples, outer_match_status_filename);
+						sts_make_outer_match_status_file(hashtable->batches[batchno].outer_tuples, outer_match_status_filename);
 					}
 					if (batchno == 0)
 					{

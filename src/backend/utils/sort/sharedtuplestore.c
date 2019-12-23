@@ -307,7 +307,7 @@ sts_end_parallel_scan(SharedTuplestoreAccessor *accessor)
 
 
 void
-sts_make_STA_outerMatchStatuses(SharedTuplestoreAccessor *accessor, char *name)
+sts_make_outer_match_status_file(SharedTuplestoreAccessor *accessor, char *name)
 {
 	uint32 tuplenum = pg_atomic_read_u32(&accessor->sts->exact_tuplenum);
 	/* don't make the outer match status file if there are no tuples */
