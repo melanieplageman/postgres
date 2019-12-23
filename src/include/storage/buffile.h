@@ -53,9 +53,6 @@ extern BufFile *BufFileOpenSharedIfExists(SharedFileSet *fileset, const char *na
 extern BufFile *BufFileOpenShared(SharedFileSet *fileset, const char *name);
 extern void BufFileDeleteShared(SharedFileSet *fileset, const char *name);
 
-extern int	BufFileFlush(BufFile *file);
-
-
 extern BufFile *BufFileRewindIfExists(BufFile *bufFile);
 
 #endif							/* BUFFILE_H */
