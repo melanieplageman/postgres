@@ -346,9 +346,10 @@ sts_make_outer_match_status_file(SharedTuplestoreAccessor *accessor, char *name)
 						errmsg("could not rewind hash-join temporary file: %m")));
 }
 
-BufFile *sts_get_my_STA_outerMatchStatuses(SharedTuplestoreAccessor *accessor)
+void
+sts_close_outer_match_status_file(SharedTuplestoreAccessor *accessor)
 {
-	return accessor->outer_match_status_file;
+	BufFileClose(accessor->outer_match_status_file);
 }
 
 

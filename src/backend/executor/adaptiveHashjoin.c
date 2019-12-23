@@ -204,9 +204,7 @@ ExecParallelHashJoinNewBatch(HashJoinState *hjstate)
 
 		if (batch->parallel_hashloop_fallback == true)
 		{
-			// everybody does this
-			// might need to check if this is present
-			BufFileClose(sts_get_my_STA_outerMatchStatuses(accessor->outer_tuples));
+			sts_close_outer_match_status_file(accessor->outer_tuples);
 
 			/*
 			 * If all workers (including this one) have finished probing the batch, one worker is elected to
