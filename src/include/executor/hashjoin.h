@@ -148,6 +148,9 @@ typedef struct HashMemoryChunkData *HashMemoryChunk;
  * followed by variable-sized objects, they are arranged in contiguous memory
  * but not accessed directly as an array.
  */
+// TODO: maybe remove lock from ParallelHashJoinBatch and use pstate->lock
+// and the PHJBatchAccessor to coordinate access to the PHJ batch similar to
+// other users of that lock
 typedef struct ParallelHashJoinBatch
 {
 	dsa_pointer buckets;		/* array of hash table buckets */

@@ -1453,9 +1453,6 @@ ExecParallelHashMergeCounters(HashJoinTable hashtable)
 	ParallelHashJoinState *pstate = hashtable->parallel_state;
 	int			i;
 
-	// TODO: looks like the pstate->lock is used to synchronize access to ParallelHashJoinBatches by
-	// ParallelHashJoinBatchAccessors -- maybe I should remove the lock from ParallelHashJoinBatch and
-	// use the pstate->lock and the accessor...
 	LWLockAcquire(&pstate->lock, LW_EXCLUSIVE);
 	pstate->total_tuples = 0;
 	for (i = 0; i < hashtable->nbatch; ++i)

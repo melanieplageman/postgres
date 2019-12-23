@@ -26,33 +26,41 @@ ExecParallelHashJoinNewChunk(HashJoinState *hjstate, bool advance_from_probing)
 	SharedTuplestoreAccessor *outer_tuples = hashtable->batches[batchno].outer_tuples;
 	SharedTuplestoreAccessor *inner_tuples = hashtable->batches[batchno].inner_tuples;
 
-	// This chunk_barrier is initialized in the ELECTING phase when the we
-	// attached to the batch in ExecParallelHashJoinNewBatch()
+	/*
+	 * 	This chunk_barrier is initialized in the ELECTING phase when the we
+	 * 	attached to the batch in ExecParallelHashJoinNewBatch()
+	 */
 	Barrier *chunk_barrier =
 			&hashtable->batches[batchno].shared->fallback_chunk_barrier;
 
 	if (batchno > 0 && advance_from_probing)
 	{
-		// the current chunk number can't be incremented if *any* worker isn't
-		// done yet (otherwise they might access the wrong data structure!)
-		// We must be in the PROBING phase
-		// need to advance the batch
-
+		/*
+		 * the current chunk number can't be incremented if *any* worker isn't
+		 * done yet (otherwise they might access the wrong data structure!)
+		 * We must be in the PROBING phase. So, need to advance the batch
+		 */
 		if (BarrierArriveAndWait(chunk_barrier,
 								 WAIT_EVENT_HASH_CHUNK_FINISHING_PROBING))
 			phj_batch->current_chunk_num++;
 
-		// Once the barrier is advanced we'll be in the DONE phase
-		// unfortunately, we are still attached to chunk barrier so we don't want to reattach
-		// and increase nparticipants or we will have deadlock
+		/*
+		 * Once the barrier is advanced we'll be in the DONE phase
+		 * unfortunately, we are still attached to chunk barrier so
+		 * we don't want to reattach and increase nparticipants or we will have deadlock
+		 */
 	}
 	else
 		BarrierAttach(chunk_barrier);
 
-	// should only come here for batches after batch 0
-	// either I need a new batch (was on the last chunk or coming from batch 0)
-	// or I need the next chunk (exhausted outer)
-	// should we do this if we already had a barrier arrive and wait above?
+	/*
+	 * We should only come here for batches after batch 0
+	 * The outer side is exhausted and either
+	 * 1) the current chunk of the inner side is exhausted and it is time to advance the chunk
+	 * 2) the last chunk of the inner side is exhausted and it is time to advance the batch
+	 * 3) finishing batch 0 and it is time to advance the batch
+	 */
+	// TODO: should we do this if we already had a barrier arrive and wait above?
 	switch (BarrierPhase(chunk_barrier))
 	{
 		case PHJ_CHUNK_ELECTING:
@@ -63,9 +71,7 @@ ExecParallelHashJoinNewChunk(HashJoinState *hjstate, bool advance_from_probing)
 			/* Fall through. */
 
 		case PHJ_CHUNK_LOADING:
-			/* Start (or join in) loading tuples. */
-			// load the next chunk of inner tuples into the hashtable
-
+			/* Start (or join in) loading the next chunk of inner tuples. */
 			sts_begin_parallel_scan(inner_tuples);
 			MinimalTuple tuple;
 			TupleTableSlot *slot;
@@ -109,17 +115,13 @@ ExecParallelHashJoinNewChunk(HashJoinState *hjstate, bool advance_from_probing)
 				return false;
 			}
 
-			// otherwise it is time for the next chunk
+			/* otherwise it is time for the next chunk */
 			if (BarrierArriveExplicitAndWait(chunk_barrier, PHJ_CHUNK_ELECTING, WAIT_EVENT_CHUNK_FINAL))
 			{
-				// rewind/reset outer tuplestore and rewind outer match status files
+				/* rewind/reset outer tuplestore and rewind outer match status files */
 				sts_reinitialize(outer_tuples);
-				// TODO: make a version of sts_begin_parallel_scan() that doesn't null out the bitmap file
-				// maybe I need to do sts_end_write() and or something manual to make it so I can rewind the outer tuples tuplestore and also keep the bitmap
-				// or maybe just do sts_end_parallel_scan(outer_tuples);
 
-				// reset inner's hashtable
-				/* Recycle the existing bucket array. */
+				/* reset inner's hashtable and recycle the existing bucket array. */
 				dsa_pointer_atomic *buckets = (dsa_pointer_atomic *)
 						dsa_get_address(hashtable->area, phj_batch->buckets);
 				for (size_t i = 0; i < hashtable->nbuckets; ++i)
@@ -188,7 +190,6 @@ ExecParallelHashJoinNewBatch(HashJoinState *hjstate)
 	 */
 	if (hashtable->curbatch >= 0)
 	{
-
 		int curbatch = hashtable->curbatch;
 		ParallelHashJoinBatchAccessor *accessor = hashtable->batches + curbatch;
 		ParallelHashJoinBatch *batch = accessor->shared;
@@ -290,9 +291,12 @@ ExecParallelHashJoinNewBatch(HashJoinState *hjstate)
 					// TODO: what if a worker joins here and hasn't set hjstate->hj_InnerExhausted = false;
 					// it would be true from the previous batch
 
-					// Create an outer match status file for this batch for this worker
-					// This file must be accessible to the other workers
-					// But *only* written to by this worker. Written to by this worker and readable by any worker
+					/*
+					 * Create an outer match status file for this batch for this worker
+					 * This file must be accessible to the other workers
+					 * But *only* written to by this worker.
+					 * Written to by this worker and readable by any worker
+					 */
 					if (hashtable->batches[batchno].shared->parallel_hashloop_fallback)
 					{
 						char outer_match_status_filename[MAXPGPATH];
@@ -311,8 +315,10 @@ ExecParallelHashJoinNewBatch(HashJoinState *hjstate)
 
 				case PHJ_BATCH_OUTER_MATCH_STATUS_PROCESSING:
 					BarrierDetach(batch_barrier);
-					// The batch isn't done but this worker can't contribute anything to it
-					// so it might as well be done from this worker's perspective
+					/*
+					 * The batch isn't done but this worker can't contribute anything to it
+					 * so it might as well be done from this worker's perspective
+					 */
 					hashtable->batches[batchno].done = true;
 					hashtable->curbatch = -1;
 					break;
