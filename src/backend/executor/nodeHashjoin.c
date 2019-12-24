@@ -724,6 +724,8 @@ ExecParallelHashJoin(PlanState *pstate)
 	 */
 	for (;;)
 	{
+		SharedTuplestoreAccessor *outer_acc;
+
 		/*
 		 * It's possible to iterate this loop many times before returning a
 		 * tuple, in some pathological cases such as needing to move much of
@@ -980,7 +982,7 @@ ExecParallelHashJoin(PlanState *pstate)
 
 			case HJ_NEED_NEW_BATCH:
 
-				phj_batch = node->hj_HashTable->batches[node->hj_HashTable->curbatch].shared;
+				phj_batch = hashtable->batches[hashtable->curbatch].shared;
 				/*
 				 * Try to advance to next batch.  Done if there are no more.
 				 */
@@ -989,8 +991,7 @@ ExecParallelHashJoin(PlanState *pstate)
 
 				// TODO: does this need to be parallel-safe?
 				if (node->last_worker
-					&& HJ_FILL_OUTER(node) && phj_batch->parallel_hashloop_fallback
-					&& node->hj_InnerExhausted)
+					&& HJ_FILL_OUTER(node) && phj_batch->parallel_hashloop_fallback)
 				{
 					node->last_worker = false;
 					node->hj_JoinState = HJ_ADAPTIVE_EMIT_UNMATCHED_OUTER_INIT;
@@ -1003,50 +1004,32 @@ ExecParallelHashJoin(PlanState *pstate)
 				}
 				advance_from_probing = false;
 				node->hj_JoinState = HJ_NEED_NEW_INNER_CHUNK;
-
 				/* FALL THRU */
 
 			case HJ_NEED_NEW_INNER_CHUNK:
 
-				if (node->hj_HashTable->curbatch == -1 || node->hj_HashTable->curbatch == 0)
-				{
+				if (hashtable->curbatch == -1 || hashtable->curbatch == 0)
 					/*
 					 * If we're not attached to a batch at all then we need to
 					 * go to HJ_NEED_NEW_BATCH. Also batch 0 doesn't have more
 					 * than 1 chunk.
 					 */
-					node->hj_InnerExhausted = true; // TODO: do I want this backend local variable for this?
 					node->hj_JoinState = HJ_NEED_NEW_BATCH;
-				}
 				else if (!ExecParallelHashJoinNewChunk(node, advance_from_probing))
-				{
-					/* If there's no next chunk available then go to the next batch  */
-					node->hj_InnerExhausted = true; // TODO: do I want this backend local variable for this?
+					/* If there's no next chunk then go to the next batch */
 					node->hj_JoinState = HJ_NEED_NEW_BATCH;
-				}
 				else
-				{
-					node->hj_InnerExhausted = false;
 					node->hj_JoinState = HJ_NEED_NEW_OUTER;
-				}
 				break;
 
 			case HJ_ADAPTIVE_EMIT_UNMATCHED_OUTER_INIT:
 
-				phj_batch = node->hj_HashTable->batches[node->hj_HashTable->curbatch].shared;
-
-				if (!phj_batch->parallel_hashloop_fallback)
-				{
-					// TODO: do I need to do sts_end_parallel_scan(outer_acc) ?
-					node->hj_JoinState = HJ_NEED_NEW_BATCH;
-					break;
-				}
-				SharedTuplestoreAccessor *outer_acc = hashtable->batches[hashtable->curbatch].outer_tuples;
+				outer_acc = hashtable->batches[hashtable->curbatch].outer_tuples;
 				sts_reinitialize(outer_acc);
 				sts_begin_parallel_scan(outer_acc);
 
 				node->hj_JoinState = HJ_ADAPTIVE_EMIT_UNMATCHED_OUTER;
-				/* fall through */
+				/* FALL THRU */
 
 			case HJ_ADAPTIVE_EMIT_UNMATCHED_OUTER:
 
@@ -1055,7 +1038,6 @@ ExecParallelHashJoin(PlanState *pstate)
 					elog(ERROR, "ExecParallelHashJoinNewBatch. outermatchstatus file is NULL. pid %i.", MyProcPid);
 
 				outer_acc = node->hj_HashTable->batches[node->hj_HashTable->curbatch].outer_tuples;
-
 
 				MinimalTuple tuple;
 				do
