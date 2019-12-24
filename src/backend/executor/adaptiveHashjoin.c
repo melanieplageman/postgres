@@ -257,7 +257,6 @@ ExecParallelHashJoinNewBatch(HashJoinState *hjstate)
 			{
 				case PHJ_BATCH_ELECTING:
 					/* One backend allocates the hash table. */
-					hjstate->hj_InnerExhausted = false;
 					if (BarrierArriveAndWait(batch_barrier,
 											 WAIT_EVENT_HASH_BATCH_ELECTING))
 					{
@@ -271,7 +270,6 @@ ExecParallelHashJoinNewBatch(HashJoinState *hjstate)
 
 				case PHJ_BATCH_ALLOCATING:
 					/* Wait for allocation to complete. */
-					hjstate->hj_InnerExhausted = false;
 					BarrierArriveAndWait(batch_barrier,
 										 WAIT_EVENT_HASH_BATCH_ALLOCATING);
 					/* Fall through. */
