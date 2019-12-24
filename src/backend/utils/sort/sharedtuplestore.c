@@ -59,11 +59,11 @@ typedef struct SharedTuplestoreParticipant
 /* The control object that lives in shared memory. */
 struct SharedTuplestore
 {
-	int			nparticipants;	/* Number of participants that can write. */
-	pg_atomic_uint32 exact_tuplenum; // TODO: does this belong elsewhere
-	int			flags;			/* Flag bits from SHARED_TUPLESTORE_XXX */
-	size_t		meta_data_size; /* Size of per-tuple header. */
-	char		name[NAMEDATALEN];	/* A name for this tuplestore. */
+	int              nparticipants;	/* Number of participants that can write. */
+	pg_atomic_uint32 ntuples; // TODO: does this belong elsewhere
+	int              flags;			/* Flag bits from SHARED_TUPLESTORE_XXX */
+	size_t           meta_data_size; /* Size of per-tuple header. */
+	char             name[NAMEDATALEN];	/* A name for this tuplestore. */
 
 	/* Followed by per-participant shared state. */
 	SharedTuplestoreParticipant participants[FLEXIBLE_ARRAY_MEMBER];
@@ -142,7 +142,7 @@ sts_initialize(SharedTuplestore *sts, int participants,
 	Assert(my_participant_number < participants);
 
 	sts->nparticipants = participants;
-	pg_atomic_init_u32(&sts->exact_tuplenum, 1);
+	pg_atomic_init_u32(&sts->ntuples, 1);
 	sts->meta_data_size = meta_data_size;
 	sts->flags = flags;
 
@@ -631,13 +631,13 @@ sts_parallel_scan_next(SharedTuplestoreAccessor *accessor, void *meta_data)
 
 int sts_increment_tuplenum(SharedTuplestoreAccessor *accessor)
 {
-	return pg_atomic_fetch_add_u32(&accessor->sts->exact_tuplenum, 1);
+	return pg_atomic_fetch_add_u32(&accessor->sts->ntuples, 1);
 }
 
 void
 sts_make_outer_match_status_file(SharedTuplestoreAccessor *accessor)
 {
-	uint32 tuplenum = pg_atomic_read_u32(&accessor->sts->exact_tuplenum);
+	uint32 tuplenum = pg_atomic_read_u32(&accessor->sts->ntuples);
 	/* don't make the outer match status file if there are no tuples */
 	if (tuplenum == 0)
 		return;

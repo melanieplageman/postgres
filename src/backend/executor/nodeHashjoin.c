@@ -1010,7 +1010,6 @@ ExecParallelHashJoin(PlanState *pstate)
 
 				if (node->hj_HashTable->curbatch == -1 || node->hj_HashTable->curbatch == 0)
 				{
-
 					/*
 					 * If we're not attached to a batch at all then we need to
 					 * go to HJ_NEED_NEW_BATCH. Also batch 0 doesn't have more
