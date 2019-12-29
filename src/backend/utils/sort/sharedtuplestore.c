@@ -647,7 +647,7 @@ sts_make_outer_match_status_file(SharedTuplestoreAccessor *accessor)
 
 	accessor->outer_match_status_file = BufFileCreateShared(accessor->fileset, name);
 
-	// TODO: check this math
+	// TODO: check this math. tuplenumber will be too high.
 	uint32 num_to_write = tuplenum / 8 + 1;
 
 	unsigned char byteToWrite = 0;

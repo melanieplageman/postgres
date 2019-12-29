@@ -606,7 +606,6 @@ ExecHashJoin(PlanState *pstate)
 				// I need to also do this even if it is NULL when it is a ROJ
 				// need to load inner again if it is an inner or left outer join and there are outer tuples in the batch OR
 				// if it is a ROJ and there are inner tuples in the batch -- should never have no tuples in either batch...
-				// TODO: is this right?
 				// if outer is not null or if it is a ROJ and inner is not null, must rewind outer match status and load inner
 				if (BufFileRewindIfExists(node->hj_HashTable->outerBatchFile[node->hj_HashTable->curbatch]) != NULL ||
 					(node->hj_HashTable->innerBatchFile[node->hj_HashTable->curbatch] != NULL && HJ_FILL_INNER(node)))

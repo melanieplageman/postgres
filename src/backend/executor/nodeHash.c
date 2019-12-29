@@ -1335,7 +1335,7 @@ ExecParallelHashRepartitionFirst(HashJoinTable hashtable)
 				ParallelHashJoinBatch *phj_batch = hashtable->batches[batchno].shared;
 
 				LWLockAcquire(&phj_batch->lock, LW_EXCLUSIVE);
-				// TODO: should I check batch estimated size here at all? do I care about that in the other place
+				// TODO: should I check batch estimated size here at all?
 				if (phj_batch->parallel_hashloop_fallback == true && (phj_batch->estimated_chunk_size + tuple_size > hashtable->parallel_state->space_allowed))
 				{
 					phj_batch->total_num_chunks++;
@@ -1421,7 +1421,7 @@ ExecParallelHashRepartitionRest(HashJoinTable hashtable)
 
 			ParallelHashJoinBatch *phj_batch = hashtable->batches[batchno].shared;
 			LWLockAcquire(&phj_batch->lock, LW_EXCLUSIVE);
-			// TODO: should I check batch estimated size here at all? do I care about that in the other place
+			// TODO: should I check batch estimated size here at all?
 			if (phj_batch->parallel_hashloop_fallback == true && (phj_batch->estimated_chunk_size + tuple_size > pstate->space_allowed))
 			{
 				phj_batch->total_num_chunks++;
