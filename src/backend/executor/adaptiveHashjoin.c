@@ -36,7 +36,7 @@ ExecParallelHashJoinNewChunk(HashJoinState *hjstate, bool advance_from_probing)
 	 * This chunk_barrier is initialized in the ELECTING phase when this worker
 	 * attached to the batch in ExecParallelHashJoinNewBatch()
 	 */
-	chunk_barrier = &hashtable->batches[batchno].shared->fallback_chunk_barrier;
+	chunk_barrier = &hashtable->batches[batchno].shared->chunk_barrier;
 
 	/*
 	 * If this worker just came from probing (from HJ_SCAN_BUCKET) we need to
@@ -50,7 +50,7 @@ ExecParallelHashJoinNewChunk(HashJoinState *hjstate, bool advance_from_probing)
 		 * done yet (otherwise they might access the wrong data structure!)
 		 */
 		if (BarrierArriveAndWait(chunk_barrier,
-								 WAIT_EVENT_HASH_CHUNK_FINISHING_PROBING))
+		                         WAIT_EVENT_HASH_CHUNK_PROBING))
 			phj_batch->current_chunk_num++;
 
 		/* Once the barrier is advanced we'll be in the DONE phase */
@@ -104,11 +104,10 @@ ExecParallelHashJoinNewChunk(HashJoinState *hjstate, bool advance_from_probing)
 
 		case PHJ_CHUNK_DONE:
 
-			BarrierArriveAndWait(chunk_barrier, WAIT_EVENT_HASH_CHUNK_MORE_DONE);
+			BarrierArriveAndWait(chunk_barrier, WAIT_EVENT_HASH_CHUNK_DONE);
 
 			if (phj_batch->current_chunk_num > phj_batch->total_num_chunks)
 			{
-				Assert(BarrierPhase(chunk_barrier) == PHJ_CHUNK_FINAL);
 				BarrierDetach(chunk_barrier);
 				return false;
 			}
@@ -117,7 +116,7 @@ ExecParallelHashJoinNewChunk(HashJoinState *hjstate, bool advance_from_probing)
 			 * Otherwise it is time for the next chunk.
 			 * One worker should reset the hashtable
 			 */
-			if (BarrierArriveExplicitAndWait(chunk_barrier, PHJ_CHUNK_ELECTING, WAIT_EVENT_CHUNK_FINAL))
+			if (BarrierArriveExplicitAndWait(chunk_barrier, PHJ_CHUNK_ELECTING, WAIT_EVENT_HASH_ADVANCE_CHUNK))
 			{
 				/* rewind/reset outer tuplestore and rewind outer match status files */
 				sts_reinitialize(outer_tuples);
@@ -191,8 +190,7 @@ ExecParallelHashJoinNewBatch(HashJoinState *hjstate)
 	 */
 	if (hashtable->curbatch >= 0)
 	{
-		int curbatch = hashtable->curbatch;
-		ParallelHashJoinBatchAccessor *accessor = hashtable->batches + curbatch;
+		ParallelHashJoinBatchAccessor *accessor = hashtable->batches + hashtable->curbatch;
 		ParallelHashJoinBatch *batch = accessor->shared;
 
 		/*
@@ -201,10 +199,10 @@ ExecParallelHashJoinNewBatch(HashJoinState *hjstate)
 		 * for another parallel scan.
 		 */
 
-		// TODO:  do I still want to end the parallel scan even if parallel_hashloop_fallback is false?
-		sts_end_parallel_scan(accessor->outer_tuples);
-
-		if (batch->parallel_hashloop_fallback == true)
+		if (!batch->parallel_hashloop_fallback)
+			BarrierArriveAndWait(&batch->batch_barrier,
+			                     WAIT_EVENT_HASH_BATCH_PROBING);
+		else
 		{
 			sts_close_outer_match_status_file(accessor->outer_tuples);
 
@@ -223,19 +221,11 @@ ExecParallelHashJoinNewBatch(HashJoinState *hjstate)
 				hjstate->last_worker = true;
 				return true;
 			}
+		}
 
-			/* the elected combining worker should not reach here */
-			hashtable->batches[curbatch].done = true;
-			ExecHashTableDetachBatch(hashtable);
-		}
-		else
-		{
-			/* non-fallback case */
-			BarrierArriveAndWait(&batch->batch_barrier,
-								 WAIT_EVENT_HASH_BATCH_PROBING);
-			hashtable->batches[curbatch].done = true;
-			ExecHashTableDetachBatch(hashtable);
-		}
+		/* the elected combining worker should not reach here */
+		hashtable->batches[hashtable->curbatch].done = true;
+		ExecHashTableDetachBatch(hashtable);
 	}
 
 	/*
@@ -251,7 +241,7 @@ ExecParallelHashJoinNewBatch(HashJoinState *hjstate)
 	{
 		if (!hashtable->batches[batchno].done)
 		{
-			Barrier    *batch_barrier =
+			Barrier *batch_barrier =
 					&hashtable->batches[batchno].shared->batch_barrier;
 
 			switch (BarrierAttach(batch_barrier))
@@ -263,7 +253,7 @@ ExecParallelHashJoinNewBatch(HashJoinState *hjstate)
 					{
 						ExecParallelHashTableAlloc(hashtable, batchno);
 						Barrier *chunk_barrier =
-								&hashtable->batches[batchno].shared->fallback_chunk_barrier;
+								&hashtable->batches[batchno].shared->chunk_barrier;
 						BarrierInit(chunk_barrier, 0);
 						hashtable->batches[batchno].shared->current_chunk_num = 1;
 					}
@@ -287,9 +277,9 @@ ExecParallelHashJoinNewBatch(HashJoinState *hjstate)
 					 * PHJ_BATCH_DONE can be reached.
 					 */
 					ExecParallelHashTableSetCurrentBatch(hashtable, batchno);
-					// TODO: what if a worker joins here and hasn't set hjstate->hj_InnerExhausted = false;
-					// it would be true from the previous batch
 
+					if (batchno == 0)
+						sts_begin_parallel_scan(hashtable->batches[batchno].outer_tuples);
 					/*
 					 * Create an outer match status file for this batch for this worker
 					 * This file must be accessible to the other workers
@@ -297,36 +287,26 @@ ExecParallelHashJoinNewBatch(HashJoinState *hjstate)
 					 * Written to by this worker and readable by any worker
 					 */
 					if (hashtable->batches[batchno].shared->parallel_hashloop_fallback)
-					{
 						sts_make_outer_match_status_file(hashtable->batches[batchno].outer_tuples);
-					}
-					if (batchno == 0)
-					{
-						// TODO: does this need to be set here also? (it is set above)
-						LWLockAcquire(&hashtable->batches[batchno].shared->lock, LW_EXCLUSIVE);
-						hashtable->batches[batchno].shared->current_chunk_num = 1;
-						LWLockRelease(&hashtable->batches[batchno].shared->lock);
-						// TODO: is this the right place to do this
-						sts_begin_parallel_scan(hashtable->batches[batchno].outer_tuples);
-					}
+
 					return true;
 
 				case PHJ_BATCH_OUTER_MATCH_STATUS_PROCESSING:
-					BarrierDetach(batch_barrier);
 					/*
-					 * The batch isn't done but this worker can't contribute anything to it
-					 * so it might as well be done from this worker's perspective
+					 * The batch isn't done but this worker can't contribute
+					 * anything to it so it might as well be done from this
+					 * worker's perspective. (Only one worker can do work in
+					 * this phase).
 					 */
-					hashtable->batches[batchno].done = true;
-					hashtable->curbatch = -1;
-					break;
+
+					/* Fall through. */
 
 				case PHJ_BATCH_DONE:
 					/*
-					 * Already done.  Detach and go around again (if any
-					 * remain).
+					 * Already done. Detach and go around again (if any remain).
 					 */
 					BarrierDetach(batch_barrier);
+
 					hashtable->batches[batchno].done = true;
 					hashtable->curbatch = -1;
 					break;

@@ -161,11 +161,11 @@ typedef struct ParallelHashJoinBatch
 	 * after finishing build phase, parallel_hashloop_fallback cannot change,
 	 * and does not require a lock to read
 	 */
-	bool		parallel_hashloop_fallback;
-	int 	total_num_chunks;
-	int		current_chunk_num;
-	size_t	estimated_chunk_size;
-	Barrier fallback_chunk_barrier;
+	bool    parallel_hashloop_fallback;
+	int     total_num_chunks;
+	int     current_chunk_num;
+	size_t  estimated_chunk_size;
+	Barrier chunk_barrier;
 	LWLock  lock;
 
 	dsa_pointer chunks;			/* chunks of tuples loaded */
@@ -173,7 +173,7 @@ typedef struct ParallelHashJoinBatch
 	size_t		estimated_size; /* size of buckets + chunks while writing */
 	size_t		ntuples;		/* number of tuples loaded */
 	size_t		old_ntuples;	/* number of tuples before repartitioning */
-	bool		space_exhausted;
+	bool    space_exhausted;
 
 	/*
 	 * Variable-sized SharedTuplestore objects follow this struct in memory.
