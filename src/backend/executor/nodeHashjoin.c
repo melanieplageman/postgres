@@ -941,8 +941,6 @@ ExecParallelHashJoin(PlanState *pstate)
 				 */
 				if (phj_batch->parallel_hashloop_fallback)
 				{
-					// TODO: it is unclear here that this slot is current, and, thus, that this tuplenum is up-to-date
-					// also, it is unclear if node->hj_OuterTupleSlot->tuplenum should be used
 					sts_set_outer_match_status(hashtable->batches[hashtable->curbatch].outer_tuples,
 					                           econtext->ecxt_outertuple->tuplenum);
 
@@ -989,7 +987,6 @@ ExecParallelHashJoin(PlanState *pstate)
 				if (!ExecParallelHashJoinNewBatch(node))
 					return NULL;	/* end of parallel-aware join */
 
-				// TODO: does this need to be parallel-safe?
 				if (node->last_worker
 					&& HJ_FILL_OUTER(node) && phj_batch->parallel_hashloop_fallback)
 				{
@@ -1033,9 +1030,7 @@ ExecParallelHashJoin(PlanState *pstate)
 
 			case HJ_ADAPTIVE_EMIT_UNMATCHED_OUTER:
 
-				if (node->combined_bitmap == NULL)
-					// TODO: since all outer match status files have to exist bc we always make them, this is an error. change that.
-					elog(ERROR, "ExecParallelHashJoinNewBatch. outermatchstatus file is NULL. pid %i.", MyProcPid);
+				Assert(node->combined_bitmap != NULL);
 
 				outer_acc = node->hj_HashTable->batches[node->hj_HashTable->curbatch].outer_tuples;
 

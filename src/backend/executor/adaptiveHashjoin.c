@@ -19,53 +19,55 @@
 bool
 ExecParallelHashJoinNewChunk(HashJoinState *hjstate, bool advance_from_probing)
 {
-	HashJoinTable hashtable = hjstate->hj_HashTable;
-	int batchno = hashtable->curbatch;
-	ParallelHashJoinBatch *phj_batch = hashtable->batches[batchno].shared;
+	HashJoinTable hashtable;
+	int batchno;
+	ParallelHashJoinBatch *phj_batch;
+	SharedTuplestoreAccessor *outer_tuples;
+	SharedTuplestoreAccessor *inner_tuples;
+	Barrier *chunk_barrier;
 
-	SharedTuplestoreAccessor *outer_tuples = hashtable->batches[batchno].outer_tuples;
-	SharedTuplestoreAccessor *inner_tuples = hashtable->batches[batchno].inner_tuples;
+	hashtable = hjstate->hj_HashTable;
+	batchno = hashtable->curbatch;
+	phj_batch = hashtable->batches[batchno].shared;
+	outer_tuples = hashtable->batches[batchno].outer_tuples;
+	inner_tuples = hashtable->batches[batchno].inner_tuples;
 
 	/*
-	 * 	This chunk_barrier is initialized in the ELECTING phase when the we
-	 * 	attached to the batch in ExecParallelHashJoinNewBatch()
+	 * This chunk_barrier is initialized in the ELECTING phase when this worker
+	 * attached to the batch in ExecParallelHashJoinNewBatch()
 	 */
-	Barrier *chunk_barrier =
-			&hashtable->batches[batchno].shared->fallback_chunk_barrier;
+	chunk_barrier = &hashtable->batches[batchno].shared->fallback_chunk_barrier;
 
-	if (batchno > 0 && advance_from_probing)
+	/*
+	 * If this worker just came from probing (from HJ_SCAN_BUCKET) we need to
+	 * advance the chunk number here. Otherwise this worker isn't attached yet
+	 * to the chunk barrier.
+	 */
+	if (advance_from_probing)
 	{
 		/*
-		 * the current chunk number can't be incremented if *any* worker isn't
+		 * The current chunk number can't be incremented if *any* worker isn't
 		 * done yet (otherwise they might access the wrong data structure!)
-		 * We must be in the PROBING phase. So, need to advance the batch
 		 */
 		if (BarrierArriveAndWait(chunk_barrier,
 								 WAIT_EVENT_HASH_CHUNK_FINISHING_PROBING))
 			phj_batch->current_chunk_num++;
 
-		/*
-		 * Once the barrier is advanced we'll be in the DONE phase
-		 * unfortunately, we are still attached to chunk barrier so
-		 * we don't want to reattach and increase nparticipants or we will have deadlock
-		 */
+		/* Once the barrier is advanced we'll be in the DONE phase */
 	}
 	else
 		BarrierAttach(chunk_barrier);
 
 	/*
-	 * We should only come here for batches after batch 0
 	 * The outer side is exhausted and either
 	 * 1) the current chunk of the inner side is exhausted and it is time to advance the chunk
 	 * 2) the last chunk of the inner side is exhausted and it is time to advance the batch
-	 * 3) finishing batch 0 and it is time to advance the batch
 	 */
-	// TODO: should we do this if we already had a barrier arrive and wait above?
 	switch (BarrierPhase(chunk_barrier))
 	{
+		// TODO: remove this phase and coordinate access to hashtable above goto and after incrementing current_chunk_num
 		case PHJ_CHUNK_ELECTING:
 		phj_chunk_electing:
-			/* One backend allocates the hash table or resets it. */
 			BarrierArriveAndWait(chunk_barrier,
 									 WAIT_EVENT_HASH_CHUNK_ELECTING);
 			/* Fall through. */
@@ -73,32 +75,28 @@ ExecParallelHashJoinNewChunk(HashJoinState *hjstate, bool advance_from_probing)
 		case PHJ_CHUNK_LOADING:
 			/* Start (or join in) loading the next chunk of inner tuples. */
 			sts_begin_parallel_scan(inner_tuples);
-			MinimalTuple tuple;
-			TupleTableSlot *slot;
 
+			MinimalTuple  tuple;
 			tupleMetadata metadata;
-			uint32		hashvalue;
 
 			while ((tuple = sts_parallel_scan_next(inner_tuples, &metadata)))
 			{
-				hashvalue = metadata.hashvalue;
-				int chunk_num = metadata.tupleid;
+				if (metadata.tupleid != phj_batch->current_chunk_num)
+					continue;
+
 				ExecForceStoreMinimalTuple(tuple,
 										   hjstate->hj_HashTupleSlot,
 										   false);
-				slot = hjstate->hj_HashTupleSlot;
-				if (chunk_num == phj_batch->current_chunk_num)
-					ExecParallelHashTableInsertCurrentBatch(hashtable, slot,
-															hashvalue);
+
+				ExecParallelHashTableInsertCurrentBatch(
+					hashtable,
+					hjstate->hj_HashTupleSlot,
+					metadata.hashvalue);
 			}
 			sts_end_parallel_scan(inner_tuples);
 			BarrierArriveAndWait(chunk_barrier,
 								 WAIT_EVENT_HASH_CHUNK_LOADING);
 			/* Fall through. */
-
-			// need to advance the phase at the top because we will return to here
-			// when we come back for a new chunk and be in the probing phase
-			// this is characterized by batch > 0 (and chunk > 0)
 
 		case PHJ_CHUNK_PROBING:
 			sts_begin_parallel_scan(outer_tuples);
@@ -115,7 +113,10 @@ ExecParallelHashJoinNewChunk(HashJoinState *hjstate, bool advance_from_probing)
 				return false;
 			}
 
-			/* otherwise it is time for the next chunk */
+			/*
+			 * Otherwise it is time for the next chunk.
+			 * One worker should reset the hashtable
+			 */
 			if (BarrierArriveExplicitAndWait(chunk_barrier, PHJ_CHUNK_ELECTING, WAIT_EVENT_CHUNK_FINAL))
 			{
 				/* rewind/reset outer tuplestore and rewind outer match status files */
@@ -128,12 +129,12 @@ ExecParallelHashJoinNewChunk(HashJoinState *hjstate, bool advance_from_probing)
 					dsa_pointer_atomic_write(&buckets[i], InvalidDsaPointer);
 
 				// TODO: this will unfortunately rescan all inner tuples in the batch for each chunk
+				// should be able to save the block in the file which starts the next chunk instead
 				sts_reinitialize(inner_tuples);
 			}
 			goto phj_chunk_electing;
 
 		case PHJ_CHUNK_FINAL:
-			Assert(BarrierPhase(chunk_barrier) == PHJ_CHUNK_FINAL);
 			BarrierDetach(chunk_barrier);
 			return false;
 
