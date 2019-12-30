@@ -310,12 +310,7 @@ BufFileOpenSharedIfExists(SharedFileSet *fileset, const char *name)
 	 * name.
 	 */
 	if (nfiles == 0)
-	{
-		elog(DEBUG1, "in BufFileOpenSharedIfExists. sharedsegment name %s does not exist. pid %i.", segment_name, MyProcPid);
 		return NULL;
-	}
-	else
-		elog(DEBUG1, "in BufFileOpenSharedIfExists. sharedsegment name %s exists. filename %s. pid %i.", segment_name, name, MyProcPid);
 	file = makeBufFileCommon(nfiles);
 	file->files = files;
 	file->readOnly = true;		/* Can't write to files opened this way */
