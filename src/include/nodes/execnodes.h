@@ -14,6 +14,7 @@
 #ifndef EXECNODES_H
 #define EXECNODES_H
 
+#include <storage/buffile.h>
 #include "access/tupconvert.h"
 #include "executor/instrument.h"
 #include "fmgr.h"
@@ -1952,6 +1953,22 @@ typedef struct HashJoinState
 	int			hj_JoinState;
 	bool		hj_MatchedOuter;
 	bool		hj_OuterNotEmpty;
+
+	/* hashloop fallback */
+	bool		hashloop_fallback;
+	/* hashloop fallback inner side */
+	bool		hj_InnerFirstChunk;
+	bool		hj_InnerExhausted;
+	off_t		hj_InnerPageOffset;
+
+	/* hashloop fallback outer side */
+	unsigned char hj_OuterCurrentByte;
+	BufFile    *hj_OuterMatchStatusesFile;	/* serial AHJ */
+	int64		hj_OuterTupleCount;
+
+	/* parallel hashloop fallback outer side */
+	bool		last_worker;
+	BufFile    *combined_bitmap;
 } HashJoinState;
 
 

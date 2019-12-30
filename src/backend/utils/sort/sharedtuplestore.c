@@ -60,6 +60,8 @@ typedef struct SharedTuplestoreParticipant
 struct SharedTuplestore
 {
 	int			nparticipants;	/* Number of participants that can write. */
+	pg_atomic_uint32 ntuples;
+			  //TODO:does this belong elsewhere
 	int			flags;			/* Flag bits from SHARED_TUPLESTORE_XXX */
 	size_t		meta_data_size; /* Size of per-tuple header. */
 	char		name[NAMEDATALEN];	/* A name for this tuplestore. */
@@ -92,10 +94,15 @@ struct SharedTuplestoreAccessor
 	BlockNumber write_page;		/* The next page to write to. */
 	char	   *write_pointer;	/* Current write pointer within chunk. */
 	char	   *write_end;		/* One past the end of the current chunk. */
+
+	/* Bitmap of matched outer tuples (currently only used for hashjoin). */
+	BufFile    *outer_match_status_file;
 };
 
 static void sts_filename(char *name, SharedTuplestoreAccessor *accessor,
 						 int participant);
+static void
+			sts_bitmap_filename(char *name, SharedTuplestoreAccessor *accessor, int participant);
 
 /*
  * Return the amount of shared memory required to hold SharedTuplestore for a
@@ -137,6 +144,7 @@ sts_initialize(SharedTuplestore *sts, int participants,
 	Assert(my_participant_number < participants);
 
 	sts->nparticipants = participants;
+	pg_atomic_init_u32(&sts->ntuples, 1);
 	sts->meta_data_size = meta_data_size;
 	sts->flags = flags;
 
@@ -166,6 +174,7 @@ sts_initialize(SharedTuplestore *sts, int participants,
 	accessor->sts = sts;
 	accessor->fileset = fileset;
 	accessor->context = CurrentMemoryContext;
+	accessor->outer_match_status_file = NULL;
 
 	return accessor;
 }
@@ -343,6 +352,7 @@ sts_puttuple(SharedTuplestoreAccessor *accessor, void *meta_data,
 			sts_flush_chunk(accessor);
 		}
 
+		/* TODO: exercise this code with a test (over-sized tuple) */
 		/* It may still not be enough in the case of a gigantic tuple. */
 		if (accessor->write_pointer + size >= accessor->write_end)
 		{
@@ -619,6 +629,129 @@ sts_parallel_scan_next(SharedTuplestoreAccessor *accessor, void *meta_data)
 	}
 
 	return NULL;
+}
+
+/*  TODO: fix signedness */
+int
+sts_increment_tuplenum(SharedTuplestoreAccessor *accessor)
+{
+	return pg_atomic_fetch_add_u32(&accessor->sts->ntuples, 1);
+}
+
+void
+sts_make_outer_match_status_file(SharedTuplestoreAccessor *accessor)
+{
+	uint32		tuplenum = pg_atomic_read_u32(&accessor->sts->ntuples);
+
+	/* don't make the outer match status file if there are no tuples */
+	if (tuplenum == 0)
+		return;
+
+	char		name[MAXPGPATH];
+
+	sts_bitmap_filename(name, accessor, accessor->participant);
+
+	accessor->outer_match_status_file = BufFileCreateShared(accessor->fileset, name);
+
+	/* TODO: check this math. tuplenumber will be too high. */
+	uint32		num_to_write = tuplenum / 8 + 1;
+
+	unsigned char byteToWrite = 0;
+
+	BufFileWrite(accessor->outer_match_status_file, &byteToWrite, num_to_write);
+
+	if (BufFileSeek(accessor->outer_match_status_file, 0, 0L, SEEK_SET))
+		ereport(ERROR,
+				(errcode_for_file_access(),
+				 errmsg("could not rewind hash-join temporary file: %m")));
+}
+
+void
+sts_set_outer_match_status(SharedTuplestoreAccessor *accessor, uint32 tuplenum)
+{
+	BufFile    *parallel_outer_matchstatuses = accessor->outer_match_status_file;
+	unsigned char current_outer_byte;
+
+	BufFileSeek(parallel_outer_matchstatuses, 0, tuplenum / 8, SEEK_SET);
+	BufFileRead(parallel_outer_matchstatuses, &current_outer_byte, 1);
+
+	current_outer_byte |= 1U << (tuplenum % 8);
+
+	if (BufFileSeek(parallel_outer_matchstatuses, 0, -1, SEEK_CUR) != 0)
+		elog(ERROR, "there is a problem with outer match status file. pid %i.", MyProcPid);
+	BufFileWrite(parallel_outer_matchstatuses, &current_outer_byte, 1);
+}
+
+void
+sts_close_outer_match_status_file(SharedTuplestoreAccessor *accessor)
+{
+	BufFileClose(accessor->outer_match_status_file);
+}
+
+BufFile *
+sts_combine_outer_match_status_files(SharedTuplestoreAccessor *accessor)
+{
+	/* TODO: this tries to close an outer match status file for */
+	/* each participant in the tuplestore. technically, only participants */
+	/* in the barrier could have outer match status files, however, */
+	/* all but one participant continue on and detach from the barrier */
+	/* so we won't have a reliable way to close only files for those attached */
+	/* to the barrier */
+	BufFile   **statuses = palloc(sizeof(BufFile *) * accessor->sts->nparticipants);
+
+	/*
+	 * Open the bitmap shared BufFile from each participant. TODO: explain why
+	 * file can be NULLs
+	 */
+	int			statuses_length = 0;
+
+	for (int i = 0; i < accessor->sts->nparticipants; i++)
+	{
+		char		bitmap_filename[MAXPGPATH];
+
+		sts_bitmap_filename(bitmap_filename, accessor, i);
+		BufFile    *file = BufFileOpenSharedIfExists(accessor->fileset, bitmap_filename);
+
+		if (file != NULL)
+			statuses[statuses_length++] = file;
+	}
+
+	BufFile    *combined_bitmap_file = BufFileCreateTemp(false);
+
+	for (int64 cur = 0; cur < BufFileSize(statuses[0]); cur++)
+		//make it while not
+			EOF
+		{
+			unsigned char combined_byte = 0;
+
+			for (int i = 0; i < statuses_length; i++)
+			{
+				unsigned char read_byte;
+
+				BufFileRead(statuses[i], &read_byte, 1);
+				combined_byte |= read_byte;
+			}
+
+			BufFileWrite(combined_bitmap_file, &combined_byte, 1);
+		}
+
+	if (BufFileSeek(combined_bitmap_file, 0, 0L, SEEK_SET))
+		ereport(ERROR,
+				(errcode_for_file_access(),
+				 errmsg("could not rewind hash-join temporary file: %m")));
+
+	for (int i = 0; i < statuses_length; i++)
+		BufFileClose(statuses[i]);
+	pfree(statuses);
+
+	return combined_bitmap_file;
+}
+
+
+static void
+sts_bitmap_filename(char *name, SharedTuplestoreAccessor *accessor, int participant)
+{
+	snprintf(name, MAXPGPATH, "%s.p%d.bitmap", accessor->sts->name, participant);
 }
 
 /*

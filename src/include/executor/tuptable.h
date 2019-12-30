@@ -129,6 +129,7 @@ typedef struct TupleTableSlot
 	MemoryContext tts_mcxt;		/* slot itself is in this context */
 	ItemPointerData tts_tid;	/* stored tuple's tid */
 	Oid			tts_tableOid;	/* table oid of tuple */
+	uint32		tuplenum;
 } TupleTableSlot;
 
 /* routines for a TupleTableSlot implementation */
@@ -425,7 +426,7 @@ static inline TupleTableSlot *
 ExecClearTuple(TupleTableSlot *slot)
 {
 	slot->tts_ops->clear(slot);
-
+	slot->tuplenum = 0;
 	return slot;
 }
 

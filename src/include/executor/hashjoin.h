@@ -148,10 +148,26 @@ typedef struct HashMemoryChunkData *HashMemoryChunk;
  * followed by variable-sized objects, they are arranged in contiguous memory
  * but not accessed directly as an array.
  */
+/*  TODO: maybe remove lock from ParallelHashJoinBatch and use pstate->lock */
+/*  and the PHJBatchAccessor to coordinate access to the PHJ batch similar to */
+/*  other users of that lock */
 typedef struct ParallelHashJoinBatch
 {
 	dsa_pointer buckets;		/* array of hash table buckets */
 	Barrier		batch_barrier;	/* synchronization for joining this batch */
+
+	/* Parallel Adaptive Hash Join members */
+
+	/*
+	 * after finishing build phase, parallel_hashloop_fallback cannot change,
+	 * and does not require a lock to read
+	 */
+	bool		parallel_hashloop_fallback;
+	int			total_num_chunks;
+	int			current_chunk_num;
+	size_t		estimated_chunk_size;
+	Barrier		chunk_barrier;
+	LWLock		lock;
 
 	dsa_pointer chunks;			/* chunks of tuples loaded */
 	size_t		size;			/* size of buckets + chunks in memory */
@@ -243,6 +259,8 @@ typedef struct ParallelHashJoinState
 	int			nparticipants;
 	size_t		space_allowed;
 	size_t		total_tuples;	/* total number of inner tuples */
+	int			batch_increases;	/* TODO: make this an atomic so I don't
+									 * need the lock to increment it? */
 	LWLock		lock;			/* lock protecting the above */
 
 	Barrier		build_barrier;	/* synchronization for the build phases */
@@ -263,9 +281,15 @@ typedef struct ParallelHashJoinState
 /* The phases for probing each batch, used by for batch_barrier. */
 #define PHJ_BATCH_ELECTING				0
 #define PHJ_BATCH_ALLOCATING			1
-#define PHJ_BATCH_LOADING				2
-#define PHJ_BATCH_PROBING				3
+#define PHJ_BATCH_CHUNKING				2
+#define PHJ_BATCH_OUTER_MATCH_STATUS_PROCESSING 3
 #define PHJ_BATCH_DONE					4
+
+#define PHJ_CHUNK_ELECTING				0
+#define PHJ_CHUNK_LOADING				1
+#define PHJ_CHUNK_PROBING				2
+#define PHJ_CHUNK_DONE					3
+#define PHJ_CHUNK_FINAL					4
 
 /* The phases of batch growth while hashing, for grow_batches_barrier. */
 #define PHJ_GROW_BATCHES_ELECTING		0
