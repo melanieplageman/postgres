@@ -51,7 +51,7 @@ ExecParallelHashJoinNewChunk(HashJoinState *hjstate, bool advance_from_probing)
 		 */
 		if (BarrierArriveAndWait(chunk_barrier,
 								 WAIT_EVENT_HASH_CHUNK_PROBING))
-			phj_batch->current_chunk_num++;
+			phj_batch->current_chunk++;
 
 		/* Once the barrier is advanced we'll be in the DONE phase */
 	}
@@ -68,7 +68,7 @@ ExecParallelHashJoinNewChunk(HashJoinState *hjstate, bool advance_from_probing)
 	{
 			/*
 			 * TODO: remove this phase and coordinate access to hashtable
-			 * above goto and after incrementing current_chunk_num
+			 * above goto and after incrementing current_chunk
 			 */
 		case PHJ_CHUNK_ELECTING:
 	phj_chunk_electing:
@@ -85,7 +85,7 @@ ExecParallelHashJoinNewChunk(HashJoinState *hjstate, bool advance_from_probing)
 
 			while ((tuple = sts_parallel_scan_next(inner_tuples, &metadata)))
 			{
-				if (metadata.tupleid != phj_batch->current_chunk_num)
+				if (metadata.chunk != phj_batch->current_chunk)
 					continue;
 
 				ExecForceStoreMinimalTuple(tuple,
@@ -110,7 +110,7 @@ ExecParallelHashJoinNewChunk(HashJoinState *hjstate, bool advance_from_probing)
 
 			BarrierArriveAndWait(chunk_barrier, WAIT_EVENT_HASH_CHUNK_DONE);
 
-			if (phj_batch->current_chunk_num > phj_batch->total_num_chunks)
+			if (phj_batch->current_chunk > phj_batch->total_chunks)
 			{
 				BarrierDetach(chunk_barrier);
 				return false;
@@ -276,7 +276,7 @@ ExecParallelHashJoinNewBatch(HashJoinState *hjstate)
 						&hashtable->batches[batchno].shared->chunk_barrier;
 
 						BarrierInit(chunk_barrier, 0);
-						hashtable->batches[batchno].shared->current_chunk_num = 1;
+						hashtable->batches[batchno].shared->current_chunk = 1;
 					}
 					/* Fall through. */
 

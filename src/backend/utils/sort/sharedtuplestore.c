@@ -57,11 +57,15 @@ typedef struct SharedTuplestoreParticipant
 } SharedTuplestoreParticipant;
 
 /* The control object that lives in shared memory. */
+/*  TODO: ntuples atomic 32 bit int is iffy. Didn't use 64bit because wasn't sure */
+/*  about 64bit atomic ints portability */
+/*  Seems like it would be possible to reduce the amount of synchronization instead */
+/*  potentially using worker number to unique-ify the tuple number */
 struct SharedTuplestore
 {
 	int			nparticipants;	/* Number of participants that can write. */
 	pg_atomic_uint32 ntuples;
-			  //TODO:does this belong elsewhere
+	/* TODO:does this belong elsewhere */
 	int			flags;			/* Flag bits from SHARED_TUPLESTORE_XXX */
 	size_t		meta_data_size; /* Size of per-tuple header. */
 	char		name[NAMEDATALEN];	/* A name for this tuplestore. */
@@ -631,8 +635,7 @@ sts_parallel_scan_next(SharedTuplestoreAccessor *accessor, void *meta_data)
 	return NULL;
 }
 
-/*  TODO: fix signedness */
-int
+uint32
 sts_increment_tuplenum(SharedTuplestoreAccessor *accessor)
 {
 	return pg_atomic_fetch_add_u32(&accessor->sts->ntuples, 1);
@@ -719,21 +722,21 @@ sts_combine_outer_match_status_files(SharedTuplestoreAccessor *accessor)
 	BufFile    *combined_bitmap_file = BufFileCreateTemp(false);
 
 	for (int64 cur = 0; cur < BufFileSize(statuses[0]); cur++)
-		//make it while not
-			EOF
+		/* make it while not */
+		EOF
+	{
+		unsigned char combined_byte = 0;
+
+		for (int i = 0; i < statuses_length; i++)
 		{
-			unsigned char combined_byte = 0;
+			unsigned char read_byte;
 
-			for (int i = 0; i < statuses_length; i++)
-			{
-				unsigned char read_byte;
-
-				BufFileRead(statuses[i], &read_byte, 1);
-				combined_byte |= read_byte;
-			}
-
-			BufFileWrite(combined_bitmap_file, &combined_byte, 1);
+			BufFileRead(statuses[i], &read_byte, 1);
+			combined_byte |= read_byte;
 		}
+
+		BufFileWrite(combined_bitmap_file, &combined_byte, 1);
+	}
 
 	if (BufFileSeek(combined_bitmap_file, 0, 0L, SEEK_SET))
 		ereport(ERROR,

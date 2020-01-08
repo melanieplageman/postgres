@@ -163,8 +163,8 @@ typedef struct ParallelHashJoinBatch
 	 * and does not require a lock to read
 	 */
 	bool		parallel_hashloop_fallback;
-	int			total_num_chunks;
-	int			current_chunk_num;
+	int			total_chunks;
+	int			current_chunk;
 	size_t		estimated_chunk_size;
 	Barrier		chunk_barrier;
 	LWLock		lock;

@@ -435,9 +435,8 @@ ExecHashJoin(PlanState *pstate)
 				{
 					/*
 					 * The current outer tuple has run out of matches, so
-					 * check whether to emit a dummy outer-join tuple.
-					 * Whether we emit one or not, the next state is
-					 * NEED_NEW_OUTER.
+					 * check whether to emit a dummy outer-join tuple. Whether
+					 * we emit one or not, the next state is NEED_NEW_OUTER.
 					 */
 					node->hj_JoinState = HJ_NEED_NEW_OUTER;
 					if (!node->hashloop_fallback || node->hj_HashTable->curbatch == 0)
@@ -907,7 +906,7 @@ ExecParallelHashJoin(PlanState *pstate)
 
 				ParallelHashJoinBatch *phj_batch = node->hj_HashTable->batches[node->hj_HashTable->curbatch].shared;
 
-				if (!phj_batch->parallel_hashloop_fallback || phj_batch->current_chunk_num == 1)
+				if (!phj_batch->parallel_hashloop_fallback || phj_batch->current_chunk == 1)
 					node->hj_MatchedOuter = false;
 				node->hj_JoinState = HJ_SCAN_BUCKET;
 
@@ -924,9 +923,8 @@ ExecParallelHashJoin(PlanState *pstate)
 				{
 					/*
 					 * The current outer tuple has run out of matches, so
-					 * check whether to emit a dummy outer-join tuple.
-					 * Whether we emit one or not, the next state is
-					 * NEED_NEW_OUTER.
+					 * check whether to emit a dummy outer-join tuple. Whether
+					 * we emit one or not, the next state is NEED_NEW_OUTER.
 					 */
 					node->hj_JoinState = HJ_NEED_NEW_OUTER;
 					if (!phj_batch->parallel_hashloop_fallback)
@@ -1096,7 +1094,7 @@ ExecParallelHashJoin(PlanState *pstate)
 					if ((tuple = sts_parallel_scan_next(outer_acc, &metadata)) == NULL)
 						break;
 
-					int			bytenum = metadata.tupleid / 8;
+					uint32		bytenum = metadata.tupleid / 8;
 					unsigned char bit = metadata.tupleid % 8;
 					unsigned char byte_to_check = 0;
 
@@ -1489,7 +1487,7 @@ ExecParallelHashJoinOuterGetTuple(PlanState *outerNode,
 		MinimalTuple tuple;
 
 		tupleMetadata metadata;
-		int			tupleid;
+		uint32		tupleid;
 
 		tuple = sts_parallel_scan_next(hashtable->batches[curbatch].outer_tuples,
 									   &metadata);
@@ -1906,7 +1904,16 @@ ExecParallelHashJoinPartitionOuter(HashJoinState *hjstate)
 			metadata.hashvalue = hashvalue;
 			SharedTuplestoreAccessor *accessor = hashtable->batches[batchno].outer_tuples;
 
+			/*
+			 * TODO: add a comment that this means the order is not
+			 * deterministic so don't count on it
+			 */
 			metadata.tupleid = sts_increment_tuplenum(accessor);
+
+			/*
+			 * TODO: only add the tupleid when it is a fallback batch to avoid
+			 * bloating of the sharedtuplestore
+			 */
 			sts_puttuple(accessor, &metadata, mintup);
 
 			if (shouldFree)

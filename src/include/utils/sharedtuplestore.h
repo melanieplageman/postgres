@@ -24,17 +24,15 @@ struct SharedTuplestoreAccessor;
 typedef struct SharedTuplestoreAccessor SharedTuplestoreAccessor;
 struct tupleMetadata;
 typedef struct tupleMetadata tupleMetadata;
-
-/*  TODO: conflicting types for tupleid with accessor->sts->ntuples (uint32) */
-/*  TODO: use a union for tupleid (uint32) (make this a uint64) and chunk number (int) */
 struct tupleMetadata
 {
 	uint32		hashvalue;
-	int			tupleid;		/* tuple id on outer side and chunk number for
-								 * inner side */
-}			__attribute__((packed));
-
-/*  TODO: make sure I can get rid of packed now that using sizeof(struct) */
+	union
+	{
+		uint32		tupleid;	/* tuple number or id on the outer side */
+		int			chunk;		/* chunk number for inner side */
+	};
+};
 
 /*
  * A flag indicating that the tuplestore will only be scanned once, so backing
@@ -72,7 +70,7 @@ extern MinimalTuple sts_parallel_scan_next(SharedTuplestoreAccessor *accessor,
 										   void *meta_data);
 
 
-extern int	sts_increment_tuplenum(SharedTuplestoreAccessor *accessor);
+extern uint32 sts_increment_tuplenum(SharedTuplestoreAccessor *accessor);
 
 extern void sts_make_outer_match_status_file(SharedTuplestoreAccessor *accessor);
 extern void sts_set_outer_match_status(SharedTuplestoreAccessor *accessor, uint32 tuplenum);

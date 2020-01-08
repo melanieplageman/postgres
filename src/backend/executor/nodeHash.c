@@ -1362,7 +1362,7 @@ ExecParallelHashRepartitionFirst(HashJoinTable hashtable)
 				/* TODO: should I check batch estimated size here at all? */
 				if (phj_batch->parallel_hashloop_fallback == true && (phj_batch->estimated_chunk_size + tuple_size > hashtable->parallel_state->space_allowed))
 				{
-					phj_batch->total_num_chunks++;
+					phj_batch->total_chunks++;
 					phj_batch->estimated_chunk_size = tuple_size;
 				}
 				else
@@ -1371,10 +1371,15 @@ ExecParallelHashRepartitionFirst(HashJoinTable hashtable)
 				tupleMetadata metadata;
 
 				metadata.hashvalue = hashTuple->hashvalue;
-				metadata.tupleid = phj_batch->total_num_chunks;
+				metadata.chunk = phj_batch->total_chunks;
 				LWLockRelease(&phj_batch->lock);
 
 				hashtable->batches[batchno].estimated_size += tuple_size;
+
+				/*
+				 * TODO: only put the chunk num if it is a fallback batch
+				 * (avoid bloating the metadata written to the file)
+				 */
 				sts_puttuple(hashtable->batches[batchno].inner_tuples,
 							 &metadata, tuple);
 			}
@@ -1451,14 +1456,19 @@ ExecParallelHashRepartitionRest(HashJoinTable hashtable)
 			/* TODO: should I check batch estimated size here at all? */
 			if (phj_batch->parallel_hashloop_fallback == true && (phj_batch->estimated_chunk_size + tuple_size > pstate->space_allowed))
 			{
-				phj_batch->total_num_chunks++;
+				phj_batch->total_chunks++;
 				phj_batch->estimated_chunk_size = tuple_size;
 			}
 			else
 				phj_batch->estimated_chunk_size += tuple_size;
-			metadata.tupleid = phj_batch->total_num_chunks;
+			metadata.chunk = phj_batch->total_chunks;
 			LWLockRelease(&phj_batch->lock);
 			/* Store the tuple its new batch. */
+
+			/*
+			 * TODO: only put the chunk num if it is a fallback batch (avoid
+			 * bloating the metadata written to the file)
+			 */
 			sts_puttuple(hashtable->batches[batchno].inner_tuples,
 						 &metadata, tuple);
 
@@ -1821,7 +1831,7 @@ retry:
 		 */
 		if (phj_batch->parallel_hashloop_fallback == true && (phj_batch->estimated_chunk_size + tuple_size > pstate->space_allowed))
 		{
-			phj_batch->total_num_chunks++;
+			phj_batch->total_chunks++;
 			phj_batch->estimated_chunk_size = tuple_size;
 		}
 		else
@@ -1830,9 +1840,13 @@ retry:
 		tupleMetadata metadata;
 
 		metadata.hashvalue = hashvalue;
-		metadata.tupleid = phj_batch->total_num_chunks;
+		metadata.chunk = phj_batch->total_chunks;
 		LWLockRelease(&phj_batch->lock);
 
+		/*
+		 * TODO: only put the chunk num if it is a fallback batch (avoid
+		 * bloating the metadata written to the file)
+		 */
 		sts_puttuple(hashtable->batches[batchno].inner_tuples, &metadata,
 					 tuple);
 	}
@@ -3043,8 +3057,8 @@ ExecParallelHashJoinSetUpBatches(HashJoinTable hashtable, int nbatch)
 		shared->parallel_hashloop_fallback = false;
 		LWLockInitialize(&shared->lock,
 						 LWTRANCHE_PARALLEL_HASH_JOIN_BATCH);
-		shared->current_chunk_num = 0;
-		shared->total_num_chunks = 1;
+		shared->current_chunk = 0;
+		shared->total_chunks = 1;
 		shared->estimated_chunk_size = 0;
 
 		/*
