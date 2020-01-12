@@ -3812,6 +3812,9 @@ pgstat_get_wait_ipc(WaitEventIPC w)
 		case WAIT_EVENT_HASH_CHUNK_ELECTING:
 			event_name = "Hash/Chunk/Electing";
 			break;
+		case WAIT_EVENT_HASH_CHUNK_RESETTING:
+			event_name = "Hash/Chunk/Resetting";
+			break;
 		case WAIT_EVENT_HASH_CHUNK_LOADING:
 			event_name = "Hash/Chunk/Loading";
 			break;

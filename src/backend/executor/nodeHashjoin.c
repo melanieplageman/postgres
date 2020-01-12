@@ -905,9 +905,10 @@ ExecParallelHashJoin(PlanState *pstate)
 				 */
 
 				ParallelHashJoinBatch *phj_batch = node->hj_HashTable->batches[node->hj_HashTable->curbatch].shared;
-
+				LWLockAcquire(&phj_batch->lock, LW_SHARED);
 				if (!phj_batch->parallel_hashloop_fallback || phj_batch->current_chunk == 1)
 					node->hj_MatchedOuter = false;
+				LWLockRelease(&phj_batch->lock);
 				node->hj_JoinState = HJ_SCAN_BUCKET;
 
 				/* FALL THRU */
@@ -1029,13 +1030,12 @@ ExecParallelHashJoin(PlanState *pstate)
 
 			case HJ_NEED_NEW_BATCH:
 
-				phj_batch = hashtable->batches[hashtable->curbatch].shared;
-
 				/*
 				 * Try to advance to next batch.  Done if there are no more.
 				 */
 				if (!ExecParallelHashJoinNewBatch(node))
 					return NULL;	/* end of parallel-aware join */
+				phj_batch = hashtable->batches[hashtable->curbatch].shared;
 
 				if (node->last_worker
 					&& HJ_FILL_OUTER(node) && phj_batch->parallel_hashloop_fallback)
@@ -1073,6 +1073,11 @@ ExecParallelHashJoin(PlanState *pstate)
 			case HJ_ADAPTIVE_EMIT_UNMATCHED_OUTER_INIT:
 
 				outer_acc = hashtable->batches[hashtable->curbatch].outer_tuples;
+				/*
+				 * This should only ever be called by one worker.
+				 * It is not protected by a barrier explicitly here. However,
+				 * more than one worker should never enter this state for a batch
+				 */
 				sts_reinitialize(outer_acc);
 				sts_begin_parallel_scan(outer_acc);
 
@@ -1080,57 +1085,75 @@ ExecParallelHashJoin(PlanState *pstate)
 				/* FALL THRU */
 
 			case HJ_ADAPTIVE_EMIT_UNMATCHED_OUTER:
-
-				Assert(node->combined_bitmap != NULL);
-
-				outer_acc = node->hj_HashTable->batches[node->hj_HashTable->curbatch].outer_tuples;
-
-				MinimalTuple tuple;
-
-				do
 				{
-					tupleMetadata metadata;
+					ParallelHashJoinBatchAccessor *batch_accessor =
+					&node->hj_HashTable->batches[node->hj_HashTable->curbatch];
 
-					if ((tuple = sts_parallel_scan_next(outer_acc, &metadata)) == NULL)
+					Assert(batch_accessor->combined_bitmap != NULL);
+
+					/*
+					 * TODO: there should be a way to know the current batch
+					 * for the purposes of getting the outer tuplestore without
+					 * needing curbatch from the hashtable so we can detach
+					 * from the batch (ExecHashTableDetachBatch)
+					 */
+					outer_acc =
+						batch_accessor->outer_tuples;
+					MinimalTuple tuple;
+
+					do
+					{
+						tupleMetadata metadata;
+
+						if ((tuple =
+							 sts_parallel_scan_next(outer_acc, &metadata)) ==
+							NULL)
+							break;
+
+						uint32		bytenum = metadata.tupleid / 8;
+						unsigned char bit = metadata.tupleid % 8;
+						unsigned char byte_to_check = 0;
+
+						/* seek to byte to check */
+						if (BufFileSeek(batch_accessor->combined_bitmap,
+										0,
+										bytenum,
+										SEEK_SET))
+							ereport(ERROR,
+									(errcode_for_file_access(),
+									 errmsg(
+											"could not rewind shared outer temporary file: %m")));
+						/* read byte containing ntuple bit */
+						if (BufFileRead(batch_accessor->combined_bitmap, &byte_to_check, 1) ==
+							0)
+							ereport(ERROR,
+									(errcode_for_file_access(),
+									 errmsg(
+											"could not read byte in outer match status bitmap: %m.")));
+						/* if bit is set */
+						bool		match = ((byte_to_check) >> bit) & 1;
+
+						if (!match)
+							break;
+					}
+					while (1);
+
+					if (tuple == NULL)
+					{
+						sts_end_parallel_scan(outer_acc);
+						node->hj_JoinState = HJ_NEED_NEW_BATCH;
 						break;
+					}
 
-					uint32		bytenum = metadata.tupleid / 8;
-					unsigned char bit = metadata.tupleid % 8;
-					unsigned char byte_to_check = 0;
+					/* Emit the unmatched tuple */
+					ExecForceStoreMinimalTuple(tuple,
+											   econtext->ecxt_outertuple,
+											   false);
+					econtext->ecxt_innertuple = node->hj_NullInnerTupleSlot;
 
-					/* seek to byte to check */
-					if (BufFileSeek(node->combined_bitmap, 0, bytenum, SEEK_SET))
-						ereport(ERROR,
-								(errcode_for_file_access(),
-								 errmsg("could not rewind shared outer temporary file: %m")));
-					/* read byte containing ntuple bit */
-					if (BufFileRead(node->combined_bitmap, &byte_to_check, 1) == 0)
-						ereport(ERROR,
-								(errcode_for_file_access(),
-								 errmsg("could not read byte in outer match status bitmap: %m.")));
-					/* if bit is set */
-					bool		match = ((byte_to_check) >> bit) & 1;
+					return ExecProject(node->js.ps.ps_ProjInfo);
 
-					if (!match)
-						break;
-				} while (1);
-
-				if (tuple == NULL)
-				{
-					sts_end_parallel_scan(outer_acc);
-					node->hj_JoinState = HJ_NEED_NEW_BATCH;
-					break;
 				}
-
-				/* Emit the unmatched tuple */
-				ExecForceStoreMinimalTuple(tuple,
-										   econtext->ecxt_outertuple,
-										   false);
-				econtext->ecxt_innertuple = node->hj_NullInnerTupleSlot;
-
-				return ExecProject(node->js.ps.ps_ProjInfo);
-
-
 			default:
 				elog(ERROR, "unrecognized hashjoin state: %d",
 					 (int) node->hj_JoinState);
@@ -1182,7 +1205,6 @@ ExecInitHashJoin(HashJoin *node, EState *estate, int eflags)
 	hjstate->hj_InnerExhausted = false;
 
 	hjstate->last_worker = false;
-	hjstate->combined_bitmap = NULL;
 
 	/*
 	 * Miscellaneous initialization

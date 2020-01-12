@@ -1225,7 +1225,19 @@ ExecParallelHashIncreaseNumBatches(HashJoinTable hashtable)
 				ExecParallelHashEnsureBatchAccessors(hashtable);
 				ExecParallelHashTableSetCurrentBatch(hashtable, 0);
 
-				LWLockAcquire(&pstate->lock, LW_EXCLUSIVE);
+				/*
+				 * Currently adaptive hashjoin keeps track of the global
+				 * (HashJoin global) number of increases to nbatches.
+				 * If the number of increases exceeds a fixed amount,
+				 * any subsequent batch exceeding the space_allowed
+				 * (one which triggers disabling growth in nbatches)
+				 * afterward will have parallel_hashloop_fallback set
+				 *
+				 * Note that stripe numbers were already being added to tuples
+				 * going into the STS, so, even batches that do not fall back
+				 * might have more than one stripe.
+				 */
+				LWLockAcquire(&pstate->lock, LW_SHARED);
 				if (pstate->batch_increases >= 2)
 					excessive_batch_num_increases = true;
 				LWLockRelease(&pstate->lock);
@@ -1243,32 +1255,9 @@ ExecParallelHashIncreaseNumBatches(HashJoinTable hashtable)
 						space_exhausted = true;
 
 						/*
-						 * only once we've increased the number of batches
-						 * overall many times should we start setting
-						 */
-
-						/*
-						 * some batches to use the fallback strategy. Those
-						 * that are still too big will have this option set
-						 */
-
-						/*
 						 * we better not repartition again (growth should be
-						 * disabled), so that we don't overwrite this value
+						 * disabled), so that we don't overwrite this flag
 						 */
-
-						/*
-						 * this tells us if we have set fallback to true or
-						 * not and how many chunks -- useful for seeing how
-						 * many chunks
-						 */
-
-						/*
-						 * we can get to before setting it to true (since we
-						 * still mark chunks (work_mem sized chunks)) in
-						 * batches even if we don't fall back
-						 */
-						/* same for below but opposite */
 						if (excessive_batch_num_increases == true)
 							batch->parallel_hashloop_fallback = true;
 
@@ -3173,6 +3162,7 @@ ExecParallelHashEnsureBatchAccessors(HashJoinTable hashtable)
 		accessor->shared = shared;
 		accessor->preallocated = 0;
 		accessor->done = false;
+		accessor->combined_bitmap = NULL;
 		accessor->inner_tuples =
 			sts_attach(ParallelHashJoinBatchInner(shared),
 					   ParallelWorkerNumber + 1,

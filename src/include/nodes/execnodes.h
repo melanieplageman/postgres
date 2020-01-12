@@ -1968,7 +1968,6 @@ typedef struct HashJoinState
 
 	/* parallel hashloop fallback outer side */
 	bool		last_worker;
-	BufFile    *combined_bitmap;
 } HashJoinState;
 
 
