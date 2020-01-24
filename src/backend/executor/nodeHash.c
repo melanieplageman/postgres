@@ -3041,7 +3041,9 @@ ExecParallelHashJoinSetUpBatches(HashJoinTable hashtable, int nbatch)
 	{
 		ParallelHashJoinBatchAccessor *accessor = &hashtable->batches[i];
 		ParallelHashJoinBatch *shared = NthParallelHashJoinBatch(batches, i);
+		SharedBits *sbits = ParallelHashJoinBatchOuterBits(shared, pstate->nparticipants);
 		char		name[MAXPGPATH];
+		char		sbname[MAXPGPATH];
 
 		shared->parallel_hashloop_fallback = false;
 		LWLockInitialize(&shared->lock,
@@ -3087,6 +3089,9 @@ ExecParallelHashJoinSetUpBatches(HashJoinTable hashtable, int nbatch)
 						   SHARED_TUPLESTORE_SINGLE_PASS,
 						   &pstate->fileset,
 						   name);
+		snprintf(sbname, MAXPGPATH, "%s.bitmaps", name);
+		accessor->sba = sb_initialize(sbits, pstate->nparticipants,
+									  ParallelWorkerNumber + 1, &pstate->sbfileset, sbname);
 	}
 
 	MemoryContextSwitchTo(oldcxt);
@@ -3158,11 +3163,11 @@ ExecParallelHashEnsureBatchAccessors(HashJoinTable hashtable)
 	{
 		ParallelHashJoinBatchAccessor *accessor = &hashtable->batches[i];
 		ParallelHashJoinBatch *shared = NthParallelHashJoinBatch(batches, i);
+		SharedBits *sbits = ParallelHashJoinBatchOuterBits(shared, pstate->nparticipants);
 
 		accessor->shared = shared;
 		accessor->preallocated = 0;
 		accessor->done = false;
-		accessor->combined_bitmap = NULL;
 		accessor->inner_tuples =
 			sts_attach(ParallelHashJoinBatchInner(shared),
 					   ParallelWorkerNumber + 1,
@@ -3172,6 +3177,7 @@ ExecParallelHashEnsureBatchAccessors(HashJoinTable hashtable)
 												  pstate->nparticipants),
 					   ParallelWorkerNumber + 1,
 					   &pstate->fileset);
+		accessor->sba = sb_attach(sbits, ParallelWorkerNumber + 1, &pstate->sbfileset);
 	}
 
 	MemoryContextSwitchTo(oldcxt);

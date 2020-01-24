@@ -13,9 +13,6 @@
 
 #include "executor/adaptiveHashjoin.h"
 
-
-
-
 bool
 ExecParallelHashJoinNewChunk(HashJoinState *hjstate, bool advance_from_probing)
 {
@@ -302,10 +299,9 @@ ExecParallelHashJoinNewBatch(HashJoinState *hjstate)
 			ExecHashTableDetachBatch(hashtable);
 		}
 
-		else if (accessor->combined_bitmap != NULL)
+		else if (sb_combined_exists(accessor->sba))
 		{
-			BufFileClose(accessor->combined_bitmap);
-			accessor->combined_bitmap = NULL;
+			sb_end_read(accessor->sba);
 			accessor->done = true;
 
 			/*
@@ -319,7 +315,7 @@ ExecParallelHashJoinNewBatch(HashJoinState *hjstate)
 
 		else
 		{
-			sts_close_outer_match_status_file(accessor->outer_tuples);
+			sb_end_write(accessor->sba);
 
 			/*
 			 * If all workers (including this one) have finished probing the
@@ -340,7 +336,7 @@ ExecParallelHashJoinNewBatch(HashJoinState *hjstate)
 				 * reach here. This worker must do some final cleanup and then
 				 * detach from the batch
 				 */
-				accessor->combined_bitmap = sts_combine_outer_match_status_files(accessor->outer_tuples);
+				sb_combine(accessor->sba);
 				ExecHashTableLoopDetachBatchForChosen(hashtable);
 				hjstate->last_worker = true;
 				return true;
@@ -421,7 +417,11 @@ ExecParallelHashJoinNewBatch(HashJoinState *hjstate)
 					 * to by this worker and readable by any worker
 					 */
 					if (hashtable->batches[batchno].shared->parallel_hashloop_fallback)
-						sts_make_outer_match_status_file(hashtable->batches[batchno].outer_tuples);
+					{
+						ParallelHashJoinBatchAccessor *accessor = hashtable->batches + hashtable->curbatch;
+
+						sb_initialize_accessor(accessor->sba, sts_get_tuplenum(accessor->outer_tuples));
+					}
 
 					return true;
 

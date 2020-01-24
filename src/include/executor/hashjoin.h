@@ -19,6 +19,7 @@
 #include "storage/barrier.h"
 #include "storage/buffile.h"
 #include "storage/lwlock.h"
+#include "utils/sharedbits.h"
 
 /* ----------------------------------------------------------------
  *				hash-join hash table structures
@@ -193,10 +194,17 @@ typedef struct ParallelHashJoinBatch
 	 ((char *) ParallelHashJoinBatchInner(batch) +						\
 	  MAXALIGN(sts_estimate(nparticipants))))
 
+/* Accessor for sharedbits following a ParallelHashJoinBatch. */
+#define ParallelHashJoinBatchOuterBits(batch, nparticipants) \
+	((SharedBits *)												\
+	 ((char *) ParallelHashJoinBatchOuter(batch, nparticipants) +						\
+	  MAXALIGN(sts_estimate(nparticipants))))
+
 /* Total size of a ParallelHashJoinBatch and tuplestores. */
 #define EstimateParallelHashJoinBatch(hashtable)						\
 	(MAXALIGN(sizeof(ParallelHashJoinBatch)) +							\
-	 MAXALIGN(sts_estimate((hashtable)->parallel_state->nparticipants)) * 2)
+	 MAXALIGN(sts_estimate((hashtable)->parallel_state->nparticipants)) * 2 + \
+	 MAXALIGN(sb_estimate((hashtable)->parallel_state->nparticipants)))
 
 /* Accessor for the nth ParallelHashJoinBatch given the base. */
 #define NthParallelHashJoinBatch(base, n)								\
@@ -221,9 +229,9 @@ typedef struct ParallelHashJoinBatchAccessor
 	bool		at_least_one_chunk; /* has this backend allocated a chunk? */
 
 	bool		done;			/* flag to remember that a batch is done */
-	BufFile    *combined_bitmap;	/* for Adaptive Hashjoin only  */
 	SharedTuplestoreAccessor *inner_tuples;
 	SharedTuplestoreAccessor *outer_tuples;
+	SharedBitsAccessor *sba;
 } ParallelHashJoinBatchAccessor;
 
 /*
@@ -270,6 +278,7 @@ typedef struct ParallelHashJoinState
 	pg_atomic_uint32 distributor;	/* counter for load balancing */
 
 	SharedFileSet fileset;		/* space for shared temporary files */
+	SharedFileSet sbfileset;
 } ParallelHashJoinState;
 
 /* The phases for building batches, used by build_barrier. */

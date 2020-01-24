@@ -48,7 +48,6 @@ extern long BufFileAppend(BufFile *target, BufFile *source);
 
 extern BufFile *BufFileCreateShared(SharedFileSet *fileset, const char *name);
 extern void BufFileExportShared(BufFile *file);
-extern BufFile *BufFileOpenSharedIfExists(SharedFileSet *fileset, const char *name);
 extern BufFile *BufFileOpenShared(SharedFileSet *fileset, const char *name);
 extern void BufFileDeleteShared(SharedFileSet *fileset, const char *name);
 

@@ -914,93 +914,98 @@ ExecParallelHashJoin(PlanState *pstate)
 				/* FALL THRU */
 
 			case HJ_SCAN_BUCKET:
-
-				/*
-				 * Scan the selected hash bucket for matches to current outer
-				 */
-				phj_batch = node->hj_HashTable->batches[node->hj_HashTable->curbatch].shared;
-
-				if (!ExecParallelScanHashBucket(node, econtext))
 				{
 					/*
-					 * The current outer tuple has run out of matches, so
-					 * check whether to emit a dummy outer-join tuple. Whether
-					 * we emit one or not, the next state is NEED_NEW_OUTER.
+					 * Scan the selected hash bucket for matches to current
+					 * outer
 					 */
-					node->hj_JoinState = HJ_NEED_NEW_OUTER;
-					if (!phj_batch->parallel_hashloop_fallback)
+					ParallelHashJoinBatchAccessor *accessor =
+					&node->hj_HashTable->batches[node->hj_HashTable->curbatch];
+
+					phj_batch = accessor->shared;
+
+					if (!ExecParallelScanHashBucket(node, econtext))
 					{
-						TupleTableSlot *slot = emitUnmatchedOuterTuple(otherqual, econtext, node);
+						/*
+						 * The current outer tuple has run out of matches, so
+						 * check whether to emit a dummy outer-join tuple.
+						 * Whether we emit one or not, the next state is
+						 * NEED_NEW_OUTER.
+						 */
+						node->hj_JoinState = HJ_NEED_NEW_OUTER;
+						if (!phj_batch->parallel_hashloop_fallback)
+						{
+							TupleTableSlot *slot = emitUnmatchedOuterTuple(otherqual, econtext, node);
 
-						if (slot != NULL)
-							return slot;
+							if (slot != NULL)
+								return slot;
+						}
+						continue;
 					}
-					continue;
-				}
 
-				/*
-				 * We've got a match, but still need to test non-hashed quals.
-				 * ExecScanHashBucket already set up all the state needed to
-				 * call ExecQual.
-				 *
-				 * If we pass the qual, then save state for next call and have
-				 * ExecProject form the projection, store it in the tuple
-				 * table, and return the slot.
-				 *
-				 * Only the joinquals determine tuple match status, but all
-				 * quals must pass to actually return the tuple.
-				 */
-				if (joinqual != NULL && !ExecQual(joinqual, econtext))
-				{
-					InstrCountFiltered1(node, 1);
+					/*
+					 * We've got a match, but still need to test non-hashed
+					 * quals. ExecScanHashBucket already set up all the state
+					 * needed to call ExecQual.
+					 *
+					 * If we pass the qual, then save state for next call and
+					 * have ExecProject form the projection, store it in the
+					 * tuple table, and return the slot.
+					 *
+					 * Only the joinquals determine tuple match status, but
+					 * all quals must pass to actually return the tuple.
+					 */
+					if (joinqual != NULL && !ExecQual(joinqual, econtext))
+					{
+						InstrCountFiltered1(node, 1);
+						break;
+					}
+
+					node->hj_MatchedOuter = true;
+					/*
+					 * Full/right outer joins are currently not supported
+					 * for parallel joins, so we don't need to set the
+					 * match bit.  Experiments show that it's worth
+					 * avoiding the shared memory traffic on large
+					 * systems.
+					 */
+					Assert(!HJ_FILL_INNER(node));
+
+					/*
+					 * TODO: how does this interact with PAHJ -- do I need to
+					 * set matchbit?
+					 */
+					/* In an antijoin, we never return a matched tuple */
+					if (node->js.jointype == JOIN_ANTI)
+					{
+						node->hj_JoinState = HJ_NEED_NEW_OUTER;
+						continue;
+					}
+
+					/*
+					 * If we only need to join to the first matching inner
+					 * tuple, then consider returning this one, but after that
+					 * continue with next outer tuple.
+					 */
+					if (node->js.single_match)
+						node->hj_JoinState = HJ_NEED_NEW_OUTER;
+
+					/*
+					 * Set the match bit for this outer tuple in the match
+					 * status file
+					 */
+					if (phj_batch->parallel_hashloop_fallback)
+					{
+						sb_setbit(accessor->sba,
+								  econtext->ecxt_outertuple->tuplenum);
+
+					}
+					if (otherqual == NULL || ExecQual(otherqual, econtext))
+						return ExecProject(node->js.ps.ps_ProjInfo);
+					else
+						InstrCountFiltered2(node, 1);
 					break;
 				}
-
-				node->hj_MatchedOuter = true;
-				/*
-				 * Full/right outer joins are currently not supported
-				 * for parallel joins, so we don't need to set the
-				 * match bit.  Experiments show that it's worth
-				 * avoiding the shared memory traffic on large
-				 * systems.
-				 */
-				Assert(!HJ_FILL_INNER(node));
-
-				/*
-				 * TODO: how does this interact with PAHJ -- do I need to set
-				 * matchbit?
-				 */
-				/* In an antijoin, we never return a matched tuple */
-				if (node->js.jointype == JOIN_ANTI)
-				{
-					node->hj_JoinState = HJ_NEED_NEW_OUTER;
-					continue;
-				}
-
-				/*
-				 * If we only need to join to the first matching inner tuple,
-				 * then consider returning this one, but after that continue
-				 * with next outer tuple.
-				 */
-				if (node->js.single_match)
-					node->hj_JoinState = HJ_NEED_NEW_OUTER;
-
-				/*
-				 * Set the match bit for this outer tuple in the match status
-				 * file
-				 */
-				if (phj_batch->parallel_hashloop_fallback)
-				{
-					sts_set_outer_match_status(hashtable->batches[hashtable->curbatch].outer_tuples,
-											   econtext->ecxt_outertuple->tuplenum);
-
-				}
-				if (otherqual == NULL || ExecQual(otherqual, econtext))
-					return ExecProject(node->js.ps.ps_ProjInfo);
-				else
-					InstrCountFiltered2(node, 1);
-				break;
-
 			case HJ_FILL_INNER_TUPLES:
 
 				/*
@@ -1089,8 +1094,6 @@ ExecParallelHashJoin(PlanState *pstate)
 					ParallelHashJoinBatchAccessor *batch_accessor =
 					&node->hj_HashTable->batches[node->hj_HashTable->curbatch];
 
-					Assert(batch_accessor->combined_bitmap != NULL);
-
 					/*
 					 * TODO: there should be a way to know the current batch
 					 * for the purposes of getting the outer tuplestore without
@@ -1105,33 +1108,10 @@ ExecParallelHashJoin(PlanState *pstate)
 					{
 						tupleMetadata metadata;
 
-						if ((tuple =
-							 sts_parallel_scan_next(outer_acc, &metadata)) ==
-							NULL)
+						if ((tuple = sts_parallel_scan_next(outer_acc, &metadata)) == NULL)
 							break;
 
-						uint32		bytenum = metadata.tupleid / 8;
-						unsigned char bit = metadata.tupleid % 8;
-						unsigned char byte_to_check = 0;
-
-						/* seek to byte to check */
-						if (BufFileSeek(batch_accessor->combined_bitmap,
-										0,
-										bytenum,
-										SEEK_SET))
-							ereport(ERROR,
-									(errcode_for_file_access(),
-									 errmsg(
-											"could not rewind shared outer temporary file: %m")));
-						/* read byte containing ntuple bit */
-						if (BufFileRead(batch_accessor->combined_bitmap, &byte_to_check, 1) ==
-							0)
-							ereport(ERROR,
-									(errcode_for_file_access(),
-									 errmsg(
-											"could not read byte in outer match status bitmap: %m.")));
-						/* if bit is set */
-						bool		match = ((byte_to_check) >> bit) & 1;
+						bool		match = sb_checkbit(batch_accessor->sba, metadata.tupleid);
 
 						if (!match)
 							break;
@@ -2003,6 +1983,7 @@ ExecHashJoinInitializeDSM(HashJoinState *state, ParallelContext *pcxt)
 
 	/* Set up the space we'll use for shared temporary files. */
 	SharedFileSetInit(&pstate->fileset, pcxt->seg);
+	SharedFileSetInit(&pstate->sbfileset, pcxt->seg);
 
 	/* Initialize the shared state in the hash node. */
 	hashNode = (HashState *) innerPlanState(state);

@@ -71,11 +71,6 @@ extern MinimalTuple sts_parallel_scan_next(SharedTuplestoreAccessor *accessor,
 
 
 extern uint32 sts_increment_tuplenum(SharedTuplestoreAccessor *accessor);
-
-extern void sts_make_outer_match_status_file(SharedTuplestoreAccessor *accessor);
-extern void sts_set_outer_match_status(SharedTuplestoreAccessor *accessor, uint32 tuplenum);
-extern void sts_close_outer_match_status_file(SharedTuplestoreAccessor *accessor);
-extern BufFile *sts_combine_outer_match_status_files(SharedTuplestoreAccessor *accessor);
-
+extern uint32 sts_get_tuplenum(SharedTuplestoreAccessor *accessor);
 
 #endif							/* SHAREDTUPLESTORE_H */
