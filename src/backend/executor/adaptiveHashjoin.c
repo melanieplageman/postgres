@@ -85,6 +85,9 @@ ExecParallelHashJoinNewChunk(HashJoinState *hjstate, bool advance_from_probing)
 
 					sts_reinitialize(outer_tuples);
 
+					/* set the rewound flag back to false to prepare for the next stripe */
+					sts_reset_rewound(inner_tuples);
+
 					/*
 					 * reset inner's hashtable and recycle the existing bucket
 					 * array.
@@ -96,33 +99,37 @@ ExecParallelHashJoinNewChunk(HashJoinState *hjstate, bool advance_from_probing)
 
 					for (size_t i = 0; i < hashtable->nbuckets; ++i)
 						dsa_pointer_atomic_write(&buckets[i], InvalidDsaPointer);
-
-					/*
-					 * TODO: this will unfortunately rescan all inner tuples
-					 * in the batch for each chunk
-					 */
-
-					/*
-					 * should be able to save the block in the file which
-					 * starts the next chunk instead
-					 */
-					sts_reinitialize(inner_tuples);
 				}
 				/* Fall through. */
 			case PHJ_CHUNK_RESETTING:
 				BarrierArriveAndWait(chunk_barrier, WAIT_EVENT_HASH_CHUNK_RESETTING);
 			case PHJ_CHUNK_LOADING:
 				/* Start (or join in) loading the next chunk of inner tuples. */
-				sts_begin_parallel_scan(inner_tuples);
+				sts_resume_parallel_scan(inner_tuples);
 
 				MinimalTuple tuple;
 				tupleMetadata metadata;
 
 				while ((tuple = sts_parallel_scan_next(inner_tuples, &metadata)))
 				{
-					if (metadata.chunk != phj_batch->current_chunk)
-						continue;
+					int current_stripe;
+					LWLockAcquire(&phj_batch->lock, LW_SHARED);
+					current_stripe = phj_batch->current_chunk;
+					LWLockRelease(&phj_batch->lock);
 
+					/* tuple from past. skip */
+					if (metadata.chunk < current_stripe)
+						continue;
+					/* tuple from future. time to back out read_page. end of stripe */
+					else if (metadata.chunk > current_stripe)
+					{
+						sts_backout_chunk(inner_tuples);
+						if (sts_seen_all_participants(inner_tuples))
+							break;
+
+						sts_ready_for_next_stripe(inner_tuples);
+						continue;
+					}
 					ExecForceStoreMinimalTuple(tuple,
 											   hjstate->hj_HashTupleSlot,
 											   false);
@@ -384,6 +391,8 @@ ExecParallelHashJoinNewBatch(HashJoinState *hjstate)
 							BarrierInit(&(barriers[i]), 0);
 						}
 						phj_batch->current_chunk = 1;
+						/* one worker needs to 0 out the read_pages of all the participants in the new batch */
+						sts_reinitialize(hashtable->batches[batchno].inner_tuples);
 					}
 					/* Fall through. */
 
@@ -409,6 +418,8 @@ ExecParallelHashJoinNewBatch(HashJoinState *hjstate)
 
 					if (batchno == 0)
 						sts_begin_parallel_scan(hashtable->batches[batchno].outer_tuples);
+
+					sts_begin_parallel_scan(hashtable->batches[batchno].inner_tuples);
 
 					/*
 					 * Create an outer match status file for this batch for

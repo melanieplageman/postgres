@@ -60,7 +60,15 @@ extern void sts_reinitialize(SharedTuplestoreAccessor *accessor);
 
 extern void sts_begin_parallel_scan(SharedTuplestoreAccessor *accessor);
 
+extern void sts_resume_parallel_scan(SharedTuplestoreAccessor *accessor);
+
 extern void sts_end_parallel_scan(SharedTuplestoreAccessor *accessor);
+
+extern void sts_backout_chunk(SharedTuplestoreAccessor *accessor);
+
+extern bool sts_seen_all_participants(SharedTuplestoreAccessor *accessor);
+
+extern void sts_ready_for_next_stripe(SharedTuplestoreAccessor *accessor);
 
 extern void sts_puttuple(SharedTuplestoreAccessor *accessor,
 						 void *meta_data,
@@ -69,6 +77,7 @@ extern void sts_puttuple(SharedTuplestoreAccessor *accessor,
 extern MinimalTuple sts_parallel_scan_next(SharedTuplestoreAccessor *accessor,
 										   void *meta_data);
 
+extern void sts_reset_rewound(SharedTuplestoreAccessor *accessor);
 
 extern uint32 sts_increment_tuplenum(SharedTuplestoreAccessor *accessor);
 extern uint32 sts_get_tuplenum(SharedTuplestoreAccessor *accessor);
