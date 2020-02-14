@@ -272,6 +272,11 @@ static void finalize_aggregates(AggState *aggstate,
 static TupleTableSlot *project_aggregates(AggState *aggstate);
 static Bitmapset *find_unaggregated_cols(AggState *aggstate);
 static bool find_unaggregated_cols_walker(Node *node, Bitmapset **colnos);
+static bool find_aggregated_cols_walker2(Node *node, void *context);
+static bool find_unaggregated_cols_walker2(Node *node, void *context);
+static void find_cols(AggState *aggstate, void *context, Bitmapset **aggregated_colnos, Bitmapset **unaggregated_colnos);
+static bool find_aggregated_cols_walker(Node *node, Bitmapset **colnos);
+static Bitmapset *find_aggregated_cols(AggState *aggstate);
 static void build_hash_table(AggState *aggstate);
 static TupleHashEntryData *lookup_hash_entry(AggState *aggstate);
 static void lookup_hash_entries(AggState *aggstate);
@@ -1232,6 +1237,137 @@ find_unaggregated_cols_walker(Node *node, Bitmapset **colnos)
 								  (void *) colnos);
 }
 
+
+typedef struct FindColsContext
+{
+	Bitmapset *aggregated_colnos;
+	Bitmapset *unaggregated_colnos;
+} FindColsContext;
+
+static bool
+find_aggregated_cols_walker2(Node *node, void *context)
+{
+	if (node == NULL)
+		return false;
+
+	FindColsContext *find_cols_context = (FindColsContext *) context;
+
+	if (IsA(node, Var))
+	{
+		Var *var = (Var *) node;
+		find_cols_context->aggregated_colnos = bms_add_member(find_cols_context->aggregated_colnos, var->varattno);
+		return false;
+	}
+	return expression_tree_walker(node, find_aggregated_cols_walker2, (void *) find_cols_context);
+}
+
+static bool
+find_unaggregated_cols_walker2(Node *node, void *context)
+{
+	if (node == NULL)
+		return false;
+
+	FindColsContext *find_cols_context = (FindColsContext *) context;
+
+	if (IsA(node, Var))
+	{
+		Var		   *var = (Var *) node;
+
+		/* setrefs.c should have set the varno to OUTER_VAR */
+		Assert(var->varno == OUTER_VAR);
+		Assert(var->varlevelsup == 0);
+		find_cols_context->unaggregated_colnos = bms_add_member(find_cols_context->unaggregated_colnos, var->varattno);
+		return false;
+	}
+	if (IsA(node, Aggref) ||IsA(node, GroupingFunc))
+	{
+		return find_aggregated_cols_walker2(node, (void *) find_cols_context);
+	}
+	return expression_tree_walker(node, find_unaggregated_cols_walker2,
+	                              (void *) find_cols_context);
+}
+
+static void
+find_cols(AggState *aggstate, void *context, Bitmapset **aggregated_colnos, Bitmapset **unaggregated_colnos)
+{
+	Agg		   *node = (Agg *) aggstate->ss.ps.plan;
+
+	FindColsContext *findColsContext = (FindColsContext *) context;
+	findColsContext->aggregated_colnos = NULL;
+	findColsContext->unaggregated_colnos = NULL;
+	(void) find_unaggregated_cols_walker2((Node *) node->plan.targetlist,
+	                                     findColsContext);
+	(void) find_unaggregated_cols_walker2((Node *) node->plan.qual,
+	                                      findColsContext);
+	//List *result = list_make2(findColsContext->unaggregated_colnos, findColsContext->aggregated_colnos);
+	//return result;
+	*aggregated_colnos = findColsContext->aggregated_colnos;
+	*unaggregated_colnos = findColsContext->unaggregated_colnos;
+}
+
+static bool
+find_aggregated_cols_walker(Node *node, Bitmapset **colnos)
+{
+	if (node == NULL)
+		return false;
+
+	if (IsA(node, Var))
+	{
+		Var                *var = (Var *) node;
+
+		*colnos = bms_add_member(*colnos, var->varattno);
+
+		return false;
+	}
+	return expression_tree_walker(node, find_aggregated_cols_walker,
+	                              (void *) colnos);
+}
+/*
+ * find_aggregated_cols
+ *       Construct a bitmapset of the column numbers of aggregated Vars
+ *       appearing in our targetlist and qual (HAVING clause)
+ */
+static Bitmapset *
+find_aggregated_cols(AggState *aggstate)
+{
+	Agg                *node = (Agg *) aggstate->ss.ps.plan;
+	Bitmapset  *colnos = NULL;
+	ListCell   *temp;
+
+	/*
+	 * We only want the columns used by aggregations in the targetlist or qual
+	 */
+	if (node->plan.targetlist != NULL)
+	{
+		foreach(temp, (List *) node->plan.targetlist)
+		{
+			if (IsA(lfirst(temp), TargetEntry))
+			{
+				Node *node = (Node *)((TargetEntry *)lfirst(temp))->expr;
+				if (IsA(node, Aggref) || IsA(node, GroupingFunc))
+					find_aggregated_cols_walker(node, &colnos);
+			}
+		}
+	}
+
+	if (node->plan.qual != NULL)
+	{
+		foreach(temp, (List *) node->plan.qual)
+		{
+			if (IsA(lfirst(temp), TargetEntry))
+			{
+				Node *node = (Node *)((TargetEntry *)lfirst(temp))->expr;
+				if (IsA(node, Aggref) || IsA(node, GroupingFunc))
+					find_aggregated_cols_walker(node, &colnos);
+			}
+		}
+	}
+
+	return colnos;
+}
+
+
+
 /*
  * (Re-)initialize the hash table(s) to empty.
  *
@@ -1318,8 +1454,26 @@ find_hash_columns(AggState *aggstate)
 	EState	   *estate = aggstate->ss.ps.state;
 	int			j;
 
+	Bitmapset *aggregated_colnos;
+
 	/* Find Vars that will be needed in tlist and qual */
 	base_colnos = find_unaggregated_cols(aggstate);
+	aggregated_colnos = find_aggregated_cols(aggstate);
+//	elog(NOTICE, "colnos found by find_unaggregated_cols: %d", *base_colnos->words);
+//	elog(NOTICE, "colnos found by find_aggregated_cols: %d", *aggregated_colnos->words);
+	elog(NOTICE, "colnos found by find_unaggregated_cols: %s", bmsToString(base_colnos));
+	elog(NOTICE, "colnos found by find_aggregated_cols: %s", bmsToString(aggregated_colnos));
+
+
+	FindColsContext findColsContext;
+	Bitmapset *aggregated_colnos2;
+	Bitmapset *unaggregated_colnos2;
+	find_cols(aggstate, &findColsContext, &aggregated_colnos2, &unaggregated_colnos2);
+//	elog(NOTICE, "unaggregated colnos: %d", *unaggregated_colnos2->words);
+//	elog(NOTICE, "aggregated colnos: %d", *aggregated_colnos2->words);
+	elog(NOTICE, "unaggregated colnos: %s", bmsToString(unaggregated_colnos2));
+	elog(NOTICE, "aggregated colnos: %s", bmsToString(aggregated_colnos2));
+
 
 	for (j = 0; j < numHashes; ++j)
 	{
