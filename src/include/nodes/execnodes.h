@@ -1954,8 +1954,6 @@ typedef struct HashJoinState
 	bool		hj_MatchedOuter;
 	bool		hj_OuterNotEmpty;
 
-	/* hashloop fallback */
-	bool		hashloop_fallback;
 	/* hashloop fallback inner side */
 	bool		hj_InnerFirstChunk;
 	bool		hj_InnerExhausted;

@@ -500,6 +500,8 @@ ExecHashTableCreate(HashState *state, List *hashOperators, List *hashCollations,
 	hashtable->partialTuples = 0;
 	hashtable->skewTuples = 0;
 	hashtable->innerBatchFile = NULL;
+	hashtable->outgoing_tuples = NULL;
+	hashtable->hashloop_fallback = NULL;
 	hashtable->outerBatchFile = NULL;
 	hashtable->spaceUsed = 0;
 	hashtable->spacePeak = 0;
@@ -570,6 +572,14 @@ ExecHashTableCreate(HashState *state, List *hashOperators, List *hashCollations,
 		 */
 		hashtable->innerBatchFile = (BufFile **)
 			palloc0(nbatch * sizeof(BufFile *));
+
+		hashtable->outgoing_tuples = (int **)
+			palloc0(nbatch * sizeof(int *));
+		for (int j = 0; j < nbatch; j++)
+			hashtable->outgoing_tuples[j] = palloc0(nbatch * sizeof(int));
+
+		hashtable->hashloop_fallback = (bool *)
+			palloc0(nbatch * sizeof(bool));
 		hashtable->outerBatchFile = (BufFile **)
 			palloc0(nbatch * sizeof(BufFile *));
 		/* The files will not be opened until needed... */
@@ -897,6 +907,8 @@ ExecHashIncreaseNumBatches(HashJoinTable hashtable)
 	/* do nothing if we've decided to shut off growth */
 	if (!hashtable->growEnabled)
 		return;
+	if (hashtable->hashloop_fallback && hashtable->hashloop_fallback[curbatch])
+		return;
 
 	/* safety check to avoid overflow */
 	if (oldnbatch > Min(INT_MAX / 2, MaxAllocSize / (sizeof(void *) * 2)))
@@ -917,6 +929,15 @@ ExecHashIncreaseNumBatches(HashJoinTable hashtable)
 		/* we had no file arrays before */
 		hashtable->innerBatchFile = (BufFile **)
 			palloc0(nbatch * sizeof(BufFile *));
+
+		hashtable->outgoing_tuples = (int **)
+			palloc0(nbatch * sizeof(int *));
+		for (int i = 0; i < nbatch; i++)
+			hashtable->outgoing_tuples[i] = (int *)
+				palloc0(nbatch * sizeof(int));
+
+		hashtable->hashloop_fallback = (bool *)
+			palloc0(nbatch * sizeof(bool));
 		hashtable->outerBatchFile = (BufFile **)
 			palloc0(nbatch * sizeof(BufFile *));
 		/* time to establish the temp tablespaces, too */
@@ -927,10 +948,32 @@ ExecHashIncreaseNumBatches(HashJoinTable hashtable)
 		/* enlarge arrays and zero out added entries */
 		hashtable->innerBatchFile = (BufFile **)
 			repalloc(hashtable->innerBatchFile, nbatch * sizeof(BufFile *));
+		MemSet(hashtable->innerBatchFile + oldnbatch, 0,
+			(nbatch - oldnbatch) * sizeof(BufFile *));
+
+		hashtable->outgoing_tuples = (int **)
+			repalloc(hashtable->outgoing_tuples, nbatch * sizeof(int *));
+		/* MemSet it before using it */
+		MemSet(hashtable->outgoing_tuples + oldnbatch, 0,
+			(nbatch - oldnbatch) * sizeof(int *));
+		for (int i = 0; i < oldnbatch; i++)
+		{
+			hashtable->outgoing_tuples[i] = (int *)
+				repalloc(hashtable->outgoing_tuples[i], nbatch * sizeof(int));
+		}
+		for (int i = oldnbatch; i < nbatch; i++)
+		{
+			hashtable->outgoing_tuples[i] = (int *)
+				palloc0(nbatch * sizeof(int));
+		}
+
+		hashtable->hashloop_fallback = (bool *)
+			repalloc(hashtable->hashloop_fallback, nbatch * sizeof(bool));
+		MemSet(hashtable->hashloop_fallback + oldnbatch, 0,
+			(nbatch - oldnbatch) * sizeof(bool));
+
 		hashtable->outerBatchFile = (BufFile **)
 			repalloc(hashtable->outerBatchFile, nbatch * sizeof(BufFile *));
-		MemSet(hashtable->innerBatchFile + oldnbatch, 0,
-			   (nbatch - oldnbatch) * sizeof(BufFile *));
 		MemSet(hashtable->outerBatchFile + oldnbatch, 0,
 			   (nbatch - oldnbatch) * sizeof(BufFile *));
 	}
@@ -989,6 +1032,7 @@ ExecHashIncreaseNumBatches(HashJoinTable hashtable)
 			ninmemory++;
 			ExecHashGetBucketAndBatch(hashtable, hashTuple->hashvalue,
 									  &bucketno, &batchno);
+			hashtable->outgoing_tuples[curbatch][batchno]++;
 
 			if (batchno == curbatch)
 			{
@@ -1046,6 +1090,19 @@ ExecHashIncreaseNumBatches(HashJoinTable hashtable)
 		printf("Hashjoin %p: disabling further increase of nbatch\n",
 			   hashtable);
 #endif
+	}
+	/* Is this the right place to reset all the counts? */
+	for(int i = 0; i < nbatch; i++)
+	{
+		double percent = hashtable->outgoing_tuples[curbatch][i] / ninmemory;
+		if (percent >= 0.8)
+		{
+			hashtable->hashloop_fallback[i] = true;
+			elog(NOTICE, "fallback is true for batch %i when nbatch is %i. and batch %i just caused split.", i, nbatch, curbatch);
+			for (int j = 0; j < nbatch; j++)
+				hashtable->outgoing_tuples[i][j] = 0;
+			break;
+		}
 	}
 }
 

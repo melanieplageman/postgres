@@ -361,6 +361,14 @@ typedef struct HashJoinTableData
 	 * tuples of batch zero.
 	 */
 	BufFile   **innerBatchFile; /* buffered virtual temp file per batch */
+	/*
+	 * this whole array is overkill, since each batch can only send tuples to certain other batches
+	 * it could be vastly decreased in size and potentially use some other form entirely
+	 * it is also worth considering some type of "score" for how degenerate a batch is
+	 * that isn't entirely reliant on preserving the count of outgoing tuples
+	 */
+	int **outgoing_tuples; /* array of arrays with counts of tuples going to other batches */
+	bool *hashloop_fallback; /* per batch array indicating if a batch should fallback or not */
 	BufFile   **outerBatchFile; /* buffered virtual temp file per batch */
 
 	/*

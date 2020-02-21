@@ -361,7 +361,9 @@ ExecHashJoin(PlanState *pstate)
 				 * handle batch 0 explicitly
 				 */
 
-				if (!node->hashloop_fallback || hashtable->curbatch == 0 || node->hj_InnerFirstChunk)
+				if (!hashtable->hashloop_fallback)
+					node->hj_MatchedOuter = false;
+				else if (!hashtable->hashloop_fallback[hashtable->curbatch] || hashtable->curbatch == 0 || node->hj_InnerFirstChunk)
 					node->hj_MatchedOuter = false;
 
 				/*
@@ -390,7 +392,7 @@ ExecHashJoin(PlanState *pstate)
 					continue;
 				}
 
-				if (node->hashloop_fallback)
+				if (hashtable->hashloop_fallback && hashtable->hashloop_fallback[hashtable->curbatch])
 				{
 					/* first tuple of new batch */
 					if (node->hj_OuterMatchStatusesFile == NULL)
@@ -439,7 +441,8 @@ ExecHashJoin(PlanState *pstate)
 					 * we emit one or not, the next state is NEED_NEW_OUTER.
 					 */
 					node->hj_JoinState = HJ_NEED_NEW_OUTER;
-					if (!node->hashloop_fallback || node->hj_HashTable->curbatch == 0)
+					int curbatch = hashtable->curbatch;
+					if (!hashtable->hashloop_fallback || !hashtable->hashloop_fallback[curbatch] || curbatch == 0)
 					{
 						TupleTableSlot *slot = emitUnmatchedOuterTuple(otherqual, econtext, node);
 
@@ -498,7 +501,7 @@ ExecHashJoin(PlanState *pstate)
 				 */
 				if (node->hj_OuterMatchStatusesFile != NULL)
 				{
-					Assert(node->hashloop_fallback == true);
+					Assert(hashtable->hashloop_fallback[hashtable->curbatch] == true);
 					int			byte_to_set = (node->hj_OuterTupleCount - 1) / 8;
 					int			bit_to_set_in_byte = (node->hj_OuterTupleCount - 1) % 8;
 
@@ -550,7 +553,7 @@ ExecHashJoin(PlanState *pstate)
 				 * however, it felt more clear to check for hashloop_fallback
 				 * explicitly
 				 */
-				if (node->hashloop_fallback && HJ_FILL_OUTER(node) && node->hj_InnerExhausted)
+				if (hashtable->hashloop_fallback && hashtable->hashloop_fallback[hashtable->curbatch] && HJ_FILL_OUTER(node) && node->hj_InnerExhausted)
 				{
 					/*
 					 * For hashloop fallback, outer tuples are not emitted
@@ -565,7 +568,14 @@ ExecHashJoin(PlanState *pstate)
 				}
 
 				if (!ExecHashJoinAdvanceBatch(node))
+				{
+					for (int i = 0; i < hashtable->nbatch; i++)
+					{
+						if (hashtable->hashloop_fallback[i])
+							elog(NOTICE, "batch %i fell back.", i);
+					}
 					return NULL;
+				}
 
 				/*
 				 * TODO: need to find a better way to distinguish if I should
@@ -593,7 +603,7 @@ ExecHashJoin(PlanState *pstate)
 
 			case HJ_NEED_NEW_INNER_CHUNK:
 
-				if (!node->hashloop_fallback)
+				if (!hashtable->hashloop_fallback || !hashtable->hashloop_fallback[hashtable->curbatch])
 				{
 					node->hj_JoinState = HJ_NEED_NEW_BATCH;
 					break;
@@ -1175,7 +1185,6 @@ ExecInitHashJoin(HashJoin *node, EState *estate, int eflags)
 	hjstate->js.ps.ExecProcNode = ExecHashJoin;
 	hjstate->js.jointype = node->join.jointype;
 
-	hjstate->hashloop_fallback = false;
 	hjstate->hj_InnerPageOffset = 0L;
 	hjstate->hj_InnerFirstChunk = false;
 	hjstate->hj_OuterCurrentByte = 0;
@@ -1601,7 +1610,6 @@ ExecHashJoinAdvanceBatch(HashJoinState *hjstate)
 
 	hjstate->hj_InnerPageOffset = 0L;
 	hjstate->hj_InnerFirstChunk = true;
-	hjstate->hashloop_fallback = false; /* new batch, so start it off false */
 	if (hjstate->hj_OuterMatchStatusesFile != NULL)
 		BufFileClose(hjstate->hj_OuterMatchStatusesFile);
 	hjstate->hj_OuterMatchStatusesFile = NULL;
@@ -1660,10 +1668,10 @@ ExecHashJoinLoadInnerBatch(HashJoinState *hjstate)
 			/* after we got the tuple, figure out what the offset is */
 			BufFileTell(innerFile, &current_fileno, &tup_end_offset);
 			current_saved_size = tup_end_offset - chunk_start_offset;
-			if (current_saved_size > work_mem)
+			/* could enable fallback here if too many times we violate work_mem */
+			if (current_saved_size > work_mem && hashtable->hashloop_fallback && hashtable->hashloop_fallback[curbatch] == true)
 			{
 				hjstate->hj_InnerPageOffset = tup_start_offset;
-				hjstate->hashloop_fallback = true;
 				return true;
 			}
 			hjstate->hj_InnerPageOffset = tup_end_offset;
