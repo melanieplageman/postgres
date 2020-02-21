@@ -349,6 +349,13 @@ ExecHashJoin(PlanState *pstate)
 				node->hj_CurSkewBucketNo = ExecHashGetSkewBucket(hashtable,
 																 hashvalue);
 				node->hj_CurTuple = NULL;
+				int curval = DatumGetInt32(outerTupleSlot->tts_values[0]);
+				if (curval == 85)
+					elog(NOTICE, "outer 85's batch is %i", batchno);
+				else if (curval == 40)
+					elog(NOTICE, "outer 40's batch is %i", batchno);
+				else if (curval == 34)
+					elog(NOTICE, "outer 34's batch is %i", batchno);
 
 				/*
 				 * for the hashloop fallback case, only initialize
@@ -571,7 +578,7 @@ ExecHashJoin(PlanState *pstate)
 				{
 					for (int i = 0; i < hashtable->nbatch; i++)
 					{
-						if (hashtable->hashloop_fallback[i])
+						if (hashtable->hashloop_fallback && hashtable->hashloop_fallback[i] == true)
 							elog(NOTICE, "batch %i fell back.", i);
 					}
 					return NULL;

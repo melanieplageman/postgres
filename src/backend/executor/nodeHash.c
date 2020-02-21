@@ -576,7 +576,7 @@ ExecHashTableCreate(HashState *state, List *hashOperators, List *hashCollations,
 		hashtable->outgoing_tuples = (int **)
 			palloc0(nbatch * sizeof(int *));
 		for (int j = 0; j < nbatch; j++)
-			hashtable->outgoing_tuples[j] = palloc0(nbatch * sizeof(int));
+			hashtable->outgoing_tuples[j] = palloc0(3 * sizeof(int));
 
 		hashtable->hashloop_fallback = (bool *)
 			palloc0(nbatch * sizeof(bool));
@@ -934,7 +934,7 @@ ExecHashIncreaseNumBatches(HashJoinTable hashtable)
 			palloc0(nbatch * sizeof(int *));
 		for (int i = 0; i < nbatch; i++)
 			hashtable->outgoing_tuples[i] = (int *)
-				palloc0(nbatch * sizeof(int));
+				palloc0(3 * sizeof(int));
 
 		hashtable->hashloop_fallback = (bool *)
 			palloc0(nbatch * sizeof(bool));
@@ -959,12 +959,12 @@ ExecHashIncreaseNumBatches(HashJoinTable hashtable)
 		for (int i = 0; i < oldnbatch; i++)
 		{
 			hashtable->outgoing_tuples[i] = (int *)
-				repalloc(hashtable->outgoing_tuples[i], nbatch * sizeof(int));
+				repalloc(hashtable->outgoing_tuples[i], 3 * sizeof(int));
 		}
 		for (int i = oldnbatch; i < nbatch; i++)
 		{
 			hashtable->outgoing_tuples[i] = (int *)
-				palloc0(nbatch * sizeof(int));
+				palloc0(3 * sizeof(int));
 		}
 
 		hashtable->hashloop_fallback = (bool *)
@@ -1002,6 +1002,10 @@ ExecHashIncreaseNumBatches(HashJoinTable hashtable)
 					 sizeof(HashJoinTuple) * hashtable->nbuckets);
 	}
 
+	// need to AND it with a bitmask that has log2_nbuckets bits set and
+	// all other bits unset (using 1's complement 0 and ^ ?)
+	int child_batch = ((1U << hashtable->log2_nbuckets) | curbatch);
+
 	/*
 	 * We will scan through the chunks directly, so that we can reset the
 	 * buckets now and not have to keep track which tuples in the buckets have
@@ -1032,7 +1036,17 @@ ExecHashIncreaseNumBatches(HashJoinTable hashtable)
 			ninmemory++;
 			ExecHashGetBucketAndBatch(hashtable, hashTuple->hashvalue,
 									  &bucketno, &batchno);
-			hashtable->outgoing_tuples[curbatch][batchno]++;
+
+			elog(NOTICE, "curbatch: %i. child_batch: %i. batchno: %i. ", curbatch, child_batch, batchno);
+			/* self */
+			if (batchno == curbatch)
+				hashtable->outgoing_tuples[curbatch][0]++;
+			/* the child of the batch causing the split */
+			else if (batchno == child_batch)
+				hashtable->outgoing_tuples[curbatch][1]++;
+			/* other */
+			else
+				hashtable->outgoing_tuples[curbatch][2]++;
 
 			if (batchno == curbatch)
 			{
@@ -1091,18 +1105,33 @@ ExecHashIncreaseNumBatches(HashJoinTable hashtable)
 			   hashtable);
 #endif
 	}
-	/* Is this the right place to reset all the counts? */
-	for(int i = 0; i < nbatch; i++)
+	float ninmemory_float = ninmemory;
+	int self_tuples = hashtable->outgoing_tuples[curbatch][0];
+	float self_float = self_tuples;
+	double self_percent = self_float / ninmemory_float;
+	int child_tuples = hashtable->outgoing_tuples[curbatch][1];
+	float child_float = child_tuples;
+	double child_percent = child_float / ninmemory_float;
+	int other_tuples = hashtable->outgoing_tuples[curbatch][2];
+	float other_float = other_tuples;
+	double other_percent = other_float / ninmemory_float;
+
+	//hashtable->outgoing_tuples[curbatch][0] / (float) ninmemory;
+
+	elog(NOTICE, "batch %i caused split. self_percent %f. self tuples %i. child_percent %f. child tuples %i. other_percent %f. other tuples %i. ninmemory %li. log2_nbuckets is %i.",
+		curbatch, self_percent, self_tuples, child_percent, child_tuples, other_percent, other_tuples, ninmemory, hashtable->log2_nbuckets);
+	if (self_percent >= 0.8)
+		hashtable->hashloop_fallback[curbatch] = true;
+	else if (child_percent >= 0.8)
+		hashtable->hashloop_fallback[child_batch] = true;
+	else if (other_percent >= 0.8)
+		elog(NOTICE, "other batches received more than 80 percent of tuples");
+	for (int i = 0; i < nbatch; i++)
 	{
-		double percent = hashtable->outgoing_tuples[curbatch][i] / ninmemory;
-		if (percent >= 0.8)
-		{
-			hashtable->hashloop_fallback[i] = true;
-			elog(NOTICE, "fallback is true for batch %i when nbatch is %i. and batch %i just caused split.", i, nbatch, curbatch);
-			for (int j = 0; j < nbatch; j++)
-				hashtable->outgoing_tuples[i][j] = 0;
-			break;
-		}
+		hashtable->outgoing_tuples[i][0] = 0;
+		hashtable->outgoing_tuples[i][1] = 0;
+		hashtable->outgoing_tuples[i][2] = 0;
+
 	}
 }
 
