@@ -1037,7 +1037,7 @@ ExecHashIncreaseNumBatches(HashJoinTable hashtable)
 			ExecHashGetBucketAndBatch(hashtable, hashTuple->hashvalue,
 									  &bucketno, &batchno);
 
-			elog(NOTICE, "curbatch: %i. child_batch: %i. batchno: %i. ", curbatch, child_batch, batchno);
+			//elog(NOTICE, "curbatch: %i. child_batch: %i. batchno: %i. ", curbatch, child_batch, batchno);
 			/* self */
 			if (batchno == curbatch)
 				hashtable->outgoing_tuples[curbatch][0]++;
@@ -1118,14 +1118,14 @@ ExecHashIncreaseNumBatches(HashJoinTable hashtable)
 
 	//hashtable->outgoing_tuples[curbatch][0] / (float) ninmemory;
 
-	elog(NOTICE, "batch %i caused split. self_percent %f. self tuples %i. child_percent %f. child tuples %i. other_percent %f. other tuples %i. ninmemory %li. log2_nbuckets is %i.",
-		curbatch, self_percent, self_tuples, child_percent, child_tuples, other_percent, other_tuples, ninmemory, hashtable->log2_nbuckets);
+//	elog(NOTICE, "batch %i caused split. self_percent %f. self tuples %i. child_percent %f. child tuples %i. other_percent %f. other tuples %i. ninmemory %li. log2_nbuckets is %i.",
+//		curbatch, self_percent, self_tuples, child_percent, child_tuples, other_percent, other_tuples, ninmemory, hashtable->log2_nbuckets);
 	if (self_percent >= 0.8)
 		hashtable->hashloop_fallback[curbatch] = true;
 	else if (child_percent >= 0.8)
 		hashtable->hashloop_fallback[child_batch] = true;
-	else if (other_percent >= 0.8)
-		elog(NOTICE, "other batches received more than 80 percent of tuples");
+//	else if (other_percent >= 0.8)
+//		elog(NOTICE, "other batches received more than 80 percent of tuples");
 	for (int i = 0; i < nbatch; i++)
 	{
 		hashtable->outgoing_tuples[i][0] = 0;

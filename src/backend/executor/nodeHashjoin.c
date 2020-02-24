@@ -349,13 +349,13 @@ ExecHashJoin(PlanState *pstate)
 				node->hj_CurSkewBucketNo = ExecHashGetSkewBucket(hashtable,
 																 hashvalue);
 				node->hj_CurTuple = NULL;
-				int curval = DatumGetInt32(outerTupleSlot->tts_values[0]);
-				if (curval == 85)
-					elog(NOTICE, "outer 85's batch is %i", batchno);
-				else if (curval == 40)
-					elog(NOTICE, "outer 40's batch is %i", batchno);
-				else if (curval == 34)
-					elog(NOTICE, "outer 34's batch is %i", batchno);
+//				int curval = DatumGetInt32(outerTupleSlot->tts_values[0]);
+//				if (curval == 85)
+//					elog(NOTICE, "outer 85's batch is %i", batchno);
+//				else if (curval == 40)
+//					elog(NOTICE, "outer 40's batch is %i", batchno);
+//				else if (curval == 34)
+//					elog(NOTICE, "outer 34's batch is %i", batchno);
 
 				/*
 				 * for the hashloop fallback case, only initialize
@@ -519,6 +519,9 @@ ExecHashJoin(PlanState *pstate)
 					BufFileWrite(node->hj_OuterMatchStatusesFile, &node->hj_OuterCurrentByte, 1);
 				}
 
+//				int outerval = DatumGetInt32(node->hj_OuterTupleSlot->tts_values[0]);
+//				if (outerval == 34 || outerval == 40 || outerval == 85)
+//					elog(NOTICE, "emitting matched tuple value %i. curbatch %i.", outerval, node->hj_HashTable->curbatch);
 				if (otherqual == NULL || ExecQual(otherqual, econtext))
 					return ExecProject(node->js.ps.ps_ProjInfo);
 				InstrCountFiltered2(node, 1);
@@ -1676,7 +1679,7 @@ ExecHashJoinLoadInnerBatch(HashJoinState *hjstate)
 			BufFileTell(innerFile, &current_fileno, &tup_end_offset);
 			current_saved_size = tup_end_offset - chunk_start_offset;
 			/* could enable fallback here if too many times we violate work_mem */
-			if (current_saved_size > work_mem && hashtable->hashloop_fallback && hashtable->hashloop_fallback[curbatch] == true)
+			if (hashtable->spaceUsed > hashtable->spaceAllowed && hashtable->hashloop_fallback && hashtable->hashloop_fallback[curbatch])
 			{
 				hjstate->hj_InnerPageOffset = tup_start_offset;
 				return true;
