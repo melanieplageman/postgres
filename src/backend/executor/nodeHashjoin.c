@@ -519,9 +519,9 @@ ExecHashJoin(PlanState *pstate)
 					BufFileWrite(node->hj_OuterMatchStatusesFile, &node->hj_OuterCurrentByte, 1);
 				}
 
-//				int outerval = DatumGetInt32(node->hj_OuterTupleSlot->tts_values[0]);
-//				if (outerval == 34 || outerval == 40 || outerval == 85)
-//					elog(NOTICE, "emitting matched tuple value %i. curbatch %i.", outerval, node->hj_HashTable->curbatch);
+				int outerval = DatumGetInt32(node->hj_OuterTupleSlot->tts_values[0]);
+				if (outerval == 34 || outerval == 40 || outerval == 85)
+					elog(NOTICE, "emitting matched tuple value %i. curbatch %i.", outerval, node->hj_HashTable->curbatch);
 				if (otherqual == NULL || ExecQual(otherqual, econtext))
 					return ExecProject(node->js.ps.ps_ProjInfo);
 				InstrCountFiltered2(node, 1);
@@ -1678,8 +1678,11 @@ ExecHashJoinLoadInnerBatch(HashJoinState *hjstate)
 			/* after we got the tuple, figure out what the offset is */
 			BufFileTell(innerFile, &current_fileno, &tup_end_offset);
 			current_saved_size = tup_end_offset - chunk_start_offset;
-			/* could enable fallback here if too many times we violate work_mem */
-			if (hashtable->spaceUsed > hashtable->spaceAllowed && hashtable->hashloop_fallback && hashtable->hashloop_fallback[curbatch])
+			/* TODO: could enable fallback here if too many times we violate work_mem */
+			int space_really_used = hashtable->spaceUsed +
+				hashtable->nbuckets_optimal * sizeof(HashJoinTuple);
+			if (space_really_used > hashtable->spaceAllowed &&
+				hashtable->hashloop_fallback && hashtable->hashloop_fallback[curbatch])
 			{
 				hjstate->hj_InnerPageOffset = tup_start_offset;
 				return true;

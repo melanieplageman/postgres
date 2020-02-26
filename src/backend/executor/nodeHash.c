@@ -908,7 +908,12 @@ ExecHashIncreaseNumBatches(HashJoinTable hashtable)
 	if (!hashtable->growEnabled)
 		return;
 	if (hashtable->hashloop_fallback && hashtable->hashloop_fallback[curbatch])
+	{
+		if (curbatch == 59)
+			elog(NOTICE, "batch 59 wants to increase nbatches");
 		return;
+
+	}
 
 	/* safety check to avoid overflow */
 	if (oldnbatch > Min(INT_MAX / 2, MaxAllocSize / (sizeof(void *) * 2)))
@@ -1064,6 +1069,10 @@ ExecHashIncreaseNumBatches(HashJoinTable hashtable)
 			{
 				/* dump it out */
 				Assert(batchno > curbatch);
+				if (batchno == 59)
+				{
+					elog(NOTICE, "ExecHashIncreaseNumBatches:  batchno 59");
+				}
 				ExecHashJoinSaveTuple(HJTUPLE_MINTUPLE(hashTuple),
 									  hashTuple->hashvalue,
 									  &hashtable->innerBatchFile[batchno]);
@@ -1118,8 +1127,8 @@ ExecHashIncreaseNumBatches(HashJoinTable hashtable)
 
 	//hashtable->outgoing_tuples[curbatch][0] / (float) ninmemory;
 
-//	elog(NOTICE, "batch %i caused split. self_percent %f. self tuples %i. child_percent %f. child tuples %i. other_percent %f. other tuples %i. ninmemory %li. log2_nbuckets is %i.",
-//		curbatch, self_percent, self_tuples, child_percent, child_tuples, other_percent, other_tuples, ninmemory, hashtable->log2_nbuckets);
+	elog(NOTICE, "batch %i caused split. self_percent %f. self tuples %i. child_percent %f. child tuples %i. other_percent %f. other tuples %i. ninmemory %li. log2_nbuckets is %i.",
+		curbatch, self_percent, self_tuples, child_percent, child_tuples, other_percent, other_tuples, ninmemory, hashtable->log2_nbuckets);
 	if (self_percent >= 0.8)
 		hashtable->hashloop_fallback[curbatch] = true;
 	else if (child_percent >= 0.8)
@@ -1829,6 +1838,10 @@ ExecHashTableInsert(HashJoinTable hashtable,
 		/*
 		 * put the tuple into a temp file for later batches
 		 */
+		if (batchno == 59)
+		{
+			elog(NOTICE, "ExecHashTableInsert: batchno 59");
+		}
 		Assert(batchno > hashtable->curbatch);
 		ExecHashJoinSaveTuple(tuple,
 							  hashvalue,
