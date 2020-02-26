@@ -3780,8 +3780,17 @@ pgstat_get_wait_ipc(WaitEventIPC w)
 		case WAIT_EVENT_HASH_BATCH_ELECTING:
 			event_name = "Hash/Batch/Electing";
 			break;
-		case WAIT_EVENT_HASH_BATCH_LOADING:
-			event_name = "Hash/Batch/Loading";
+		case WAIT_EVENT_HASH_STRIPE_ELECTING:
+			event_name = "Hash/Stripe/Electing";
+			break;
+		case WAIT_EVENT_HASH_STRIPE_RESETTING:
+			event_name = "Hash/Stripe/RESETTING";
+			break;
+		case WAIT_EVENT_HASH_STRIPE_LOADING:
+			event_name = "Hash/Stripe/Loading";
+			break;
+		case WAIT_EVENT_HASH_STRIPE_PROBING:
+			event_name = "Hash/Stripe/Probing";
 			break;
 		case WAIT_EVENT_HASH_BUILD_ALLOCATING:
 			event_name = "Hash/Build/Allocating";
