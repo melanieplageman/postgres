@@ -97,6 +97,7 @@
 #include "utils/tzparser.h"
 #include "utils/varlena.h"
 #include "utils/xml.h"
+#include "executor/nodeHashjoin.h"
 
 #ifndef PG_KRB_SRVTAB
 #define PG_KRB_SRVTAB ""
@@ -220,6 +221,7 @@ static bool check_recovery_target_lsn(char **newval, void **extra, GucSource sou
 static void assign_recovery_target_lsn(const char *newval, void *extra);
 static bool check_primary_slot_name(char **newval, void **extra, GucSource source);
 static bool check_default_with_oids(bool *newval, void **extra, GucSource source);
+static bool check_fixed_batch_size(int *newval, void **extra, GucSource source);
 
 /* Private functions in guc-file.l that need to be called from guc.c */
 static ConfigVariable *ProcessConfigFileInternal(GucContext context,
@@ -570,6 +572,7 @@ int			tcp_keepalives_idle;
 int			tcp_keepalives_interval;
 int			tcp_keepalives_count;
 int			tcp_user_timeout;
+int			fixed_batch_size;
 
 /*
  * SSL renegotiation was been removed in PostgreSQL 9.5, but we tolerate it
@@ -2050,6 +2053,15 @@ static struct config_bool ConfigureNamesBool[] =
 		NULL, NULL, NULL
 	},
 
+	{
+		{"debug_adaptive_hj", PGC_USERSET, DEVELOPER_OPTIONS,
+			gettext_noop("Turns on debugging for adapative hashjoin"),
+		},
+		&debug_adaptive_hj,
+		false,
+		NULL, NULL, NULL
+	},
+
 	/* End-of-list marker */
 	{
 		{NULL, 0, 0, NULL, NULL}, NULL, false, NULL, NULL, NULL
@@ -3364,6 +3376,15 @@ static struct config_int ConfigureNamesInt[] =
 		&tcp_user_timeout,
 		0, 0, INT_MAX,
 		NULL, assign_tcp_user_timeout, show_tcp_user_timeout
+	},
+
+	{
+		{"fixed_batch_size", PGC_USERSET, CLIENT_CONN_OTHER,
+			gettext_noop("Sets a fixed batch size during hash join.")
+		},
+		&fixed_batch_size,
+		0, 0, INT_MAX,
+		check_fixed_batch_size, NULL, NULL
 	},
 
 	/* End-of-list marker */
@@ -11978,6 +11999,20 @@ check_default_with_oids(bool *newval, void **extra, GucSource source)
 		/* check the GUC's definition for an explanation */
 		GUC_check_errcode(ERRCODE_FEATURE_NOT_SUPPORTED);
 		GUC_check_errmsg("tables declared WITH OIDS are not supported");
+
+		return false;
+	}
+
+	return true;
+}
+
+static bool
+check_fixed_batch_size(int *newval, void **extra, GucSource source)
+{
+	if (*newval != 0 && (*newval & (*newval - 1)) != 0)
+	{
+		/* check the GUC's definition for an explanation */
+		GUC_check_errmsg("batch size must be a power of 2");
 
 		return false;
 	}

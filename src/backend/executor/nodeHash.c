@@ -39,6 +39,7 @@
 #include "port/atomics.h"
 #include "port/pg_bitutils.h"
 #include "utils/dynahash.h"
+#include "utils/guc.h"
 #include "utils/lsyscache.h"
 #include "utils/memutils.h"
 #include "utils/syscache.h"
@@ -80,6 +81,7 @@ static bool ExecParallelHashTuplePrealloc(HashJoinTable hashtable,
 static void ExecParallelHashMergeCounters(HashJoinTable hashtable);
 static void ExecParallelHashCloseBatchAccessors(HashJoinTable hashtable);
 
+bool debug_adaptive_hj = false;
 
 /* ----------------------------------------------------------------
  *		ExecHash
@@ -495,12 +497,13 @@ ExecHashTableCreate(HashState *state, List *hashOperators, List *hashCollations,
 	hashtable->curbatch = 0;
 	hashtable->nbatch_original = nbatch;
 	hashtable->nbatch_outstart = nbatch;
-	hashtable->growEnabled = true;
 	hashtable->totalTuples = 0;
 	hashtable->partialTuples = 0;
 	hashtable->skewTuples = 0;
 	hashtable->innerBatchFile = NULL;
 	hashtable->outerBatchFile = NULL;
+	hashtable->hashloop_fallback = NULL;
+	hashtable->fallback_batches_stats = NULL;
 	hashtable->spaceUsed = 0;
 	hashtable->spacePeak = 0;
 	hashtable->spaceAllowed = space_allowed;
@@ -571,6 +574,8 @@ ExecHashTableCreate(HashState *state, List *hashOperators, List *hashCollations,
 		hashtable->innerBatchFile = (BufFile **)
 			palloc0(nbatch * sizeof(BufFile *));
 		hashtable->outerBatchFile = (BufFile **)
+			palloc0(nbatch * sizeof(BufFile *));
+		hashtable->hashloop_fallback = (BufFile **)
 			palloc0(nbatch * sizeof(BufFile *));
 		/* The files will not be opened until needed... */
 		/* ... but make sure we have temp tablespaces established for them */
@@ -868,6 +873,8 @@ ExecHashTableDestroy(HashJoinTable hashtable)
 				BufFileClose(hashtable->innerBatchFile[i]);
 			if (hashtable->outerBatchFile[i])
 				BufFileClose(hashtable->outerBatchFile[i]);
+			if (hashtable->hashloop_fallback[i])
+				BufFileClose(hashtable->hashloop_fallback[i]);
 		}
 	}
 
@@ -888,14 +895,20 @@ ExecHashIncreaseNumBatches(HashJoinTable hashtable)
 {
 	int			oldnbatch = hashtable->nbatch;
 	int			curbatch = hashtable->curbatch;
+	int			childbatch;
 	int			nbatch;
 	MemoryContext oldcxt;
 	long		ninmemory;
 	long		nfreed;
 	HashMemoryChunk oldchunks;
+	int			curbatch_outgoing_tuples;
+	int			childbatch_outgoing_tuples;
+	float		curbatch_frac;
+	float		childbatch_frac;
+	int			target_batch;
+	FallbackBatchStats *fallback_batch_stats;
 
-	/* do nothing if we've decided to shut off growth */
-	if (!hashtable->growEnabled)
+	if (hashtable->hashloop_fallback && hashtable->hashloop_fallback[curbatch])
 		return;
 
 	/* safety check to avoid overflow */
@@ -919,6 +932,13 @@ ExecHashIncreaseNumBatches(HashJoinTable hashtable)
 			palloc0(nbatch * sizeof(BufFile *));
 		hashtable->outerBatchFile = (BufFile **)
 			palloc0(nbatch * sizeof(BufFile *));
+
+		/*
+		 * TODO: is this definitely the right place to make these (when
+		 * innerBatchFile is NULL ?
+		 */
+		hashtable->hashloop_fallback = (BufFile **)
+			palloc0(nbatch * sizeof(BufFile *));
 		/* time to establish the temp tablespaces, too */
 		PrepareTempTablespaces();
 	}
@@ -929,9 +949,13 @@ ExecHashIncreaseNumBatches(HashJoinTable hashtable)
 			repalloc(hashtable->innerBatchFile, nbatch * sizeof(BufFile *));
 		hashtable->outerBatchFile = (BufFile **)
 			repalloc(hashtable->outerBatchFile, nbatch * sizeof(BufFile *));
+		hashtable->hashloop_fallback = (BufFile **)
+			repalloc(hashtable->hashloop_fallback, nbatch * sizeof(BufFile *));
 		MemSet(hashtable->innerBatchFile + oldnbatch, 0,
 			   (nbatch - oldnbatch) * sizeof(BufFile *));
 		MemSet(hashtable->outerBatchFile + oldnbatch, 0,
+			   (nbatch - oldnbatch) * sizeof(BufFile *));
+		MemSet(hashtable->hashloop_fallback + oldnbatch, 0,
 			   (nbatch - oldnbatch) * sizeof(BufFile *));
 	}
 
@@ -944,6 +968,8 @@ ExecHashIncreaseNumBatches(HashJoinTable hashtable)
 	 * no longer of the current batch.
 	 */
 	ninmemory = nfreed = 0;
+	curbatch_outgoing_tuples = childbatch_outgoing_tuples = 0;
+	childbatch = 0;
 
 	/* If know we need to resize nbuckets, we can do it while rebatching. */
 	if (hashtable->nbuckets_optimal != hashtable->nbuckets)
@@ -1001,6 +1027,7 @@ ExecHashIncreaseNumBatches(HashJoinTable hashtable)
 				/* and add it back to the appropriate bucket */
 				copyTuple->next.unshared = hashtable->buckets.unshared[bucketno];
 				hashtable->buckets.unshared[bucketno] = copyTuple;
+				curbatch_outgoing_tuples++;
 			}
 			else
 			{
@@ -1012,6 +1039,14 @@ ExecHashIncreaseNumBatches(HashJoinTable hashtable)
 
 				hashtable->spaceUsed -= hashTupleSize;
 				nfreed++;
+
+				/*
+				 * TODO: a tuple could go to more than one batch -- not just
+				 * the child need to account for that and do the math to
+				 * figure out the child
+				 */
+				childbatch = batchno;
+				childbatch_outgoing_tuples++;
 			}
 
 			/* next tuple in this chunk */
@@ -1032,21 +1067,34 @@ ExecHashIncreaseNumBatches(HashJoinTable hashtable)
 #endif
 
 	/*
-	 * If we dumped out either all or none of the tuples in the table, disable
-	 * further expansion of nbatch.  This situation implies that we have
-	 * enough tuples of identical hashvalues to overflow spaceAllowed.
-	 * Increasing nbatch will not fix it since there's no way to subdivide the
-	 * group any more finely. We have to just gut it out and hope the server
-	 * has enough RAM.
+	 * The same batch should not be marked to fall back more than once
 	 */
-	if (nfreed == 0 || nfreed == ninmemory)
+	childbatch_frac = childbatch_outgoing_tuples / (float) ninmemory;
+	curbatch_frac = curbatch_outgoing_tuples / (float) ninmemory;
+
+	/*
+	 * TODO: initialize the outer match status files to have the correct
+	 * number of bytes
+	 */
+	if (debug_adaptive_hj)
 	{
-		hashtable->growEnabled = false;
-#ifdef HJDEBUG
-		printf("Hashjoin %p: disabling further increase of nbatch\n",
-			   hashtable);
-#endif
+		if (childbatch_frac >= 0.8)
+			printf("childbatch %i targeted to fallback.", childbatch);
+		if (curbatch_frac >= 0.8)
+			printf("curbatch %i targeted to fallback.", curbatch);
 	}
+	if (childbatch_frac >= 0.8 && childbatch > 0)
+		target_batch = childbatch;
+	else if (curbatch_frac >= 0.8)
+		target_batch = curbatch;
+	else
+		return;
+	hashtable->hashloop_fallback[target_batch] = BufFileCreateTemp(false);
+
+	fallback_batch_stats = palloc0(sizeof(FallbackBatchStats));
+	fallback_batch_stats->batchno = target_batch;
+	fallback_batch_stats->numstripes = 0;
+	hashtable->fallback_batches_stats = lappend(hashtable->fallback_batches_stats, fallback_batch_stats);
 }
 
 /*
@@ -2671,6 +2719,7 @@ ExecHashGetInstrumentation(HashInstrumentation *instrument,
 	instrument->nbatch = hashtable->nbatch;
 	instrument->nbatch_original = hashtable->nbatch_original;
 	instrument->space_peak = hashtable->spacePeak;
+	instrument->fallback_batches_stats = hashtable->fallback_batches_stats;
 }
 
 /*

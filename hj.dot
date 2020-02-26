@@ -1,0 +1,19 @@
+digraph {
+  HJ_BUILD_HASHTABLE -> HJ_NEED_NEW_OUTER[label="load inner tuples"];
+  HJ_NEED_NEW_OUTER -> HJ_FILL_INNER_TUPLES[label="exhausted outer tuple"];
+  HJ_NEED_NEW_OUTER -> HJ_NEED_NEW_STRIPE[label="end of stripe"];
+  HJ_NEED_NEW_OUTER -> HJ_NEED_NEW_OUTER[label="displaced outer tuple"];
+  HJ_NEED_NEW_OUTER -> HJ_SCAN_BUCKET[label="found outer tuple"];
+  HJ_SCAN_BUCKET -> HJ_FILL_OUTER_TUPLE[label="no fallback, no match"];
+  HJ_SCAN_BUCKET -> HJ_NEED_NEW_OUTER[label="fallback, no match"];
+  HJ_SCAN_BUCKET -> HJ_SCAN_BUCKET[label="match disqualified"];
+  HJ_SCAN_BUCKET -> emit[label="match qualified"];
+  HJ_FILL_OUTER_TUPLE -> HJ_NEED_NEW_OUTER[label="outer tuple out of matches"];
+  HJ_FILL_INNER_TUPLES -> HJ_NEED_NEW_STRIPE[label="finished unmatched tuples"];
+  HJ_FILL_INNER_TUPLES -> HJ_FILL_INNER_TUPLES[label="unmatched tuples"];
+  HJ_NEED_NEW_STRIPE -> HJ_NEED_NEW_OUTER[label="load inner stripe"];
+  HJ_NEED_NEW_STRIPE -> HJ_EMIT_UNMATCHED_OUTER_TUPLES[label="exhausted inner stripe"];
+  HJ_NEED_NEW_STRIPE -> exit[label="no more batches"];
+  HJ_EMIT_UNMATCHED_OUTER_TUPLES -> HJ_NEED_NEW_OUTER[label="load inner stripe"];
+  HJ_EMIT_UNMATCHED_OUTER_TUPLES -> exit[label="no more batches"];
+}

@@ -14,6 +14,7 @@
 #define INSTRUMENT_H
 
 #include "portability/instr_time.h"
+#include "nodes/pg_list.h"
 
 
 typedef struct BufferUsage
@@ -31,6 +32,12 @@ typedef struct BufferUsage
 	instr_time	blk_read_time;	/* time spent reading */
 	instr_time	blk_write_time; /* time spent writing */
 } BufferUsage;
+
+typedef struct FallbackBatchStats
+{
+	int			batchno;
+	int			numstripes;
+} FallbackBatchStats;
 
 /* Flag bits included in InstrAlloc's instrument_options bitmask */
 typedef enum InstrumentOption

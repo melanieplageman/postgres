@@ -31,4 +31,6 @@ extern void ExecHashJoinInitializeWorker(HashJoinState *state,
 extern void ExecHashJoinSaveTuple(MinimalTuple tuple, uint32 hashvalue,
 								  BufFile **fileptr);
 
+extern bool debug_adaptive_hj;
+
 #endif							/* NODEHASHJOIN_H */

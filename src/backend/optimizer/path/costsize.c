@@ -92,6 +92,7 @@
 #include "optimizer/planmain.h"
 #include "optimizer/restrictinfo.h"
 #include "parser/parsetree.h"
+#include "utils/guc.h"
 #include "utils/lsyscache.h"
 #include "utils/selfuncs.h"
 #include "utils/spccache.h"
@@ -3384,6 +3385,9 @@ initial_cost_hashjoin(PlannerInfo *root, JoinCostWorkspace *workspace,
 							&numbuckets,
 							&numbatches,
 							&num_skew_mcvs);
+
+	if (fixed_batch_size != 0)
+		numbatches = fixed_batch_size;
 
 	/*
 	 * If inner relation is too big then we will need to "batch" the join,

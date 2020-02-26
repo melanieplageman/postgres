@@ -313,8 +313,6 @@ typedef struct HashJoinTableData
 	int			nbatch_original;	/* nbatch when we started inner scan */
 	int			nbatch_outstart;	/* nbatch when we started outer scan */
 
-	bool		growEnabled;	/* flag to shut off nbatch increases */
-
 	double		totalTuples;	/* # tuples obtained from inner plan */
 	double		partialTuples;	/* # tuples obtained from inner plan by me */
 	double		skewTuples;		/* # tuples inserted into skew tuples */
@@ -328,6 +326,8 @@ typedef struct HashJoinTableData
 	 */
 	BufFile   **innerBatchFile; /* buffered virtual temp file per batch */
 	BufFile   **outerBatchFile; /* buffered virtual temp file per batch */
+	BufFile   **hashloop_fallback;	/* outer match status files if fall back */
+	List	   *fallback_batches_stats; /* per hashjoin batch statistics */
 
 	/*
 	 * Info about the datatype-specific hash functions for the datatypes being

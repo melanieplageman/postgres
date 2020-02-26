@@ -538,3 +538,100 @@ WHERE
     AND hjtest_1.a <> hjtest_2.b;
 
 ROLLBACK;
+
+-- Serial Adaptive Hash Join
+
+CREATE TYPE stub AS (hash INTEGER, value CHAR(8098));
+
+--SET fixed_batch_size TO 4;
+CREATE FUNCTION stub_hash(item stub)
+RETURNS INTEGER AS $$
+DECLARE
+  batch_size INTEGER;
+BEGIN
+  batch_size := 4;
+  --batch_size := current_setting('fixed_batch_size');
+  RETURN item.hash << (batch_size - 1);
+END; $$ LANGUAGE plpgsql IMMUTABLE LEAKPROOF STRICT PARALLEL SAFE;
+
+CREATE FUNCTION stub_eq(item1 stub, item2 stub)
+RETURNS BOOLEAN AS $$
+BEGIN
+  RETURN item1.hash = item2.hash AND item1.value = item2.value;
+END; $$ LANGUAGE plpgsql IMMUTABLE LEAKPROOF STRICT PARALLEL SAFE;
+
+CREATE OPERATOR = (
+  FUNCTION = stub_eq,
+  LEFTARG = stub,
+  RIGHTARG = stub,
+  COMMUTATOR = =,
+  HASHES, MERGES
+);
+
+CREATE OPERATOR CLASS stub_hash_ops
+DEFAULT FOR TYPE stub USING hash AS
+  OPERATOR 1 =(stub, stub),
+  FUNCTION 1 stub_hash(stub);
+
+CREATE TABLE probeside(a stub);
+ALTER TABLE probeside ALTER COLUMN a SET STORAGE PLAIN;
+-- non-fallback batch with unmatched outer tuple
+INSERT INTO probeside SELECT '(2, "")' FROM generate_series(1, 1);
+-- fallback batch unmatched outer tuple (in first stripe maybe)
+INSERT INTO probeside SELECT '(1, "unmatched outer tuple")' FROM generate_series(1, 1);
+-- fallback batch matched outer tuple
+INSERT INTO probeside SELECT '(1, "")' FROM generate_series(1, 5);
+-- fallback batch unmatched outer tuple (in last stripe maybe)
+-- When numbatches=4, hash 5 maps to batch 1, but after numbatches doubles to
+-- 8 batches hash 5 maps to batch 5.
+INSERT INTO probeside SELECT '(5, "")' FROM generate_series(1, 1);
+-- non-fallback batch matched outer tuple
+INSERT INTO probeside SELECT '(3, "")' FROM generate_series(1, 1);
+-- batch with 3 stripes where non-first/non-last stripe contains unmatched outer tuple
+INSERT INTO probeside SELECT '(6, "")' FROM generate_series(1, 5);
+INSERT INTO probeside SELECT '(6, "unmatched outer tuple")' FROM generate_series(1, 1);
+INSERT INTO probeside SELECT '(6, "")' FROM generate_series(1, 1);
+
+CREATE TABLE hashside_wide(a stub, id int);
+ALTER TABLE hashside_wide ALTER COLUMN a SET STORAGE PLAIN;
+-- falls back with an unmatched inner tuple that is in fist, middle, and last
+-- stripe
+INSERT INTO hashside_wide SELECT '(1, "unmatched inner tuple in first stripe")', 1 FROM generate_series(1, 1);
+INSERT INTO hashside_wide SELECT '(1, "")', 1 FROM generate_series(1, 9);
+INSERT INTO hashside_wide SELECT '(1, "unmatched inner tuple in middle stripe")', 1 FROM generate_series(1, 1);
+INSERT INTO hashside_wide SELECT '(1, "")', 1 FROM generate_series(1, 9);
+INSERT INTO hashside_wide SELECT '(1, "unmatched inner tuple in last stripe")', 1 FROM generate_series(1, 1);
+
+-- doesn't fall back -- matched tuple
+INSERT INTO hashside_wide SELECT '(3, "")', 3 FROM generate_series(1, 1);
+INSERT INTO hashside_wide SELECT '(6, "")', 6 FROM generate_series(1, 20);
+
+ANALYZE probeside, hashside_wide;
+
+SET enable_nestloop TO off;
+SET enable_mergejoin TO off;
+SET work_mem = 64;
+
+SELECT (probeside.a).hash, TRIM((probeside.a).value), hashside_wide.id, (hashside_wide.a).hash, TRIM((hashside_wide.a).value)
+FROM probeside
+LEFT OUTER JOIN hashside_wide USING (a)
+ORDER BY 1, 2;
+
+EXPLAIN (ANALYZE, summary off, timing off, costs off, usage off) SELECT * FROM probeside
+LEFT OUTER JOIN hashside_wide USING (a);
+
+SELECT (probeside.a).hash, TRIM((probeside.a).value), hashside_wide.id, (hashside_wide.a).hash, TRIM((hashside_wide.a).value)
+FROM probeside
+RIGHT OUTER JOIN hashside_wide USING (a)
+ORDER BY 1, 2;
+
+EXPLAIN (ANALYZE, summary off, timing off, costs off, usage off) SELECT * FROM probeside
+RIGHT OUTER JOIN hashside_wide USING (a);
+
+SELECT (probeside.a).hash, TRIM((probeside.a).value), hashside_wide.id, (hashside_wide.a).hash, TRIM((hashside_wide.a).value)
+FROM probeside
+FULL OUTER JOIN hashside_wide USING (a)
+ORDER BY 1, 2;
+
+EXPLAIN (ANALYZE, summary off, timing off, costs off, usage off) SELECT * FROM probeside
+FULL OUTER JOIN hashside_wide USING (a);

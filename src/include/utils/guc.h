@@ -277,6 +277,7 @@ extern int	tcp_keepalives_idle;
 extern int	tcp_keepalives_interval;
 extern int	tcp_keepalives_count;
 extern int	tcp_user_timeout;
+extern int	fixed_batch_size;
 
 #ifdef TRACE_SORT
 extern bool trace_sort;
