@@ -41,5 +41,5 @@ extern int	BarrierAttach(Barrier *barrier);
 extern bool BarrierDetach(Barrier *barrier);
 extern int	BarrierPhase(Barrier *barrier);
 extern int	BarrierParticipants(Barrier *barrier);
-
+extern bool BarrierDetachOrAdvance(Barrier *barrier);
 #endif							/* BARRIER_H */

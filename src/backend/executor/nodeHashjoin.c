@@ -1413,8 +1413,8 @@ ExecParallelHashJoinNewBatch(HashJoinState *hjstate)
 						sb_initialize_accessor(hashtable->batches[hashtable->curbatch].sba,
 											   sts_get_tuplenum(hashtable->batches[hashtable->curbatch].outer_tuples));
 					hashtable->curstripe = -1;
-					ExecParallelHashJoinLoadStripe(hjstate);
-					return true;
+					if (ExecParallelHashJoinLoadStripe(hjstate))
+						return true;
 
 				case PHJ_BATCH_DONE:
 
@@ -1461,7 +1461,8 @@ ExecParallelHashJoinLoadStripe(HashJoinState *hjstate)
 
 	if (hashtable->curstripe >= 0)
 	{
-		BarrierArriveAndWait(stripe_barrier, WAIT_EVENT_HASH_STRIPE_PROBING);
+		if (!BarrierDetachOrAdvance(stripe_barrier))
+			return false;
 	}
 	else if (hashtable->curstripe == -1)
 	{
@@ -1474,10 +1475,13 @@ ExecParallelHashJoinLoadStripe(HashJoinState *hjstate)
 		 * fallback Either way the worker can't contribute so just detach and
 		 * move on.
 		 */
-		if (PHJ_STRIPE_NUMBER(phase) > batch->maximum_stripe_number)
+		if (PHJ_STRIPE_NUMBER(phase) > 0)
 			return ExecHashTableDetachStripe(hashtable);
 
 		hashtable->curstripe = PHJ_STRIPE_NUMBER(phase);
+
+		if (PHJ_STRIPE_PHASE(phase) == PHJ_STRIPE_DONE)
+			return ExecHashTableDetachStripe(hashtable);
 	}
 	else if (hashtable->curstripe == -2)
 	{

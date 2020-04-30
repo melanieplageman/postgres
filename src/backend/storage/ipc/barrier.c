@@ -309,3 +309,31 @@ BarrierDetachImpl(Barrier *barrier, bool arrive)
 
 	return last;
 }
+/*
+ * If this worker is the only participant, advance the phase and return true
+ * If this worker is not the only participant, detach from the barrier
+ * and return false.
+ */
+bool
+BarrierDetachOrAdvance(Barrier *barrier)
+{
+	SpinLockAcquire(&barrier->mutex);
+	if (barrier->participants > 1)
+	{
+		SpinLockRelease(&barrier->mutex);
+		return BarrierDetachImpl(barrier, false);
+	}
+	else
+	{
+		int			start_phase;
+		int			next_phase;
+
+		start_phase = barrier->phase;
+		next_phase = start_phase + 1;
+		barrier->arrived = 0;
+		barrier->phase = next_phase;
+		barrier->elected = next_phase;
+		SpinLockRelease(&barrier->mutex);
+		return true;
+	}
+}
