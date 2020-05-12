@@ -2235,6 +2235,7 @@ _readAgg(void)
 	READ_BITMAPSET_FIELD(aggParams);
 	READ_NODE_FIELD(groupingSets);
 	READ_NODE_FIELD(chain);
+	READ_NODE_FIELD(sortnode);
 
 	READ_DONE();
 }

@@ -2364,15 +2364,14 @@ show_grouping_sets(PlanState *planstate, Agg *agg,
 
 	ExplainOpenGroup("Grouping Sets", "Grouping Sets", false, es);
 
-	show_grouping_set_keys(planstate, agg, NULL,
+	show_grouping_set_keys(planstate, agg, (Sort *) agg->sortnode,
 						   context, useprefix, ancestors, es);
 
 	foreach(lc, agg->chain)
 	{
 		Agg		   *aggnode = lfirst(lc);
-		Sort	   *sortnode = (Sort *) aggnode->plan.lefttree;
 
-		show_grouping_set_keys(planstate, aggnode, sortnode,
+		show_grouping_set_keys(planstate, aggnode, (Sort *) aggnode->sortnode,
 							   context, useprefix, ancestors, es);
 	}
 

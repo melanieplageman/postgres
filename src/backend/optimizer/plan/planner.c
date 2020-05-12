@@ -175,7 +175,8 @@ static void consider_groupingsets_paths(PlannerInfo *root,
 										bool can_hash,
 										grouping_sets_data *gd,
 										const AggClauseCosts *agg_costs,
-										double dNumGroups);
+										double dNumGroups,
+										AggStrategy strat);
 static RelOptInfo *create_window_paths(PlannerInfo *root,
 									   RelOptInfo *input_rel,
 									   PathTarget *input_target,
@@ -4184,6 +4185,14 @@ create_ordinary_grouping_paths(PlannerInfo *root, RelOptInfo *input_rel,
  * it, by combinations of hashing and sorting.  This can be called multiple
  * times, so it's important that it not scribble on input.  No result is
  * returned, but any generated paths are added to grouped_rel.
+ *
+ * - strat:
+ *   preferred aggregate strategy to use.
+ *
+ * - is_sorted:
+ *   Is the input sorted on the groupCols of the first rollup. Caller
+ *   must set it correctly if strat is set to AGG_SORTED, the planner
+ *   uses it to generate a sortnode.
  */
 static void
 consider_groupingsets_paths(PlannerInfo *root,
@@ -4193,13 +4202,16 @@ consider_groupingsets_paths(PlannerInfo *root,
 							bool can_hash,
 							grouping_sets_data *gd,
 							const AggClauseCosts *agg_costs,
-							double dNumGroups)
+							double dNumGroups,
+							AggStrategy strat)
 {
 	Query	   *parse = root->parse;
 
+	Assert(strat == AGG_HASHED || strat == AGG_SORTED);
+
 	/*
-	 * If we're not being offered sorted input, then only consider plans that
-	 * can be done entirely by hashing.
+	 * If strat is AGG_HASHED, then only consider plans that can be done
+	 * entirely by hashing.
 	 *
 	 * We can hash everything if it looks like it'll fit in work_mem. But if
 	 * the input is actually sorted despite not being advertised as such, we
@@ -4208,7 +4220,7 @@ consider_groupingsets_paths(PlannerInfo *root,
 	 * If none of the grouping sets are sortable, then ignore the work_mem
 	 * limit and generate a path anyway, since otherwise we'll just fail.
 	 */
-	if (!is_sorted)
+	if (strat == AGG_HASHED)
 	{
 		List	   *new_rollups = NIL;
 		RollupData *unhashed_rollup = NULL;
@@ -4249,6 +4261,8 @@ consider_groupingsets_paths(PlannerInfo *root,
 			unhashed_rollup = lfirst_node(RollupData, l_start);
 			exclude_groups = unhashed_rollup->numGroups;
 			l_start = lnext(gd->rollups, l_start);
+			/* update is_sorted to true */
+			is_sorted = true;
 		}
 
 		hashsize = estimate_hashagg_tablesize(path,
@@ -4347,6 +4361,8 @@ consider_groupingsets_paths(PlannerInfo *root,
 			rollup->hashable = false;
 			rollup->is_hashed = false;
 			new_rollups = lappend(new_rollups, rollup);
+			/* update is_sorted to true */
+			is_sorted = true;
 			strat = AGG_MIXED;
 		}
 
@@ -4358,20 +4374,25 @@ consider_groupingsets_paths(PlannerInfo *root,
 										  strat,
 										  new_rollups,
 										  agg_costs,
-										  dNumGroups));
+										  dNumGroups,
+										  is_sorted));
 		return;
 	}
 
 	/*
-	 * If we have sorted input but nothing we can do with it, bail.
+	 * Strategy is AGG_SORTED but nothing we can do with it, bail.
 	 */
 	if (list_length(gd->rollups) == 0)
 		return;
 
 	/*
-	 * Given sorted input, we try and make two paths: one sorted and one mixed
-	 * sort/hash. (We need to try both because hashagg might be disabled, or
-	 * some columns might not be sortable.)
+	 * Callers consider AGG_SORTED strategy, the first rollup must use
+	 * non-hashed aggregate, 'is_sorted' tells whether the first rollup need
+	 * to do its own sort.
+	 *
+	 * we try and make two paths: one sorted and one mixed sort/hash. (We need
+	 * to try both because hashagg might be disabled, or some columns might
+	 * not be sortable.)
 	 *
 	 * can_hash is passed in as false if some obstacle elsewhere (such as
 	 * ordered aggs) means that we shouldn't consider hashing at all.
@@ -4426,7 +4447,7 @@ consider_groupingsets_paths(PlannerInfo *root,
 
 			/*
 			 * We leave the first rollup out of consideration since it's the
-			 * one that matches the input sort order.  We assign indexes "i"
+			 * one that need to be sorted.  We assign indexes "i"
 			 * to only those entries considered for hashing; the second loop,
 			 * below, must use the same condition.
 			 */
@@ -4515,7 +4536,8 @@ consider_groupingsets_paths(PlannerInfo *root,
 											  AGG_MIXED,
 											  rollups,
 											  agg_costs,
-											  dNumGroups));
+											  dNumGroups,
+											  is_sorted));
 		}
 	}
 
@@ -4531,7 +4553,8 @@ consider_groupingsets_paths(PlannerInfo *root,
 										  AGG_SORTED,
 										  gd->rollups,
 										  agg_costs,
-										  dNumGroups));
+										  dNumGroups,
+										  is_sorted));
 }
 
 /*
@@ -6510,11 +6533,30 @@ add_paths_to_grouping_rel(PlannerInfo *root, RelOptInfo *input_rel,
 			int			presorted_keys;
 
 			is_sorted = pathkeys_count_contained_in(root->group_pathkeys,
-													 path->pathkeys,
-													 &presorted_keys);
+													path->pathkeys,
+													&presorted_keys);
 
 			if (path == cheapest_path || is_sorted)
 			{
+				/*
+				 * TODO: melanie I'm not sure about doing this in this way
+				 * here. grouping sets will always do their own sort now,
+				 * which is what this literally does, but it doesn't feel like
+				 * the right way to do it Also, why don't regular groupaggs
+				 * also do their own sorts? the rationale isn't clear to me.
+				 * why not only add sort path for explicit order by. also, the
+				 * comment doesn't make sense to me
+				 */
+				if (parse->groupingSets)
+				{
+					/* consider AGG_SORTED strategy */
+					consider_groupingsets_paths(root, grouped_rel,
+												path, is_sorted, can_hash,
+												gd, agg_costs, dNumGroups,
+												AGG_SORTED);
+					continue;
+				}
+
 				/* Sort the cheapest-total path if it isn't already sorted */
 				if (!is_sorted)
 					path = (Path *) create_sort_path(root,
@@ -6522,15 +6564,7 @@ add_paths_to_grouping_rel(PlannerInfo *root, RelOptInfo *input_rel,
 													 path,
 													 root->group_pathkeys,
 													 -1.0);
-
-				/* Now decide what to stick atop it */
-				if (parse->groupingSets)
-				{
-					consider_groupingsets_paths(root, grouped_rel,
-												path, true, can_hash,
-												gd, agg_costs, dNumGroups);
-				}
-				else if (parse->hasAggs)
+				if (parse->hasAggs)
 				{
 					/*
 					 * We have aggregation, possibly with plain GROUP BY. Make
@@ -6590,6 +6624,17 @@ add_paths_to_grouping_rel(PlannerInfo *root, RelOptInfo *input_rel,
 			 */
 			Assert(list_length(root->group_pathkeys) != 1);
 
+			/*
+			 * TODO: add a test which exercises incremental sort with grouping
+			 * sets
+			 */
+			if (parse->groupingSets)
+			{
+				consider_groupingsets_paths(root, grouped_rel,
+											path, true, can_hash,
+											gd, agg_costs, dNumGroups, AGG_SORTED);
+				continue;
+			}
 			path = (Path *) create_incremental_sort_path(root,
 														 grouped_rel,
 														 path,
@@ -6597,14 +6642,7 @@ add_paths_to_grouping_rel(PlannerInfo *root, RelOptInfo *input_rel,
 														 presorted_keys,
 														 -1.0);
 
-			/* Now decide what to stick atop it */
-			if (parse->groupingSets)
-			{
-				consider_groupingsets_paths(root, grouped_rel,
-											path, true, can_hash,
-											gd, agg_costs, dNumGroups);
-			}
-			else if (parse->hasAggs)
+			if (parse->hasAggs)
 			{
 				/*
 				 * We have aggregation, possibly with plain GROUP BY. Make
@@ -6759,7 +6797,8 @@ add_paths_to_grouping_rel(PlannerInfo *root, RelOptInfo *input_rel,
 			 */
 			consider_groupingsets_paths(root, grouped_rel,
 										cheapest_path, false, true,
-										gd, agg_costs, dNumGroups);
+										gd, agg_costs, dNumGroups,
+										AGG_HASHED);
 		}
 		else
 		{
