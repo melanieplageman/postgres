@@ -828,6 +828,7 @@ typedef struct Agg
 	/* Note: planner provides numGroups & aggParams only in HASHED/MIXED case */
 	List	   *groupingSets;	/* grouping sets to use */
 	List	   *chain;			/* chained Agg/Sort nodes */
+	Plan	   *sortnode;		/* agg does its own sort, only used by grouping sets now */
 } Agg;
 
 /* ----------------

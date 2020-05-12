@@ -410,6 +410,7 @@ static AggStatePerGroup lookup_hash_entry(AggState *aggstate, uint32 hash,
 										  bool *in_hash_table);
 static void lookup_hash_entries(AggState *aggstate);
 static TupleTableSlot *agg_retrieve_direct(AggState *aggstate);
+static void agg_sort_input(AggState *aggstate);
 static void agg_fill_hash_table(AggState *aggstate);
 static bool agg_refill_hash_table(AggState *aggstate);
 static TupleTableSlot *agg_retrieve_hash_table(AggState *aggstate);
@@ -522,7 +523,7 @@ initialize_phase(AggState *aggstate, int newphase)
 	 */
 	if (newphase > 0 && newphase < aggstate->numphases - 1)
 	{
-		Sort	   *sortnode = aggstate->phases[newphase + 1].sortnode;
+		Sort	   *sortnode = (Sort *)aggstate->phases[newphase + 1].aggnode->sortnode;
 		PlanState  *outerNode = outerPlanState(aggstate);
 		TupleDesc	tupDesc = ExecGetResultType(outerNode);
 
@@ -2143,6 +2144,8 @@ ExecAgg(PlanState *pstate)
 				break;
 			case AGG_PLAIN:
 			case AGG_SORTED:
+				if (!node->input_sorted)
+					agg_sort_input(node);
 				result = agg_retrieve_direct(node);
 				break;
 		}
@@ -2498,6 +2501,45 @@ agg_retrieve_direct(AggState *aggstate)
 
 	/* No more groups */
 	return NULL;
+}
+
+static void
+agg_sort_input(AggState *aggstate)
+{
+	AggStatePerPhase phase = &aggstate->phases[1];
+	TupleDesc	tupDesc;
+	Sort		*sortnode;
+
+	Assert(!aggstate->input_sorted);
+	Assert(phase->aggnode->sortnode);
+
+	sortnode = (Sort *) phase->aggnode->sortnode;
+	tupDesc = ExecGetResultType(outerPlanState(aggstate));
+
+	aggstate->sort_in = tuplesort_begin_heap(tupDesc,
+											 sortnode->numCols,
+											 sortnode->sortColIdx,
+											 sortnode->sortOperators,
+											 sortnode->collations,
+											 sortnode->nullsFirst,
+											 work_mem,
+											 NULL, false);
+	for (;;)
+	{
+		TupleTableSlot *outerslot;
+
+		outerslot = ExecProcNode(outerPlanState(aggstate));
+		if (TupIsNull(outerslot))
+			break;
+
+		tuplesort_puttupleslot(aggstate->sort_in, outerslot);
+	}
+
+	/* Sort the first phase */
+	tuplesort_performsort(aggstate->sort_in);
+
+	/* Mark the input to be sorted */
+	aggstate->input_sorted = true;
 }
 
 /*
@@ -3170,6 +3212,7 @@ ExecInitAgg(Agg *node, EState *estate, int eflags)
 	Plan	   *outerPlan;
 	ExprContext *econtext;
 	TupleDesc	scanDesc;
+	Agg			*firstSortAgg;
 	int			numaggs,
 				transno,
 				aggno;
@@ -3214,12 +3257,15 @@ ExecInitAgg(Agg *node, EState *estate, int eflags)
 	aggstate->grp_firstTuple = NULL;
 	aggstate->sort_in = NULL;
 	aggstate->sort_out = NULL;
+	aggstate->input_sorted = true;
 
 	/*
 	 * phases[0] always exists, but is dummy in sorted/plain mode
 	 */
 	numPhases = (use_hashing ? 1 : 2);
 	numHashes = (use_hashing ? 1 : 0);
+
+	firstSortAgg = node->aggstrategy == AGG_SORTED ? node : NULL;
 
 	/*
 	 * Calculate the maximum number of grouping sets in any phase; this
@@ -3242,7 +3288,13 @@ ExecInitAgg(Agg *node, EState *estate, int eflags)
 			 * others add an extra phase.
 			 */
 			if (agg->aggstrategy != AGG_HASHED)
+			{
 				++numPhases;
+
+				if (!firstSortAgg)
+					firstSortAgg = agg;
+
+			}
 			else
 				++numHashes;
 		}
@@ -3250,6 +3302,13 @@ ExecInitAgg(Agg *node, EState *estate, int eflags)
 
 	aggstate->maxsets = numGroupingSets;
 	aggstate->numphases = numPhases;
+
+	/*
+	 * The first SORTED phase is not sorted, agg need to do its own sort. See
+	 * agg_sort_input(), this can only happen in groupingsets case.
+	 */
+	if (firstSortAgg && firstSortAgg->sortnode)
+		aggstate->input_sorted = false;	
 
 	aggstate->aggcontexts = (ExprContext **)
 		palloc0(sizeof(ExprContext *) * numGroupingSets);
@@ -3309,7 +3368,8 @@ ExecInitAgg(Agg *node, EState *estate, int eflags)
 	 * If there are more than two phases (including a potential dummy phase
 	 * 0), input will be resorted using tuplesort. Need a slot for that.
 	 */
-	if (numPhases > 2)
+	if (numPhases > 2 ||
+		!aggstate->input_sorted)
 	{
 		aggstate->sort_slot = ExecInitExtraTupleSlot(estate, scanDesc,
 													 &TTSOpsMinimalTuple);
@@ -3380,20 +3440,11 @@ ExecInitAgg(Agg *node, EState *estate, int eflags)
 	for (phaseidx = 0; phaseidx <= list_length(node->chain); ++phaseidx)
 	{
 		Agg		   *aggnode;
-		Sort	   *sortnode;
 
 		if (phaseidx > 0)
-		{
 			aggnode = list_nth_node(Agg, node->chain, phaseidx - 1);
-			sortnode = castNode(Sort, aggnode->plan.lefttree);
-		}
 		else
-		{
 			aggnode = node;
-			sortnode = NULL;
-		}
-
-		Assert(phase <= 1 || sortnode);
 
 		if (aggnode->aggstrategy == AGG_HASHED
 			|| aggnode->aggstrategy == AGG_MIXED)
@@ -3510,7 +3561,6 @@ ExecInitAgg(Agg *node, EState *estate, int eflags)
 
 			phasedata->aggnode = aggnode;
 			phasedata->aggstrategy = aggnode->aggstrategy;
-			phasedata->sortnode = sortnode;
 		}
 	}
 
@@ -4645,12 +4695,17 @@ ExecReScanAgg(AggState *node)
 				   sizeof(AggStatePerGroupData) * node->numaggs);
 		}
 
+		/* Reset input_sorted */
+		if (aggnode->sortnode)
+			node->input_sorted = false;
+
 		/* reset to phase 1 */
 		initialize_phase(node, 1);
 
 		node->input_done = false;
 		node->projected_set = -1;
 	}
+
 
 	if (outerPlan->chgParam == NULL)
 		ExecReScan(outerPlan);

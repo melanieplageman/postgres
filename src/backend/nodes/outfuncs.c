@@ -787,6 +787,7 @@ _outAgg(StringInfo str, const Agg *node)
 	WRITE_BITMAPSET_FIELD(aggParams);
 	WRITE_NODE_FIELD(groupingSets);
 	WRITE_NODE_FIELD(chain);
+	WRITE_NODE_FIELD(sortnode);
 }
 
 static void

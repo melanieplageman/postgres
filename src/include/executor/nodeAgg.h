@@ -277,8 +277,6 @@ typedef struct AggStatePerPhaseData
 	ExprState **eqfunctions;	/* expression returning equality, indexed by
 								 * nr of cols to compare */
 	Agg		   *aggnode;		/* Agg node for phase data */
-	Sort	   *sortnode;		/* Sort node for input ordering for phase */
-
 	ExprState  *evaltrans;		/* evaluation of transition functions  */
 
 	/* cached variants of the compiled expression */
