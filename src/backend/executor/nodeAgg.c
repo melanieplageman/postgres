@@ -2144,8 +2144,6 @@ ExecAgg(PlanState *pstate)
 				break;
 			case AGG_PLAIN:
 			case AGG_SORTED:
-				if (!node->input_sorted)
-					agg_sort_input(node);
 				result = agg_retrieve_direct(node);
 				break;
 		}
@@ -3307,7 +3305,7 @@ ExecInitAgg(Agg *node, EState *estate, int eflags)
 	 * The first SORTED phase is not sorted, agg need to do its own sort. See
 	 * agg_sort_input(), this can only happen in groupingsets case.
 	 */
-	if (firstSortAgg && firstSortAgg->sortnode)
+	//if (firstSortAgg && firstSortAgg->sortnode)
 		aggstate->input_sorted = false;
 
 	aggstate->aggcontexts = (ExprContext **)
