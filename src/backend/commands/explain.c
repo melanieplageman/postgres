@@ -2392,7 +2392,7 @@ show_grouping_set_keys(PlanState *planstate,
 	const char *keyname;
 	const char *keysetname;
 
-	if (aggnode->aggstrategy == AGG_HASHED || aggnode->aggstrategy == AGG_MIXED)
+	if (aggnode->aggstrategy == AGG_HASHED)
 	{
 		keyname = "Hash Key";
 		keysetname = "Hash Keys";

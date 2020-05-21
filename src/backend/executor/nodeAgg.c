@@ -250,6 +250,7 @@
 #include "miscadmin.h"
 #include "nodes/makefuncs.h"
 #include "nodes/nodeFuncs.h"
+#include "nodes/pathnodes.h"
 #include "optimizer/optimizer.h"
 #include "parser/parse_agg.h"
 #include "parser/parse_coerce.h"
@@ -354,12 +355,38 @@ typedef struct HashAggSpill
  */
 typedef struct HashAggBatch
 {
-	int				 setno;			/* grouping set */
+	int				 phaseidx;		/* phase that own this batch */
 	int				 used_bits;		/* number of bits of hash already used */
 	LogicalTapeSet	*tapeset;		/* borrowed reference to tape set */
 	int				 input_tapenum;	/* input partition tape */
 	int64			 input_tuples;	/* number of tuples in this batch */
 } HashAggBatch;
+
+/*
+ * Represents different stages of hash aggregate.
+ *
+ * HASHAGG_INITIAL: initial stage for hash aggregate, allow to do all hash
+ * transitions in one expression, get input tuples from outer node and all
+ * hash entries are filled. 
+ *
+ * HASHAGG_SPILL: enter hash spill mode, allow to do all hash transitions
+ * in one expression, still get input tuples from outer node but some hash
+ * entries might not be filled, so a null check is added into the transitions
+ * expression.
+ *
+ * HASHAGG_REFILL: refilling the hash table group set by group set, disallow
+ * doing all hash transitions in one expression, get input tuples from spill
+ * files, only one hash entry is filled, we may reenter hash spill mode when
+ * refilling the hash table, but the transition expression is not called if
+ * the hash entry is not filled, so null check is not added in the transition
+ * expression.
+ */
+typedef enum HashAggStage
+{
+	HASHAGG_INITIAL = 0,
+	HASHAGG_SPILL,
+	HASHAGG_REFILL,
+} HashAggStage;
 
 static void select_current_set(AggState *aggstate, int setno, bool is_hash);
 static void initialize_phase(AggState *aggstate, int newphase);
@@ -385,7 +412,7 @@ static void finalize_partialaggregate(AggState *aggstate,
 									  AggStatePerAgg peragg,
 									  AggStatePerGroup pergroupstate,
 									  Datum *resultVal, bool *resultIsNull);
-static void prepare_hash_slot(AggState *aggstate);
+static void prepare_hash_slot(AggState *aggstate, AggStatePerPhaseHash perhash);
 static void prepare_projection_slot(AggState *aggstate,
 									TupleTableSlot *slot,
 									int currentSet);
@@ -396,9 +423,9 @@ static TupleTableSlot *project_aggregates(AggState *aggstate);
 static Bitmapset *find_unaggregated_cols(AggState *aggstate);
 static bool find_unaggregated_cols_walker(Node *node, Bitmapset **colnos);
 static void build_hash_tables(AggState *aggstate);
-static void build_hash_table(AggState *aggstate, int setno, long nbuckets);
-static void hashagg_recompile_expressions(AggState *aggstate, bool minslot,
-										  bool nullcheck);
+static void build_hash_table(AggState *aggstate,
+							 AggStatePerPhaseHash perhash, long nbuckets);
+static void hashagg_recompile_expressions(AggState *aggstate);
 static long hash_choose_num_buckets(double hashentrysize,
 									long estimated_nbuckets,
 									Size memory);
@@ -406,13 +433,17 @@ static int hash_choose_num_partitions(uint64 input_groups,
 									  double hashentrysize,
 									  int used_bits,
 									  int *log2_npartittions);
-static AggStatePerGroup lookup_hash_entry(AggState *aggstate, uint32 hash,
+static AggStatePerGroup lookup_hash_entry(AggState *aggstate,
+										  AggStatePerPhaseHash perhash,
+										  uint32 hash,
 										  bool *in_hash_table);
-static void lookup_hash_entries(AggState *aggstate);
+static void lookup_hash_entries(AggState *aggstate,
+								AggStatePerPhaseHash current_hash,
+								List *concurrent_hashes);
 static TupleTableSlot *agg_retrieve_direct(AggState *aggstate);
-static void agg_sort_input(AggState *aggstate);
 static void agg_fill_hash_table(AggState *aggstate);
 static bool agg_refill_hash_table(AggState *aggstate);
+static void agg_sort_input(AggState *aggstate);
 static TupleTableSlot *agg_retrieve_hash_table(AggState *aggstate);
 static TupleTableSlot *agg_retrieve_hash_table_in_memory(AggState *aggstate);
 static void hash_agg_check_limits(AggState *aggstate);
@@ -422,7 +453,7 @@ static void hash_agg_update_metrics(AggState *aggstate, bool from_tape,
 static void hashagg_finish_initial_spills(AggState *aggstate);
 static void hashagg_reset_spill_state(AggState *aggstate);
 static HashAggBatch *hashagg_batch_new(LogicalTapeSet *tapeset,
-									   int input_tapenum, int setno,
+									   int input_tapenum, int phaseidx,
 									   int64 input_tuples, int used_bits);
 static MinimalTuple hashagg_batch_read(HashAggBatch *batch, uint32 *hashp);
 static void hashagg_spill_init(HashAggSpill *spill, HashTapeInfo *tapeinfo,
@@ -431,7 +462,7 @@ static void hashagg_spill_init(HashAggSpill *spill, HashTapeInfo *tapeinfo,
 static Size hashagg_spill_tuple(HashAggSpill *spill, TupleTableSlot *slot,
 								uint32 hash);
 static void hashagg_spill_finish(AggState *aggstate, HashAggSpill *spill,
-								 int setno);
+								 int phaseidx);
 static void hashagg_tapeinfo_init(AggState *aggstate);
 static void hashagg_tapeinfo_assign(HashTapeInfo *tapeinfo, int *dest,
 									int ndest);
@@ -465,7 +496,10 @@ select_current_set(AggState *aggstate, int setno, bool is_hash)
 	 * ExecAggPlainTransByRef().
 	 */
 	if (is_hash)
+	{
+		Assert(setno == 0);
 		aggstate->curaggcontext = aggstate->hashcontext;
+	}
 	else
 		aggstate->curaggcontext = aggstate->aggcontexts[setno];
 
@@ -473,72 +507,73 @@ select_current_set(AggState *aggstate, int setno, bool is_hash)
 }
 
 /*
- * Switch to phase "newphase", which must either be 0 or 1 (to reset) or
+ * Switch to phase "newphase", which must either be 0 (to reset) or
  * current_phase + 1. Juggle the tuplesorts accordingly.
- *
- * Phase 0 is for hashing, which we currently handle last in the AGG_MIXED
- * case, so when entering phase 0, all we need to do is drop open sorts.
  */
 static void
 initialize_phase(AggState *aggstate, int newphase)
 {
-	Assert(newphase <= 1 || newphase == aggstate->current_phase + 1);
+	AggStatePerPhase current_phase;
+	AggStatePerPhaseSort persort;
+
+	/* Don't use aggstate->phase here, it might not be initialized yet*/
+	current_phase = aggstate->phases[aggstate->current_phase];
 
 	/*
 	 * Whatever the previous state, we're now done with whatever input
-	 * tuplesort was in use.
+	 * tuplesort was in use, cleanup them.
+	 *
+	 * Note: we keep the first tuplesort/tuplestore, this will benifit the
+	 * rescan in some cases without resorting the input again.
 	 */
-	if (aggstate->sort_in)
+	if (!current_phase->is_hashed && aggstate->current_phase > 0)
 	{
-		tuplesort_end(aggstate->sort_in);
-		aggstate->sort_in = NULL;
-	}
-
-	if (newphase <= 1)
-	{
-		/*
-		 * Discard any existing output tuplesort.
-		 */
-		if (aggstate->sort_out)
+		persort = (AggStatePerPhaseSort) current_phase;
+		if (persort->sort_in)
 		{
-			tuplesort_end(aggstate->sort_out);
-			aggstate->sort_out = NULL;
+			tuplesort_end(persort->sort_in);
+			persort->sort_in = NULL;
 		}
 	}
-	else
-	{
-		/*
-		 * The old output tuplesort becomes the new input one, and this is the
-		 * right time to actually sort it.
-		 */
-		aggstate->sort_in = aggstate->sort_out;
-		aggstate->sort_out = NULL;
-		Assert(aggstate->sort_in);
-		tuplesort_performsort(aggstate->sort_in);
-	}
+
+	/* advance to next phase */
+	aggstate->current_phase = newphase;
+	aggstate->phase = aggstate->phases[newphase];
+
+	if (aggstate->phase->is_hashed)
+		return;
+
+	/* New phase is not hashed */
+	persort = (AggStatePerPhaseSort) aggstate->phase;
+
+	/* This is the right time to actually sort it. */
+	if (persort->sort_in)
+		tuplesort_performsort(persort->sort_in);
 
 	/*
-	 * If this isn't the last phase, we need to sort appropriately for the
+	 * If copy_out is set, we need to sort appropriately for the
 	 * next phase in sequence.
 	 */
-	if (newphase > 0 && newphase < aggstate->numphases - 1)
+	if (persort->copy_out)
 	{
-		Sort	   *sortnode = (Sort *) aggstate->phases[newphase + 1].aggnode->sortnode;
-		PlanState  *outerNode = outerPlanState(aggstate);
-		TupleDesc	tupDesc = ExecGetResultType(outerNode);
+		AggStatePerPhaseSort next =
+			(AggStatePerPhaseSort) aggstate->phases[newphase + 1];
+		Sort *sortnode = (Sort *) next->phasedata.aggnode->sortnode;
+		PlanState *outerNode = outerPlanState(aggstate);
+		TupleDesc tupDesc = ExecGetResultType(outerNode);
 
-		aggstate->sort_out = tuplesort_begin_heap(tupDesc,
-												  sortnode->numCols,
-												  sortnode->sortColIdx,
-												  sortnode->sortOperators,
-												  sortnode->collations,
-												  sortnode->nullsFirst,
-												  work_mem,
-												  NULL, false);
+		Assert(!next->phasedata.is_hashed);
+
+		if (!next->sort_in)
+			next->sort_in = tuplesort_begin_heap(tupDesc,
+												 sortnode->numCols,
+												 sortnode->sortColIdx,
+												 sortnode->sortOperators,
+												 sortnode->collations,
+												 sortnode->nullsFirst,
+												 work_mem,
+												 NULL, false);
 	}
-
-	aggstate->current_phase = newphase;
-	aggstate->phase = &aggstate->phases[newphase];
 }
 
 /*
@@ -553,12 +588,16 @@ static TupleTableSlot *
 fetch_input_tuple(AggState *aggstate)
 {
 	TupleTableSlot *slot;
+	AggStatePerPhaseSort current_phase;
 
-	if (aggstate->sort_in)
+	Assert(!aggstate->phase->is_hashed);
+	current_phase = (AggStatePerPhaseSort) aggstate->phase;
+
+	if (current_phase->sort_in)
 	{
 		/* make sure we check for interrupts in either path through here */
 		CHECK_FOR_INTERRUPTS();
-		if (!tuplesort_gettupleslot(aggstate->sort_in, true, false,
+		if (!tuplesort_gettupleslot(current_phase->sort_in, true, false,
 									aggstate->sort_slot, NULL))
 			return NULL;
 		slot = aggstate->sort_slot;
@@ -566,8 +605,13 @@ fetch_input_tuple(AggState *aggstate)
 	else
 		slot = ExecProcNode(outerPlanState(aggstate));
 
-	if (!TupIsNull(slot) && aggstate->sort_out)
-		tuplesort_puttupleslot(aggstate->sort_out, slot);
+	if (!TupIsNull(slot) && current_phase->copy_out)
+	{
+		AggStatePerPhaseSort next =
+			(AggStatePerPhaseSort) aggstate->phases[aggstate->current_phase + 1];
+		Assert(!next->phasedata.is_hashed);
+		tuplesort_puttupleslot(next->sort_in, slot);
+	}
 
 	return slot;
 }
@@ -673,7 +717,7 @@ initialize_aggregates(AggState *aggstate,
 					  int numReset)
 {
 	int			transno;
-	int			numGroupingSets = Max(aggstate->phase->numsets, 1);
+	int			numGroupingSets = aggstate->phase->numsets;
 	int			setno = 0;
 	int			numTrans = aggstate->numtrans;
 	AggStatePerTrans transstates = aggstate->pertrans;
@@ -1202,10 +1246,9 @@ finalize_partialaggregate(AggState *aggstate,
  * hashslot. This is necessary to compute the hash or perform a lookup.
  */
 static void
-prepare_hash_slot(AggState *aggstate)
+prepare_hash_slot(AggState *aggstate, AggStatePerPhaseHash perhash)
 {
 	TupleTableSlot *inputslot = aggstate->tmpcontext->ecxt_outertuple;
-	AggStatePerHash perhash = &aggstate->perhash[aggstate->current_set];
 	TupleTableSlot *hashslot = perhash->hashslot;
 	int				i;
 
@@ -1439,13 +1482,19 @@ find_unaggregated_cols_walker(Node *node, Bitmapset **colnos)
 static void
 build_hash_tables(AggState *aggstate)
 {
-	int				setno;
+	int	phaseidx;
 
-	for (setno = 0; setno < aggstate->num_hashes; ++setno)
+	for (phaseidx = 0; phaseidx < aggstate->numphases; phaseidx++)
 	{
-		AggStatePerHash perhash = &aggstate->perhash[setno];
+		AggStatePerPhaseHash perhash;
+		AggStatePerPhase phase = aggstate->phases[phaseidx];
 		long			nbuckets;
 		Size			memory;
+
+		if (!phase->is_hashed)
+			continue;
+
+		perhash = (AggStatePerPhaseHash) phase;
 
 		if (perhash->hashtable != NULL)
 		{
@@ -1453,15 +1502,13 @@ build_hash_tables(AggState *aggstate)
 			continue;
 		}
 
-		Assert(perhash->aggnode->numGroups > 0);
-
 		memory = aggstate->hash_mem_limit / aggstate->num_hashes;
 
 		/* choose reasonable number of buckets per hashtable */
 		nbuckets = hash_choose_num_buckets(
-			aggstate->hashentrysize, perhash->aggnode->numGroups, memory);
+			aggstate->hashentrysize, phase->aggnode->numGroups, memory);
 
-		build_hash_table(aggstate, setno, nbuckets);
+		build_hash_table(aggstate, perhash, nbuckets);
 	}
 
 	aggstate->hash_ngroups_current = 0;
@@ -1471,9 +1518,8 @@ build_hash_tables(AggState *aggstate)
  * Build a single hashtable for this grouping set.
  */
 static void
-build_hash_table(AggState *aggstate, int setno, long nbuckets)
+build_hash_table(AggState *aggstate, AggStatePerPhaseHash perhash, long nbuckets)
 {
-	AggStatePerHash perhash = &aggstate->perhash[setno];
 	MemoryContext	metacxt = aggstate->hash_metacxt;
 	MemoryContext	hashcxt = aggstate->hashcontext->ecxt_per_tuple_memory;
 	MemoryContext	tmpcxt	= aggstate->tmpcontext->ecxt_per_tuple_memory;
@@ -1497,7 +1543,7 @@ build_hash_table(AggState *aggstate, int setno, long nbuckets)
 		perhash->hashGrpColIdxHash,
 		perhash->eqfuncoids,
 		perhash->hashfunctions,
-		perhash->aggnode->grpCollations,
+		perhash->phasedata.aggnode->grpCollations,
 		nbuckets,
 		additionalsize,
 		metacxt,
@@ -1536,23 +1582,29 @@ find_hash_columns(AggState *aggstate)
 {
 	Bitmapset  *base_colnos;
 	List	   *outerTlist = outerPlanState(aggstate)->plan->targetlist;
-	int			numHashes = aggstate->num_hashes;
 	EState	   *estate = aggstate->ss.ps.state;
 	int			j;
 
 	/* Find Vars that will be needed in tlist and qual */
 	base_colnos = find_unaggregated_cols(aggstate);
 
-	for (j = 0; j < numHashes; ++j)
+	for (j = 0; j < aggstate->numphases; ++j)
 	{
-		AggStatePerHash perhash = &aggstate->perhash[j];
+		AggStatePerPhase perphase = aggstate->phases[j];
+		AggStatePerPhaseHash perhash;
 		Bitmapset  *colnos = bms_copy(base_colnos);
-		AttrNumber *grpColIdx = perhash->aggnode->grpColIdx;
+		Bitmapset  *grouped_cols = perphase->grouped_cols[0];
+		AttrNumber *grpColIdx = perphase->aggnode->grpColIdx;
 		List	   *hashTlist = NIL;
+		ListCell   *lc;
 		TupleDesc	hashDesc;
 		int			maxCols;
 		int			i;
 
+		if (!perphase->is_hashed)
+			continue;
+
+		perhash = (AggStatePerPhaseHash) perphase;
 		perhash->largestGrpColIdx = 0;
 
 		/*
@@ -1562,18 +1614,12 @@ find_hash_columns(AggState *aggstate)
 		 * there'd be no point storing them.  Use prepare_projection_slot's
 		 * logic to determine which.
 		 */
-		if (aggstate->phases[0].grouped_cols)
+		foreach(lc, aggstate->all_grouped_cols)
 		{
-			Bitmapset  *grouped_cols = aggstate->phases[0].grouped_cols[j];
-			ListCell   *lc;
+			int			attnum = lfirst_int(lc);
 
-			foreach(lc, aggstate->all_grouped_cols)
-			{
-				int			attnum = lfirst_int(lc);
-
-				if (!bms_is_member(attnum, grouped_cols))
-					colnos = bms_del_member(colnos, attnum);
-			}
+			if (!bms_is_member(attnum, grouped_cols))
+				colnos = bms_del_member(colnos, attnum);
 		}
 
 		/*
@@ -1629,7 +1675,7 @@ find_hash_columns(AggState *aggstate)
 		hashDesc = ExecTypeFromTL(hashTlist);
 
 		execTuplesHashPrepare(perhash->numCols,
-							  perhash->aggnode->grpOperators,
+							  perphase->aggnode->grpOperators,
 							  &perhash->eqfuncoids,
 							  &perhash->hashfunctions);
 		perhash->hashslot =
@@ -1694,28 +1740,44 @@ hash_agg_entry_size(int numTrans, Size tupleWidth, Size transitionSpace)
  * expressions in the AggStatePerPhase, and reuse when appropriate.
  */
 static void
-hashagg_recompile_expressions(AggState *aggstate, bool minslot, bool nullcheck)
+hashagg_recompile_expressions(AggState *aggstate)
 {
-	AggStatePerPhase		 phase;
-	int						 i = minslot ? 1 : 0;
-	int						 j = nullcheck ? 1 : 0;
+	AggStatePerPhase		 phase = aggstate->phase;
 
 	Assert(aggstate->aggstrategy == AGG_HASHED ||
 		   aggstate->aggstrategy == AGG_MIXED);
 
-	if (aggstate->aggstrategy == AGG_HASHED)
-		phase = &aggstate->phases[0];
-	else /* AGG_MIXED */
-		phase = &aggstate->phases[1];
-
-	if (phase->evaltrans_cache[i][j] == NULL)
+	if (phase->evaltrans_cache[aggstate->hash_agg_stage] == NULL)
 	{
 		const TupleTableSlotOps *outerops	= aggstate->ss.ps.outerops;
-		bool					 outerfixed = aggstate->ss.ps.outeropsfixed;
-		bool					 dohash		= true;
-		bool					 dosort;
+		bool	outerfixed = aggstate->ss.ps.outeropsfixed;
+		bool	minslot = false;
+		int		nullcheck = false;
+		int		allow_concurrent_hashing = true;
 
-		dosort = aggstate->aggstrategy == AGG_MIXED ? true : false;
+		/*
+		 * we are refilling the hash table and we disallow concurrent hashing
+		 * within transition expression because we refill the hash tables one
+		 * set by one set, this can avoid unnecessary nullcheck, meanwhile, we
+		 * get tuple from spill file, so it is a MinimalTuple.
+		 */
+		if (aggstate->hash_agg_stage == HASHAGG_REFILL)
+		{
+			minslot = true;
+			nullcheck = false;
+			allow_concurrent_hashing = false;
+		}
+		/*
+		 * we entred the spill mode, the concurrent hashing still works in this
+		 * mode, but some grouping sets need to put the tuple into spill files
+		 * and their pergroup states will be NULL, so we need add nullcheck.
+		 */
+		else if (aggstate->hash_agg_stage == HASHAGG_SPILL)
+		{
+			minslot = false;
+			nullcheck = true;
+			allow_concurrent_hashing = true;
+		}
 
 		/* temporarily change the outerops while compiling the expression */
 		if (minslot)
@@ -1724,15 +1786,15 @@ hashagg_recompile_expressions(AggState *aggstate, bool minslot, bool nullcheck)
 			aggstate->ss.ps.outeropsfixed = true;
 		}
 
-		phase->evaltrans_cache[i][j] = ExecBuildAggTrans(
-			aggstate, phase, dosort, dohash, nullcheck);
+		phase->evaltrans_cache[aggstate->hash_agg_stage] =
+			ExecBuildAggTrans(aggstate, phase, nullcheck, allow_concurrent_hashing);
 
 		/* change back */
 		aggstate->ss.ps.outerops = outerops;
 		aggstate->ss.ps.outeropsfixed = outerfixed;
 	}
 
-	phase->evaltrans = phase->evaltrans_cache[i][j];
+	phase->evaltrans = phase->evaltrans_cache[aggstate->hash_agg_stage];
 }
 
 /*
@@ -1831,29 +1893,22 @@ static void
 hash_agg_enter_spill_mode(AggState *aggstate)
 {
 	aggstate->hash_spill_mode = true;
-	hashagg_recompile_expressions(aggstate, aggstate->table_filled, true);
+
+	/* if table_filled is true, we must be refilling the hash table */
+	if (aggstate->table_filled)
+		aggstate->hash_agg_stage = HASHAGG_REFILL;
+	else
+		aggstate->hash_agg_stage = HASHAGG_SPILL;
+
+	hashagg_recompile_expressions(aggstate);
 
 	if (!aggstate->hash_ever_spilled)
 	{
 		Assert(aggstate->hash_tapeinfo == NULL);
-		Assert(aggstate->hash_spills == NULL);
 
 		aggstate->hash_ever_spilled = true;
 
 		hashagg_tapeinfo_init(aggstate);
-
-		aggstate->hash_spills = palloc(
-			sizeof(HashAggSpill) * aggstate->num_hashes);
-
-		for (int setno = 0; setno < aggstate->num_hashes; setno++)
-		{
-			AggStatePerHash	 perhash = &aggstate->perhash[setno];
-			HashAggSpill	*spill	 = &aggstate->hash_spills[setno];
-
-			hashagg_spill_init(spill, aggstate->hash_tapeinfo, 0,
-							   perhash->aggnode->numGroups,
-							   aggstate->hashentrysize);
-		}
 	}
 }
 
@@ -2001,9 +2056,9 @@ hash_choose_num_partitions(uint64 input_groups, double hashentrysize,
  * spill it to disk.
  */
 static AggStatePerGroup
-lookup_hash_entry(AggState *aggstate, uint32 hash, bool *in_hash_table)
+lookup_hash_entry(AggState *aggstate, AggStatePerPhaseHash perhash,
+				  uint32 hash, bool *in_hash_table)
 {
-	AggStatePerHash perhash = &aggstate->perhash[aggstate->current_set];
 	TupleTableSlot *hashslot = perhash->hashslot;
 	TupleHashEntryData *entry;
 	bool			isnew = false;
@@ -2077,34 +2132,48 @@ lookup_hash_entry(AggState *aggstate, uint32 hash, bool *in_hash_table)
  * efficient.
  */
 static void
-lookup_hash_entries(AggState *aggstate)
+lookup_hash_entries(AggState *aggstate, AggStatePerPhaseHash current_hash,
+					List *concurrent_hashes)
 {
-	AggStatePerGroup *pergroup = aggstate->hash_pergroup;
-	int			setno;
+	AggStatePerPhaseHash perhash;
+	int		i;
 
-	for (setno = 0; setno < aggstate->num_hashes; setno++)
+	for (i = 0; i < 1 + list_length(concurrent_hashes); i++)
 	{
-		AggStatePerHash	perhash = &aggstate->perhash[setno];
 		uint32			hash;
 		bool			in_hash_table;
 
-		select_current_set(aggstate, setno, true);
-		prepare_hash_slot(aggstate);
+		if (i == 0)
+			perhash = current_hash;
+		else
+			perhash = (AggStatePerPhaseHash) list_nth(concurrent_hashes, i - 1);
+
+		if (!perhash)
+			continue;
+
+		select_current_set(aggstate, 0, true);
+		prepare_hash_slot(aggstate, perhash);
 		hash = TupleHashTableHash(perhash->hashtable, perhash->hashslot);
-		pergroup[setno] = lookup_hash_entry(aggstate, hash, &in_hash_table);
+		perhash->phasedata.pergroups[0] =
+			lookup_hash_entry(aggstate, perhash, hash, &in_hash_table);
 
 		/* check to see if we need to spill the tuple for this grouping set */
 		if (!in_hash_table)
 		{
-			HashAggSpill	*spill	 = &aggstate->hash_spills[setno];
 			TupleTableSlot	*slot	 = aggstate->tmpcontext->ecxt_outertuple;
 
-			if (spill->partitions == NULL)
-				hashagg_spill_init(spill, aggstate->hash_tapeinfo, 0,
-								   perhash->aggnode->numGroups,
+			if (perhash->hash_spill == NULL)
+				perhash->hash_spill = palloc0(sizeof(HashAggSpill));
+
+			if (perhash->hash_spill->partitions == NULL)
+				hashagg_spill_init(perhash->hash_spill,
+								   aggstate->hash_tapeinfo, 0,
+								   perhash->phasedata.aggnode->numGroups,
 								   aggstate->hashentrysize);
 
-			hashagg_spill_tuple(spill, slot, hash);
+			hashagg_spill_tuple(perhash->hash_spill,
+								slot,
+								hash);
 		}
 	}
 }
@@ -2138,12 +2207,11 @@ ExecAgg(PlanState *pstate)
 			case AGG_HASHED:
 				if (!node->table_filled)
 					agg_fill_hash_table(node);
-				/* FALLTHROUGH */
-			case AGG_MIXED:
 				result = agg_retrieve_hash_table(node);
 				break;
 			case AGG_PLAIN:
 			case AGG_SORTED:
+			case AGG_MIXED:
 				if (!node->input_sorted)
 					agg_sort_input(node);
 				result = agg_retrieve_direct(node);
@@ -2171,8 +2239,8 @@ agg_retrieve_direct(AggState *aggstate)
 	TupleTableSlot *outerslot;
 	TupleTableSlot *firstSlot;
 	TupleTableSlot *result;
-	bool		hasGroupingSets = aggstate->phase->numsets > 0;
-	int			numGroupingSets = Max(aggstate->phase->numsets, 1);
+	bool		hasGroupingSets = aggstate->phase->aggnode->groupingSets != NULL;
+	int			numGroupingSets = aggstate->phase->numsets;
 	int			currentSet;
 	int			nextSetSize;
 	int			numReset;
@@ -2189,7 +2257,7 @@ agg_retrieve_direct(AggState *aggstate)
 	tmpcontext = aggstate->tmpcontext;
 
 	peragg = aggstate->peragg;
-	pergroups = aggstate->pergroups;
+	pergroups = aggstate->phase->pergroups;
 	firstSlot = aggstate->ss.ss_ScanTupleSlot;
 
 	/*
@@ -2247,25 +2315,35 @@ agg_retrieve_direct(AggState *aggstate)
 		{
 			if (aggstate->current_phase < aggstate->numphases - 1)
 			{
+				/* Advance to the next phase */
 				initialize_phase(aggstate, aggstate->current_phase + 1);
-				aggstate->input_done = false;
-				aggstate->projected_set = -1;
-				numGroupingSets = Max(aggstate->phase->numsets, 1);
-				node = aggstate->phase->aggnode;
-				numReset = numGroupingSets;
-			}
-			else if (aggstate->aggstrategy == AGG_MIXED)
-			{
-				/*
-				 * Mixed mode; we've output all the grouped stuff and have
-				 * full hashtables, so switch to outputting those.
-				 */
-				initialize_phase(aggstate, 0);
-				aggstate->table_filled = true;
-				ResetTupleHashIterator(aggstate->perhash[0].hashtable,
-									   &aggstate->perhash[0].hashiter);
-				select_current_set(aggstate, 0, true);
-				return agg_retrieve_hash_table(aggstate);
+
+				/* Check whether new phase is an AGG_HASHED */
+				if (!aggstate->phase->is_hashed)
+				{
+					aggstate->input_done = false;
+					aggstate->projected_set = -1;
+					numGroupingSets = aggstate->phase->numsets;
+					node = aggstate->phase->aggnode;
+					numReset = numGroupingSets;
+					pergroups = aggstate->phase->pergroups;
+				}
+				else
+				{
+					AggStatePerPhaseHash perhash = (AggStatePerPhaseHash) aggstate->phase;
+					/* finalize any spills */
+					hashagg_finish_initial_spills(aggstate);
+
+
+					/*
+					 * Mixed mode; we've output all the grouped stuff and have
+					 * full hashtables, so switch to outputting those.
+					 */
+					aggstate->table_filled = true;
+					ResetTupleHashIterator(perhash->hashtable, &perhash->hashiter);
+					select_current_set(aggstate, 0, true);
+					return agg_retrieve_hash_table(aggstate);
+				}
 			}
 			else
 			{
@@ -2304,11 +2382,11 @@ agg_retrieve_direct(AggState *aggstate)
 		 */
 		tmpcontext->ecxt_innertuple = econtext->ecxt_outertuple;
 		if (aggstate->input_done ||
-			(node->aggstrategy != AGG_PLAIN &&
+			(aggstate->phase->aggnode->numCols > 0 &&
 			 aggstate->projected_set != -1 &&
 			 aggstate->projected_set < (numGroupingSets - 1) &&
 			 nextSetSize > 0 &&
-			 !ExecQualAndReset(aggstate->phase->eqfunctions[nextSetSize - 1],
+			 !ExecQualAndReset(((AggStatePerPhaseSort) aggstate->phase)->eqfunctions[nextSetSize - 1],
 							   tmpcontext)))
 		{
 			aggstate->projected_set += 1;
@@ -2411,13 +2489,13 @@ agg_retrieve_direct(AggState *aggstate)
 				for (;;)
 				{
 					/*
-					 * During phase 1 only of a mixed agg, we need to update
-					 * hashtables as well in advance_aggregates.
+					 * If current phase can do transition concurrently, we need
+					 * to update hashtables as well in advance_aggregates.
 					 */
-					if (aggstate->aggstrategy == AGG_MIXED &&
-						aggstate->current_phase == 1)
+					if (aggstate->phase->concurrent_hashes)
 					{
-						lookup_hash_entries(aggstate);
+						lookup_hash_entries(aggstate, NULL,
+											aggstate->phase->concurrent_hashes);
 					}
 
 					/* Advance the aggregates (or combine functions) */
@@ -2430,11 +2508,6 @@ agg_retrieve_direct(AggState *aggstate)
 					if (TupIsNull(outerslot))
 					{
 						/* no more outer-plan tuples available */
-
-						/* if we built hash tables, finalize any spills */
-						if (aggstate->aggstrategy == AGG_MIXED &&
-							aggstate->current_phase == 1)
-							hashagg_finish_initial_spills(aggstate);
 
 						if (hasGroupingSets)
 						{
@@ -2454,10 +2527,10 @@ agg_retrieve_direct(AggState *aggstate)
 					 * If we are grouping, check whether we've crossed a group
 					 * boundary.
 					 */
-					if (node->aggstrategy != AGG_PLAIN)
+					if (aggstate->phase->aggnode->numCols > 0)
 					{
 						tmpcontext->ecxt_innertuple = firstSlot;
-						if (!ExecQual(aggstate->phase->eqfunctions[node->numCols - 1],
+						if (!ExecQual(((AggStatePerPhaseSort) aggstate->phase)->eqfunctions[node->numCols - 1],
 									  tmpcontext))
 						{
 							aggstate->grp_firstTuple = ExecCopySlotHeapTuple(outerslot);
@@ -2506,24 +2579,31 @@ agg_retrieve_direct(AggState *aggstate)
 static void
 agg_sort_input(AggState *aggstate)
 {
-	AggStatePerPhase phase = &aggstate->phases[1];
+	AggStatePerPhase phase = aggstate->phases[0];
+	AggStatePerPhaseSort persort = (AggStatePerPhaseSort) phase;
 	TupleDesc	tupDesc;
 	Sort		*sortnode;
+	bool		randomAccess;
 
 	Assert(!aggstate->input_sorted);
+	Assert(!phase->is_hashed);
 	Assert(phase->aggnode->sortnode);
 
 	sortnode = (Sort *) phase->aggnode->sortnode;
 	tupDesc = ExecGetResultType(outerPlanState(aggstate));
+	randomAccess = (aggstate->eflags & (EXEC_FLAG_REWIND |
+										EXEC_FLAG_BACKWARD |
+										EXEC_FLAG_MARK)) != 0;
 
-	aggstate->sort_in = tuplesort_begin_heap(tupDesc,
-											 sortnode->numCols,
-											 sortnode->sortColIdx,
-											 sortnode->sortOperators,
-											 sortnode->collations,
-											 sortnode->nullsFirst,
-											 work_mem,
-											 NULL, false);
+
+	persort->sort_in = tuplesort_begin_heap(tupDesc,
+											sortnode->numCols,
+											sortnode->sortColIdx,
+											sortnode->sortOperators,
+											sortnode->collations,
+											sortnode->nullsFirst,
+											work_mem,
+											NULL, randomAccess);
 	for (;;)
 	{
 		TupleTableSlot *outerslot;
@@ -2532,11 +2612,11 @@ agg_sort_input(AggState *aggstate)
 		if (TupIsNull(outerslot))
 			break;
 
-		tuplesort_puttupleslot(aggstate->sort_in, outerslot);
+		tuplesort_puttupleslot(persort->sort_in, outerslot);
 	}
 
 	/* Sort the first phase */
-	tuplesort_performsort(aggstate->sort_in);
+	tuplesort_performsort(persort->sort_in);
 
 	/* Mark the input to be sorted */
 	aggstate->input_sorted = true;
@@ -2548,8 +2628,14 @@ agg_sort_input(AggState *aggstate)
 static void
 agg_fill_hash_table(AggState *aggstate)
 {
+	AggStatePerPhaseHash current_hash;
 	TupleTableSlot *outerslot;
 	ExprContext *tmpcontext = aggstate->tmpcontext;
+	List *concurrent_hashes = aggstate->phase->concurrent_hashes;
+
+	/* Current phase must be the first phase */
+	Assert(aggstate->current_phase == 0);
+	current_hash = (AggStatePerPhaseHash) aggstate->phase;
 
 	/*
 	 * Process each outer-plan tuple, and then fetch the next one, until we
@@ -2557,7 +2643,7 @@ agg_fill_hash_table(AggState *aggstate)
 	 */
 	for (;;)
 	{
-		outerslot = fetch_input_tuple(aggstate);
+		outerslot = ExecProcNode(outerPlanState(aggstate));
 		if (TupIsNull(outerslot))
 			break;
 
@@ -2565,7 +2651,7 @@ agg_fill_hash_table(AggState *aggstate)
 		tmpcontext->ecxt_outertuple = outerslot;
 
 		/* Find or build hashtable entries */
-		lookup_hash_entries(aggstate);
+		lookup_hash_entries(aggstate, current_hash, concurrent_hashes);
 
 		/* Advance the aggregates (or combine functions) */
 		advance_aggregates(aggstate);
@@ -2583,8 +2669,7 @@ agg_fill_hash_table(AggState *aggstate)
 	aggstate->table_filled = true;
 	/* Initialize to walk the first hash table */
 	select_current_set(aggstate, 0, true);
-	ResetTupleHashIterator(aggstate->perhash[0].hashtable,
-						   &aggstate->perhash[0].hashiter);
+	ResetTupleHashIterator(current_hash->hashtable, &current_hash->hashiter);
 }
 
 /*
@@ -2602,6 +2687,7 @@ agg_fill_hash_table(AggState *aggstate)
 static bool
 agg_refill_hash_table(AggState *aggstate)
 {
+	AggStatePerPhaseHash perhash;
 	HashAggBatch	*batch;
 	HashAggSpill	 spill;
 	HashTapeInfo	*tapeinfo = aggstate->hash_tapeinfo;
@@ -2613,6 +2699,7 @@ agg_refill_hash_table(AggState *aggstate)
 
 	batch = linitial(aggstate->hash_batches);
 	aggstate->hash_batches = list_delete_first(aggstate->hash_batches);
+	perhash = (AggStatePerPhaseHash) aggstate->phases[batch->phaseidx];
 
 	/*
 	 * Estimate the number of groups for this batch as the total number of
@@ -2627,32 +2714,15 @@ agg_refill_hash_table(AggState *aggstate)
 						batch->used_bits, &aggstate->hash_mem_limit,
 						&aggstate->hash_ngroups_limit, NULL);
 
-	/* there could be residual pergroup pointers; clear them */
-	for (int setoff = 0;
-		 setoff < aggstate->maxsets + aggstate->num_hashes;
-		 setoff++)
-		aggstate->all_pergroups[setoff] = NULL;
-
 	/* free memory and reset hash tables */
 	ReScanExprContext(aggstate->hashcontext);
-	for (int setno = 0; setno < aggstate->num_hashes; setno++)
-		ResetTupleHashTable(aggstate->perhash[setno].hashtable);
+	ResetTupleHashTable(perhash->hashtable);
 
 	aggstate->hash_ngroups_current = 0;
 
-	/*
-	 * In AGG_MIXED mode, hash aggregation happens in phase 1 and the output
-	 * happens in phase 0. So, we switch to phase 1 when processing a batch,
-	 * and back to phase 0 after the batch is done.
-	 */
-	Assert(aggstate->current_phase == 0);
-	if (aggstate->phase->aggstrategy == AGG_MIXED)
-	{
-		aggstate->current_phase = 1;
-		aggstate->phase = &aggstate->phases[aggstate->current_phase];
-	}
-
-	select_current_set(aggstate, batch->setno, true);
+	/* switch to the phase of current batch */
+	initialize_phase(aggstate, batch->phaseidx);
+	select_current_set(aggstate, 0, true);
 
 	/*
 	 * Spilled tuples are always read back as MinimalTuples, which may be
@@ -2661,7 +2731,8 @@ agg_refill_hash_table(AggState *aggstate)
 	 * We still need the NULL check, because we are only processing one
 	 * grouping set at a time and the rest will be NULL.
 	 */
-	hashagg_recompile_expressions(aggstate, true, true);
+	aggstate->hash_agg_stage = HASHAGG_REFILL;
+	hashagg_recompile_expressions(aggstate);
 
 	LogicalTapeRewindForRead(tapeinfo->tapeset, batch->input_tapenum,
 							 HASHAGG_READ_BUFFER_SIZE);
@@ -2680,9 +2751,9 @@ agg_refill_hash_table(AggState *aggstate)
 		ExecStoreMinimalTuple(tuple, slot, true);
 		aggstate->tmpcontext->ecxt_outertuple = slot;
 
-		prepare_hash_slot(aggstate);
-		aggstate->hash_pergroup[batch->setno] = lookup_hash_entry(
-			aggstate, hash, &in_hash_table);
+		prepare_hash_slot(aggstate, perhash);
+		perhash->phasedata.pergroups[0] =
+			lookup_hash_entry(aggstate, perhash, hash, &in_hash_table);
 
 		if (in_hash_table)
 		{
@@ -2714,14 +2785,10 @@ agg_refill_hash_table(AggState *aggstate)
 
 	hashagg_tapeinfo_release(tapeinfo, batch->input_tapenum);
 
-	/* change back to phase 0 */
-	aggstate->current_phase = 0;
-	aggstate->phase = &aggstate->phases[aggstate->current_phase];
-
 	if (spill_initialized)
 	{
 		hash_agg_update_metrics(aggstate, true, spill.npartitions);
-		hashagg_spill_finish(aggstate, &spill, batch->setno);
+		hashagg_spill_finish(aggstate, &spill, batch->phaseidx);
 	}
 	else
 		hash_agg_update_metrics(aggstate, true, 0);
@@ -2729,9 +2796,7 @@ agg_refill_hash_table(AggState *aggstate)
 	aggstate->hash_spill_mode = false;
 
 	/* prepare to walk the first hash table */
-	select_current_set(aggstate, batch->setno, true);
-	ResetTupleHashIterator(aggstate->perhash[batch->setno].hashtable,
-						   &aggstate->perhash[batch->setno].hashiter);
+	ResetTupleHashIterator(perhash->hashtable, &perhash->hashiter);
 
 	pfree(batch);
 
@@ -2779,7 +2844,7 @@ agg_retrieve_hash_table_in_memory(AggState *aggstate)
 	TupleHashEntryData *entry;
 	TupleTableSlot *firstSlot;
 	TupleTableSlot *result;
-	AggStatePerHash perhash;
+	AggStatePerPhaseHash perhash;
 
 	/*
 	 * get state info from node.
@@ -2790,11 +2855,7 @@ agg_retrieve_hash_table_in_memory(AggState *aggstate)
 	peragg = aggstate->peragg;
 	firstSlot = aggstate->ss.ss_ScanTupleSlot;
 
-	/*
-	 * Note that perhash (and therefore anything accessed through it) can
-	 * change inside the loop, as we change between grouping sets.
-	 */
-	perhash = &aggstate->perhash[aggstate->current_set];
+	perhash = (AggStatePerPhaseHash) aggstate->phase;
 
 	/*
 	 * We loop retrieving groups until we find one satisfying
@@ -2813,18 +2874,16 @@ agg_retrieve_hash_table_in_memory(AggState *aggstate)
 		entry = ScanTupleHashTable(perhash->hashtable, &perhash->hashiter);
 		if (entry == NULL)
 		{
-			int			nextset = aggstate->current_set + 1;
-
-			if (nextset < aggstate->num_hashes)
+			if (aggstate->current_phase + 1 < aggstate->numphases &&
+				aggstate->hash_agg_stage != HASHAGG_REFILL)
 			{
 				/*
 				 * Switch to next grouping set, reinitialize, and restart the
 				 * loop.
 				 */
-				select_current_set(aggstate, nextset, true);
-
-				perhash = &aggstate->perhash[aggstate->current_set];
-
+				select_current_set(aggstate, 0, true);
+				initialize_phase(aggstate, aggstate->current_phase + 1);
+				perhash = (AggStatePerPhaseHash) aggstate->phase;
 				ResetTupleHashIterator(perhash->hashtable, &perhash->hashiter);
 
 				continue;
@@ -3019,12 +3078,12 @@ hashagg_spill_tuple(HashAggSpill *spill, TupleTableSlot *slot, uint32 hash)
  * be done.
  */
 static HashAggBatch *
-hashagg_batch_new(LogicalTapeSet *tapeset, int tapenum, int setno,
+hashagg_batch_new(LogicalTapeSet *tapeset, int tapenum, int phaseidx,
 				  int64 input_tuples, int used_bits)
 {
 	HashAggBatch *batch = palloc0(sizeof(HashAggBatch));
 
-	batch->setno = setno;
+	batch->phaseidx = phaseidx;
 	batch->used_bits = used_bits;
 	batch->tapeset = tapeset;
 	batch->input_tapenum = tapenum;
@@ -3090,25 +3149,31 @@ hashagg_batch_read(HashAggBatch *batch, uint32 *hashp)
 static void
 hashagg_finish_initial_spills(AggState *aggstate)
 {
-	int setno;
+	int phaseidx;
 	int total_npartitions = 0;
 
-	if (aggstate->hash_spills != NULL)
+	for (phaseidx = 0; phaseidx < aggstate->numphases; phaseidx++)
 	{
-		for (setno = 0; setno < aggstate->num_hashes; setno++)
-		{
-			HashAggSpill *spill = &aggstate->hash_spills[setno];
-			total_npartitions += spill->npartitions;
-			hashagg_spill_finish(aggstate, spill, setno);
-		}
+		AggStatePerPhaseHash	perhash;
+		AggStatePerPhase		phase = aggstate->phases[phaseidx];
 
-		/*
-		 * We're not processing tuples from outer plan any more; only
-		 * processing batches of spilled tuples. The initial spill structures
-		 * are no longer needed.
-		 */
-		pfree(aggstate->hash_spills);
-		aggstate->hash_spills = NULL;
+		if (!phase->is_hashed)
+			continue;
+
+		perhash = (AggStatePerPhaseHash) phase;
+		if (perhash->hash_spill)
+		{
+			total_npartitions += perhash->hash_spill->npartitions;
+			hashagg_spill_finish(aggstate, perhash->hash_spill, phase->phaseidx);
+
+			/*
+			 * We're not processing tuples from outer plan any more; only
+			 * processing batches of spilled tuples. The initial spill structures
+			 * are no longer needed.
+			 */
+			pfree(perhash->hash_spill);
+			perhash->hash_spill = NULL;
+		}
 	}
 
 	hash_agg_update_metrics(aggstate, false, total_npartitions);
@@ -3121,7 +3186,7 @@ hashagg_finish_initial_spills(AggState *aggstate)
  * Transform spill partitions into new batches.
  */
 static void
-hashagg_spill_finish(AggState *aggstate, HashAggSpill *spill, int setno)
+hashagg_spill_finish(AggState *aggstate, HashAggSpill *spill, int phaseidx)
 {
 	int i;
 	int used_bits = 32 - spill->shift;
@@ -3139,7 +3204,7 @@ hashagg_spill_finish(AggState *aggstate, HashAggSpill *spill, int setno)
 			continue;
 
 		new_batch = hashagg_batch_new(aggstate->hash_tapeinfo->tapeset,
-									  tapenum, setno, spill->ntuples[i],
+									  tapenum, phaseidx, spill->ntuples[i],
 									  used_bits);
 		aggstate->hash_batches = lcons(new_batch, aggstate->hash_batches);
 		aggstate->hash_batches_used++;
@@ -3155,21 +3220,25 @@ hashagg_spill_finish(AggState *aggstate, HashAggSpill *spill, int setno)
 static void
 hashagg_reset_spill_state(AggState *aggstate)
 {
-	ListCell *lc;
+	ListCell	*lc;
+	int			phaseidx;
 
 	/* free spills from initial pass */
-	if (aggstate->hash_spills != NULL)
+	for (phaseidx = 0; phaseidx < aggstate->numphases; phaseidx++)
 	{
-		int setno;
+		AggStatePerPhaseHash	perhash;
+		AggStatePerPhase		phase = aggstate->phases[phaseidx];
 
-		for (setno = 0; setno < aggstate->num_hashes; setno++)
+		if (!phase->is_hashed)
+			continue;
+
+		perhash = (AggStatePerPhaseHash) phase;
+
+		if (perhash->hash_spill)
 		{
-			HashAggSpill *spill = &aggstate->hash_spills[setno];
-			pfree(spill->ntuples);
-			pfree(spill->partitions);
+			pfree(perhash->hash_spill);
+			perhash->hash_spill = NULL;
 		}
-		pfree(aggstate->hash_spills);
-		aggstate->hash_spills = NULL;
 	}
 
 	/* free batches */
@@ -3208,25 +3277,22 @@ ExecInitAgg(Agg *node, EState *estate, int eflags)
 	AggState   *aggstate;
 	AggStatePerAgg peraggs;
 	AggStatePerTrans pertransstates;
-	AggStatePerGroup *pergroups;
 	Plan	   *outerPlan;
 	ExprContext *econtext;
 	TupleDesc	scanDesc;
-	Agg			*firstSortAgg;
 	int			numaggs,
 				transno,
 				aggno;
-	int			phase;
 	int			phaseidx;
 	ListCell   *l;
 	Bitmapset  *all_grouped_cols = NULL;
 	int			numGroupingSets = 1;
-	int			numPhases;
-	int			numHashes;
 	int			i = 0;
 	int			j = 0;
+	bool		need_extra_slot = false;
 	bool		use_hashing = (node->aggstrategy == AGG_HASHED ||
 							   node->aggstrategy == AGG_MIXED);
+	uint64		totalHashGroups = 0;
 
 	/* check for unsupported flags */
 	Assert(!(eflags & (EXEC_FLAG_BACKWARD | EXEC_FLAG_MARK)));
@@ -3253,24 +3319,15 @@ ExecInitAgg(Agg *node, EState *estate, int eflags)
 	aggstate->curpertrans = NULL;
 	aggstate->input_done = false;
 	aggstate->agg_done = false;
-	aggstate->pergroups = NULL;
 	aggstate->grp_firstTuple = NULL;
-	aggstate->sort_in = NULL;
-	aggstate->sort_out = NULL;
 	aggstate->input_sorted = true;
-
-	/*
-	 * phases[0] always exists, but is dummy in sorted/plain mode
-	 */
-	numPhases = (use_hashing ? 1 : 2);
-	numHashes = (use_hashing ? 1 : 0);
-
-	firstSortAgg = node->aggstrategy == AGG_SORTED ? node : NULL;
+	aggstate->eflags = eflags;
+	aggstate->num_hashes = 0;
+	aggstate->hash_agg_stage = HASHAGG_INITIAL;
 
 	/*
 	 * Calculate the maximum number of grouping sets in any phase; this
-	 * determines the size of some allocations.  Also calculate the number of
-	 * phases, since all hashed/mixed nodes contribute to only a single phase.
+	 * determines the size of some allocations.
 	 */
 	if (node->groupingSets)
 	{
@@ -3283,31 +3340,19 @@ ExecInitAgg(Agg *node, EState *estate, int eflags)
 			numGroupingSets = Max(numGroupingSets,
 								  list_length(agg->groupingSets));
 
-			/*
-			 * additional AGG_HASHED aggs become part of phase 0, but all
-			 * others add an extra phase.
-			 */
 			if (agg->aggstrategy != AGG_HASHED)
-			{
-				++numPhases;
-
-				if (!firstSortAgg)
-					firstSortAgg = agg;
-
-			}
-			else
-				++numHashes;
+				need_extra_slot = true;
 		}
 	}
 
 	aggstate->maxsets = numGroupingSets;
-	aggstate->numphases = numPhases;
+	aggstate->numphases = 1 + list_length(node->chain);
 
 	/*
-	 * The first SORTED phase is not sorted, agg need to do its own sort. See
+	 * The first phase is not sorted, agg need to do its own sort. See
 	 * agg_sort_input(), this can only happen in groupingsets case.
 	 */
-	if (firstSortAgg && firstSortAgg->sortnode)
+	if (node->sortnode)
 		aggstate->input_sorted = false;
 
 	aggstate->aggcontexts = (ExprContext **)
@@ -3365,11 +3410,10 @@ ExecInitAgg(Agg *node, EState *estate, int eflags)
 	scanDesc = aggstate->ss.ss_ScanTupleSlot->tts_tupleDescriptor;
 
 	/*
-	 * If there are more than two phases (including a potential dummy phase
-	 * 0), input will be resorted using tuplesort. Need a slot for that.
+	 * An extra slot is needed if 1) agg need to do its own sort 2) agg
+	 * has more than one non-hashed phases
 	 */
-	if (numPhases > 2 ||
-		!aggstate->input_sorted)
+	if (node->sortnode || need_extra_slot)
 	{
 		aggstate->sort_slot = ExecInitExtraTupleSlot(estate, scanDesc,
 													 &TTSOpsMinimalTuple);
@@ -3425,72 +3469,92 @@ ExecInitAgg(Agg *node, EState *estate, int eflags)
 	 * For each phase, prepare grouping set data and fmgr lookup data for
 	 * compare functions.  Accumulate all_grouped_cols in passing.
 	 */
-	aggstate->phases = palloc0(numPhases * sizeof(AggStatePerPhaseData));
+	aggstate->phases = palloc0(aggstate->numphases * sizeof(AggStatePerPhase));
 
-	aggstate->num_hashes = numHashes;
-	if (numHashes)
-	{
-		aggstate->perhash = palloc0(sizeof(AggStatePerHashData) * numHashes);
-		aggstate->phases[0].numsets = 0;
-		aggstate->phases[0].gset_lengths = palloc(numHashes * sizeof(int));
-		aggstate->phases[0].grouped_cols = palloc(numHashes * sizeof(Bitmapset *));
-	}
-
-	phase = 0;
-	for (phaseidx = 0; phaseidx <= list_length(node->chain); ++phaseidx)
+	for (phaseidx = 0; phaseidx < aggstate->numphases; phaseidx++)
 	{
 		Agg		   *aggnode;
+		AggStatePerPhase phasedata = NULL;
 
 		if (phaseidx > 0)
 			aggnode = list_nth_node(Agg, node->chain, phaseidx - 1);
 		else
 			aggnode = node;
 
-		if (aggnode->aggstrategy == AGG_HASHED
-			|| aggnode->aggstrategy == AGG_MIXED)
+		if (aggnode->aggstrategy == AGG_HASHED)
 		{
-			AggStatePerPhase phasedata = &aggstate->phases[0];
-			AggStatePerHash perhash;
-			Bitmapset  *cols = NULL;
+			AggStatePerPhaseHash perhash;
+			Bitmapset *cols = NULL;
 
-			Assert(phase == 0);
-			i = phasedata->numsets++;
-			perhash = &aggstate->perhash[i];
+			aggstate->num_hashes++;
+			totalHashGroups += aggnode->numGroups;
 
-			/* phase 0 always points to the "real" Agg in the hash case */
-			phasedata->aggnode = node;
-			phasedata->aggstrategy = node->aggstrategy;
+			perhash = (AggStatePerPhaseHash) palloc0(sizeof(AggStatePerPhaseHashData));
+			phasedata = (AggStatePerPhase) perhash;
+			phasedata->is_hashed = true;
+			phasedata->aggnode = aggnode;
+			phasedata->aggstrategy = aggnode->aggstrategy;
 
-			/* but the actual Agg node representing this hash is saved here */
-			perhash->aggnode = aggnode;
+			/* AGG_HASHED always has only one set */
+			phasedata->numsets = 1;
+			phasedata->gset_lengths = palloc(sizeof(int));
+			phasedata->gset_lengths[0] = perhash->numCols = aggnode->numCols;
 
-			phasedata->gset_lengths[i] = perhash->numCols = aggnode->numCols;
-
+			phasedata->grouped_cols = palloc(sizeof(Bitmapset *));
 			for (j = 0; j < aggnode->numCols; ++j)
 				cols = bms_add_member(cols, aggnode->grpColIdx[j]);
-
-			phasedata->grouped_cols[i] = cols;
+			phasedata->grouped_cols[0] = cols;
 
 			all_grouped_cols = bms_add_members(all_grouped_cols, cols);
-			continue;
+
+			/*
+			 * Initialize pergroup state. For AGG_HASHED, all groups do transition
+			 * on the fly, all pergroup states are kept in hashtable, everytime
+			 * a tuple is processed, lookup_hash_entry() choose one group and
+			 * set phasedata->pergroups[0], then advance_aggregates can use it
+			 * to do transition in this group.
+			 * We do not need to allocate a real pergroup and set the pointer
+			 * here, there are too many pergroup states, lookup_hash_entry() will
+			 * allocate it.
+			 */
+			phasedata->pergroups =
+				(AggStatePerGroup *) palloc0(sizeof(AggStatePerGroup));
+
+			/*
+			 * Hash aggregate does not require the order of input tuples, so
+			 * we can do the transition immediately when a tuple is fetched,
+			 * which means we can do the transition concurrently with the
+			 * first phase.
+			 */
+			if (phaseidx > 0)
+			{
+				aggstate->phases[0]->concurrent_hashes =
+					lappend(aggstate->phases[0]->concurrent_hashes, perhash);
+				/* skip evaltrans for this phase */
+				phasedata->skip_evaltrans = true;
+			}
 		}
 		else
 		{
-			AggStatePerPhase phasedata = &aggstate->phases[++phase];
-			int			num_sets;
+			AggStatePerPhaseSort persort;
 
-			phasedata->numsets = num_sets = list_length(aggnode->groupingSets);
+			persort = (AggStatePerPhaseSort) palloc0(sizeof(AggStatePerPhaseSortData));
+			phasedata = (AggStatePerPhase) persort;
+			phasedata->is_hashed = false;
+			phasedata->aggnode = aggnode;
+			phasedata->aggstrategy = aggnode->aggstrategy;
 
-			if (num_sets)
+			if (aggnode->groupingSets)
 			{
-				phasedata->gset_lengths = palloc(num_sets * sizeof(int));
-				phasedata->grouped_cols = palloc(num_sets * sizeof(Bitmapset *));
+				phasedata->numsets = list_length(aggnode->groupingSets);
+				phasedata->gset_lengths = palloc(phasedata->numsets * sizeof(int));
+				phasedata->grouped_cols = palloc(phasedata->numsets * sizeof(Bitmapset *));
 
 				i = 0;
 				foreach(l, aggnode->groupingSets)
 				{
-					int			current_length = list_length(lfirst(l));
-					Bitmapset  *cols = NULL;
+					int		current_length = list_length(lfirst(l));
+					Bitmapset	*cols = NULL;
 
 					/* planner forces this to be correct */
 					for (j = 0; j < current_length; ++j)
@@ -3507,37 +3571,49 @@ ExecInitAgg(Agg *node, EState *estate, int eflags)
 			}
 			else
 			{
-				Assert(phaseidx == 0);
-
+				phasedata->numsets = 1;
 				phasedata->gset_lengths = NULL;
 				phasedata->grouped_cols = NULL;
 			}
 
 			/*
+			 * Initialize pergroup states for AGG_SORTED/AGG_PLAIN/AGG_MIXED
+			 * phases, each set only have one group on the fly, all groups in
+			 * a set can reuse a pergroup state. Unlike AGG_HASHED, we
+			 * pre-allocate the pergroup states here.
+			 */
+			phasedata->pergroups =
+				(AggStatePerGroup *) palloc0(sizeof(AggStatePerGroup) * phasedata->numsets);
+
+			for (i = 0; i < phasedata->numsets; i++)
+			{
+				phasedata->pergroups[i] =
+					(AggStatePerGroup) palloc0(sizeof(AggStatePerGroupData) * numaggs);
+			}
+
+			/*
 			 * If we are grouping, precompute fmgr lookup data for inner loop.
 			 */
-			if (aggnode->aggstrategy == AGG_SORTED)
+			if (aggnode->numCols > 0)
 			{
 				int			i = 0;
-
-				Assert(aggnode->numCols > 0);
 
 				/*
 				 * Build a separate function for each subset of columns that
 				 * need to be compared.
 				 */
-				phasedata->eqfunctions =
+				persort->eqfunctions =
 					(ExprState **) palloc0(aggnode->numCols * sizeof(ExprState *));
 
 				/* for each grouping set */
-				for (i = 0; i < phasedata->numsets; i++)
+				for (i = 0; i < phasedata->numsets && phasedata->gset_lengths; i++)
 				{
 					int			length = phasedata->gset_lengths[i];
 
-					if (phasedata->eqfunctions[length - 1] != NULL)
+					if (persort->eqfunctions[length - 1] != NULL)
 						continue;
 
-					phasedata->eqfunctions[length - 1] =
+					persort->eqfunctions[length - 1] =
 						execTuplesMatchPrepare(scanDesc,
 											   length,
 											   aggnode->grpColIdx,
@@ -3547,9 +3623,9 @@ ExecInitAgg(Agg *node, EState *estate, int eflags)
 				}
 
 				/* and for all grouped columns, unless already computed */
-				if (phasedata->eqfunctions[aggnode->numCols - 1] == NULL)
+				if (persort->eqfunctions[aggnode->numCols - 1] == NULL)
 				{
-					phasedata->eqfunctions[aggnode->numCols - 1] =
+					persort->eqfunctions[aggnode->numCols - 1] =
 						execTuplesMatchPrepare(scanDesc,
 											   aggnode->numCols,
 											   aggnode->grpColIdx,
@@ -3559,9 +3635,24 @@ ExecInitAgg(Agg *node, EState *estate, int eflags)
 				}
 			}
 
-			phasedata->aggnode = aggnode;
-			phasedata->aggstrategy = aggnode->aggstrategy;
+			/*
+			 * For non-first AGG_SORTED phase, it processes the same input
+			 * tuples with previous phase except that it need to resort the
+			 * input tuples. Tell the previous phase to copy out the tuples.
+			 */
+			if (phaseidx > 0)
+			{
+				AggStatePerPhaseSort prev =
+					(AggStatePerPhaseSort) aggstate->phases[phaseidx - 1];
+
+				Assert(!prev->phasedata.is_hashed);
+				/* Tell the previous phase to copy the tuple to the sort_in */
+				prev->copy_out = true;
+			}
 		}
+
+		phasedata->phaseidx = phaseidx;
+		aggstate->phases[phaseidx] = phasedata;
 	}
 
 	/*
@@ -3584,83 +3675,9 @@ ExecInitAgg(Agg *node, EState *estate, int eflags)
 
 	aggstate->peragg = peraggs;
 	aggstate->pertrans = pertransstates;
-
-
-	aggstate->all_pergroups =
-		(AggStatePerGroup *) palloc0(sizeof(AggStatePerGroup)
-									 * (numGroupingSets + numHashes));
-	pergroups = aggstate->all_pergroups;
-
-	if (node->aggstrategy != AGG_HASHED)
-	{
-		for (i = 0; i < numGroupingSets; i++)
-		{
-			pergroups[i] = (AggStatePerGroup) palloc0(sizeof(AggStatePerGroupData)
-													  * numaggs);
-		}
-
-		aggstate->pergroups = pergroups;
-		pergroups += numGroupingSets;
-	}
-
-	/*
-	 * Hashing can only appear in the initial phase.
-	 */
-	if (use_hashing)
-	{
-		Plan   *outerplan = outerPlan(node);
-		uint64	totalGroups = 0;
-		int 	i;
-
-		aggstate->hash_metacxt = AllocSetContextCreate(
-			aggstate->ss.ps.state->es_query_cxt,
-			"HashAgg meta context",
-			ALLOCSET_DEFAULT_SIZES);
-		aggstate->hash_spill_slot = ExecInitExtraTupleSlot(
-			estate, scanDesc, &TTSOpsMinimalTuple);
-
-		/* this is an array of pointers, not structures */
-		aggstate->hash_pergroup = pergroups;
-
-		aggstate->hashentrysize = hash_agg_entry_size(
-			aggstate->numtrans, outerplan->plan_width, node->transitionSpace);
-
-		/*
-		 * Consider all of the grouping sets together when setting the limits
-		 * and estimating the number of partitions. This can be inaccurate
-		 * when there is more than one grouping set, but should still be
-		 * reasonable.
-		 */
-		for (i = 0; i < aggstate->num_hashes; i++)
-			totalGroups += aggstate->perhash[i].aggnode->numGroups;
-
-		hash_agg_set_limits(aggstate->hashentrysize, totalGroups, 0,
-							&aggstate->hash_mem_limit,
-							&aggstate->hash_ngroups_limit,
-							&aggstate->hash_planned_partitions);
-		find_hash_columns(aggstate);
-		build_hash_tables(aggstate);
-		aggstate->table_filled = false;
-	}
-
-	/*
-	 * Initialize current phase-dependent values to initial phase. The initial
-	 * phase is 1 (first sort pass) for all strategies that use sorting (if
-	 * hashing is being done too, then phase 0 is processed last); but if only
-	 * hashing is being done, then phase 0 is all there is.
-	 */
-	if (node->aggstrategy == AGG_HASHED)
-	{
-		aggstate->current_phase = 0;
-		initialize_phase(aggstate, 0);
-		select_current_set(aggstate, 0, true);
-	}
-	else
-	{
-		aggstate->current_phase = 1;
-		initialize_phase(aggstate, 1);
-		select_current_set(aggstate, 0, false);
-	}
+	aggstate->current_phase = 0;
+	initialize_phase(aggstate, 0);
+	select_current_set(aggstate, 0, aggstate->aggstrategy == AGG_HASHED);
 
 	/* -----------------
 	 * Perform lookups of aggregate function info, and initialize the
@@ -4005,51 +4022,15 @@ ExecInitAgg(Agg *node, EState *estate, int eflags)
 	 */
 	for (phaseidx = 0; phaseidx < aggstate->numphases; phaseidx++)
 	{
-		AggStatePerPhase phase = &aggstate->phases[phaseidx];
-		bool		dohash = false;
-		bool		dosort = false;
+		AggStatePerPhase phase = aggstate->phases[phaseidx];
 
-		/* phase 0 doesn't necessarily exist */
-		if (!phase->aggnode)
+		if (phase->skip_evaltrans)
 			continue;
 
-		if (aggstate->aggstrategy == AGG_MIXED && phaseidx == 1)
-		{
-			/*
-			 * Phase one, and only phase one, in a mixed agg performs both
-			 * sorting and aggregation.
-			 */
-			dohash = true;
-			dosort = true;
-		}
-		else if (aggstate->aggstrategy == AGG_MIXED && phaseidx == 0)
-		{
-			/*
-			 * No need to compute a transition function for an AGG_MIXED phase
-			 * 0 - the contents of the hashtables will have been computed
-			 * during phase 1.
-			 */
-			continue;
-		}
-		else if (phase->aggstrategy == AGG_PLAIN ||
-				 phase->aggstrategy == AGG_SORTED)
-		{
-			dohash = false;
-			dosort = true;
-		}
-		else if (phase->aggstrategy == AGG_HASHED)
-		{
-			dohash = true;
-			dosort = false;
-		}
-		else
-			Assert(false);
-
-		phase->evaltrans = ExecBuildAggTrans(aggstate, phase, dosort, dohash,
-											 false);
+		phase->evaltrans = ExecBuildAggTrans(aggstate, phase, false, true);
 
 		/* cache compiled expression for outer slot without NULL check */
-		phase->evaltrans_cache[0][0] = phase->evaltrans;
+		phase->evaltrans_cache[HASHAGG_INITIAL] = phase->evaltrans;
 	}
 
 	return aggstate;
@@ -4535,13 +4516,21 @@ ExecEndAgg(AggState *node)
 	int			transno;
 	int			numGroupingSets = Max(node->maxsets, 1);
 	int			setno;
+	int			phaseidx;
 
 	/* Make sure we have closed any open tuplesorts */
+	for (phaseidx = 0; phaseidx < node->numphases; phaseidx++)
+	{
+		AggStatePerPhase		phase = node->phases[phaseidx];
+		AggStatePerPhaseSort	persort;
 
-	if (node->sort_in)
-		tuplesort_end(node->sort_in);
-	if (node->sort_out)
-		tuplesort_end(node->sort_out);
+		if (phase->is_hashed)
+			continue;
+
+		persort = (AggStatePerPhaseSort) phase;
+		if (persort->sort_in)
+			tuplesort_end(persort->sort_in);
+	}
 
 	hashagg_reset_spill_state(node);
 
@@ -4591,6 +4580,7 @@ ExecReScanAgg(AggState *node)
 	int			transno;
 	int			numGroupingSets = Max(node->maxsets, 1);
 	int			setno;
+	int			phaseidx;
 
 	node->agg_done = false;
 
@@ -4615,8 +4605,12 @@ ExecReScanAgg(AggState *node)
 		if (outerPlan->chgParam == NULL && !node->hash_ever_spilled &&
 			!bms_overlap(node->ss.ps.chgParam, aggnode->aggParams))
 		{
-			ResetTupleHashIterator(node->perhash[0].hashtable,
-								   &node->perhash[0].hashiter);
+			AggStatePerPhaseHash perhash = (AggStatePerPhaseHash) node->phases[0];
+			ResetTupleHashIterator(perhash->hashtable,
+								   &perhash->hashiter);
+
+			/* reset to phase 0 */
+			initialize_phase(node, 0);
 			select_current_set(node, 0, true);
 			return;
 		}
@@ -4681,7 +4675,8 @@ ExecReScanAgg(AggState *node)
 		node->table_filled = false;
 		/* iterator will be reset when the table is filled */
 
-		hashagg_recompile_expressions(node, false, false);
+		node->hash_agg_stage = HASHAGG_INITIAL;
+		hashagg_recompile_expressions(node);
 	}
 
 	if (node->aggstrategy != AGG_HASHED)
@@ -4689,18 +4684,54 @@ ExecReScanAgg(AggState *node)
 		/*
 		 * Reset the per-group state (in particular, mark transvalues null)
 		 */
-		for (setno = 0; setno < numGroupingSets; setno++)
+		for (phaseidx = 0; phaseidx < node->numphases; phaseidx++)
 		{
-			MemSet(node->pergroups[setno], 0,
-				   sizeof(AggStatePerGroupData) * node->numaggs);
+			AggStatePerPhase phase = node->phases[phaseidx];
+
+			/* hash pergroups is reset by build_hash_tables */
+			if (phase->is_hashed)
+				continue;
+
+			for (setno = 0; setno < phase->numsets; setno++)
+				MemSet(phase->pergroups[setno], 0,
+					   sizeof(AggStatePerGroupData) * node->numaggs);
 		}
 
-		/* Reset input_sorted */
+		/*
+		 * The agg did its own first sort using tuplesort and the first
+		 * tuplesort is kept (see initialize_phase), if the subplan does
+		 * not have any parameter changes, and none of our own parameter
+		 * changes affect input expressions of the aggregated functions,
+		 * then we can just rescan the first tuplesort, no need to build
+		 * it again.
+		 *
+		 * Note: agg only do its own sort for groupingsets now.
+		 */
 		if (aggnode->sortnode)
-			node->input_sorted = false;
+		{
+			AggStatePerPhaseSort firstphase = (AggStatePerPhaseSort) node->phases[0];
+			bool randomAccess = (node->eflags & (EXEC_FLAG_REWIND |
+												 EXEC_FLAG_BACKWARD |
+												 EXEC_FLAG_MARK)) != 0;
+			if (firstphase->sort_in &&
+				randomAccess &&
+				outerPlan->chgParam == NULL &&
+				!bms_overlap(node->ss.ps.chgParam, aggnode->aggParams))
+			{
+				tuplesort_rescan(firstphase->sort_in);
+				node->input_sorted = true;
+			}
+			else
+			{
+				if (firstphase->sort_in)
+					tuplesort_end(firstphase->sort_in);
+				firstphase->sort_in = NULL;
+				node->input_sorted = false;
+			}
+		}
 
-		/* reset to phase 1 */
-		initialize_phase(node, 1);
+		/* reset to phase 0 */
+		initialize_phase(node, 0);
 
 		node->input_done = false;
 		node->projected_set = -1;

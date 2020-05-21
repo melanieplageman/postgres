@@ -2265,8 +2265,6 @@ create_groupingsets_plan(PlannerInfo *root, GroupingSetsPath *best_path)
 	chain = NIL;
 	if (list_length(rollups) > 1)
 	{
-		bool		is_first_sort = ((RollupData *) linitial(rollups))->is_hashed;
-
 		for_each_cell(lc, rollups, list_second_cell(rollups))
 		{
 			RollupData *rollup = lfirst(lc);
@@ -2279,25 +2277,18 @@ create_groupingsets_plan(PlannerInfo *root, GroupingSetsPath *best_path)
 
 			if (!rollup->is_hashed)
 			{
-				if (!is_first_sort ||
-					(is_first_sort && !best_path->is_sorted))
-				{
-					sort_plan = (Plan *)
-						make_sort_from_groupcols(rollup->groupClause,
-												 new_grpColIdx,
-												 subplan);
+				sort_plan = (Plan *)
+					make_sort_from_groupcols(rollup->groupClause,
+					                         new_grpColIdx,
+					                         subplan);
 
-					/*
-					 * Remove stuff we don't need to avoid bloating debug
-					 * output.
-					 */
-					sort_plan->targetlist = NIL;
-					sort_plan->lefttree = NULL;
-				}
+				/*
+				 * Remove stuff we don't need to avoid bloating debug
+				 * output.
+				 */
+				sort_plan->targetlist = NIL;
+				sort_plan->lefttree = NULL;
 			}
-
-			if (!rollup->is_hashed)
-				is_first_sort = false;
 
 			if (rollup->is_hashed)
 				strat = AGG_HASHED;

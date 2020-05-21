@@ -1004,10 +1004,10 @@ explain (costs off) select a, b, grouping(a,b), sum(v), count(*), max(v)
  Sort
    Sort Key: (GROUPING("*VALUES*".column1, "*VALUES*".column2)), "*VALUES*".column1, "*VALUES*".column2
    ->  MixedAggregate
+         Group Key: ()
          Hash Key: "*VALUES*".column1, "*VALUES*".column2
          Hash Key: "*VALUES*".column1
          Hash Key: "*VALUES*".column2
-         Group Key: ()
          ->  Values Scan on "*VALUES*"
 (8 rows)
 
@@ -1066,9 +1066,9 @@ explain (costs off)
  Sort
    Sort Key: (GROUPING(unhashable_col, unsortable_col)), (sum(v))
    ->  MixedAggregate
-         Hash Key: unsortable_col
          Sort Key: unhashable_col
            Group Key: unhashable_col
+         Hash Key: unsortable_col
          ->  Seq Scan on gstest4
 (7 rows)
 
@@ -1108,9 +1108,9 @@ explain (costs off)
  Sort
    Sort Key: (GROUPING(unhashable_col, unsortable_col)), (sum(v))
    ->  MixedAggregate
-         Hash Key: v, unsortable_col
          Sort Key: v, unhashable_col
            Group Key: v, unhashable_col
+         Hash Key: v, unsortable_col
          ->  Seq Scan on gstest4
 (7 rows)
 
@@ -1149,10 +1149,10 @@ explain (costs off)
            QUERY PLAN           
 --------------------------------
  MixedAggregate
+   Group Key: ()
+   Group Key: ()
+   Group Key: ()
    Hash Key: a, b
-   Group Key: ()
-   Group Key: ()
-   Group Key: ()
    ->  Seq Scan on gstest_empty
 (6 rows)
 
@@ -1310,10 +1310,10 @@ explain (costs off)
          ->  Sort
                Sort Key: a, b
                ->  MixedAggregate
+                     Group Key: ()
                      Hash Key: a, b
                      Hash Key: a
                      Hash Key: b
-                     Group Key: ()
                      ->  Seq Scan on gstest2
 (11 rows)
 
@@ -1345,10 +1345,10 @@ explain (costs off)
  Sort
    Sort Key: gstest_data.a, gstest_data.b
    ->  MixedAggregate
+         Group Key: ()
          Hash Key: gstest_data.a, gstest_data.b
          Hash Key: gstest_data.a
          Hash Key: gstest_data.b
-         Group Key: ()
          ->  Nested Loop
                ->  Values Scan on "*VALUES*"
                ->  Function Scan on gstest_data
@@ -1545,16 +1545,16 @@ explain (costs off)
          QUERY PLAN         
 ----------------------------
  MixedAggregate
-   Hash Key: two
-   Hash Key: four
-   Hash Key: ten
-   Hash Key: hundred
    Sort Key: unique1
      Group Key: unique1
    Sort Key: twothousand
      Group Key: twothousand
    Sort Key: thousand
      Group Key: thousand
+   Hash Key: hundred
+   Hash Key: ten
+   Hash Key: four
+   Hash Key: two
    ->  Seq Scan on tenk1
 (12 rows)
 
@@ -1567,12 +1567,12 @@ explain (costs off)
        QUERY PLAN        
 -------------------------
  MixedAggregate
-   Hash Key: two
-   Hash Key: four
-   Hash Key: ten
-   Hash Key: hundred
    Sort Key: unique1
      Group Key: unique1
+   Hash Key: hundred
+   Hash Key: ten
+   Hash Key: four
+   Hash Key: two
    ->  Seq Scan on tenk1
 (8 rows)
 
@@ -1586,15 +1586,15 @@ explain (costs off)
          QUERY PLAN         
 ----------------------------
  MixedAggregate
-   Hash Key: two
-   Hash Key: four
-   Hash Key: ten
-   Hash Key: hundred
-   Hash Key: thousand
    Sort Key: unique1
      Group Key: unique1
    Sort Key: twothousand
      Group Key: twothousand
+   Hash Key: thousand
+   Hash Key: hundred
+   Hash Key: ten
+   Hash Key: four
+   Hash Key: two
    ->  Seq Scan on tenk1
 (11 rows)
 
@@ -1671,6 +1671,7 @@ group by cube (g1000, g100,g10);
                     QUERY PLAN                     
 ---------------------------------------------------
  MixedAggregate
+   Group Key: ()
    Hash Key: (g.g % 1000), (g.g % 100), (g.g % 10)
    Hash Key: (g.g % 1000), (g.g % 100)
    Hash Key: (g.g % 1000)
@@ -1678,7 +1679,6 @@ group by cube (g1000, g100,g10);
    Hash Key: (g.g % 100)
    Hash Key: (g.g % 10), (g.g % 1000)
    Hash Key: (g.g % 10)
-   Group Key: ()
    ->  Function Scan on generate_series g
 (10 rows)
 

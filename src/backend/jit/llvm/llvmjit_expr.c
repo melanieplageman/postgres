@@ -2049,30 +2049,26 @@ llvm_compile_expr(ExprState *state)
 			case EEOP_AGG_PLAIN_PERGROUP_NULLCHECK:
 				{
 					int				 jumpnull;
-					LLVMValueRef	 v_aggstatep;
-					LLVMValueRef	 v_allpergroupsp;
+					LLVMValueRef	 v_pergroupsp;
 					LLVMValueRef	 v_pergroup_allaggs;
-					LLVMValueRef	 v_setoff;
+					LLVMValueRef	 v_setno;
 
 					jumpnull = op->d.agg_plain_pergroup_nullcheck.jumpnull;
 
 					/*
-					 * pergroup_allaggs = aggstate->all_pergroups
-					 * [op->d.agg_plain_pergroup_nullcheck.setoff];
+					 * pergroup =
+					 * &op->d.agg_plain_pergroup_nullcheck.pergroups
+					 * [op->d.agg_plain_pergroup_nullcheck.setno];
 					 */
-					v_aggstatep = LLVMBuildBitCast(
-						b, v_parent, l_ptr(StructAggState), "");
+					v_pergroupsp =
+						l_ptr_const(op->d.agg_plain_pergroup_nullcheck.pergroups,
+									l_ptr(l_ptr(StructAggStatePerGroupData)));
 
-					v_allpergroupsp = l_load_struct_gep(
-						b, v_aggstatep,
-						FIELDNO_AGGSTATE_ALL_PERGROUPS,
-						"aggstate.all_pergroups");
+					v_setno =
+						l_int32_const(op->d.agg_plain_pergroup_nullcheck.setno);
 
-					v_setoff = l_int32_const(
-						op->d.agg_plain_pergroup_nullcheck.setoff);
-
-					v_pergroup_allaggs = l_load_gep1(
-						b, v_allpergroupsp, v_setoff, "");
+					v_pergroup_allaggs =
+						l_load_gep1(b, v_pergroupsp, v_setno, "");
 
 					LLVMBuildCondBr(
 						b,
@@ -2094,6 +2090,7 @@ llvm_compile_expr(ExprState *state)
 				{
 					AggState   *aggstate;
 					AggStatePerTrans pertrans;
+					AggStatePerGroup *pergroups;
 					FunctionCallInfo fcinfo;
 
 					LLVMValueRef v_aggstatep;
@@ -2103,12 +2100,12 @@ llvm_compile_expr(ExprState *state)
 					LLVMValueRef v_transvaluep;
 					LLVMValueRef v_transnullp;
 
-					LLVMValueRef v_setoff;
+					LLVMValueRef v_setno;
 					LLVMValueRef v_transno;
 
 					LLVMValueRef v_aggcontext;
 
-					LLVMValueRef v_allpergroupsp;
+					LLVMValueRef v_pergroupsp;
 					LLVMValueRef v_current_setp;
 					LLVMValueRef v_current_pertransp;
 					LLVMValueRef v_curaggcontext;
@@ -2124,6 +2121,7 @@ llvm_compile_expr(ExprState *state)
 
 					aggstate = castNode(AggState, state->parent);
 					pertrans = op->d.agg_trans.pertrans;
+					pergroups = op->d.agg_trans.pergroups;
 
 					fcinfo = pertrans->transfn_fcinfo;
 
@@ -2133,19 +2131,18 @@ llvm_compile_expr(ExprState *state)
 											  l_ptr(StructAggStatePerTransData));
 
 					/*
-					 * pergroup = &aggstate->all_pergroups
-					 * [op->d.agg_strict_trans_check.setoff]
-					 * [op->d.agg_init_trans_check.transno];
+					 * pergroup = &op->d.agg_trans.pergroups
+					 * [op->d.agg_trans.setno]
+					 * [op->d.agg_trans.transno];
 					 */
-					v_allpergroupsp =
-						l_load_struct_gep(b, v_aggstatep,
-										  FIELDNO_AGGSTATE_ALL_PERGROUPS,
-										  "aggstate.all_pergroups");
-					v_setoff = l_int32_const(op->d.agg_trans.setoff);
+					v_pergroupsp =
+						l_ptr_const(pergroups,
+									l_ptr(l_ptr(StructAggStatePerGroupData)));
+					v_setno = l_int32_const(op->d.agg_trans.setno);
 					v_transno = l_int32_const(op->d.agg_trans.transno);
 					v_pergroupp =
 						LLVMBuildGEP(b,
-									 l_load_gep1(b, v_allpergroupsp, v_setoff, ""),
+									 l_load_gep1(b, v_pergroupsp, v_setno, ""),
 									 &v_transno, 1, "");
 
 
