@@ -284,6 +284,13 @@ typedef struct MergeAppend
 	struct PartitionPruneInfo *part_prune_info;
 } MergeAppend;
 
+typedef struct MergeAppendOrRedirect
+{
+	Plan		plan;
+	Bitmapset  *apprelids;		/* RTIs of appendrel(s) formed by this node */
+	List	   *mergeplans;
+} MergeAppendOrRedirect;
+
 /* ----------------
  *	RecursiveUnion node -
  *		Generate a recursive union of two subplans.

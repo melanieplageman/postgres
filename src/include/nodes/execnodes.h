@@ -1260,6 +1260,15 @@ typedef struct MergeAppendState
 	Bitmapset  *ms_valid_subplans;
 } MergeAppendState;
 
+typedef struct MergeAppendOrRedirectState
+{
+	PlanState	ps;				/* its first field is NodeTag */
+	PlanState **mergeplans;		/* array of PlanStates for my inputs */
+	int			ms_nplans;
+	TupleTableSlot **ms_slots;	/* array of length ms_nplans */
+	bool		ms_initialized; /* are subplans started? */
+} MergeAppendOrRedirectState;
+
 /* ----------------
  *	 RecursiveUnionState information
  *

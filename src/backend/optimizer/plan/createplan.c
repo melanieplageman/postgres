@@ -2205,11 +2205,63 @@ create_groupingsets_plan(PlannerInfo *root, GroupingSetsPath *best_path)
 	Assert(root->parse->groupingSets);
 	Assert(rollups != NIL);
 
+	MergeAppendOrRedirect *mergenode = makeNode(MergeAppendOrRedirect);
+	Plan	   *mergeplan = &mergenode->plan;
+	List	   *tlist = build_path_tlist(root, &best_path->path);
+	RelOptInfo *rel = best_path->path.parent;
+
 	/*
-	 * Agg can project, so no need to be terribly picky about child tlist, but
-	 * we do need grouping columns to be available
+	 * We don't have the actual creation of the MergeAppend node split out
+	 * into a separate make_xxx function.  This is because we want to run
+	 * prepare_sort_from_pathkeys on it before we do so on the individual
+	 * child plans, to make cross-checking the sort info easier.
 	 */
+	copy_generic_path_info(mergeplan, (Path *) best_path);
+	mergeplan->targetlist = tlist;
+	mergeplan->qual = NIL;
+	mergeplan->lefttree = NULL;
+	mergeplan->righttree = NULL;
+	mergenode->apprelids = rel->relids;
+
+	/*
+	* Agg can project, so no need to be terribly picky about child tlist, but
+	* we do need grouping columns to be available
+	*/
 	subplan = create_plan_recurse(root, best_path->subpath, CP_LABEL_TLIST);
+	for_each_cell(lc, rollups, linitial(rollups))
+	{
+		RollupData *rollup = lfirst(lc);
+		AttrNumber *new_grpColIdx;
+		Plan	   *sort_plan = NULL;
+		Plan	   *agg_plan;
+		AggStrategy strat;
+
+		new_grpColIdx = remap_groupColIdx(root, rollup->groupClause);
+
+		if (rollup->is_hashed)
+			strat = AGG_HASHED;
+		else if (list_length(linitial(rollup->gsets)) == 0)
+			strat = AGG_PLAIN;
+		else
+			strat = AGG_SORTED;
+
+		agg_plan = (Plan *) make_agg(NIL,
+		                             NIL,
+		                             strat,
+		                             AGGSPLIT_SIMPLE,
+		                             list_length((List *) linitial(rollup->gsets)),
+		                             new_grpColIdx,
+		                             extract_grouping_ops(rollup->groupClause),
+		                             extract_grouping_collations(rollup->groupClause, subplan->targetlist),
+		                             rollup->gsets,
+		                             NIL,
+		                             rollup->numGroups,
+		                             best_path->transitionSpace,
+		                             sort_plan);
+		mergenode->mergeplans = lappend(mergenode->mergeplans, agg_plan);
+	}
+	return mergeplan;
+
 
 	/*
 	 * Compute the mapping from tleSortGroupRef to column index in the child's

@@ -52,8 +52,45 @@
 typedef int32 SlotNumber;
 
 static TupleTableSlot *ExecMergeAppend(PlanState *pstate);
+static TupleTableSlot *ExecMergeAppendOrRedirect(PlanState *pstate);
 static int	heap_compare_slots(Datum a, Datum b, void *arg);
 
+MergeAppendOrRedirectState *
+ExecInitMergeAppendOrRedirect(MergeAppendOrRedirect *node, EState *estate, int eflags)
+{
+	MergeAppendOrRedirectState *mergestate = makeNode(MergeAppendOrRedirectState);
+	PlanState **mergeplanstates;
+	int nplans;
+	int i;
+
+	mergestate->ps.plan = (Plan *) node;
+	mergestate->ps.state = estate;
+	mergestate->ps.ExecProcNode = ExecMergeAppendOrRedirect;
+
+	nplans = list_length(node->mergeplans);
+	mergeplanstates = (PlanState **) palloc(nplans * sizeof(PlanState *));
+	mergestate->mergeplans = mergeplanstates;
+	mergestate->ms_nplans = nplans;
+
+	mergestate->ms_slots = (TupleTableSlot **) palloc0(sizeof(TupleTableSlot *) * nplans);
+
+	ExecInitResultTupleSlotTL(&mergestate->ps, &TTSOpsVirtual);
+	mergestate->ps.resultopsset = true;
+	mergestate->ps.resultopsfixed = false;
+	for (i = 0; i < nplans - 1; i++)
+	{
+		Plan	   *initNode = (Plan *) list_nth(node->mergeplans, i);
+
+		mergeplanstates[i] = ExecInitNode(initNode, estate, eflags);
+	}
+	mergestate->ps.ps_ProjInfo = NULL;
+	/*
+	 * initialize to show we have not run the subplans yet
+	 */
+	mergestate->ms_initialized = false;
+
+	return mergestate;
+}
 
 /* ----------------------------------------------------------------
  *		ExecInitMergeAppend
@@ -200,6 +237,12 @@ ExecInitMergeAppend(MergeAppend *node, EState *estate, int eflags)
 	mergestate->ms_initialized = false;
 
 	return mergestate;
+}
+
+static TupleTableSlot *
+ExecMergeAppendOrRedirect(PlanState *pstate)
+{
+
 }
 
 /* ----------------------------------------------------------------
