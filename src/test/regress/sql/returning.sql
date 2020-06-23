@@ -76,6 +76,7 @@ UPDATE foo SET f3 = f3*2
 SELECT * FROM foo;
 SELECT * FROM foochild;
 
+explain
 DELETE FROM foo
   USING int8_tbl i
   WHERE foo.f1 = i.q2
