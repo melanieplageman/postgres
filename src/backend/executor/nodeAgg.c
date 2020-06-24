@@ -1563,10 +1563,7 @@ find_hash_columns(AggState *aggstate)
 	Agg *aggnode =  (Agg *) aggstate->ss.ps.plan;
 
 	aggstate->colnos_needed = bms_union(base_colnos, aggregated_colnos);
-	Bitmapset *diff = bms_difference(aggstate->colnos_needed, aggnode->required_colnos);
-	if (!bms_is_empty(diff))
-		elog(NOTICE, "aggregated cols: %s. unaggregated cols: %s. all_cols: %s",
-		     bmsToString(aggregated_colnos), bmsToString(base_colnos), bmsToString(aggnode->required_colnos));
+	aggstate->colnos_needed = aggnode->required_colnos;
 	aggstate->max_colno_needed = 0;
 	aggstate->all_cols_needed = true;
 

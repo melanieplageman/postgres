@@ -1658,7 +1658,7 @@ create_unique_plan(PlannerInfo *root, UniquePath *best_path, int flags)
 								 NIL,
 								 best_path->path.rows,
 								 0,
-								 subplan, NULL);
+								 subplan);
 	}
 	else
 	{
@@ -2290,7 +2290,7 @@ create_groupingsets_plan(PlannerInfo *root, GroupingSetsPath *best_path)
 										 NIL,
 										 rollup->numGroups,
 										 best_path->transitionSpace,
-										 sort_plan, NULL);
+										 sort_plan);
 
 			/*
 			 * Remove stuff we don't need to avoid bloating debug output.
@@ -2329,7 +2329,7 @@ create_groupingsets_plan(PlannerInfo *root, GroupingSetsPath *best_path)
 						chain,
 						rollup->numGroups,
 						best_path->transitionSpace,
-						subplan, NULL);
+						subplan);
 
 		/* Copy cost data from Path to Plan */
 		copy_generic_path_info(&plan->plan, &best_path->path);
