@@ -553,6 +553,32 @@ extract_grouping_cols(List *groupClause, List *tlist)
 	return grpColIdx;
 }
 
+static bool
+find_spill_cols_walker(Node *node, Bitmapset **required_colnos)
+{
+	if (node == NULL)
+		return false;
+	if (IsA(node, Var))
+	{
+		Var		   *var = (Var *) node;
+		if (var->varno == OUTER_VAR && var->varlevelsup == 0)
+			*required_colnos = bms_add_member(*required_colnos, var->varattno);
+		return false;
+	}
+	return expression_tree_walker(node, find_spill_cols_walker,
+	                              (void *) required_colnos);
+}
+
+Bitmapset *extract_required_spill_cols(List *quals, List *tlist)
+{
+	Bitmapset *required_colnos = palloc(sizeof(Bitmapset));
+	required_colnos = NULL;
+	(void) find_spill_cols_walker((Node *) tlist, &required_colnos);
+	(void) find_spill_cols_walker((Node *) quals, &required_colnos);
+	return required_colnos;
+}
+
+
 /*
  * grouping_is_sortable - is it possible to implement grouping list by sorting?
  *

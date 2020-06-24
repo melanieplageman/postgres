@@ -1946,6 +1946,12 @@ set_upper_references(PlannerInfo *root, Plan *plan, int rtoffset)
 					   subplan_itlist,
 					   OUTER_VAR,
 					   rtoffset);
+	if (IsA(plan, Agg))
+	{
+		Agg *agg = (Agg *)plan;
+		if (agg->aggstrategy == AGG_HASHED)
+			agg->required_colnos = extract_required_spill_cols(plan->qual, plan->targetlist);
+	}
 
 	pfree(subplan_itlist);
 }

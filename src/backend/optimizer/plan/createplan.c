@@ -1658,7 +1658,7 @@ create_unique_plan(PlannerInfo *root, UniquePath *best_path, int flags)
 								 NIL,
 								 best_path->path.rows,
 								 0,
-								 subplan);
+								 subplan, NULL);
 	}
 	else
 	{
@@ -2113,27 +2113,12 @@ create_agg_plan(PlannerInfo *root, AggPath *best_path)
 	Plan	   *subplan;
 	List	   *tlist;
 	List	   *quals;
-	int			flags;
 
-	/*
-	 * Agg can project, so no need to be terribly picky about child tlist, but
-	 * we do need grouping columns to be available. We are a bit more careful
-	 * with hash aggregate, where we explicitly request small tlist to
-	 * minimize I/O needed for spilling (we can't be sure spilling won't be
-	 * necessary, so we just do it every time).
-	 */
-	flags = CP_LABEL_TLIST;
-
-	/* ensure small tlist for hash aggregate */
-	if (best_path->aggstrategy == AGG_HASHED)
-		flags |= CP_SMALL_TLIST;
-
-	subplan = create_plan_recurse(root, best_path->subpath, flags);
+	subplan = create_plan_recurse(root, best_path->subpath, CP_LABEL_TLIST);
 
 	tlist = build_path_tlist(root, &best_path->path);
 
 	quals = order_qual_clauses(root, best_path->qual);
-
 	plan = make_agg(tlist, quals,
 					best_path->aggstrategy,
 					best_path->aggsplit,
@@ -2210,26 +2195,12 @@ create_groupingsets_plan(PlannerInfo *root, GroupingSetsPath *best_path)
 	int			maxref;
 	List	   *chain;
 	ListCell   *lc;
-	int			flags;
 
 	/* Shouldn't get here without grouping sets */
 	Assert(root->parse->groupingSets);
 	Assert(rollups != NIL);
 
-	/*
-	 * Agg can project, so no need to be terribly picky about child tlist, but
-	 * we do need grouping columns to be available. We are a bit more careful
-	 * with hash aggregate, where we explicitly request small tlist to
-	 * minimize I/O needed for spilling (we can't be sure spilling won't be
-	 * necessary, so we just do it every time).
-	 */
-	flags = CP_LABEL_TLIST;
-
-	/* ensure small tlist for hash aggregate */
-	if (best_path->aggstrategy == AGG_HASHED)
-		flags |= CP_SMALL_TLIST;
-
-	subplan = create_plan_recurse(root, best_path->subpath, flags);
+	subplan = create_plan_recurse(root, best_path->subpath, CP_LABEL_TLIST);
 
 	/*
 	 * Compute the mapping from tleSortGroupRef to column index in the child's
@@ -2319,7 +2290,7 @@ create_groupingsets_plan(PlannerInfo *root, GroupingSetsPath *best_path)
 										 NIL,
 										 rollup->numGroups,
 										 best_path->transitionSpace,
-										 sort_plan);
+										 sort_plan, NULL);
 
 			/*
 			 * Remove stuff we don't need to avoid bloating debug output.
@@ -2358,7 +2329,7 @@ create_groupingsets_plan(PlannerInfo *root, GroupingSetsPath *best_path)
 						chain,
 						rollup->numGroups,
 						best_path->transitionSpace,
-						subplan);
+						subplan, NULL);
 
 		/* Copy cost data from Path to Plan */
 		copy_generic_path_info(&plan->plan, &best_path->path);
@@ -6376,6 +6347,7 @@ make_agg(List *tlist, List *qual,
 	node->aggstrategy = aggstrategy;
 	node->aggsplit = aggsplit;
 	node->numCols = numGroupCols;
+	node->required_colnos = NULL;
 	node->grpColIdx = grpColIdx;
 	node->grpOperators = grpOperators;
 	node->grpCollations = grpCollations;
