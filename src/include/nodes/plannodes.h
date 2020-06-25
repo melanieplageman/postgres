@@ -819,6 +819,8 @@ typedef struct Agg
 	AggStrategy aggstrategy;	/* basic strategy, see nodes.h */
 	AggSplit	aggsplit;		/* agg-splitting mode, see nodes.h */
 	int			numCols;		/* number of grouping columns */
+	Bitmapset *aggregated_colnos;
+	Bitmapset *unaggregated_colnos;
 	AttrNumber *grpColIdx;		/* their indexes in the target list */
 	Oid		   *grpOperators;	/* equality operators to compare with */
 	Oid		   *grpCollations;

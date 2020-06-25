@@ -68,6 +68,14 @@ typedef struct
 	int			rtoffset;
 } fix_upper_expr_context;
 
+/* used to find referenced colnos */
+typedef struct BifurcateColsContext
+{
+	bool	   is_aggref;		/* is under an aggref */
+	Bitmapset *aggregated;		/* column references under an aggref */
+	Bitmapset *unaggregated;	/* other column references */
+} BifurcateColsContext;
+
 /*
  * Check if a Const node is a regclass value.  We accept plain OID too,
  * since a regclass Const will get folded to that type if it's an argument
@@ -113,6 +121,8 @@ static Node *fix_scan_expr(PlannerInfo *root, Node *node, int rtoffset);
 static Node *fix_scan_expr_mutator(Node *node, fix_scan_expr_context *context);
 static bool fix_scan_expr_walker(Node *node, fix_scan_expr_context *context);
 static void set_join_references(PlannerInfo *root, Join *join, int rtoffset);
+static void bifurcate_agg_cols(List *quals, List *tlist, Bitmapset **aggregated, Bitmapset **unaggregated);
+static bool bifurcate_agg_cols_walker(Node *node, BifurcateColsContext *context);
 static void set_upper_references(PlannerInfo *root, Plan *plan, int rtoffset);
 static void set_param_references(PlannerInfo *root, Plan *plan);
 static Node *convert_combining_aggrefs(Node *node, void *context);
@@ -1879,6 +1889,58 @@ set_join_references(PlannerInfo *root, Join *join, int rtoffset)
 	pfree(inner_itlist);
 }
 
+
+/*
+ * Walk tlist and qual to find referenced colnos, dividing them into
+ * aggregated and unaggregated sets.
+ */
+static void
+bifurcate_agg_cols(List *quals, List *tlist, Bitmapset **aggregated, Bitmapset **unaggregated)
+{
+	BifurcateColsContext context;
+
+	context.is_aggref = false;
+	context.aggregated = NULL;
+	context.unaggregated = NULL;
+
+	(void) bifurcate_agg_cols_walker((Node *) tlist, &context);
+	(void) bifurcate_agg_cols_walker((Node *) quals, &context);
+
+	*aggregated = context.aggregated;
+	*unaggregated = context.unaggregated;
+}
+
+
+static bool
+bifurcate_agg_cols_walker(Node *node, BifurcateColsContext *context)
+{
+	if (node == NULL)
+		return false;
+	if (IsA(node, Var))
+	{
+		Var		   *var = (Var *) node;
+
+		if (var->varno != OUTER_VAR && var->varlevelsup != 0)
+			return false;
+
+		if (context->is_aggref)
+			context->aggregated = bms_add_member(context->aggregated, var->varattno);
+		else
+			context->unaggregated = bms_add_member(context->unaggregated, var->varattno);
+		return false;
+	}
+	if (IsA(node, Aggref))
+	{
+		Assert(!context->is_aggref);
+		context->is_aggref = true;
+		expression_tree_walker(node, bifurcate_agg_cols_walker, (void *) context);
+		context->is_aggref = false;
+		return false;
+	}
+	return expression_tree_walker(node, bifurcate_agg_cols_walker, (void *) context);
+}
+
+
 /*
  * set_upper_references
  *	  Update the targetlist and quals of an upper-level plan node
@@ -1946,6 +2008,13 @@ set_upper_references(PlannerInfo *root, Plan *plan, int rtoffset)
 					   subplan_itlist,
 					   OUTER_VAR,
 					   rtoffset);
+
+	if (IsA(plan, Agg))
+	{
+		Agg *agg = (Agg *)plan;
+		if (agg->aggstrategy == AGG_HASHED || agg->aggstrategy == AGG_MIXED)
+			bifurcate_agg_cols(plan->qual, plan->targetlist, &agg->aggregated_colnos, &agg->unaggregated_colnos);
+	}
 
 	pfree(subplan_itlist);
 }

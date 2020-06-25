@@ -779,6 +779,8 @@ _outAgg(StringInfo str, const Agg *node)
 	WRITE_ENUM_FIELD(aggstrategy, AggStrategy);
 	WRITE_ENUM_FIELD(aggsplit, AggSplit);
 	WRITE_INT_FIELD(numCols);
+	WRITE_BITMAPSET_FIELD(aggregated_colnos);
+	WRITE_BITMAPSET_FIELD(unaggregated_colnos);
 	WRITE_ATTRNUMBER_ARRAY(grpColIdx, node->numCols);
 	WRITE_OID_ARRAY(grpOperators, node->numCols);
 	WRITE_OID_ARRAY(grpCollations, node->numCols);

@@ -2227,6 +2227,8 @@ _readAgg(void)
 	READ_ENUM_FIELD(aggstrategy, AggStrategy);
 	READ_ENUM_FIELD(aggsplit, AggSplit);
 	READ_INT_FIELD(numCols);
+	READ_BITMAPSET_FIELD(aggregated_colnos);
+	READ_BITMAPSET_FIELD(unaggregated_colnos);
 	READ_ATTRNUMBER_ARRAY(grpColIdx, local_node->numCols);
 	READ_OID_ARRAY(grpOperators, local_node->numCols);
 	READ_OID_ARRAY(grpCollations, local_node->numCols);
