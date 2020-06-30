@@ -1350,8 +1350,7 @@ ExecParallelHashIncreaseNumBatches(HashJoinTable hashtable)
 					 */
 					if (batch->space_exhausted ||
 						batch->estimated_size > pstate->space_allowed ||
-						batch->size > pstate->space_allowed ||
-						batch->estimated_size > pstate->space_allowed)
+						batch->size > pstate->space_allowed)
 					{
 						int			parent;
 						float		frac_moved;
@@ -1429,11 +1428,12 @@ ExecParallelHashRepartitionFirst(HashJoinTable hashtable)
 			size_t		tuple_size =
 			MAXALIGN(HJTUPLE_OVERHEAD + tuple->t_len);
 			tupleMetadata metadata;
+			ParallelHashJoinBatch *batch;
 
 			ExecHashGetBucketAndBatch(hashtable, hashTuple->hashvalue,
 									  &bucketno, &batchno);
 
-			ParallelHashJoinBatch *batch = hashtable->batches[batchno].shared;
+			batch = hashtable->batches[batchno].shared;
 
 			Assert(batchno < hashtable->nbatch);
 			if (batchno == 0 && batch->size + tuple_size < hashtable->parallel_state->space_allowed)
@@ -1459,7 +1459,7 @@ ExecParallelHashRepartitionFirst(HashJoinTable hashtable)
 				{
 					batch->maximum_stripe_number++;
 					batch->estimated_stripe_size = 0;
-					batch->hashloop_fallback = true;
+					batch->batch0_spilled = true;
 				}
 
 				batch->estimated_stripe_size += tuple_size;
@@ -3050,6 +3050,7 @@ ExecParallelHashTupleAlloc(HashJoinTable hashtable, size_t size,
 	/* Check if it's time to grow batches or buckets. */
 	if (pstate->growth != PHJ_GROWTH_DISABLED)
 	{
+		// TODO: rename this local variable
 		ParallelHashJoinBatchAccessor batch = hashtable->batches[0];
 
 		Assert(curbatch == 0);
@@ -3176,6 +3177,7 @@ ExecParallelHashJoinSetUpBatches(HashJoinTable hashtable, int nbatch)
 		char		sbname[MAXPGPATH];
 
 		shared->hashloop_fallback = false;
+		shared->batch0_spilled = false;
 		/* TODO: is it okay to use the same tranche for this lock? */
 		LWLockInitialize(&shared->lock, LWTRANCHE_PARALLEL_HASH_JOIN);
 		shared->maximum_stripe_number = 0;
@@ -3187,6 +3189,19 @@ ExecParallelHashJoinSetUpBatches(HashJoinTable hashtable, int nbatch)
 		 */
 		BarrierInit(&shared->batch_barrier, 0);
 		BarrierInit(&shared->stripe_barrier, 0);
+		/* Batch 0, stripe 0 doesn't need to be loaded. */
+		if (i == 0)
+		{
+			BarrierAttach(&shared->batch_barrier);
+			while (BarrierPhase(&shared->batch_barrier) < PHJ_BATCH_STRIPING)
+				BarrierArriveAndWait(&shared->batch_barrier, 0);
+			BarrierDetach(&shared->batch_barrier);
+
+			BarrierAttach(&shared->stripe_barrier);
+			while (BarrierPhase(&shared->stripe_barrier) < PHJ_STRIPE_PROBING)
+				BarrierArriveAndWait(&shared->stripe_barrier, 0);
+			BarrierDetach(&shared->stripe_barrier);
+		}
 
 		/* why isn't done initialized here ? */
 		accessor->done = PHJ_BATCH_ACCESSOR_NOT_DONE;

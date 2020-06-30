@@ -180,6 +180,7 @@ typedef struct ParallelHashJoinBatch
 	 * not require a lock to read
 	 */
 	bool		hashloop_fallback;
+	bool batch0_spilled;
 	int			maximum_stripe_number;	/* the number of stripes in the batch */
 	size_t		estimated_stripe_size;	/* size of last stripe in batch */
 	LWLock		lock;
