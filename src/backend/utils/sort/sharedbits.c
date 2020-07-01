@@ -1,4 +1,7 @@
 #include "postgres.h"
+
+#include <fcntl.h>
+
 #include "storage/buffile.h"
 #include "utils/sharedbits.h"
 
@@ -216,7 +219,7 @@ sb_combine(SharedBitsAccessor *accessor)
 
 		if (!accessor->bits->participants[i].present)
 			continue;
-		file = BufFileOpenShared(accessor->fileset, bitmap_filename);
+		file = BufFileOpenShared(accessor->fileset, bitmap_filename, O_RDWR);
 		/* TODO: can we be sure that this file is at beginning? */
 		Assert(file);
 

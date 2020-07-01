@@ -1771,6 +1771,7 @@ PathNameOpenTemporaryFile(const char *path, int mode)
 	return file;
 }
 
+
 /*
  * Delete a file by pathname.  Return true if the file existed, false if
  * didn't.

@@ -320,8 +320,8 @@ BufFileOpenShared(SharedFileSet *fileset, const char *name, int mode)
 	if (nfiles == 0)
 		ereport(ERROR,
 				(errcode_for_file_access(),
-				 errmsg("could not open temporary file \"%s\" from BufFile \"%s\": %m",
-						segment_name, name)));
+				 errmsg("%d: could not open temporary file \"%s\" from BufFile \"%s\": %m",
+						MyProcPid, segment_name, name)));
 
 	file = makeBufFileCommon(nfiles);
 	file->files = files;

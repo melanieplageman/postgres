@@ -2991,8 +2991,6 @@ show_hash_info(HashState *hashstate, ExplainState *es)
 											  worker_hi->nbatch_original);
 			hinstrument.space_peak = Max(hinstrument.space_peak,
 										 worker_hi->space_peak);
-			if (!hinstrument.fallback_batches_stats && worker_hi->fallback_batches_stats)
-				hinstrument.fallback_batches_stats = worker_hi->fallback_batches_stats;
 		}
 	}
 
