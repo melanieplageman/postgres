@@ -1,0 +1,84 @@
+
+/* TODO: should we use tupleid instead of position in the serial case too? */
+
+- move hashtable reset to final phase of stripe machine instead of having it twice
+
+
+- notes for email
+  - removed growEnabled for serial hashjoin
+  - PHJ_GROWTH_DISABLED used differently
+
+
+
+this tries to close an outer match status file for each participant in
+the tuplestore. technically, only participants in the barrier could have outer
+match status files, however, all but one participant continue on and detach
+from the barrier so we won't have a reliable way to close only files for those
+attached to the barrier
+
+
+only write tuplemetadata with stripe number *and* hashvalue to sharedtuplestore if it is a fall back batch
+sts_puttuple()
+to avoid bloating the tuplestore
+
+
+make local variable naming of PHJBatch and PHJBatchAccessor consistent (sometimes it is batch and sometimes shared for the PHJBatch and sometimes accessor and sometimes batch for the other)
+see ExecParallelHashRepartitionRest()
+
+- Revisit GUC to fix batch size used for testing. We ran into some
+  problems with it and decided to wait until we needed it again to fix
+  it
+
+- Move instrumentation for stripes into the hashloopBatchFile array
+  itself (potentially)
+
+- Format the serial hashjoin state machine diagram
+
+- Potentially add tupleid to serial case (used in parallel case) and use it instead
+  of relying on tuple ordering for marking bits (could also be used in
+  instrumentation)
+
+
+extern bool BarrierDetachOrAdvance(Barrier *barrier);
+/*
+ * If this worker is the only participant, advance the phase and return true
+ * If this worker is not the only participant, detach from the barrier
+ * and return false.
+ */
+bool
+BarrierDetachOrAdvance(Barrier *barrier)
+{
+	SpinLockAcquire(&barrier->mutex);
+	if (barrier->participants > 1)
+	{
+		SpinLockRelease(&barrier->mutex);
+		return BarrierDetachImpl(barrier, false);
+	}
+	else
+	{
+		int			start_phase;
+		int			next_phase;
+
+		start_phase = barrier->phase;
+		next_phase = start_phase + 1;
+		barrier->arrived = 0;
+		barrier->phase = next_phase;
+		barrier->elected = next_phase;
+		SpinLockRelease(&barrier->mutex);
+		return true;
+	}
+}
+
+
+- what if the skew hashtable exceeds work_mem?
+
+
+batch0 fallback
+deal with:
+- skew hashtable
+- parallel : fast-forwarding the barrier 
+
+- instrumentation improvement for parallel and serial (code is not good)
+- had to remove optimization for workers collab-ing on stripes -- need new one
+
+- test with more workers (also try debugging with detach-on-fork with more than one worker)

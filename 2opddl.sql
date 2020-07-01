@@ -1,0 +1,27 @@
+DROP TYPE IF EXISTS stub CASCADE;
+CREATE TYPE stub AS (hash INTEGER, value CHAR(8098));
+
+CREATE FUNCTION stub_hash(item stub)
+RETURNS INTEGER AS $$
+BEGIN
+  RETURN item.hash;
+END; $$ LANGUAGE plpgsql IMMUTABLE LEAKPROOF STRICT PARALLEL SAFE;
+
+CREATE FUNCTION stub_eq(item1 stub, item2 stub)
+RETURNS BOOLEAN AS $$
+BEGIN
+  RETURN item1.hash = item2.hash AND item1.value = item2.value;
+END; $$ LANGUAGE plpgsql IMMUTABLE LEAKPROOF STRICT PARALLEL SAFE;
+
+CREATE OPERATOR = (
+  FUNCTION = stub_eq,
+  LEFTARG = stub,
+  RIGHTARG = stub,
+  COMMUTATOR = =,
+  HASHES, MERGES
+);
+
+CREATE OPERATOR CLASS stub_hash_ops
+DEFAULT FOR TYPE stub USING hash AS
+  OPERATOR 1 =(stub, stub),
+  FUNCTION 1 stub_hash(stub);

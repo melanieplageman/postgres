@@ -174,14 +174,15 @@ typedef struct ParallelHashJoinBatch
 	bool		space_exhausted;
 
 	/* Adaptive HashJoin */
-
 	/*
 	 * after finishing build phase, hashloop_fallback cannot change, and does
 	 * not require a lock to read
 	 */
-	bool		hashloop_fallback;
+	bool		hashloop_fallback; // make an atomic?
+	bool dont_even_try_hashtable;
 	int			maximum_stripe_number;	/* the number of stripes in the batch */
 	size_t		estimated_stripe_size;	/* size of last stripe in batch */
+	pg_atomic_uint64 ntuples_in_memory; /* number of tuples loaded into the hashtable */
 	LWLock		lock;
 
 	/*
@@ -240,6 +241,7 @@ typedef struct ParallelHashJoinBatchAccessor
 	SharedTuplestoreAccessor *inner_tuples;
 	SharedTuplestoreAccessor *outer_tuples;
 	SharedBitsAccessor *sba;
+	bool participated;
 
 	/*
 	 * All participants except the last worker working on a batch which has
@@ -265,7 +267,10 @@ typedef enum ParallelHashGrowth
 	/* The memory budget would be exhausted, so we need to repartition. */
 	PHJ_GROWTH_NEED_MORE_BATCHES,
 	/* Repartitioning didn't help last time, so don't try to do that again. */
-	PHJ_GROWTH_DISABLED
+	/* TODO: rename PHJ_GROWTH_DISABLED */
+	PHJ_GROWTH_DISABLED,
+	PHJ_GROWTH_SPILL_BATCH0,
+	PHJ_GROWTH_LOADING
 } ParallelHashGrowth;
 
 typedef enum ParallelHashJoinBatchAccessorStatus
@@ -299,6 +304,8 @@ typedef struct ParallelHashJoinState
 	LWLock		lock;			/* lock protecting the above */
 
 	Barrier		build_barrier;	/* synchronization for the build phases */
+	Barrier     eviction_barrier;
+	Barrier     repartition_barrier;
 	Barrier		grow_batches_barrier;
 	Barrier		grow_buckets_barrier;
 	pg_atomic_uint32 distributor;	/* counter for load balancing */
@@ -324,10 +331,22 @@ typedef struct ParallelHashJoinState
 #define PHJ_STRIPE_ELECTING				0
 #define PHJ_STRIPE_RESETTING			1
 #define PHJ_STRIPE_LOADING				2
-#define PHJ_STRIPE_PROBING				3
-#define PHJ_STRIPE_DONE				    4
-#define PHJ_STRIPE_NUMBER(n)            ((n) / 5)
-#define PHJ_STRIPE_PHASE(n)             ((n) % 5)
+#define PHJ_STRIPE_OVERFLOWING          3
+#define PHJ_STRIPE_PROBING				4
+#define PHJ_STRIPE_DONE				    5
+#define PHJ_STRIPE_NUMBER(n)            ((n) / 6)
+#define PHJ_STRIPE_PHASE(n)             ((n) % 6)
+
+#define PHJ_EVICT_ELECTING 0
+#define PHJ_EVICT_RESETTING 1
+#define PHJ_EVICT_SPILLING 2
+#define PHJ_EVICT_FINISHING 3
+#define PHJ_EVICT_DONE 4
+#define PHJ_EVICT_PHASE(n)          ((n) % 5)
+
+#define PHJ_REPARTITION_BATCH0_DRAIN_QUEUE 0
+#define PHJ_REPARTITION_BATCH0_DRAIN_SPILL_FILE 1
+#define PHJ_REPARTITION_BATCH0_PHASE(n)  ((n) % 2)
 
 /* The phases of batch growth while hashing, for grow_batches_barrier. */
 #define PHJ_GROW_BATCHES_ELECTING		0
