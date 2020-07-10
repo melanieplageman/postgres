@@ -1189,6 +1189,7 @@ ExecParallelHashIncreaseNumBatches(HashJoinTable hashtable)
 				int			new_nbatch;
 				int			i;
 
+				pstate->abandon_repartitioning = false;
 				/* Move the old batch out of the way. */
 				old_batch0 = hashtable->batches[0].shared;
 				pstate->old_batches = pstate->batches;
@@ -1301,7 +1302,8 @@ ExecParallelHashIncreaseNumBatches(HashJoinTable hashtable)
 			ExecParallelHashTableSetCurrentBatch(hashtable, 0);
 			/* Then partition, flush counters. */
 			ExecParallelHashRepartitionFirst(hashtable);
-			ExecParallelHashRepartitionRest(hashtable);
+			if (!pstate->abandon_repartitioning)
+				ExecParallelHashRepartitionRest(hashtable);
 			ExecParallelHashMergeCounters(hashtable);
 			/* Wait for the above to be finished. */
 			BarrierArriveAndWait(&pstate->grow_batches_barrier,
@@ -1438,6 +1440,11 @@ ExecParallelHashRepartitionFirst(HashJoinTable hashtable)
 					ExecParallelHashTupleAlloc(hashtable,
 											   HJTUPLE_OVERHEAD + tuple->t_len,
 											   &shared);
+				if (!copyTuple)
+				{
+					Assert(hashtable->parallel_state->abandon_repartitioning);
+					return;
+				}
 				copyTuple->hashvalue = hashTuple->hashvalue;
 				memcpy(HJTUPLE_MINTUPLE(copyTuple), tuple, tuple->t_len);
 				ExecParallelHashPushTuple(&hashtable->buckets.shared[bucketno],
@@ -1945,6 +1952,8 @@ ExecParallelHashTableInsertCurrentBatch(HashJoinTable hashtable,
 	hashTuple = ExecParallelHashTupleAlloc(hashtable,
 										   HJTUPLE_OVERHEAD + tuple->t_len,
 										   &shared);
+	/* After finishing with the build phase, this function should never fail */
+	Assert(hashTuple);
 	hashTuple->hashvalue = hashvalue;
 	memcpy(HJTUPLE_MINTUPLE(hashTuple), tuple, tuple->t_len);
 	HeapTupleHeaderClearMatch(HJTUPLE_MINTUPLE(hashTuple));
@@ -3033,6 +3042,25 @@ ExecParallelHashTupleAlloc(HashJoinTable hashtable, size_t size,
 		chunk_size = size + HASH_CHUNK_HEADER_SIZE;
 	else
 		chunk_size = HASH_CHUNK_SIZE;
+
+	/*
+	 * If we are already repartitioning and the space is full, we need to
+	 * abandon this repartitioning attempt and either start a new attempt with
+	 * double the number of batches or disable growth and resign ourselves to
+	 * exceeding the space allowed. We will decide during
+	 * PHJ_GROW_BATCHES_DECIDING phase which of these to do.
+	 */
+	if (pstate->growth == PHJ_GROWTH_DISABLED &&
+		PHJ_GROW_BATCHES_PHASE(BarrierPhase(&pstate->grow_batches_barrier)) ==
+			PHJ_GROW_BATCHES_REPARTITIONING &&
+		hashtable->batches[0].at_least_one_chunk &&
+		hashtable->batches[0].shared->size + chunk_size > pstate->space_allowed)
+	{
+		pstate->abandon_repartitioning = true;
+		hashtable->batches[0].shared->space_exhausted = true;
+		LWLockRelease(&pstate->lock);
+		return NULL;
+	}
 
 	/* Check if it's time to grow batches or buckets. */
 	if (pstate->growth != PHJ_GROWTH_DISABLED)

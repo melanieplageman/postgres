@@ -297,6 +297,7 @@ typedef struct ParallelHashJoinState
 	size_t		space_allowed;
 	size_t		total_tuples;	/* total number of inner tuples */
 	LWLock		lock;			/* lock protecting the above */
+	bool abandon_repartitioning;
 
 	Barrier		build_barrier;	/* synchronization for the build phases */
 	Barrier		grow_batches_barrier;
