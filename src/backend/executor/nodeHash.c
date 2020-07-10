@@ -361,27 +361,6 @@ MultiExecParallelHash(HashState *node)
 				 */
 				pstate->growth = PHJ_GROWTH_DISABLED;
 
-				/*
-				 * In the current design, batch 0 cannot fall back. That
-				 * behavior is an artifact of the existing design where batch
-				 * 0 fills the initial hash table and as an optimization it
-				 * doesn't need a batch file. But, there is no real reason
-				 * that batch 0 shouldn't be allowed to spill.
-				 *
-				 * Consider a hash table where majority of tuples with
-				 * hashvalue 0. These tuples will never relocate no matter how
-				 * many batches exist. If you cannot exceed work_mem, then you
-				 * will be stuck infinitely trying to double the number of
-				 * batches in order to accommodate the tuples that can only
-				 * ever be in batch 0. So, we allow it to be set to fall back
-				 * during the build phase to avoid excessive batch increases
-				 * but we don't check it when loading the actual tuples, so we
-				 * may exceed space_allowed. We set it back to false here so
-				 * that it isn't true during any of the checks that may happen
-				 * during probing.
-				 */
-				hashtable->batches[0].shared->hashloop_fallback = false;
-
 				for (i = 0; i < hashtable->nbatch; ++i)
 				{
 					FallbackBatchStats *fallback_batch_stats;
@@ -3058,6 +3037,7 @@ ExecParallelHashTupleAlloc(HashJoinTable hashtable, size_t size,
 	/* Check if it's time to grow batches or buckets. */
 	if (pstate->growth != PHJ_GROWTH_DISABLED)
 	{
+		// TODO: rename this local variable
 		ParallelHashJoinBatchAccessor batch = hashtable->batches[0];
 
 		Assert(curbatch == 0);
@@ -3577,7 +3557,6 @@ ExecParallelHashTuplePrealloc(HashJoinTable hashtable, int batchno, size_t size)
 	ParallelHashJoinBatchAccessor *batch = &hashtable->batches[batchno];
 	size_t		want = Max(size, HASH_CHUNK_SIZE - HASH_CHUNK_HEADER_SIZE);
 
-	Assert(batchno > 0);
 	Assert(batchno < hashtable->nbatch);
 	Assert(size == MAXALIGN(size));
 
