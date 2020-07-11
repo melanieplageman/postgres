@@ -1693,6 +1693,8 @@ ExecParallelHashJoinLoadStripe(HashJoinState *hjstate)
 				 * do this again here in case a worker began the scan and then
 				 * entered after loading before probing
 				 */
+				if (batch->hashloop_fallback && batchno == 0)
+					elog(NOTICE, "batch 0 stripes: %i", batch->maximum_stripe_number);
 				sts_end_parallel_scan(inner_tuples);
 				sts_begin_parallel_scan(outer_tuples);
 				return true;
@@ -2050,6 +2052,7 @@ ExecHashJoinInitializeDSM(HashJoinState *state, ParallelContext *pcxt)
 	 */
 	pstate->nbatch = 0;
 	pstate->space_allowed = 0;
+	pstate->stashed_one_tup = 0;
 	pstate->batches = InvalidDsaPointer;
 	pstate->old_batches = InvalidDsaPointer;
 	pstate->nbuckets = 0;

@@ -295,6 +295,7 @@ typedef struct ParallelHashJoinState
 	dsa_pointer chunk_work_queue;	/* chunk work queue */
 	int			nparticipants;
 	size_t		space_allowed;
+	int        stashed_one_tup;
 	size_t		total_tuples;	/* total number of inner tuples */
 	LWLock		lock;			/* lock protecting the above */
 	bool abandon_repartitioning;
