@@ -64,9 +64,11 @@ extern void sts_resume_parallel_scan(SharedTuplestoreAccessor *accessor);
 
 extern void sts_end_parallel_scan(SharedTuplestoreAccessor *accessor);
 
-extern void sts_puttuple(SharedTuplestoreAccessor *accessor,
-						 void *meta_data,
-						 MinimalTuple tuple);
+extern void
+sts_puttuple(SharedTuplestoreAccessor *accessor,
+             void *meta_data,
+             MinimalTuple tuple,
+             bool print);
 
 extern MinimalTuple sts_parallel_scan_next(SharedTuplestoreAccessor *accessor,
 										   void *meta_data);

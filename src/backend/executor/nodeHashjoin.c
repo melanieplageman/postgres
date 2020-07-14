@@ -340,6 +340,7 @@ ExecHashJoinImpl(PlanState *pstate, bool parallel)
 				 * from the outer plan node.  If we succeed, we have to stash
 				 * it away for later consumption by ExecHashJoinOuterGetTuple.
 				 */
+//				volatile int mybp = 0; while (mybp == 0){};
 				if (HJ_FILL_INNER(node))
 				{
 					/* no chance to not build the hash table */
@@ -1659,10 +1660,15 @@ ExecParallelHashJoinLoadStripe(HashJoinState *hjstate)
 					 * TODO: sts_resume_parallel_scan() is overkill for stripe
 					 * 0 of each batch
 					 */
+					if (batchno == 0)
+						elog(NOTICE, "about to resume inner side scan for batch 0. worker: %i. curstripe: %i", ParallelWorkerNumber, hashtable->curstripe);
 					sts_resume_parallel_scan(inner_tuples);
 
 					while ((tuple = sts_parallel_scan_next(inner_tuples, &metadata)))
 					{
+						if (batchno == 0)
+							elog(NOTICE, "got a tuple from batch 0 spill file. worker: %i. curstripe: %i. tuple stripe says %i",
+								ParallelWorkerNumber, hashtable->curstripe, metadata.stripe);
 						/* The tuple is from a previous stripe. Skip it */
 						if (metadata.stripe < PHJ_STRIPE_NUMBER(phase))
 							continue;
@@ -1694,7 +1700,8 @@ ExecParallelHashJoinLoadStripe(HashJoinState *hjstate)
 				 * entered after loading before probing
 				 */
 				if (batch->hashloop_fallback && batchno == 0)
-					elog(NOTICE, "batch 0 stripes: %i", batch->maximum_stripe_number);
+					elog(NOTICE, "batch 0 stripes: %i. worker: %i. curstripe: %i",
+						batch->maximum_stripe_number, ParallelWorkerNumber, hashtable->curstripe);
 				sts_end_parallel_scan(inner_tuples);
 				sts_begin_parallel_scan(outer_tuples);
 				return true;
@@ -2002,7 +2009,10 @@ ExecParallelHashJoinPartitionOuter(HashJoinState *hjstate)
 			/* cannot count on deterministic order of tupleids */
 			metadata.tupleid = sts_increment_ntuples(accessor);
 
-			sts_puttuple(hashtable->batches[batchno].outer_tuples, &metadata.hashvalue, mintup);
+			sts_puttuple(hashtable->batches[batchno].outer_tuples,
+			             &metadata.hashvalue,
+			             mintup,
+			             false);
 
 			if (shouldFree)
 				heap_free_minimal_tuple(mintup);
