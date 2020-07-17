@@ -358,8 +358,8 @@ sts_puttuple(SharedTuplestoreAccessor *accessor,
 
 		/* Create one.  Only this backend will write into it. */
 		sts_filename(name, accessor, accessor->participant);
-		if (print)
-			elog(NOTICE, "making file %s\n", name);
+		//if (print)
+		//	elog(NOTICE, "making file %s\n", name);
 		accessor->write_file = BufFileCreateShared(accessor->fileset, name);
 
 		/* Set up the shared state for this backend's file. */
@@ -446,7 +446,7 @@ sts_puttuple(SharedTuplestoreAccessor *accessor,
 			if (print)
 			{
 				sts_filename(name, accessor, accessor->participant);
-				elog(NOTICE, "writing oversize tup into file %s", name);
+			//	elog(NOTICE, "writing oversize tup into file %s", name);
 			}
 			return;
 		}
@@ -464,7 +464,7 @@ sts_puttuple(SharedTuplestoreAccessor *accessor,
 	if (print)
 	{
 		sts_filename(name, accessor, accessor->participant);
-		elog(NOTICE, "writing tup into file %s", name);
+		//elog(NOTICE, "writing tup into file %s", name);
 	}
 }
 

@@ -340,7 +340,7 @@ ExecHashJoinImpl(PlanState *pstate, bool parallel)
 				 * from the outer plan node.  If we succeed, we have to stash
 				 * it away for later consumption by ExecHashJoinOuterGetTuple.
 				 */
-//				volatile int mybp = 0; while (mybp == 0){};
+				//volatile int mybp = 0; while (mybp == 0){};
 				if (HJ_FILL_INNER(node))
 				{
 					/* no chance to not build the hash table */
@@ -433,7 +433,8 @@ ExecHashJoinImpl(PlanState *pstate, bool parallel)
 						 * If multi-batch, we need to hash the outer relation
 						 * up front.
 						 */
-						if (hashtable->nbatch > 1)
+						// DO_NEXT
+						if (hashtable->nbatch > 1 || (hashtable->nbatch == 1 && hashtable->batches[0].shared->hashloop_fallback))
 							ExecParallelHashJoinPartitionOuter(node);
 						BarrierArriveAndWait(build_barrier,
 											 WAIT_EVENT_HASH_BUILD_HASH_OUTER);
@@ -730,6 +731,7 @@ ExecHashJoinImpl(PlanState *pstate, bool parallel)
 				 */
 				if (parallel)
 				{
+				//	elog(NOTICE, "need new stripe");
 					if (!ExecParallelHashJoinLoadStripe(node) &&
 						!ExecParallelHashJoinNewBatch(node))
 						return NULL;	/* end of parallel-aware join */
@@ -1069,8 +1071,12 @@ ExecParallelHashJoinOuterGetTuple(PlanState *outerNode,
 	 * single-batch hash joins.  Otherwise we have to go to batch files, even
 	 * for batch 0.
 	 */
-	if (curbatch == 0 && hashtable->nbatch == 1)
+	LWLockAcquire(&hashtable->batches[0].shared->lock, LW_SHARED);
+
+	if (curbatch == 0 && hashtable->nbatch == 1 && !hashtable->batches[0].shared->hashloop_fallback)
 	{
+		LWLockRelease(&hashtable->batches[0].shared->lock);
+
 		slot = ExecProcNode(outerNode);
 
 		while (!TupIsNull(slot))
@@ -1094,6 +1100,8 @@ ExecParallelHashJoinOuterGetTuple(PlanState *outerNode,
 	}
 	else if (curbatch < hashtable->nbatch)
 	{
+		LWLockRelease(&hashtable->batches[0].shared->lock);
+
 		tupleMetadata metadata;
 		MinimalTuple tuple;
 
@@ -1115,8 +1123,13 @@ ExecParallelHashJoinOuterGetTuple(PlanState *outerNode,
 			slot = hjstate->hj_OuterTupleSlot;
 			return slot;
 		}
-		else
+		else {
+
 			ExecClearTuple(hjstate->hj_OuterTupleSlot);
+		}
+	}
+	else {
+		LWLockRelease(&hashtable->batches[0].shared->lock);
 	}
 
 	/* End of this batch */
@@ -1660,15 +1673,15 @@ ExecParallelHashJoinLoadStripe(HashJoinState *hjstate)
 					 * TODO: sts_resume_parallel_scan() is overkill for stripe
 					 * 0 of each batch
 					 */
-					if (batchno == 0)
-						elog(NOTICE, "about to resume inner side scan for batch 0. worker: %i. curstripe: %i", ParallelWorkerNumber, hashtable->curstripe);
+					//if (batchno == 0)
+					//	elog(NOTICE, "about to resume inner side scan for batch 0. worker: %i. curstripe: %i", ParallelWorkerNumber, hashtable->curstripe);
 					sts_resume_parallel_scan(inner_tuples);
 
 					while ((tuple = sts_parallel_scan_next(inner_tuples, &metadata)))
 					{
-						if (batchno == 0)
-							elog(NOTICE, "got a tuple from batch 0 spill file. worker: %i. curstripe: %i. tuple stripe says %i",
-								ParallelWorkerNumber, hashtable->curstripe, metadata.stripe);
+//						if (batchno == 0)
+//							elog(NOTICE, "got a tuple from batch 0 spill file. worker: %i. curstripe: %i. tuple stripe says %i",
+//								ParallelWorkerNumber, hashtable->curstripe, metadata.stripe);
 						/* The tuple is from a previous stripe. Skip it */
 						if (metadata.stripe < PHJ_STRIPE_NUMBER(phase))
 							continue;
@@ -1699,9 +1712,9 @@ ExecParallelHashJoinLoadStripe(HashJoinState *hjstate)
 				 * do this again here in case a worker began the scan and then
 				 * entered after loading before probing
 				 */
-				if (batch->hashloop_fallback && batchno == 0)
-					elog(NOTICE, "batch 0 stripes: %i. worker: %i. curstripe: %i",
-						batch->maximum_stripe_number, ParallelWorkerNumber, hashtable->curstripe);
+				//if (batch->hashloop_fallback && batchno == 0)
+				//	elog(NOTICE, "batch 0 stripes: %i. worker: %i. curstripe: %i",
+				//		batch->maximum_stripe_number, ParallelWorkerNumber, hashtable->curstripe);
 				sts_end_parallel_scan(inner_tuples);
 				sts_begin_parallel_scan(outer_tuples);
 				return true;
