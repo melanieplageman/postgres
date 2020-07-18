@@ -433,7 +433,6 @@ ExecHashJoinImpl(PlanState *pstate, bool parallel)
 						 * If multi-batch, we need to hash the outer relation
 						 * up front.
 						 */
-						// DO_NEXT
 						if (hashtable->nbatch > 1 || (hashtable->nbatch == 1 && hashtable->batches[0].shared->hashloop_fallback))
 							ExecParallelHashJoinPartitionOuter(node);
 						BarrierArriveAndWait(build_barrier,

@@ -180,6 +180,7 @@ typedef struct ParallelHashJoinBatch
 	 * not require a lock to read
 	 */
 	bool		hashloop_fallback;
+	bool dont_even_try_hashtable;
 	int			maximum_stripe_number;	/* the number of stripes in the batch */
 	size_t		estimated_stripe_size;	/* size of last stripe in batch */
 	LWLock		lock;
@@ -265,7 +266,8 @@ typedef enum ParallelHashGrowth
 	/* The memory budget would be exhausted, so we need to repartition. */
 	PHJ_GROWTH_NEED_MORE_BATCHES,
 	/* Repartitioning didn't help last time, so don't try to do that again. */
-	PHJ_GROWTH_DISABLED
+	PHJ_GROWTH_DISABLED,
+	PHJ_GROWTH_SPILL_BATCH0
 } ParallelHashGrowth;
 
 typedef enum ParallelHashJoinBatchAccessorStatus
