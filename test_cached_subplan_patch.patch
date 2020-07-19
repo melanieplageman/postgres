@@ -1,0 +1,61 @@
+diff --git a/src/backend/optimizer/path/costsize.c b/src/backend/optimizer/path/costsize.c
+index 4ff3c7a2fd..b02d337149 100644
+--- a/src/backend/optimizer/path/costsize.c
++++ b/src/backend/optimizer/path/costsize.c
+@@ -4288,9 +4288,12 @@ cost_qual_eval_walker(Node *node, cost_qual_eval_context *context)
+ 		 * use.)
+ 		 */
+ 		AlternativeSubPlan *asplan = (AlternativeSubPlan *) node;
+-
+-		return cost_qual_eval_walker((Node *) linitial(asplan->subplans),
++		bool result = cost_qual_eval_walker((Node *) linitial(asplan->subplans),
+ 									 context);
++		SubPlan *subplan = linitial(asplan->subplans);
++		elog(NOTICE, "SubPlan 1: per_tuple cost: %f. startup cost: %f",
++		     subplan->per_call_cost, subplan->startup_cost);
++		return result;
+ 	}
+ 	else if (IsA(node, PlaceHolderVar))
+ 	{
+diff --git a/src/backend/optimizer/plan/subselect.c b/src/backend/optimizer/plan/subselect.c
+index b02fcb9bfe..724aa29ce2 100644
+--- a/src/backend/optimizer/plan/subselect.c
++++ b/src/backend/optimizer/plan/subselect.c
+@@ -725,6 +725,8 @@ subplan_is_hashable(Plan *plan)
+ 	 */
+ 	subquery_size = plan->plan_rows *
+ 		(MAXALIGN(plan->plan_width) + MAXALIGN(SizeofHeapTupleHeader));
++
++	elog(NOTICE, "subplan_is_hashable: plan->plan_rows is %f", plan->plan_rows);
+ 	if (subquery_size > work_mem * 1024L)
+ 		return false;
+ 
+diff --git a/src/test/regress/sql/updatable_views.sql b/src/test/regress/sql/updatable_views.sql
+index 64f23d0902..839897a5b5 100644
+--- a/src/test/regress/sql/updatable_views.sql
++++ b/src/test/regress/sql/updatable_views.sql
+@@ -1101,19 +1101,19 @@ ANALYZE t111;
+ CREATE VIEW v1 WITH (security_barrier=true) AS
+ SELECT *, (SELECT d FROM t11 WHERE t11.a = t1.a LIMIT 1) AS d
+ FROM t1
+-WHERE a > 5 AND EXISTS(SELECT 1 FROM t12 WHERE t12.a = t1.a);
++WHERE EXISTS(SELECT 1 FROM t12 WHERE t12.a = t1.a);
+ 
+ SELECT * FROM v1 WHERE a=3; -- should not see anything
+ SELECT * FROM v1 WHERE a=8;
+ 
+-EXPLAIN (VERBOSE, COSTS OFF)
+-UPDATE v1 SET a=100 WHERE snoop(a) AND leakproof(a) AND a < 7 AND a != 6;
+-UPDATE v1 SET a=100 WHERE snoop(a) AND leakproof(a) AND a < 7 AND a != 6;
++EXPLAIN (VERBOSE, ANALYZE)
++UPDATE v1 SET a=100;
++UPDATE v1 SET a=100;
+ 
+ SELECT * FROM v1 WHERE a=100; -- Nothing should have been changed to 100
+ SELECT * FROM t1 WHERE a=100; -- Nothing should have been changed to 100
+ 
+-EXPLAIN (VERBOSE, COSTS OFF)
++EXPLAIN (VERBOSE, ANALYZE)
+ UPDATE v1 SET a=a+1 WHERE snoop(a) AND leakproof(a) AND a = 8;
+ UPDATE v1 SET a=a+1 WHERE snoop(a) AND leakproof(a) AND a = 8;
+ 

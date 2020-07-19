@@ -1,0 +1,22 @@
+#!/bin/bash
+
+# if no cores in /tmp/cores print that
+# if cores, execute latest core with postgres binary
+if [ -d /tmp/cores ] ; then
+   COREDIR=/tmp/cores
+else
+  echo "tmp/cores does not exist"
+  exit 1
+fi
+
+CORE=$(ls -tr $COREDIR | tail -n 1)
+echo $COREDIR/$CORE
+
+if [ -f ../pginstall/bin/postgres ] ; then
+  PGBINARY=../pginstall/bin/postgres
+else
+  echo "Can't find postgres binary"
+  exit 1
+fi
+
+gdb -c $COREDIR/$CORE $PGBINARY

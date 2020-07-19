@@ -1,0 +1,86 @@
+Why batch 0 has to fall back:
+
+Take this example with the current patch:
+
+DROP TYPE stub CASCADE;
+CREATE TYPE stub AS (hash INTEGER, value CHAR(8098));
+
+CREATE FUNCTION stub_hash(item stub)
+RETURNS INTEGER AS $$
+BEGIN
+  RETURN item.hash;
+END; $$ LANGUAGE plpgsql IMMUTABLE LEAKPROOF STRICT PARALLEL SAFE;
+
+CREATE FUNCTION stub_eq(item1 stub, item2 stub)
+RETURNS BOOLEAN AS $$
+BEGIN
+  RETURN item1.hash = item2.hash AND item1.value = item2.value;
+END; $$ LANGUAGE plpgsql IMMUTABLE LEAKPROOF STRICT PARALLEL SAFE;
+
+CREATE OPERATOR = (
+  FUNCTION = stub_eq,
+  LEFTARG = stub,
+  RIGHTARG = stub,
+  COMMUTATOR = =,
+  HASHES, MERGES
+);
+
+CREATE OPERATOR CLASS stub_hash_ops
+DEFAULT FOR TYPE stub USING hash AS
+  OPERATOR 1 =(stub, stub),
+  FUNCTION 1 stub_hash(stub);
+
+DROP TABLE IF EXISTS probeside_batch0;
+CREATE TABLE probeside_batch0(a stub);
+ALTER TABLE probeside_batch0 ALTER COLUMN a SET STORAGE PLAIN;
+INSERT INTO probeside_batch0 SELECT '(0, "")' FROM generate_series(1, 13);
+INSERT INTO probeside_batch0 SELECT '(0, "unmatched outer")' FROM generate_series(1, 1);
+
+DROP TABLE IF EXISTS hashside_wide_batch0;
+CREATE TABLE hashside_wide_batch0(a stub, id int);
+ALTER TABLE hashside_wide_batch0 ALTER COLUMN a SET STORAGE PLAIN;
+INSERT INTO hashside_wide_batch0 SELECT '(0, "")', 42 FROM generate_series(1, 1);
+INSERT INTO hashside_wide_batch0 SELECT '(0, "")', 10 FROM generate_series(1, 8);
+INSERT INTO hashside_wide_batch0 SELECT '(0, "")', 22 FROM generate_series(1, 2000);
+ANALYZE probeside_batch0, hashside_wide_batch0;
+
+set min_parallel_table_scan_size = 0;
+set parallel_setup_cost = 0;
+set enable_hashjoin = on;
+
+set max_parallel_workers_per_gather = 1;
+set enable_parallel_hash = on;
+set work_mem = '64kB';
+
+explain (costs off, analyze)
+SELECT (probeside_batch0.a).hash, ((((probeside_batch0.a).hash << 7) >> 3) & 31) AS batchno, TRIM((probeside_batch0.a).value), hashside_wide_batch0.id, hashside_wide_batch0.ctid as innerctid, (hashside_wide_batch0.a).hash, TRIM((hashside_wide_batch0.a).value), probeside_batch0.ctid as outerctid
+FROM probeside_batch0
+LEFT OUTER JOIN hashside_wide_batch0 USING (a)
+ORDER BY 1, 2, 3, 4, 5, 6, 7, 8;
+
+
+With the current patch, because all of the tuples are destined for batch
+0 and cannot hash to any other batch and batch 0 cannot spill, this
+query exceeds the space limit by a lot.
+
+                                                                                                                                                QUERY PLAN                                                                                                                                                 
+-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+ Gather Merge (actual time=3970.720..4239.524 rows=26118 loops=1)
+   Workers Planned: 1
+   Workers Launched: 1
+   ->  Sort (actual time=3266.574..3350.390 rows=13059 loops=2)
+         Sort Key: ((probeside_batch0.a).hash), (((((probeside_batch0.a).hash << 7) >> 3) & 31)), (btrim(((probeside_batch0.a).value)::text)), hashside_wide_batch0.id, hashside_wide_batch0.ctid, ((hashside_wide_batch0.a).hash), (btrim(((hashside_wide_batch0.a).value)::text)), probeside_batch0.ctid
+         Sort Method: external merge  Disk: 1024kB
+         Worker 0:  Sort Method: external merge  Disk: 896kB
+         ->  Parallel Hash Left Join (actual time=32.419..3147.938 rows=13059 loops=2)
+               Hash Cond: (probeside_batch0.a = hashside_wide_batch0.a)
+               ->  Parallel Seq Scan on probeside_batch0 (actual time=0.013..0.069 rows=7 loops=2)
+               ->  Parallel Hash (actual time=30.581..30.586 rows=1004 loops=2)
+                     Buckets: 8 (originally 8)  Batches: 1024 (originally 256)  Memory Usage: 16097kB
+                     ->  Parallel Seq Scan on hashside_wide_batch0 (actual time=0.019..8.137 rows=1004 loops=2)
+ Planning Time: 0.284 ms
+ Execution Time: 4340.184 ms
+(15 rows)
+
+Thus, we make batch 0 a special case for no reason that can violate the
+spirit of this patch.
