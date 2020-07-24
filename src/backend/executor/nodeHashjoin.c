@@ -340,7 +340,7 @@ ExecHashJoinImpl(PlanState *pstate, bool parallel)
 				 * from the outer plan node.  If we succeed, we have to stash
 				 * it away for later consumption by ExecHashJoinOuterGetTuple.
 				 */
-				//volatile int mybp = 0; while (mybp == 0){};
+//				volatile int mybp = 0; while (mybp == 0){};
 				if (HJ_FILL_INNER(node))
 				{
 					/* no chance to not build the hash table */
@@ -2086,6 +2086,7 @@ ExecHashJoinInitializeDSM(HashJoinState *state, ParallelContext *pcxt)
 	LWLockInitialize(&pstate->lock,
 					 LWTRANCHE_PARALLEL_HASH_JOIN);
 	pstate->abandon_repartitioning = false;
+	pstate->reset_buckets = 0;
 	BarrierInit(&pstate->build_barrier, 0);
 	BarrierInit(&pstate->grow_batches_barrier, 0);
 	BarrierInit(&pstate->grow_buckets_barrier, 0);

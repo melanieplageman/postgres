@@ -25,7 +25,7 @@ set work_mem = '64kB';
 /* set log_min_messages = error; */
 /* set log_min_error_statement = error; */
 /* set client_min_messages = error; */
-explain (costs off, analyze)
+--explain (costs off, analyze)
 SELECT (probeside_batch0.a).hash, ((((probeside_batch0.a).hash << 7) >> 3) & 31) AS batchno, TRIM((probeside_batch0.a).value), hashside_wide_batch0.id, hashside_wide_batch0.ctid as innerctid, (hashside_wide_batch0.a).hash, TRIM((hashside_wide_batch0.a).value), probeside_batch0.ctid as outerctid
 FROM probeside_batch0
 LEFT OUTER JOIN hashside_wide_batch0 USING (a)

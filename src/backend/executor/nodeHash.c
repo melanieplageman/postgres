@@ -1191,6 +1191,7 @@ ExecParallelHashIncreaseNumBatches(HashJoinTable hashtable)
 				int			i;
 
 				pstate->abandon_repartitioning = false;
+				pstate->reset_buckets = 0;
 				/* Move the old batch out of the way. */
 				old_batch0 = hashtable->batches[0].shared;
 				pstate->old_batches = pstate->batches;
@@ -1456,6 +1457,7 @@ ExecParallelHashRepartitionFirst(HashJoinTable hashtable)
 				memcpy(HJTUPLE_MINTUPLE(copyTuple), tuple, tuple->t_len);
 				ExecParallelHashPushTuple(&hashtable->buckets.shared[bucketno],
 										  copyTuple, shared);
+				//elog(NOTICE, "as part of repartitionfirst, alloc succeeded. putting tuple into hashtable");
 			}
 			else
 			{
@@ -1482,7 +1484,7 @@ ExecParallelHashRepartitionFirst(HashJoinTable hashtable)
 				LWLockRelease(&batch->lock);
 
 				hashtable->batches[batchno].estimated_size += tuple_size;
-
+				//elog(NOTICE, "as part of repartitionfirst, putting former batch 0 tuple into batchno %i", batchno);
 				sts_puttuple(hashtable->batches[batchno].inner_tuples,
 				             &metadata,
 				             tuple,
@@ -1581,6 +1583,8 @@ retry:
 				/* Push it onto the front of the bucket's list */
 				ExecParallelHashPushTuple(&hashtable->buckets.shared[bucketno],
 				                          hashTuple, shared);
+				//elog(NOTICE, "as part of repartitionfirst, moving tuple from batch 0 spill file back to hashtable.");
+
 			}
 			else
 			{
@@ -2001,27 +2005,42 @@ retry:
 			memcpy(HJTUPLE_MINTUPLE(hashTuple), tuple, tuple->t_len);
 			ExecParallelHashPushTuple(&hashtable->buckets.shared[bucketno],
 			                          hashTuple, shared);
+			//elog(NOTICE, "Alloc succeeded. putting tuple into hashtable batch 0 from ExecParallelHashTableInsert()");
 		}
 		else
 		{
 			ParallelHashJoinState *pstate = hashtable->parallel_state;
+			// TODO: do this parallelism with a barrier?
 			LWLockAcquire(&pstate->lock, LW_EXCLUSIVE);
 			if (pstate->growth == PHJ_GROWTH_SPILL_BATCH0)
 			{
-				dsa_pointer_atomic *buckets;
 				dsa_pointer chunk_shared;
 				HashMemoryChunk chunk;
+
+				if (pstate->reset_buckets == 0)
+				{
+					//elog(NOTICE, "Someone reset the buckets");
+					dsa_pointer_atomic *buckets = (dsa_pointer_atomic *)
+						dsa_get_address(hashtable->area, hashtable->batches[0].shared->buckets);
+					for (size_t i = 0; i < hashtable->nbuckets; ++i)
+						dsa_pointer_atomic_write(&buckets[i], InvalidDsaPointer);
+					pstate->chunk_work_queue = hashtable->batches[0].shared->chunks;
+					hashtable->batches[0].shared->size = 0; // maybe do this after freeing everything
+					pstate->reset_buckets++;
+				}
+				LWLockRelease(&pstate->lock);
+				// assert that we have access to batch 0 shared tuplestore
+
+				ParallelHashJoinBatch *batches;
+				batches = (ParallelHashJoinBatch *)
+					dsa_get_address(hashtable->area, pstate->batches);
+				ParallelHashJoinBatch *shared = NthParallelHashJoinBatch(batches, 0);
+				Assert(shared == hashtable->batches[0].shared);
+
+				ExecParallelHashTableSetCurrentBatch(hashtable, 0);
+
 				ParallelHashJoinBatch *batch = hashtable->batches[0].shared;
-				/* Recycle the existing bucket array. */
-				buckets = (dsa_pointer_atomic *)
-					dsa_get_address(hashtable->area, batch->buckets);
 
-				for (size_t i = 0; i < hashtable->nbuckets; ++i)
-					dsa_pointer_atomic_write(&buckets[i], InvalidDsaPointer);
-
-				pstate->chunk_work_queue = batch->chunks;
-
-				// TODO: make this not serial with the lock
 				while ((chunk = ExecParallelHashPopChunkQueue(hashtable, &chunk_shared)))
 				{
 					size_t		idx = 0;
@@ -2061,9 +2080,18 @@ retry:
 
 					CHECK_FOR_INTERRUPTS();
 				}
+				LWLockAcquire(&pstate->lock, LW_EXCLUSIVE);
 				pstate->growth = PHJ_GROWTH_OK;
+				if (pstate->reset_buckets == 1)
+				{
+					hashtable->batches[0].shared->chunks = 0;
+					pstate->reset_buckets = 0; // TODO: fix this
+				}
+				//elog(NOTICE, "everything was evicted from hashtable to batch 0 spill file");
+				LWLockRelease(&pstate->lock);
 			}
-			LWLockRelease(&pstate->lock);
+			else
+				LWLockRelease(&pstate->lock);
 			goto retry;
 		}
 	}
@@ -3269,16 +3297,19 @@ ExecParallelHashTupleAlloc(HashJoinTable hashtable, size_t size,
 		 * workers to allocate a new chunk (this could also be a problem in master)
 		 */
 		if (batch.shared->size +
-			chunk_size > pstate->space_allowed &&
-			(batch.at_least_one_chunk || pstate->abandon_repartitioning))
+			chunk_size > pstate->space_allowed)
 		{
-			if (batch.shared->hashloop_fallback)
-				pstate->growth = PHJ_GROWTH_SPILL_BATCH0;
-			else
-				pstate->growth = PHJ_GROWTH_NEED_MORE_BATCHES;
-			hashtable->batches[0].shared->space_exhausted = true;
-			LWLockRelease(&pstate->lock);
-			return NULL;
+			if (batch.shared->hashloop_fallback ||
+					batch.at_least_one_chunk || pstate->abandon_repartitioning)
+			{
+				if (batch.shared->hashloop_fallback)
+					pstate->growth = PHJ_GROWTH_SPILL_BATCH0;
+				else
+					pstate->growth = PHJ_GROWTH_NEED_MORE_BATCHES;
+				hashtable->batches[0].shared->space_exhausted = true;
+				LWLockRelease(&pstate->lock);
+				return NULL;
+			}
 		}
 
 		/* Check if our load factor limit would be exceeded. */
@@ -3816,6 +3847,8 @@ ExecParallelHashTuplePrealloc(HashJoinTable hashtable, int batchno, size_t size)
 			 * participants to help repartition.
 			 */
 			batch->shared->space_exhausted = true;
+			//if (batchno == 4)
+			//	elog(NOTICE, "prealloc for batch 4 triggered growth in the number of batches");
 			pstate->growth = PHJ_GROWTH_NEED_MORE_BATCHES;
 			LWLockRelease(&batch->shared->lock);
 			LWLockRelease(&pstate->lock);
