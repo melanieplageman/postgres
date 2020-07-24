@@ -1191,7 +1191,6 @@ ExecParallelHashIncreaseNumBatches(HashJoinTable hashtable)
 				int			i;
 
 				pstate->abandon_repartitioning = false;
-				pstate->reset_buckets = 0;
 				/* Move the old batch out of the way. */
 				old_batch0 = hashtable->batches[0].shared;
 				pstate->old_batches = pstate->batches;
@@ -2010,85 +2009,98 @@ retry:
 		else
 		{
 			ParallelHashJoinState *pstate = hashtable->parallel_state;
-			// TODO: do this parallelism with a barrier?
 			LWLockAcquire(&pstate->lock, LW_EXCLUSIVE);
 			if (pstate->growth == PHJ_GROWTH_SPILL_BATCH0)
 			{
-				dsa_pointer chunk_shared;
-				HashMemoryChunk chunk;
-
-				if (pstate->reset_buckets == 0)
-				{
-					//elog(NOTICE, "Someone reset the buckets");
-					dsa_pointer_atomic *buckets = (dsa_pointer_atomic *)
-						dsa_get_address(hashtable->area, hashtable->batches[0].shared->buckets);
-					for (size_t i = 0; i < hashtable->nbuckets; ++i)
-						dsa_pointer_atomic_write(&buckets[i], InvalidDsaPointer);
-					pstate->chunk_work_queue = hashtable->batches[0].shared->chunks;
-					hashtable->batches[0].shared->size = 0; // maybe do this after freeing everything
-					pstate->reset_buckets++;
-				}
 				LWLockRelease(&pstate->lock);
-				// assert that we have access to batch 0 shared tuplestore
-
-				ParallelHashJoinBatch *batches;
-				batches = (ParallelHashJoinBatch *)
-					dsa_get_address(hashtable->area, pstate->batches);
-				ParallelHashJoinBatch *shared = NthParallelHashJoinBatch(batches, 0);
-				Assert(shared == hashtable->batches[0].shared);
-
-				ExecParallelHashTableSetCurrentBatch(hashtable, 0);
-
-				ParallelHashJoinBatch *batch = hashtable->batches[0].shared;
-
-				while ((chunk = ExecParallelHashPopChunkQueue(hashtable, &chunk_shared)))
+				BarrierAttach(&pstate->eviction_barrier);
+				switch (PHJ_EVICT_PHASE(BarrierPhase(&pstate->eviction_barrier)))
 				{
-					size_t		idx = 0;
-
-					while (idx < chunk->used)
-					{
-						HashJoinTuple hashTuple1 = (HashJoinTuple) (HASH_CHUNK_DATA(chunk) + idx);
-						MinimalTuple  tuple1     = HJTUPLE_MINTUPLE(hashTuple1);
-						size_t		tuple_size = MAXALIGN(HJTUPLE_OVERHEAD + tuple1->t_len);
-						tupleMetadata metadata;
-
-						LWLockAcquire(&batch->lock, LW_EXCLUSIVE);
-
-						if (batch->estimated_stripe_size + tuple_size > hashtable->parallel_state->space_allowed)
+					case PHJ_EVICT_ELECTING:
+						if (BarrierArriveAndWait(&pstate->eviction_barrier, WAIT_EVENT_HASH_EVICT_ELECT))
 						{
-							batch->maximum_stripe_number++;
-							batch->estimated_stripe_size = 0;
+							dsa_pointer_atomic *buckets = (dsa_pointer_atomic *)
+								dsa_get_address(hashtable->area, hashtable->batches[0].shared->buckets);
+							for (size_t i = 0; i < hashtable->nbuckets; ++i)
+								dsa_pointer_atomic_write(&buckets[i], InvalidDsaPointer);
+							LWLockAcquire(&pstate->lock, LW_EXCLUSIVE);
+							pstate->chunk_work_queue = hashtable->batches[0].shared->chunks;
+							LWLockRelease(&pstate->lock);
+							hashtable->batches[0].shared->size = 0; // maybe do this after freeing everything
 						}
+						/* FALLTHROUGH */
+					case PHJ_EVICT_RESETTING:
+						BarrierArriveAndWait(&pstate->eviction_barrier, WAIT_EVENT_HASH_EVICT_RESET);
+						/* FALLTHROUGH */
+					case PHJ_EVICT_SPILLING:
+					{
+						dsa_pointer chunk_shared;
+						HashMemoryChunk chunk;
+						// assert that we have access to batch 0 shared tuplestore
+						ParallelHashJoinBatch *batches;
+						batches = (ParallelHashJoinBatch *)
+							dsa_get_address(hashtable->area, pstate->batches);
+						ParallelHashJoinBatch *shared = NthParallelHashJoinBatch(batches, 0);
+						Assert(shared == hashtable->batches[0].shared);
 
-						batch->estimated_stripe_size += tuple_size;
+						ExecParallelHashTableSetCurrentBatch(hashtable, 0);
 
-						metadata.hashvalue = hashTuple1->hashvalue;
-						metadata.stripe = batch->maximum_stripe_number;
-						LWLockRelease(&batch->lock);
+						ParallelHashJoinBatch *batch = hashtable->batches[0].shared;
 
-						hashtable->batches[0].estimated_size += tuple_size;
+						while ((chunk = ExecParallelHashPopChunkQueue(hashtable, &chunk_shared)))
+						{
+							size_t		idx = 0;
 
-						sts_puttuple(hashtable->batches[0].inner_tuples,
-						             &metadata,
-						             tuple1,
-						             false);
+							while (idx < chunk->used)
+							{
+								HashJoinTuple hashTuple1 = (HashJoinTuple) (HASH_CHUNK_DATA(chunk) + idx);
+								MinimalTuple  tuple1     = HJTUPLE_MINTUPLE(hashTuple1);
+								size_t		tuple_size = MAXALIGN(HJTUPLE_OVERHEAD + tuple1->t_len);
+								tupleMetadata metadata;
 
-						idx += MAXALIGN(HJTUPLE_OVERHEAD +
-							                HJTUPLE_MINTUPLE(hashTuple1)->t_len);
+								LWLockAcquire(&batch->lock, LW_EXCLUSIVE);
+
+								if (batch->estimated_stripe_size + tuple_size > hashtable->parallel_state->space_allowed)
+								{
+									batch->maximum_stripe_number++;
+									batch->estimated_stripe_size = 0;
+								}
+
+								batch->estimated_stripe_size += tuple_size;
+
+								metadata.hashvalue = hashTuple1->hashvalue;
+								metadata.stripe = batch->maximum_stripe_number;
+								LWLockRelease(&batch->lock);
+
+								hashtable->batches[0].estimated_size += tuple_size;
+
+								sts_puttuple(hashtable->batches[0].inner_tuples,
+								             &metadata,
+								             tuple1,
+								             false);
+
+								idx += MAXALIGN(HJTUPLE_OVERHEAD +
+									                HJTUPLE_MINTUPLE(hashTuple1)->t_len);
+							}
+							dsa_free(hashtable->area, chunk_shared);
+
+							CHECK_FOR_INTERRUPTS();
+						}
+						BarrierArriveAndWait(&pstate->eviction_barrier, WAIT_EVENT_HASH_EVICT_SPILL);
+						/* FALLTHROUGH */
 					}
-					dsa_free(hashtable->area, chunk_shared);
-
-					CHECK_FOR_INTERRUPTS();
+					case PHJ_EVICT_FINISHING:
+						if (BarrierArriveAndWait(&pstate->eviction_barrier, WAIT_EVENT_HASH_EVICT_FINISH))
+						{
+							LWLockAcquire(&pstate->lock, LW_EXCLUSIVE);
+							pstate->growth = PHJ_GROWTH_OK;
+							hashtable->batches[0].shared->chunks = 0;
+							//elog(NOTICE, "everything was evicted from hashtable to batch 0 spill file");
+							LWLockRelease(&pstate->lock);
+						}
+					case PHJ_EVICT_DONE:
+						BarrierArriveAndDetach(&pstate->eviction_barrier);
 				}
-				LWLockAcquire(&pstate->lock, LW_EXCLUSIVE);
-				pstate->growth = PHJ_GROWTH_OK;
-				if (pstate->reset_buckets == 1)
-				{
-					hashtable->batches[0].shared->chunks = 0;
-					pstate->reset_buckets = 0; // TODO: fix this
-				}
-				//elog(NOTICE, "everything was evicted from hashtable to batch 0 spill file");
-				LWLockRelease(&pstate->lock);
 			}
 			else
 				LWLockRelease(&pstate->lock);

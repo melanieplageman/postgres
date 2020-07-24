@@ -2086,8 +2086,8 @@ ExecHashJoinInitializeDSM(HashJoinState *state, ParallelContext *pcxt)
 	LWLockInitialize(&pstate->lock,
 					 LWTRANCHE_PARALLEL_HASH_JOIN);
 	pstate->abandon_repartitioning = false;
-	pstate->reset_buckets = 0;
 	BarrierInit(&pstate->build_barrier, 0);
+	BarrierInit(&pstate->eviction_barrier, 0);
 	BarrierInit(&pstate->grow_batches_barrier, 0);
 	BarrierInit(&pstate->grow_buckets_barrier, 0);
 

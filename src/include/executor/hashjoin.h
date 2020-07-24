@@ -304,6 +304,7 @@ typedef struct ParallelHashJoinState
 	int reset_buckets;
 
 	Barrier		build_barrier;	/* synchronization for the build phases */
+	Barrier     eviction_barrier;
 	Barrier		grow_batches_barrier;
 	Barrier		grow_buckets_barrier;
 	pg_atomic_uint32 distributor;	/* counter for load balancing */
@@ -333,6 +334,13 @@ typedef struct ParallelHashJoinState
 #define PHJ_STRIPE_DONE				    4
 #define PHJ_STRIPE_NUMBER(n)            ((n) / 5)
 #define PHJ_STRIPE_PHASE(n)             ((n) % 5)
+
+#define PHJ_EVICT_ELECTING 0
+#define PHJ_EVICT_RESETTING 1
+#define PHJ_EVICT_SPILLING 2
+#define PHJ_EVICT_FINISHING 3
+#define PHJ_EVICT_DONE 4
+#define PHJ_EVICT_PHASE(n)          ((n) % 5)
 
 /* The phases of batch growth while hashing, for grow_batches_barrier. */
 #define PHJ_GROW_BATCHES_ELECTING		0
