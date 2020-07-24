@@ -2026,6 +2026,7 @@ retry:
 							LWLockAcquire(&pstate->lock, LW_EXCLUSIVE);
 							pstate->chunk_work_queue = hashtable->batches[0].shared->chunks;
 							LWLockRelease(&pstate->lock);
+							// maybe need to use a lock here too
 							hashtable->batches[0].shared->size = 0; // maybe do this after freeing everything
 						}
 						/* FALLTHROUGH */
@@ -2098,6 +2099,7 @@ retry:
 							//elog(NOTICE, "everything was evicted from hashtable to batch 0 spill file");
 							LWLockRelease(&pstate->lock);
 						}
+						/* FALLTHROUGH */
 					case PHJ_EVICT_DONE:
 						BarrierArriveAndDetach(&pstate->eviction_barrier);
 				}
@@ -2165,9 +2167,9 @@ ExecParallelHashTableInsertCurrentBatch(HashJoinTable hashtable,
 	hashTuple = ExecParallelHashTupleAlloc(hashtable,
 										   HJTUPLE_OVERHEAD + tuple->t_len,
 										   &shared);
+	Assert(hashTuple);
 	LWLockAcquire(&hashtable->parallel_state->lock, LW_SHARED);
-	Assert(hashtable->parallel_state->growth == PHJ_GROWTH_DISABLED &&
-			!hashtable->parallel_state->abandon_repartitioning);
+	Assert(hashtable->parallel_state->growth == PHJ_GROWTH_DISABLED);
 	LWLockRelease(&hashtable->parallel_state->lock);
 	/* After finishing with the build phase, this function should never fail */
 	Assert(hashTuple);
@@ -3308,11 +3310,16 @@ ExecParallelHashTupleAlloc(HashJoinTable hashtable, size_t size,
 		 * chunks of memory, we are reusing old ones, so we shouldn't force
 		 * workers to allocate a new chunk (this could also be a problem in master)
 		 */
+		// TODO: add a comment explaining this complex logic -- maybe use a variable for the
+		// different condition subsets
 		if (batch.shared->size +
 			chunk_size > pstate->space_allowed)
 		{
 			if (batch.shared->hashloop_fallback ||
-					batch.at_least_one_chunk || pstate->abandon_repartitioning)
+				batch.at_least_one_chunk ||
+				(BarrierPhase(&pstate->build_barrier) == PHJ_BUILD_HASHING_INNER &&
+					pstate->abandon_repartitioning))
+
 			{
 				if (batch.shared->hashloop_fallback)
 					pstate->growth = PHJ_GROWTH_SPILL_BATCH0;
