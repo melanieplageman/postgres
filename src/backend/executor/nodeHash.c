@@ -1418,6 +1418,8 @@ ExecParallelHashRepartitionFirst(HashJoinTable hashtable)
 	dsa_pointer chunk_shared;
 	HashMemoryChunk chunk;
 
+	ParallelHashJoinBatch *old_batches;
+
 	Assert(hashtable->nbatch == hashtable->parallel_state->nbatch);
 
 	while ((chunk = ExecParallelHashPopChunkQueue(hashtable, &chunk_shared)))
@@ -1503,17 +1505,14 @@ ExecParallelHashRepartitionFirst(HashJoinTable hashtable)
 
 		CHECK_FOR_INTERRUPTS();
 	}
-	ParallelHashJoinBatch *old_batches;
+
 repart_spill_file:
 	/* Scan the batch 0 spill file if we made one */
 	old_batches = (ParallelHashJoinBatch *)
 		dsa_get_address(hashtable->area, hashtable->parallel_state->old_batches);
-	SharedTuplestoreAccessor *old_inner_batch0 = palloc0(sizeof(SharedTuplestoreAccessor *));
-
 	ParallelHashJoinBatch *old_shared =
 		                      NthParallelHashJoinBatch(old_batches, 0);
-
-	old_inner_batch0 = sts_attach(ParallelHashJoinBatchInner(old_shared),
+	SharedTuplestoreAccessor *old_inner_batch0 = sts_attach(ParallelHashJoinBatchInner(old_shared),
 	                                 ParallelWorkerNumber + 1,
 	                                 &hashtable->parallel_state->fileset);
 // DO_THIS_NEXT
@@ -1522,13 +1521,15 @@ repart_spill_file:
 // and move the old batch 0 tuples from the spill file into the new one so that we don't lose them
 // ? do I even need to check that the size is too big? is it enough that the all went back?
 	LWLockAcquire(&hashtable->parallel_state->lock, LW_SHARED);
+	Assert(!LWLockHeldByMe(&hashtable->batches[0].shared->lock));
+	LWLockAcquire(&hashtable->batches[0].shared->lock, LW_EXCLUSIVE);
 	if (hashtable->batches[0].old_ntuples == hashtable->batches[0].ntuples &&
-	hashtable->batches[0].shared->size >= hashtable->parallel_state->space_allowed)
+		hashtable->batches[0].shared->size >= hashtable->parallel_state->space_allowed)
 	{
-		// TODO: lock this
 		hashtable->batches[0].shared->dont_even_try_hashtable = true;
 		hashtable->batches[0].shared->space_exhausted = true;
 	}
+	LWLockRelease(&hashtable->batches[0].shared->lock);
 	LWLockRelease(&hashtable->parallel_state->lock);
 	if (old_shared->hashloop_fallback)
 	{
