@@ -80,6 +80,11 @@ static bool ExecParallelHashTuplePrealloc(HashJoinTable hashtable,
 static void ExecParallelHashMergeCounters(HashJoinTable hashtable);
 static void ExecParallelHashCloseBatchAccessors(HashJoinTable hashtable);
 
+static void
+ExecParallelForceSpillTuple(const struct HashJoinTableData *hashtable,
+                            const struct HashJoinTupleData *hashTuple,
+                            const MinimalTupleData *tuple,
+                            int batchno);
 /* ----------------------------------------------------------------
  *		ExecHash
  *
@@ -1462,34 +1467,11 @@ ExecParallelHashRepartitionFirst(HashJoinTable hashtable)
 			}
 			else
 			{
-				size_t		tuple_size =
-				MAXALIGN(HJTUPLE_OVERHEAD + tuple->t_len);
-				tupleMetadata metadata;
+				ExecParallelForceSpillTuple(hashtable,
+				                            hashTuple,
+				                            tuple,
+				                            batchno);
 
-				/* It belongs in a later batch. */
-				ParallelHashJoinBatch *batch = hashtable->batches[batchno].shared;
-
-				LWLockAcquire(&batch->lock, LW_EXCLUSIVE);
-
-				// why isn't prealloc used here
-				if (batch->estimated_stripe_size + tuple_size > hashtable->parallel_state->space_allowed)
-				{
-					batch->maximum_stripe_number++;
-					batch->estimated_stripe_size = 0;
-				}
-
-				batch->estimated_stripe_size += tuple_size;
-
-				metadata.hashvalue = hashTuple->hashvalue;
-				metadata.stripe = batch->maximum_stripe_number;
-				LWLockRelease(&batch->lock);
-
-				hashtable->batches[batchno].estimated_size += tuple_size;
-				//elog(NOTICE, "as part of repartitionfirst, putting former batch 0 tuple into batchno %i", batchno);
-				sts_puttuple(hashtable->batches[batchno].inner_tuples,
-				             &metadata,
-				             tuple,
-				             false);
 			}
 
 			/* Count this tuple. */
@@ -1614,6 +1596,50 @@ retry:
 		}
 		sts_end_parallel_scan(old_inner_batch0);
 	}
+}
+
+/*
+ * Spill a HashJoinTuple into a batch file, ignoring if the space_allowed
+ * would be exceeded. Do track the estimated_size.
+ */
+static void
+ExecParallelForceSpillTuple(const struct HashJoinTableData *hashtable,
+                            const struct HashJoinTupleData *hashTuple,
+                            const MinimalTupleData *tuple,
+                            int batchno)
+{
+	size_t        tuple_size =
+			MAXALIGN(HJTUPLE_OVERHEAD + tuple->t_len);
+	tupleMetadata metadata;
+
+	ParallelHashJoinBatch *batch = hashtable->batches[batchno].shared;
+
+	Assert(!LWLockHeldByMe(&hashtable->parallel_state->lock));
+	LWLockAcquire(&hashtable->parallel_state->lock, LW_SHARED);
+	LWLockAcquire(&batch->stats_lock, LW_EXCLUSIVE);
+	if (batch->estimated_stripe_size + tuple_size > hashtable->parallel_state->space_allowed)
+	{
+		batch->maximum_stripe_number++;
+		batch->estimated_stripe_size = 0;
+	}
+	LWLockRelease(&hashtable->parallel_state->lock);
+	batch->estimated_stripe_size += tuple_size;
+
+	metadata.hashvalue = hashTuple->hashvalue;
+	metadata.stripe = batch->maximum_stripe_number;
+
+	// this is wrong, checking it for every tuple in shared memory defeats the point
+	// of having a backend local estimate, but if we wait until after writing all tuples
+	// the stripe numbers will be wrong -- need another strategy
+	// INCONSISTENT STATE: this lock only protects this stuff here
+	hashtable->batches[batchno].shared->estimated_size += tuple_size;
+	LWLockRelease(&batch->stats_lock);
+
+	//elog(NOTICE, "as part of repartitionfirst, putting former batch 0 tuple into batchno %i", batchno);
+	sts_puttuple(hashtable->batches[batchno].inner_tuples,
+	             &metadata,
+	             tuple,
+	             false);
 }
 
 /*
@@ -3436,6 +3462,7 @@ ExecParallelHashJoinSetUpBatches(HashJoinTable hashtable, int nbatch)
 		shared->dont_even_try_hashtable = false;
 		/* TODO: is it okay to use the same tranche for this lock? */
 		LWLockInitialize(&shared->lock, LWTRANCHE_PARALLEL_HASH_JOIN);
+		LWLockInitialize(&shared->stats_lock, LWTRANCHE_PARALLEL_HASH_JOIN);
 		if (i == 0)
 			shared->maximum_stripe_number = 1;
 		else

@@ -179,10 +179,11 @@ typedef struct ParallelHashJoinBatch
 	 * after finishing build phase, hashloop_fallback cannot change, and does
 	 * not require a lock to read
 	 */
-	bool		hashloop_fallback;
+	bool		hashloop_fallback; // make an atomic?
 	bool dont_even_try_hashtable;
 	int			maximum_stripe_number;	/* the number of stripes in the batch */
 	size_t		estimated_stripe_size;	/* size of last stripe in batch */
+	LWLock stats_lock;
 	LWLock		lock;
 
 	/*
