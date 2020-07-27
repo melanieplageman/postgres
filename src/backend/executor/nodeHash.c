@@ -81,7 +81,7 @@ static void ExecParallelHashMergeCounters(HashJoinTable hashtable);
 static void ExecParallelHashCloseBatchAccessors(HashJoinTable hashtable);
 
 static void
-ExecParallelForceSpillTuple(HashJoinTable hashtable, HashJoinTuple hashTuple,
+ExecParallelForceSpillTuple(HashJoinTable hashtable, uint32 hashvalue,
                             MinimalTuple tuple,
                             int batchno);
 /* ----------------------------------------------------------------
@@ -1471,7 +1471,7 @@ ExecParallelHashRepartitionFirst(HashJoinTable hashtable)
 			else
 			{
 				ExecParallelForceSpillTuple(hashtable,
-				                            hashTuple,
+				                            hashTuple->hashvalue,
 				                            tuple,
 				                            batchno);
 
@@ -1500,17 +1500,21 @@ repart_spill_file:
 	old_inner_batch0 = sts_attach(ParallelHashJoinBatchInner(old_shared),
 	                                 ParallelWorkerNumber + 1,
 	                                 &hashtable->parallel_state->fileset);
-// DO_THIS_NEXT
-// if memory is full and 100% of the tuples from the queue went back to the hashtable, we should set space exhausted to true
-// because even if we got all the tups from the queue into the hashtable, this is still an undesirable situation
-// and move the old batch 0 tuples from the spill file into the new one so that we don't lose them
-// ? do I even need to check that the size is too big? is it enough that the all went back?
+	/*
+	 * If memory is full and 10% of the tuples from the queue went back to the
+	 * hashtable, then we should indicate that space is exhausted and move
+	 * all of the old batch 0 spill file tuples into the new one to avoid losing
+	 * them when we switch generations.
+	 */
 	new_batch0_accessor = hashtable->batches[0];
 	LWLockAcquire(&pstate->lock, LW_SHARED);
 	Assert(!LWLockHeldByMe(&new_batch0_accessor.shared->lock));
 	LWLockAcquire(&new_batch0_accessor.shared->lock, LW_EXCLUSIVE);
-	// TODO: if this check is needed to determine if we should try the hashtable, then we need to update
-	// all locations counting tuples to use the shared variable
+	/*
+	 * TODO: if this check is needed to determine if we should try the hashtable, then we need to update
+	 * all locations counting tuples to use the shared variable. maybe it is enough just that the size is
+	 * too big OR all tuples went back
+	 */
 	if (new_batch0_accessor.shared->old_ntuples == new_batch0_accessor.shared->ntuples &&
 		new_batch0_accessor.shared->size >= pstate->space_allowed)
 	{
@@ -1538,21 +1542,24 @@ repart_spill_file:
 			int                           batchno;
 			ParallelHashJoinBatchAccessor new_batch_accessor;
 			dsa_pointer                   shared;
+			bool reload_hashtable = false;
 retry:
 			ExecHashGetBucketAndBatch(hashtable, metadata.hashvalue, &bucketno, &batchno);
 			/* if it would fit in the hashtable, move it back into the hashtable */
 			new_batch_accessor = hashtable->batches[batchno];
-			LWLockAcquire(&new_batch_accessor.shared->lock, LW_EXCLUSIVE);
+			LWLockAcquire(&new_batch_accessor.shared->lock, LW_SHARED);
+			reload_hashtable = batchno == 0 && new_batch_accessor.shared->size + tuple_size < pstate->space_allowed &&
+				!new_batch_accessor.shared->dont_even_try_hashtable;
+			LWLockRelease(&new_batch_accessor.shared->lock);
+
 			/*
 			 * We don't take a lock to read pstate->space_allowed because it
 			 * should not change during execution of the hash join
 			 */
-			if (batchno == 0 && new_batch_accessor.shared->size + tuple_size < pstate->space_allowed &&
-				!new_batch_accessor.shared->dont_even_try_hashtable)
+			if (reload_hashtable)
 			{
 				/* It still belongs in hashtable.  Copy to a new chunk. */
 				HashJoinTuple hashTuple;
-				LWLockRelease(&new_batch_accessor.shared->lock);
 
 				/* Try to load it into memory. */
 				Assert(BarrierPhase(&pstate->build_barrier) ==
@@ -1587,28 +1594,17 @@ retry:
 			else
 			{
 				/* it belongs in a spill file -- either batch 0 or later */
-				int stripeno;
-				if (new_batch_accessor.shared->estimated_stripe_size + tuple_size > pstate->space_allowed)
-				{
-					new_batch_accessor.shared->maximum_stripe_number++;
-					new_batch_accessor.shared->estimated_stripe_size = 0;
-				}
-				new_batch_accessor.shared->estimated_stripe_size += tuple_size;
-				stripeno = new_batch_accessor.shared->maximum_stripe_number;
-				metadata.stripe = stripeno;
-				LWLockRelease(&new_batch_accessor.shared->lock);
-				/* Store the tuple its new batch. */
-				sts_puttuple(new_batch_accessor.inner_tuples,
-				             &metadata,
-				             tuple,
-				             false);
+				ExecParallelForceSpillTuple(hashtable, metadata.hashvalue, tuple, batchno);
 			}
+
+
 			LWLockAcquire(&new_batch_accessor.shared->lock, LW_EXCLUSIVE);
-			LWLockAcquire(&old_shared->lock, LW_EXCLUSIVE);
-			new_batch_accessor.shared->estimated_size += tuple_size;
 			++new_batch_accessor.shared->ntuples;
-			++old_shared->old_ntuples;
 			LWLockRelease(&new_batch_accessor.shared->lock);
+
+
+			LWLockAcquire(&old_shared->lock, LW_EXCLUSIVE);
+			++old_shared->old_ntuples;
 			LWLockRelease(&old_shared->lock);
 
 			CHECK_FOR_INTERRUPTS();
@@ -1622,7 +1618,7 @@ retry:
  * would be exceeded. Do track the estimated_size.
  */
 static void
-ExecParallelForceSpillTuple(HashJoinTable hashtable, HashJoinTuple hashTuple,
+ExecParallelForceSpillTuple(HashJoinTable hashtable, uint32 hashvalue,
                             MinimalTuple tuple,
                             int batchno)
 {
@@ -1643,17 +1639,12 @@ ExecParallelForceSpillTuple(HashJoinTable hashtable, HashJoinTuple hashTuple,
 	LWLockRelease(&hashtable->parallel_state->lock);
 	batch_accessor.shared->estimated_stripe_size += tuple_size;
 
-	metadata.hashvalue = hashTuple->hashvalue;
+	metadata.hashvalue = hashvalue;
 	metadata.stripe = batch_accessor.shared->maximum_stripe_number;
 
-	// this is wrong, checking it for every tuple in shared memory defeats the point
-	// of having a backend local estimate, but if we wait until after writing all tuples
-	// the stripe numbers will be wrong -- need another strategy
-	// INCONSISTENT STATE: this lock only protects this stuff here
 	batch_accessor.shared->estimated_size += tuple_size;
 	LWLockRelease(&batch_accessor.shared->lock);
 
-	//elog(NOTICE, "as part of repartitionfirst, putting former batch 0 tuple into batchno %i", batchno);
 	sts_puttuple(batch_accessor.inner_tuples,
 	             &metadata,
 	             tuple,
