@@ -1597,7 +1597,6 @@ retry:
 				ExecParallelForceSpillTuple(hashtable, metadata.hashvalue, tuple, batchno);
 			}
 
-
 			LWLockAcquire(&new_batch_accessor.shared->lock, LW_EXCLUSIVE);
 			++new_batch_accessor.shared->ntuples;
 			LWLockRelease(&new_batch_accessor.shared->lock);
@@ -1688,38 +1687,17 @@ ExecParallelHashRepartitionRest(HashJoinTable hashtable)
 
 		while ((tuple = sts_parallel_scan_next(old_inner_tuples[i], &metadata.hashvalue)))
 		{
-			size_t		tuple_size = MAXALIGN(HJTUPLE_OVERHEAD + tuple->t_len);
 			int			bucketno;
 			int			batchno;
-			ParallelHashJoinBatchAccessor batch_accessor;
-			ParallelHashJoinBatchAccessor old_batch_accessor;
 
 			/* Decide which partition it goes to in the new generation. */
 			ExecHashGetBucketAndBatch(hashtable, metadata.hashvalue, &bucketno,
 									  &batchno);
-			batch_accessor = hashtable->batches[batchno];
-			old_batch_accessor = hashtable->batches[i];
 
-			LWLockAcquire(&batch_accessor.shared->lock, LW_EXCLUSIVE);
-			batch_accessor.shared->estimated_size += tuple_size;
-			++batch_accessor.shared->ntuples;
-			++old_batch_accessor.shared->old_ntuples;
+			ExecParallelForceSpillTuple(hashtable, metadata.hashvalue, tuple, batchno);
 
-			/* Store the tuple its new batch. */
-			if (batch_accessor.shared->estimated_stripe_size + tuple_size > pstate->space_allowed)
-			{
-				batch_accessor.shared->maximum_stripe_number++;
-				batch_accessor.shared->estimated_stripe_size = 0;
-			}
-			batch_accessor.shared->estimated_stripe_size += tuple_size;
-			metadata.stripe = batch_accessor.shared->maximum_stripe_number;
-			LWLockRelease(&batch_accessor.shared->lock);
-			/* Store the tuple its new batch. */
-			sts_puttuple(batch_accessor.inner_tuples,
-			             &metadata,
-			             tuple,
-			             false);
-
+			++hashtable->batches[batchno].shared->ntuples;
+			++hashtable->batches[i].shared->old_ntuples;
 			CHECK_FOR_INTERRUPTS();
 		}
 		sts_end_parallel_scan(old_inner_tuples[i]);
