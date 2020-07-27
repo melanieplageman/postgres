@@ -2085,34 +2085,14 @@ retry:
 
 							while (idx < chunk->used)
 							{
-								HashJoinTuple hashTuple1 = (HashJoinTuple) (HASH_CHUNK_DATA(chunk) + idx);
-								MinimalTuple  tuple1     = HJTUPLE_MINTUPLE(hashTuple1);
-								size_t		tuple_size = MAXALIGN(HJTUPLE_OVERHEAD + tuple1->t_len);
-								tupleMetadata metadata;
+								MinimalTuple minTuple;
+								hashTuple = (HashJoinTuple) (HASH_CHUNK_DATA(chunk) + idx);
+								minTuple     = HJTUPLE_MINTUPLE(hashTuple);
 
-								LWLockAcquire(&batch0_accessor.shared->lock, LW_EXCLUSIVE);
-
-								if (batch0_accessor.shared->estimated_stripe_size + tuple_size > hashtable->parallel_state->space_allowed)
-								{
-									batch0_accessor.shared->maximum_stripe_number++;
-									batch0_accessor.shared->estimated_stripe_size = 0;
-								}
-
-								batch0_accessor.shared->estimated_stripe_size += tuple_size;
-
-								metadata.hashvalue = hashTuple1->hashvalue;
-								metadata.stripe = batch0_accessor.shared->maximum_stripe_number;
-
-								batch0_accessor.shared->estimated_size += tuple_size;
-								LWLockRelease(&batch0_accessor.shared->lock);
-
-								sts_puttuple(hashtable->batches[0].inner_tuples,
-								             &metadata,
-								             tuple1,
-								             false);
+								ExecParallelForceSpillTuple(hashtable, hashTuple->hashvalue, minTuple, 0);
 
 								idx += MAXALIGN(HJTUPLE_OVERHEAD +
-									                HJTUPLE_MINTUPLE(hashTuple1)->t_len);
+									                HJTUPLE_MINTUPLE(hashTuple)->t_len);
 							}
 							dsa_free(hashtable->area, chunk_shared);
 
