@@ -183,7 +183,6 @@ typedef struct ParallelHashJoinBatch
 	bool dont_even_try_hashtable;
 	int			maximum_stripe_number;	/* the number of stripes in the batch */
 	size_t		estimated_stripe_size;	/* size of last stripe in batch */
-	LWLock stats_lock;
 	LWLock		lock;
 
 	/*
