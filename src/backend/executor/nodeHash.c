@@ -1456,11 +1456,16 @@ ExecParallelHashRepartitionFirst(HashJoinTable hashtable)
 					ExecParallelHashTupleAlloc(hashtable,
 											   HJTUPLE_OVERHEAD + tuple->t_len,
 											   &shared);
-				// DO_NEXT need to check for PHJ_GROWTH_SPILL_BATCH0
+				/* TODO: need to check for PHJ_GROWTH_SPILL_BATCH0 */
 
 				if (!copyTuple)
 				{
+					// TODO: take a lock
 					Assert(hashtable->parallel_state->abandon_repartitioning);
+					ParallelHashJoinBatchAccessor batch0_accessor = hashtable->batches[0];
+					LWLockAcquire(&batch0_accessor.shared->lock, LW_EXCLUSIVE);
+					batch0_accessor.shared->dont_even_try_hashtable = true;
+					LWLockRelease(&batch0_accessor.shared->lock);
 					goto repart_spill_file;
 				}
 				copyTuple->hashvalue = hashTuple->hashvalue;
@@ -1507,7 +1512,6 @@ repart_spill_file:
 	 * them when we switch generations.
 	 */
 	new_batch0_accessor = hashtable->batches[0];
-	LWLockAcquire(&pstate->lock, LW_SHARED);
 	Assert(!LWLockHeldByMe(&new_batch0_accessor.shared->lock));
 	LWLockAcquire(&new_batch0_accessor.shared->lock, LW_EXCLUSIVE);
 	/*
@@ -1515,14 +1519,13 @@ repart_spill_file:
 	 * all locations counting tuples to use the shared variable. maybe it is enough just that the size is
 	 * too big OR all tuples went back
 	 */
-	if (new_batch0_accessor.shared->old_ntuples == new_batch0_accessor.shared->ntuples &&
-		new_batch0_accessor.shared->size >= pstate->space_allowed)
+
+	if (new_batch0_accessor.shared->size >= pstate->space_allowed)
 	{
 		new_batch0_accessor.shared->dont_even_try_hashtable = true;
-		new_batch0_accessor.shared->space_exhausted = true;
+		Assert(new_batch0_accessor.shared->space_exhausted);
 	}
 	LWLockRelease(&new_batch0_accessor.shared->lock);
-	LWLockRelease(&pstate->lock);
 
 	/*
 	 * The old batch 0 is no longer being updated, so we should be able to
