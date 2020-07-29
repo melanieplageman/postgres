@@ -3182,7 +3182,6 @@ ExecParallelHashTableEvictBatch0(HashJoinTable hashtable)
 					HashJoinTuple hashTuple = (HashJoinTuple) (HASH_CHUNK_DATA(chunk) + idx);
 					minTuple     = HJTUPLE_MINTUPLE(hashTuple);
 
-					hashtable->batches[0].shared->evicted_batch0_tuples++;
 					ExecParallelForceSpillTuple(hashtable, hashTuple->hashvalue, minTuple, 0);
 
 					idx += MAXALIGN(HJTUPLE_OVERHEAD +
@@ -3201,8 +3200,9 @@ ExecParallelHashTableEvictBatch0(HashJoinTable hashtable)
 				Assert(!LWLockHeldByMe(&pstate->lock));
 				LWLockAcquire(&pstate->lock, LW_EXCLUSIVE);
 				LWLockAcquire(&hashtable->batches[0].shared->lock, LW_EXCLUSIVE);
-				elog(NOTICE, "Batch0 Eviction Machine: %d: old_ntuples: %ld. ntuples: %ld. evicted ntuples: %ld",
-					ParallelWorkerNumber, hashtable->batches[0].shared->old_ntuples, hashtable->batches[0].shared->ntuples,
+				elog(NOTICE, "%d: Batch0 Eviction Machine. old_ntuples: %ld. ntuples: %ld.",
+					ParallelWorkerNumber,
+					hashtable->batches[0].shared->old_ntuples,
 					hashtable->batches[0].shared->ntuples);
 				pstate->growth = PHJ_GROWTH_OK;
 				hashtable->batches[0].shared->chunks = 0;
