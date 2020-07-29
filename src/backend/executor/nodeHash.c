@@ -1492,6 +1492,7 @@ ExecParallelHashRepartitionFirst(HashJoinTable hashtable)
 			/* Count this tuple. */
 			LWLockAcquire(&new_batch0_accessor.shared->lock, LW_EXCLUSIVE);
 			++new_batch0_accessor.shared->old_ntuples;
+			++new_batch0_accessor.shared->evicted_batch0_tuples;
 			LWLockRelease(&new_batch0_accessor.shared->lock);
 
 			LWLockAcquire(&hashtable->batches[batchno].shared->lock, LW_EXCLUSIVE);
@@ -1533,8 +1534,14 @@ ExecParallelHashRepartitionFirst(HashJoinTable hashtable)
 
 
 				/* Count this tuple. */
-				++hashtable->batches[0].shared->old_ntuples;
+				LWLockAcquire(&new_batch0_accessor.shared->lock, LW_EXCLUSIVE);
+				++new_batch0_accessor.shared->old_ntuples;
+				++new_batch0_accessor.shared->evicted_batch0_tuples;
+				LWLockRelease(&new_batch0_accessor.shared->lock);
+
+				LWLockAcquire(&hashtable->batches[batchno].shared->lock, LW_EXCLUSIVE);
 				++hashtable->batches[batchno].shared->ntuples;
+				LWLockRelease(&hashtable->batches[batchno].shared->lock);
 
 				idx += MAXALIGN(HJTUPLE_OVERHEAD + HJTUPLE_MINTUPLE(hashTuple)->t_len);
 			}
@@ -1622,6 +1629,9 @@ ExecParallelHashRepartitionFirst(HashJoinTable hashtable)
 		CHECK_FOR_INTERRUPTS();
 	}
 	sts_end_parallel_scan(old_inner_batch0_sts);
+	elog(NOTICE, "RepartitionFirst: %d: old_ntuples: %ld. ntuples: %ld. evicted ntuples: %ld",
+	     ParallelWorkerNumber, hashtable->batches[0].shared->old_ntuples, hashtable->batches[0].shared->ntuples,
+	     hashtable->batches[0].shared->ntuples);
 }
 
 

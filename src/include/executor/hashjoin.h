@@ -174,7 +174,7 @@ typedef struct ParallelHashJoinBatch
 	bool		space_exhausted;
 
 	/* Adaptive HashJoin */
-
+	size_t evicted_batch0_tuples;
 	/*
 	 * after finishing build phase, hashloop_fallback cannot change, and does
 	 * not require a lock to read
