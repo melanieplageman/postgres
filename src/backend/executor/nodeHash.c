@@ -1439,12 +1439,15 @@ ExecParallelHashRepartitionFirst(HashJoinTable hashtable)
 	old_batches = (ParallelHashJoinBatch *) dsa_get_address(hashtable->area, hashtable->parallel_state->old_batches);
 	Assert(old_batches);
 	old_shared = NthParallelHashJoinBatch(old_batches, 0);
-	old_inner_batch0_sts = NULL;
+	old_inner_batch0_sts = sts_attach(ParallelHashJoinBatchInner(old_shared), ParallelWorkerNumber + 1, &hashtable->parallel_state->fileset);
+	sts_begin_parallel_scan(old_inner_batch0_sts);
 
 	new_batch0_accessor = hashtable->batches[0];
 
 	chunk = NULL;
-
+	elog(NOTICE, "%d: Begin of RepartitionFirst. old batch old ntuples: %ld.",
+		ParallelWorkerNumber,
+		old_shared->old_ntuples);
 
 	while ((chunk = ExecParallelHashPopChunkQueue(hashtable, &chunk_shared)) && !hashtable->batches[0].shared->space_exhausted)
 	{
@@ -1490,10 +1493,9 @@ ExecParallelHashRepartitionFirst(HashJoinTable hashtable)
 				ExecParallelForceSpillTuple(hashtable, hashTuple->hashvalue, tuple, batchno);
 
 			/* Count this tuple. */
-			LWLockAcquire(&new_batch0_accessor.shared->lock, LW_EXCLUSIVE);
-			++new_batch0_accessor.shared->old_ntuples;
-			++new_batch0_accessor.shared->evicted_batch0_tuples;
-			LWLockRelease(&new_batch0_accessor.shared->lock);
+			LWLockAcquire(&old_shared->lock, LW_EXCLUSIVE);
+			++old_shared->old_ntuples;
+			LWLockRelease(&old_shared->lock);
 
 			LWLockAcquire(&hashtable->batches[batchno].shared->lock, LW_EXCLUSIVE);
 			++hashtable->batches[batchno].shared->ntuples;
@@ -1534,10 +1536,9 @@ ExecParallelHashRepartitionFirst(HashJoinTable hashtable)
 
 
 				/* Count this tuple. */
-				LWLockAcquire(&new_batch0_accessor.shared->lock, LW_EXCLUSIVE);
-				++new_batch0_accessor.shared->old_ntuples;
-				++new_batch0_accessor.shared->evicted_batch0_tuples;
-				LWLockRelease(&new_batch0_accessor.shared->lock);
+				LWLockAcquire(&old_shared->lock, LW_EXCLUSIVE);
+				++old_shared->old_ntuples;
+				LWLockRelease(&old_shared->lock);
 
 				LWLockAcquire(&hashtable->batches[batchno].shared->lock, LW_EXCLUSIVE);
 				++hashtable->batches[batchno].shared->ntuples;
@@ -1551,19 +1552,16 @@ ExecParallelHashRepartitionFirst(HashJoinTable hashtable)
 	{
 		bool spill = false;
 		int                           batchno;
-		old_inner_batch0_sts = sts_attach(ParallelHashJoinBatchInner(old_shared), ParallelWorkerNumber + 1, &hashtable->parallel_state->fileset);
-		sts_begin_parallel_scan(old_inner_batch0_sts);
+
 		while ((tuple = sts_parallel_scan_next(old_inner_batch0_sts, &metadata.hashvalue))
 					&& !hashtable->batches[0].shared->space_exhausted)
 		{
 			Assert(old_shared->hashloop_fallback);
 
 			int                           bucketno;
-			ParallelHashJoinBatchAccessor new_batch_accessor;
 			dsa_pointer                   shared;
 
 			ExecHashGetBucketAndBatch(hashtable, metadata.hashvalue, &bucketno, &batchno);
-			new_batch_accessor = hashtable->batches[batchno];
 
 			/*
 			* We don't take a lock to read pstate->space_allowed because it
@@ -1587,13 +1585,13 @@ ExecParallelHashRepartitionFirst(HashJoinTable hashtable)
 			ExecParallelHashPushTuple(&hashtable->buckets.shared[bucketno],
 			                          hashTuple, shared);
 
-			LWLockAcquire(&new_batch_accessor.shared->lock, LW_EXCLUSIVE);
-			++new_batch_accessor.shared->ntuples;
-			LWLockRelease(&new_batch_accessor.shared->lock);
-
 			LWLockAcquire(&old_shared->lock, LW_EXCLUSIVE);
 			++old_shared->old_ntuples;
 			LWLockRelease(&old_shared->lock);
+
+			LWLockAcquire(&hashtable->batches[batchno].shared->lock, LW_EXCLUSIVE);
+			++hashtable->batches[batchno].shared->ntuples;
+			LWLockRelease(&hashtable->batches[batchno].shared->lock);
 
 			CHECK_FOR_INTERRUPTS();
 		}
@@ -1606,31 +1604,27 @@ ExecParallelHashRepartitionFirst(HashJoinTable hashtable)
 	}
 	// ensure attached to old batch 0
 	// while it is not exhausted, put its tuples into files
-	if (!old_inner_batch0_sts)
-		return;
 	while ((tuple = sts_parallel_scan_next(old_inner_batch0_sts, &metadata.hashvalue)))
 	{
 		int                           bucketno;
 		int                           batchno;
-		ParallelHashJoinBatchAccessor new_batch_accessor;
 
 		ExecHashGetBucketAndBatch(hashtable, metadata.hashvalue, &bucketno, &batchno);
-		new_batch_accessor = hashtable->batches[batchno];
 		ExecParallelForceSpillTuple(hashtable, metadata.hashvalue, tuple, batchno);
-
-		LWLockAcquire(&new_batch_accessor.shared->lock, LW_EXCLUSIVE);
-		++new_batch_accessor.shared->ntuples;
-		LWLockRelease(&new_batch_accessor.shared->lock);
 
 		LWLockAcquire(&old_shared->lock, LW_EXCLUSIVE);
 		++old_shared->old_ntuples;
 		LWLockRelease(&old_shared->lock);
 
+		LWLockAcquire(&hashtable->batches[batchno].shared->lock, LW_EXCLUSIVE);
+		++hashtable->batches[batchno].shared->ntuples;
+		LWLockRelease(&hashtable->batches[batchno].shared->lock);
+
 		CHECK_FOR_INTERRUPTS();
 	}
 	sts_end_parallel_scan(old_inner_batch0_sts);
-	elog(NOTICE, "RepartitionFirst: %d: old_ntuples: %ld. ntuples: %ld. evicted ntuples: %ld",
-	     ParallelWorkerNumber, hashtable->batches[0].shared->old_ntuples, hashtable->batches[0].shared->ntuples,
+	elog(NOTICE, "%d: End of RepartitionFirst: new batch 0 new ntuples: %ld.",
+	     ParallelWorkerNumber,
 	     hashtable->batches[0].shared->ntuples);
 }
 
@@ -3283,7 +3277,9 @@ ExecParallelHashTupleAlloc(HashJoinTable hashtable, size_t size,
 
 		hashtable->current_chunk = NULL;
 		LWLockRelease(&pstate->lock);
-
+		if (growth == PHJ_GROWTH_SPILL_BATCH0)
+			elog(NOTICE, "%d: TupleAlloc before evicting hashtable. tuples: %ld",
+			ParallelWorkerNumber, hashtable->batches[0].shared->ntuples);
 		/* Another participant has commanded us to help grow. */
 		if (growth == PHJ_GROWTH_NEED_MORE_BATCHES)
 			ExecParallelHashIncreaseNumBatches(hashtable);
@@ -3892,7 +3888,9 @@ ExecParallelHashTuplePrealloc(HashJoinTable hashtable, int batchno, size_t size)
 		pstate->growth == PHJ_GROWTH_SPILL_BATCH0)
 	{
 		ParallelHashGrowth growth = pstate->growth;
-
+		if (growth == PHJ_GROWTH_SPILL_BATCH0)
+			elog(NOTICE, "%d: TuplePrealloc before evicting hashtable. tuples: %ld",
+			     ParallelWorkerNumber, hashtable->batches[0].shared->ntuples);
 		LWLockRelease(&pstate->lock);
 		if (growth == PHJ_GROWTH_NEED_MORE_BATCHES)
 			ExecParallelHashIncreaseNumBatches(hashtable);
