@@ -1442,12 +1442,7 @@ ExecParallelHashRepartitionFirst(HashJoinTable hashtable)
 	old_inner_batch0_sts = sts_attach(ParallelHashJoinBatchInner(old_shared), ParallelWorkerNumber + 1, &hashtable->parallel_state->fileset);
 	sts_begin_parallel_scan(old_inner_batch0_sts);
 
-	new_batch0_accessor = hashtable->batches[0];
-
 	chunk = NULL;
-	elog(NOTICE, "%d: Begin of RepartitionFirst. old batch old ntuples: %ld.",
-		ParallelWorkerNumber,
-		old_shared->old_ntuples);
 
 	while ((chunk = ExecParallelHashPopChunkQueue(hashtable, &chunk_shared)) && !hashtable->batches[0].shared->space_exhausted)
 	{
@@ -1623,9 +1618,6 @@ ExecParallelHashRepartitionFirst(HashJoinTable hashtable)
 		CHECK_FOR_INTERRUPTS();
 	}
 	sts_end_parallel_scan(old_inner_batch0_sts);
-	elog(NOTICE, "%d: End of RepartitionFirst: new batch 0 new ntuples: %ld.",
-	     ParallelWorkerNumber,
-	     hashtable->batches[0].shared->ntuples);
 }
 
 
@@ -3199,11 +3191,6 @@ ExecParallelHashTableEvictBatch0(HashJoinTable hashtable)
 			{
 				Assert(!LWLockHeldByMe(&pstate->lock));
 				LWLockAcquire(&pstate->lock, LW_EXCLUSIVE);
-				LWLockAcquire(&hashtable->batches[0].shared->lock, LW_EXCLUSIVE);
-				elog(NOTICE, "%d: Batch0 Eviction Machine. old_ntuples: %ld. ntuples: %ld.",
-					ParallelWorkerNumber,
-					hashtable->batches[0].shared->old_ntuples,
-					hashtable->batches[0].shared->ntuples);
 				pstate->growth = PHJ_GROWTH_OK;
 				hashtable->batches[0].shared->chunks = 0;
 				LWLockRelease(&hashtable->batches[0].shared->lock);
@@ -3277,9 +3264,6 @@ ExecParallelHashTupleAlloc(HashJoinTable hashtable, size_t size,
 
 		hashtable->current_chunk = NULL;
 		LWLockRelease(&pstate->lock);
-		if (growth == PHJ_GROWTH_SPILL_BATCH0)
-			elog(NOTICE, "%d: TupleAlloc before evicting hashtable. tuples: %ld",
-			ParallelWorkerNumber, hashtable->batches[0].shared->ntuples);
 		/* Another participant has commanded us to help grow. */
 		if (growth == PHJ_GROWTH_NEED_MORE_BATCHES)
 			ExecParallelHashIncreaseNumBatches(hashtable);
@@ -3888,9 +3872,6 @@ ExecParallelHashTuplePrealloc(HashJoinTable hashtable, int batchno, size_t size)
 		pstate->growth == PHJ_GROWTH_SPILL_BATCH0)
 	{
 		ParallelHashGrowth growth = pstate->growth;
-		if (growth == PHJ_GROWTH_SPILL_BATCH0)
-			elog(NOTICE, "%d: TuplePrealloc before evicting hashtable. tuples: %ld",
-			     ParallelWorkerNumber, hashtable->batches[0].shared->ntuples);
 		LWLockRelease(&pstate->lock);
 		if (growth == PHJ_GROWTH_NEED_MORE_BATCHES)
 			ExecParallelHashIncreaseNumBatches(hashtable);
