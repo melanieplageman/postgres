@@ -1488,13 +1488,8 @@ ExecParallelHashRepartitionFirst(HashJoinTable hashtable)
 				ExecParallelForceSpillTuple(hashtable, hashTuple->hashvalue, tuple, batchno);
 
 			/* Count this tuple. */
-			LWLockAcquire(&old_shared->lock, LW_EXCLUSIVE);
-			++old_shared->old_ntuples;
-			LWLockRelease(&old_shared->lock);
-
-			LWLockAcquire(&hashtable->batches[batchno].shared->lock, LW_EXCLUSIVE);
-			++hashtable->batches[batchno].shared->ntuples;
-			LWLockRelease(&hashtable->batches[batchno].shared->lock);
+			++hashtable->batches[0].old_ntuples;
+			++hashtable->batches[batchno].ntuples;
 
 			idx += MAXALIGN(HJTUPLE_OVERHEAD + HJTUPLE_MINTUPLE(hashTuple)->t_len);
 		}
@@ -1531,13 +1526,8 @@ ExecParallelHashRepartitionFirst(HashJoinTable hashtable)
 
 
 				/* Count this tuple. */
-				LWLockAcquire(&old_shared->lock, LW_EXCLUSIVE);
-				++old_shared->old_ntuples;
-				LWLockRelease(&old_shared->lock);
-
-				LWLockAcquire(&hashtable->batches[batchno].shared->lock, LW_EXCLUSIVE);
-				++hashtable->batches[batchno].shared->ntuples;
-				LWLockRelease(&hashtable->batches[batchno].shared->lock);
+				++hashtable->batches[0].old_ntuples;
+				++hashtable->batches[batchno].ntuples;
 
 				idx += MAXALIGN(HJTUPLE_OVERHEAD + HJTUPLE_MINTUPLE(hashTuple)->t_len);
 			}
@@ -1580,13 +1570,8 @@ ExecParallelHashRepartitionFirst(HashJoinTable hashtable)
 			ExecParallelHashPushTuple(&hashtable->buckets.shared[bucketno],
 			                          hashTuple, shared);
 
-			LWLockAcquire(&old_shared->lock, LW_EXCLUSIVE);
-			++old_shared->old_ntuples;
-			LWLockRelease(&old_shared->lock);
-
-			LWLockAcquire(&hashtable->batches[batchno].shared->lock, LW_EXCLUSIVE);
-			++hashtable->batches[batchno].shared->ntuples;
-			LWLockRelease(&hashtable->batches[batchno].shared->lock);
+			++hashtable->batches[0].old_ntuples;
+			++hashtable->batches[batchno].ntuples;
 
 			CHECK_FOR_INTERRUPTS();
 		}
@@ -1607,13 +1592,8 @@ ExecParallelHashRepartitionFirst(HashJoinTable hashtable)
 		ExecHashGetBucketAndBatch(hashtable, metadata.hashvalue, &bucketno, &batchno);
 		ExecParallelForceSpillTuple(hashtable, metadata.hashvalue, tuple, batchno);
 
-		LWLockAcquire(&old_shared->lock, LW_EXCLUSIVE);
-		++old_shared->old_ntuples;
-		LWLockRelease(&old_shared->lock);
-
-		LWLockAcquire(&hashtable->batches[batchno].shared->lock, LW_EXCLUSIVE);
-		++hashtable->batches[batchno].shared->ntuples;
-		LWLockRelease(&hashtable->batches[batchno].shared->lock);
+		++hashtable->batches[0].old_ntuples;
+		++hashtable->batches[batchno].ntuples;
 
 		CHECK_FOR_INTERRUPTS();
 	}
@@ -1705,8 +1685,8 @@ ExecParallelHashRepartitionRest(HashJoinTable hashtable)
 
 			ExecParallelForceSpillTuple(hashtable, metadata.hashvalue, tuple, batchno);
 
-			++hashtable->batches[batchno].shared->ntuples;
-			++hashtable->batches[i].shared->old_ntuples;
+			++hashtable->batches[batchno].ntuples;
+			++hashtable->batches[i].old_ntuples;
 			CHECK_FOR_INTERRUPTS();
 		}
 		sts_end_parallel_scan(old_inner_tuples[i]);
@@ -2067,7 +2047,7 @@ retry:
 		             tuple,
 		             false);
 	}
-	++hashtable->batches[batchno].shared->ntuples;
+	++hashtable->batches[batchno].ntuples;
 
 	if (shouldFree)
 		heap_free_minimal_tuple(tuple);
@@ -3139,10 +3119,10 @@ ExecParallelHashTableEvictBatch0(HashJoinTable hashtable)
 				for (size_t i = 0; i < hashtable->nbuckets; ++i)
 					dsa_pointer_atomic_write(&buckets[i], InvalidDsaPointer);
 				LWLockAcquire(&pstate->lock, LW_EXCLUSIVE);
-				LWLockAcquire(&batch0_accessor.shared->lock, LW_EXCLUSIVE);
 				pstate->chunk_work_queue = batch0_accessor.shared->chunks;
 				LWLockRelease(&pstate->lock);
 				// maybe do this after freeing everything
+				LWLockAcquire(&batch0_accessor.shared->lock, LW_EXCLUSIVE);
 				batch0_accessor.shared->size = 0;
 				LWLockRelease(&batch0_accessor.shared->lock);
 			}
@@ -3192,9 +3172,11 @@ ExecParallelHashTableEvictBatch0(HashJoinTable hashtable)
 				Assert(!LWLockHeldByMe(&pstate->lock));
 				LWLockAcquire(&pstate->lock, LW_EXCLUSIVE);
 				pstate->growth = PHJ_GROWTH_OK;
+				LWLockRelease(&pstate->lock);
+
+				LWLockAcquire(&hashtable->batches[0].shared->lock, LW_EXCLUSIVE);
 				hashtable->batches[0].shared->chunks = 0;
 				LWLockRelease(&hashtable->batches[0].shared->lock);
-				LWLockRelease(&pstate->lock);
 			}
 			/* FALLTHROUGH */
 		case PHJ_EVICT_DONE:
