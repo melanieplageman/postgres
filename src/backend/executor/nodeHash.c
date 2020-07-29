@@ -1499,6 +1499,37 @@ ExecParallelHashRepartitionFirst(HashJoinTable hashtable)
 
 		CHECK_FOR_INTERRUPTS();
 	}
+	if (chunk)
+	{
+		size_t		idx = 0;
+
+		/* Repartition all tuples in this chunk. */
+		while (idx < chunk->used)
+		{
+			HashJoinTuple hashTuple = (HashJoinTuple) (HASH_CHUNK_DATA(chunk) + idx);
+
+			int			bucketno;
+			int			batchno;
+			tuple = HJTUPLE_MINTUPLE(hashTuple);
+
+			ExecHashGetBucketAndBatch(hashtable, hashTuple->hashvalue,
+			                          &bucketno, &batchno);
+
+			Assert(batchno < hashtable->nbatch);
+			ExecParallelForceSpillTuple(hashtable,
+			                            hashTuple->hashvalue,
+			                            tuple,
+			                            batchno);
+
+			/* Count this tuple. */
+			++hashtable->batches[0].old_ntuples;
+			++hashtable->batches[batchno].ntuples;
+
+			idx += MAXALIGN(HJTUPLE_OVERHEAD + HJTUPLE_MINTUPLE(hashTuple)->t_len);
+		}
+	}
+
+	/* START SECOND CASE */
 	if (chunk != NULL)
 	{
 		Assert(hashtable->batches[0].shared->space_exhausted);
