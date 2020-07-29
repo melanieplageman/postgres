@@ -266,6 +266,7 @@ typedef enum ParallelHashGrowth
 	/* The memory budget would be exhausted, so we need to repartition. */
 	PHJ_GROWTH_NEED_MORE_BATCHES,
 	/* Repartitioning didn't help last time, so don't try to do that again. */
+	/* TODO: get rid of PHJ_GROWTH_DISABLED */
 	PHJ_GROWTH_DISABLED,
 	PHJ_GROWTH_SPILL_BATCH0
 } ParallelHashGrowth;
