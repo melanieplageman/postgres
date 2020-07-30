@@ -374,20 +374,6 @@ MultiExecParallelHash(HashState *node)
 				 * skew).
 				 */
 				pstate->growth = PHJ_GROWTH_DISABLED;
-
-				for (i = 0; i < hashtable->nbatch; ++i)
-				{
-					FallbackBatchStats *fallback_batch_stats;
-					ParallelHashJoinBatch *batch = hashtable->batches[i].shared;
-
-					if (!batch->hashloop_fallback)
-						continue;
-					fallback_batch_stats = palloc0(sizeof(FallbackBatchStats));
-					fallback_batch_stats->batchno = i;
-					fallback_batch_stats->numstripes = batch->maximum_stripe_number + 1;
-					hashtable->fallback_batches_stats = lappend(hashtable->fallback_batches_stats,
-						fallback_batch_stats);
-				}
 			}
 	}
 
@@ -401,6 +387,26 @@ MultiExecParallelHash(HashState *node)
 	hashtable->totalTuples = pstate->total_tuples;
 	ExecParallelHashEnsureBatchAccessors(hashtable);
 
+	/*
+	 * TODO: Move this elsewhere.
+	 * Related: Also consider what in ExecParallelHashJoinSetUpBatches()
+	 * can be performed ONCE after the build stage.
+	 * ExecParallelHashJoinSetUpBatches() is also called during growing batches.
+	 * And centralize instrumentation.
+	 * Set up fallback_batches_stats: stripe info for batches
+	 */
+	for (i = 0; i < hashtable->nbatch; ++i)
+	{
+		FallbackBatchStats *fallback_batch_stats;
+		ParallelHashJoinBatch *batch = hashtable->batches[i].shared;
+
+		if (!batch->hashloop_fallback)
+			continue;
+		fallback_batch_stats = palloc0(sizeof(FallbackBatchStats));
+		fallback_batch_stats->batchno = i;
+		fallback_batch_stats->numstripes = batch->maximum_stripe_number + 1;
+		hashtable->fallback_batches_stats = lappend(hashtable->fallback_batches_stats, fallback_batch_stats);
+	}
 	/*
 	 * The next synchronization point is in ExecHashJoin's HJ_BUILD_HASHTABLE
 	 * case, which will bring the build phase to PHJ_BUILD_DONE (if it isn't

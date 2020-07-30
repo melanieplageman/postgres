@@ -1,4 +1,4 @@
-DROP TYPE stub CASCADE;
+DROP TYPE IF EXISTS stub CASCADE;
 CREATE TYPE stub AS (hash INTEGER, value CHAR(8098));
 
 CREATE FUNCTION stub_hash(item stub)
