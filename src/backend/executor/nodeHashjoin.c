@@ -2088,6 +2088,7 @@ ExecHashJoinInitializeDSM(HashJoinState *state, ParallelContext *pcxt)
 	pstate->abandon_repartitioning = false;
 	BarrierInit(&pstate->build_barrier, 0);
 	BarrierInit(&pstate->eviction_barrier, 0);
+	BarrierInit(&pstate->repartition_barrier, 0);
 	BarrierInit(&pstate->grow_batches_barrier, 0);
 	BarrierInit(&pstate->grow_buckets_barrier, 0);
 
