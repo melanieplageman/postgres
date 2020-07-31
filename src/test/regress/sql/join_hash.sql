@@ -686,7 +686,6 @@ ORDER BY 1, 2, 3, 4, 5;
 set local min_parallel_table_scan_size = 0;
 set local parallel_setup_cost = 0;
 set local enable_hashjoin = on;
--- parallel_tuple_cost is set?
 
 savepoint settings;
 set max_parallel_workers_per_gather = 1;

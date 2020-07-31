@@ -730,7 +730,6 @@ ExecHashJoinImpl(PlanState *pstate, bool parallel)
 				 */
 				if (parallel)
 				{
-				//	elog(NOTICE, "need new stripe");
 					if (!ExecParallelHashJoinLoadStripe(node) &&
 						!ExecParallelHashJoinNewBatch(node))
 						return NULL;	/* end of parallel-aware join */
@@ -1099,10 +1098,10 @@ ExecParallelHashJoinOuterGetTuple(PlanState *outerNode,
 	}
 	else if (curbatch < hashtable->nbatch)
 	{
-		LWLockRelease(&hashtable->batches[0].shared->lock);
 
 		tupleMetadata metadata;
 		MinimalTuple tuple;
+		LWLockRelease(&hashtable->batches[0].shared->lock);
 
 		tuple = sts_parallel_scan_next(hashtable->batches[curbatch].outer_tuples,
 									   &metadata);
@@ -1672,15 +1671,10 @@ ExecParallelHashJoinLoadStripe(HashJoinState *hjstate)
 					 * TODO: sts_resume_parallel_scan() is overkill for stripe
 					 * 0 of each batch
 					 */
-					//if (batchno == 0)
-					//	elog(NOTICE, "about to resume inner side scan for batch 0. worker: %i. curstripe: %i", ParallelWorkerNumber, hashtable->curstripe);
 					sts_resume_parallel_scan(inner_tuples);
 
 					while ((tuple = sts_parallel_scan_next(inner_tuples, &metadata)))
 					{
-//						if (batchno == 0)
-//							elog(NOTICE, "got a tuple from batch 0 spill file. worker: %i. curstripe: %i. tuple stripe says %i",
-//								ParallelWorkerNumber, hashtable->curstripe, metadata.stripe);
 						/* The tuple is from a previous stripe. Skip it */
 						if (metadata.stripe < PHJ_STRIPE_NUMBER(phase))
 							continue;
@@ -1711,9 +1705,6 @@ ExecParallelHashJoinLoadStripe(HashJoinState *hjstate)
 				 * do this again here in case a worker began the scan and then
 				 * entered after loading before probing
 				 */
-				//if (batch->hashloop_fallback && batchno == 0)
-				//	elog(NOTICE, "batch 0 stripes: %i. worker: %i. curstripe: %i",
-				//		batch->maximum_stripe_number, ParallelWorkerNumber, hashtable->curstripe);
 				sts_end_parallel_scan(inner_tuples);
 				sts_begin_parallel_scan(outer_tuples);
 				return true;
@@ -1744,6 +1735,9 @@ ExecParallelHashJoinLoadStripe(HashJoinState *hjstate)
 
 					for (size_t i = 0; i < hashtable->nbuckets; ++i)
 						dsa_pointer_atomic_write(&buckets[i], InvalidDsaPointer);
+					LWLockAcquire(&hashtable->batches[hashtable->curbatch].shared->lock, LW_EXCLUSIVE);
+					hashtable->batches[hashtable->curbatch].shared->size = 0;
+					LWLockRelease(&hashtable->batches[hashtable->curbatch].shared->lock);
 				}
 
 				hashtable->curstripe++;
@@ -1774,6 +1768,10 @@ fallback_stripe:
 
 	for (size_t i = 0; i < hashtable->nbuckets; ++i)
 		dsa_pointer_atomic_write(&buckets[i], InvalidDsaPointer);
+
+	LWLockAcquire(&hashtable->batches[hashtable->curbatch].shared->lock, LW_EXCLUSIVE);
+	hashtable->batches[hashtable->curbatch].shared->size = 0;
+	LWLockRelease(&hashtable->batches[hashtable->curbatch].shared->lock);
 
 	/*
 	 * If all workers (including this one) have finished probing the batch,
@@ -2085,7 +2083,6 @@ ExecHashJoinInitializeDSM(HashJoinState *state, ParallelContext *pcxt)
 	pstate->total_tuples = 0;
 	LWLockInitialize(&pstate->lock,
 					 LWTRANCHE_PARALLEL_HASH_JOIN);
-	pstate->abandon_repartitioning = false;
 	BarrierInit(&pstate->build_barrier, 0);
 	BarrierInit(&pstate->eviction_barrier, 0);
 	BarrierInit(&pstate->repartition_barrier, 0);

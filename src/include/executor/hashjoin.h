@@ -300,7 +300,6 @@ typedef struct ParallelHashJoinState
 	int        stashed_one_tup;
 	size_t		total_tuples;	/* total number of inner tuples */
 	LWLock		lock;			/* lock protecting the above */
-	bool abandon_repartitioning;
 	int reset_buckets;
 
 	Barrier		build_barrier;	/* synchronization for the build phases */

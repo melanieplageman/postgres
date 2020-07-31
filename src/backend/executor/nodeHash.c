@@ -83,9 +83,11 @@ static void ExecParallelHashMergeCounters(HashJoinTable hashtable);
 static void ExecParallelHashCloseBatchAccessors(HashJoinTable hashtable);
 
 static void
-ExecParallelForceSpillTuple(HashJoinTable hashtable, uint32 hashvalue,
+ExecParallelForceSpillTuple(HashJoinTable hashtable,
+                            uint32 hashvalue,
                             MinimalTuple tuple,
-                            int batchno);
+                            int batchno,
+                            int print_type);
 static void
 ExecParallelHashRepartitionSpilledBatch(HashJoinTable hashtable,
                                         SharedTuplestoreAccessor *old_inner_batch0_sts);
@@ -1211,7 +1213,6 @@ ExecParallelHashIncreaseNumBatches(HashJoinTable hashtable)
 				int			new_nbatch;
 				int			i;
 
-				pstate->abandon_repartitioning = false;
 				/* Move the old batch out of the way. */
 				old_batch0 = hashtable->batches[0].shared;
 				pstate->old_batches = pstate->batches;
@@ -1324,8 +1325,11 @@ ExecParallelHashIncreaseNumBatches(HashJoinTable hashtable)
 			ExecParallelHashTableSetCurrentBatch(hashtable, 0);
 			/* Then partition, flush counters. */
 			ExecParallelHashRepartitionFirst(hashtable);
-			if (!pstate->abandon_repartitioning)
-				ExecParallelHashRepartitionRest(hashtable);
+			/*
+			 * TODO: add a debugging check that confirms that all the tuples
+			 * from the old generation are present in the new generation
+			 */
+			ExecParallelHashRepartitionRest(hashtable);
 			ExecParallelHashMergeCounters(hashtable);
 			/* Wait for the above to be finished. */
 			BarrierArriveAndWait(&pstate->grow_batches_barrier,
@@ -1355,13 +1359,12 @@ ExecParallelHashIncreaseNumBatches(HashJoinTable hashtable)
 					 * This ParallelHashJoinBatch relies on the barrier for
 					 * protection.
 					 */
-					ParallelHashJoinBatchAccessor batch_accessor = hashtable->batches[i];
 
 					/*
 					 * All batches were just created anew during
 					 * repartitioning
 					 */
-					Assert(!batch_accessor.shared->hashloop_fallback);
+					Assert(!hashtable->batches[i].shared->hashloop_fallback);
 
 					/*
 					 * At the time of repartitioning, each batch updates its
@@ -1377,9 +1380,9 @@ ExecParallelHashIncreaseNumBatches(HashJoinTable hashtable)
 					 * backwards at this point as we would have already
 					 * exceeded inserted the allowed space.
 					 */
-					if (batch_accessor.shared->space_exhausted ||
-						batch_accessor.shared->estimated_size > pstate->space_allowed ||
-						batch_accessor.shared->size > pstate->space_allowed)
+					if (hashtable->batches[i].shared->space_exhausted ||
+						hashtable->batches[i].shared->estimated_size > pstate->space_allowed ||
+						hashtable->batches[i].shared->size > pstate->space_allowed)
 					{
 						int			parent;
 						float		frac_moved;
@@ -1387,7 +1390,7 @@ ExecParallelHashIncreaseNumBatches(HashJoinTable hashtable)
 						space_exhausted = true;
 
 						parent = i % pstate->old_nbatch;
-						frac_moved = batch_accessor.shared->ntuples / (float) hashtable->batches[parent].shared->old_ntuples;
+						frac_moved = hashtable->batches[i].shared->ntuples / (float) hashtable->batches[parent].shared->old_ntuples;
 
 						/*
 						 * If too many tuples remain in the parent or too many
@@ -1399,7 +1402,28 @@ ExecParallelHashIncreaseNumBatches(HashJoinTable hashtable)
 						 */
 						if (frac_moved >= MAX_RELOCATION)
 						{
-							batch_accessor.shared->hashloop_fallback = true;
+							hashtable->batches[i].shared->hashloop_fallback = true;
+							space_exhausted = false;
+						}
+					}
+					/*
+					 * If all of the tuples in the hashtable were put back in the
+					 * hashtable during repartitioning, mark this batch as a fallback
+					 * batch so that we will evict the tuples to a spill file were we to run out of space again
+					 * This has the problem of wasting a lot of time during the probe phase if it turns out that
+					 * we never try and allocate any more memory in the hashtable.
+					 *
+					 * TODO: It might be worth doing something to indicate that if all of the tuples went
+					 * back into a batch but it only exactly used the space_allowed, that the batch is
+					 * not a fallback batch yet but that the current stripe is full, so if you need to allocate
+					 * more, it would mark it as a fallback batch. Otherwise, a batch 0 with no tuples in spill
+					 * files will still be treated as a fallback batch during probing
+					 */
+					if (i == 0 && hashtable->batches[0].shared->size == pstate->space_allowed)
+					{
+						if (hashtable->batches[0].shared->ntuples == hashtable->batches[0].shared->old_ntuples)
+						{
+							hashtable->batches[0].shared->hashloop_fallback = true;
 							space_exhausted = false;
 						}
 					}
@@ -1436,6 +1460,8 @@ ExecParallelHashIncreaseNumBatches(HashJoinTable hashtable)
 static void
 ExecParallelHashRepartitionFirst(HashJoinTable hashtable)
 {
+	ParallelHashJoinState *pstate;
+
 	ParallelHashJoinBatch *old_shared;
 	SharedTuplestoreAccessor *old_inner_batch0_sts;
 
@@ -1447,35 +1473,25 @@ ExecParallelHashRepartitionFirst(HashJoinTable hashtable)
 	old_shared = NthParallelHashJoinBatch(old_batches, 0);
 	old_inner_batch0_sts = sts_attach(ParallelHashJoinBatchInner(old_shared), ParallelWorkerNumber + 1, &hashtable->parallel_state->fileset);
 
-	ParallelHashJoinState *pstate = hashtable->parallel_state;
+	pstate = hashtable->parallel_state;
 
 	Assert(hashtable->nbatch == hashtable->parallel_state->nbatch);
-//	LWLockAcquire(&pstate->lock, LW_EXCLUSIVE);
-//	BarrierAttach(&pstate->repartition_barrier);
-//	LWLockRelease(&pstate->lock);
-//	switch(PHJ_REPARTITION_BATCH0_PHASE(BarrierPhase(&pstate->repartition_barrier)))
-//	{
-//		case PHJ_REPARTITION_BATCH0_DRAIN_QUEUE:
-//			while ((chunk = ExecParallelHashPopChunkQueue(hashtable, &chunk_shared)))
-//			{
-//				ExecParallelHashRepartitionChunk(hashtable, chunk);
-//				dsa_free(hashtable->area, chunk_shared);
-//				CHECK_FOR_INTERRUPTS();
-//			}
-//			BarrierArriveAndWait(&pstate->repartition_barrier, WAIT_EVENT_HASH_REPARTITION_BATCH0_DRAIN_QUEUE);
-//			/* FALLTHROUGH */
-//		case PHJ_REPARTITION_BATCH0_DRAIN_SPILL_FILE:
-//			Assert(old_shared->hashloop_fallback);
-//			ExecParallelHashRepartitionSpilledBatch(hashtable, old_inner_batch0_sts);
-//	}
-	while ((chunk = ExecParallelHashPopChunkQueue(hashtable, &chunk_shared)))
+	BarrierAttach(&pstate->repartition_barrier);
+	switch(PHJ_REPARTITION_BATCH0_PHASE(BarrierPhase(&pstate->repartition_barrier)))
 	{
-		ExecParallelHashRepartitionChunk(hashtable, chunk);
-		dsa_free(hashtable->area, chunk_shared);
-		CHECK_FOR_INTERRUPTS();
+		case PHJ_REPARTITION_BATCH0_DRAIN_QUEUE:
+			while ((chunk = ExecParallelHashPopChunkQueue(hashtable, &chunk_shared)))
+			{
+				ExecParallelHashRepartitionChunk(hashtable, chunk);
+				dsa_free(hashtable->area, chunk_shared);
+				CHECK_FOR_INTERRUPTS();
+			}
+			BarrierArriveAndWait(&pstate->repartition_barrier, WAIT_EVENT_HASH_REPARTITION_BATCH0_DRAIN_QUEUE);
+			/* FALLTHROUGH */
+		case PHJ_REPARTITION_BATCH0_DRAIN_SPILL_FILE:
+			ExecParallelHashRepartitionSpilledBatch(hashtable, old_inner_batch0_sts);
 	}
-	ExecParallelHashRepartitionSpilledBatch(hashtable, old_inner_batch0_sts);
-
+	BarrierArriveAndDetach(&pstate->repartition_barrier);
 }
 
 static void
@@ -1515,34 +1531,41 @@ ExecParallelHashRepartitionSpilledBatch(HashJoinTable hashtable,
  * would be exceeded. Do track the estimated_size.
  */
 static void
-ExecParallelForceSpillTuple(HashJoinTable hashtable, uint32 hashvalue,
+ExecParallelForceSpillTuple(HashJoinTable hashtable,
+                            uint32 hashvalue,
                             MinimalTuple tuple,
-                            int batchno)
+                            int batchno,
+                            int print_type)
 {
 	size_t        tuple_size =
 			MAXALIGN(HJTUPLE_OVERHEAD + tuple->t_len);
 	tupleMetadata metadata;
 
-	ParallelHashJoinBatchAccessor batch_accessor = hashtable->batches[batchno];
+	ParallelHashJoinBatchAccessor *batch_accessor = &(hashtable->batches[batchno]);
 
 	Assert(!LWLockHeldByMe(&hashtable->parallel_state->lock));
 	LWLockAcquire(&hashtable->parallel_state->lock, LW_SHARED);
-	LWLockAcquire(&batch_accessor.shared->lock, LW_EXCLUSIVE);
-	if (batch_accessor.shared->estimated_stripe_size + tuple_size > hashtable->parallel_state->space_allowed)
+	LWLockAcquire(&batch_accessor->shared->lock, LW_EXCLUSIVE);
+	if (batch_accessor->shared->estimated_size + tuple_size > hashtable->parallel_state->space_allowed)
 	{
-		batch_accessor.shared->maximum_stripe_number++;
-		batch_accessor.shared->estimated_stripe_size = 0;
+			if (batch_accessor->shared->estimated_stripe_size + tuple_size > hashtable->parallel_state->space_allowed)
+			{
+				batch_accessor->shared->maximum_stripe_number++;
+				batch_accessor->shared->estimated_stripe_size = 0;
+			}
 	}
+
+	batch_accessor->shared->estimated_stripe_size += tuple_size;
+	batch_accessor->shared->estimated_size += tuple_size;
+
 	LWLockRelease(&hashtable->parallel_state->lock);
-	batch_accessor.shared->estimated_stripe_size += tuple_size;
 
 	metadata.hashvalue = hashvalue;
-	metadata.stripe = batch_accessor.shared->maximum_stripe_number;
+	metadata.stripe = batch_accessor->shared->maximum_stripe_number;
 
-	batch_accessor.shared->estimated_size += tuple_size;
-	LWLockRelease(&batch_accessor.shared->lock);
+	LWLockRelease(&batch_accessor->shared->lock);
 
-	sts_puttuple(batch_accessor.inner_tuples,
+	sts_puttuple(batch_accessor->inner_tuples,
 	             &metadata,
 	             tuple,
 	             false);
@@ -1592,7 +1615,11 @@ ExecParallelHashRepartitionRest(HashJoinTable hashtable)
 			ExecHashGetBucketAndBatch(hashtable, metadata.hashvalue, &bucketno,
 									  &batchno);
 
-			ExecParallelForceSpillTuple(hashtable, metadata.hashvalue, tuple, batchno);
+			ExecParallelForceSpillTuple(hashtable,
+			                            metadata.hashvalue,
+			                            tuple,
+			                            batchno,
+			                            0);
 
 			++hashtable->batches[batchno].ntuples;
 			++hashtable->batches[i].old_ntuples;
@@ -3063,7 +3090,11 @@ ExecParallelHashTableEvictBatch0(HashJoinTable hashtable)
 					HashJoinTuple hashTuple = (HashJoinTuple) (HASH_CHUNK_DATA(chunk) + idx);
 					minTuple     = HJTUPLE_MINTUPLE(hashTuple);
 
-					ExecParallelForceSpillTuple(hashtable, hashTuple->hashvalue, minTuple, 0);
+					ExecParallelForceSpillTuple(hashtable,
+					                            hashTuple->hashvalue,
+					                            minTuple,
+					                            0,
+					                            1);
 
 					idx += MAXALIGN(HJTUPLE_OVERHEAD +
 						                HJTUPLE_MINTUPLE(hashTuple)->t_len);
@@ -3084,7 +3115,7 @@ ExecParallelHashTableEvictBatch0(HashJoinTable hashtable)
 				LWLockRelease(&pstate->lock);
 
 				LWLockAcquire(&hashtable->batches[0].shared->lock, LW_EXCLUSIVE);
-				hashtable->batches[0].shared->chunks = 0;
+				hashtable->batches[0].shared->chunks = InvalidDsaPointer;
 				LWLockRelease(&hashtable->batches[0].shared->lock);
 			}
 			/* FALLTHROUGH */
@@ -3114,9 +3145,6 @@ ExecParallelHashTupleAlloc(HashJoinTable hashtable, size_t size,
 	Size		chunk_size;
 	HashJoinTuple result;
 	int			curbatch = hashtable->curbatch;
-
-	ParallelHashJoinBatchAccessor batch0_accessor;
-	ParallelHashJoinBatchAccessor batch_accessor;
 
 	size = MAXALIGN(size);
 
@@ -3184,61 +3212,34 @@ ExecParallelHashTupleAlloc(HashJoinTable hashtable, size_t size,
 	 * Because we set at_least_one_chunk to false before repartitioning, it will
 	 * never be true here
 	 */
-	batch0_accessor = hashtable->batches[0];
-	LWLockAcquire(&batch0_accessor.shared->lock, LW_EXCLUSIVE);
-	if (pstate->growth == PHJ_GROWTH_DISABLED && BarrierPhase(&pstate->build_barrier) == PHJ_BUILD_HASHING_INNER &&
-		PHJ_GROW_BATCHES_PHASE(BarrierPhase(&pstate->grow_batches_barrier)) ==
-			PHJ_GROW_BATCHES_REPARTITIONING &&
-		batch0_accessor.shared->size + chunk_size > pstate->space_allowed)
-	{
-		pstate->abandon_repartitioning = true;
-		batch0_accessor.shared->space_exhausted = true;
-		//pstate->growth = PHJ_GROWTH_SPILL_BATCH0;
-		LWLockRelease(&pstate->lock);
-		LWLockRelease(&batch0_accessor.shared->lock);
-		return NULL;
-	}
+	LWLockAcquire(&hashtable->batches[0].shared->lock, LW_EXCLUSIVE);
 
 	/* Check if it's time to grow batches or buckets. */
 	if (pstate->growth != PHJ_GROWTH_DISABLED)
 	{
 		Assert(curbatch == 0);
 		Assert(BarrierPhase(&pstate->build_barrier) == PHJ_BUILD_HASHING_INNER);
-
 		/*
 		 * Check if our space limit would be exceeded.  To avoid choking on
 		 * very large tuples or very low work_mem setting, we'll always allow
 		 * each backend to allocate at least one chunk.
+		 *
+		 * If the batch has already been marked to fall back, then we don't need
+		 * to worry about having allocated one chunk -- we should start evicting
+		 * tuples. This shouldn't happen?
+		 * TODO: simplify the if statements and logic here
 		 */
-
-		/*
-		 * TODO: get rid of this check for batch 0 and make it so that batch 0
-		 * always has to keep trying to increase the number of batches
-		 */
-		/*
-		 * TODO: at_least_one_chunk is working incorrectly when we come here after
-		 * abandoning repartitioning -- then at_least_one_chunk doesn't need to be true -- even though we don't allocate any *new*
-		 * chunks of memory, we are reusing old ones, so we shouldn't force
-		 * workers to allocate a new chunk (this could also be a problem in master)
-		 */
-		// TODO: add a comment explaining this complex logic -- maybe use a variable for the
-		// different condition subsets
-		if (batch0_accessor.shared->size +
-			chunk_size > pstate->space_allowed)
+		if (hashtable->batches[0].shared->size + chunk_size > pstate->space_allowed)
 		{
-			if (batch0_accessor.shared->hashloop_fallback ||
-				batch0_accessor.at_least_one_chunk ||
-				(BarrierPhase(&pstate->build_barrier) == PHJ_BUILD_HASHING_INNER &&
-					pstate->abandon_repartitioning))
-
+			if (hashtable->batches[0].shared->hashloop_fallback || hashtable->batches[0].at_least_one_chunk)
 			{
-				if (batch0_accessor.shared->hashloop_fallback)
+				if (hashtable->batches[0].shared->hashloop_fallback)
 					pstate->growth = PHJ_GROWTH_SPILL_BATCH0;
-				else
+				else if (hashtable->batches[0].at_least_one_chunk)
 					pstate->growth = PHJ_GROWTH_NEED_MORE_BATCHES;
-				batch0_accessor.shared->space_exhausted = true;
+				hashtable->batches[0].shared->space_exhausted = true;
 				LWLockRelease(&pstate->lock);
-				LWLockRelease(&batch0_accessor.shared->lock);
+				LWLockRelease(&hashtable->batches[0].shared->lock);
 				return NULL;
 			}
 		}
@@ -3246,10 +3247,10 @@ ExecParallelHashTupleAlloc(HashJoinTable hashtable, size_t size,
 		/* Check if our load factor limit would be exceeded. */
 		if (hashtable->nbatch == 1)
 		{
-			batch0_accessor.shared->ntuples += batch0_accessor.ntuples;
-			batch0_accessor.ntuples = 0;
+			hashtable->batches[0].shared->ntuples += hashtable->batches[0].ntuples;
+			hashtable->batches[0].ntuples = 0;
 			/* Guard against integer overflow and alloc size overflow */
-			if (batch0_accessor.shared->ntuples + 1 >
+			if (hashtable->batches[0].shared->ntuples + 1 >
 				hashtable->nbuckets * NTUP_PER_BUCKET &&
 				hashtable->nbuckets < (INT_MAX / 2) &&
 				hashtable->nbuckets * 2 <=
@@ -3257,16 +3258,20 @@ ExecParallelHashTupleAlloc(HashJoinTable hashtable, size_t size,
 			{
 				pstate->growth = PHJ_GROWTH_NEED_MORE_BUCKETS;
 				LWLockRelease(&pstate->lock);
-				LWLockRelease(&batch0_accessor.shared->lock);
+				LWLockRelease(&hashtable->batches[0].shared->lock);
 
 				return NULL;
 			}
 		}
 	}
+	/*
+	 * TODO: fix this -- logic is confusing -- size will not be right for batches other than batch 0
+	 * also, it seems like the shared batch memory isn't valid anymore after build? investigate
+	 */
+	Assert(hashtable->batches[hashtable->curbatch].shared->size + chunk_size <= pstate->space_allowed);
 
 	/* We are cleared to allocate a new chunk. */
 	chunk_shared = dsa_allocate(hashtable->area, chunk_size);
-
 
 	/*
 	 * The chunk is accounted for in the hashtable size only. Even though
@@ -3275,12 +3280,11 @@ ExecParallelHashTupleAlloc(HashJoinTable hashtable, size_t size,
 	 * determining if the hashtable is too big, and, we will only ever
 	 * number stripes (starting with 1 instead of 0 for batch 0) in the spill file.
 	 */
-	batch_accessor = hashtable->batches[curbatch];
 	if (curbatch != 0)
-		LWLockAcquire(&batch_accessor.shared->lock, LW_EXCLUSIVE);
+		LWLockAcquire(&hashtable->batches[curbatch].shared->lock, LW_EXCLUSIVE);
 
-	batch_accessor.shared->size += chunk_size;
-	batch_accessor.at_least_one_chunk = true;
+	hashtable->batches[curbatch].shared->size += chunk_size;
+	hashtable->batches[curbatch].at_least_one_chunk = true;
 
 	/* Set up the chunk. */
 	chunk = (HashMemoryChunk) dsa_get_address(hashtable->area, chunk_shared);
@@ -3293,8 +3297,8 @@ ExecParallelHashTupleAlloc(HashJoinTable hashtable, size_t size,
 	 * increase the number of buckets or batches (batch 0 only) and later for
 	 * freeing the memory (all batches).
 	 */
-	chunk->next.shared = batch_accessor.shared->chunks;
-	batch_accessor.shared->chunks = chunk_shared;
+	chunk->next.shared = hashtable->batches[curbatch].shared->chunks;
+	hashtable->batches[curbatch].shared->chunks = chunk_shared;
 
 	if (size <= HASH_CHUNK_THRESHOLD)
 	{
@@ -3306,9 +3310,9 @@ ExecParallelHashTupleAlloc(HashJoinTable hashtable, size_t size,
 		hashtable->current_chunk_shared = chunk_shared;
 	}
 	LWLockRelease(&pstate->lock);
-	LWLockRelease(&batch_accessor.shared->lock);
+	LWLockRelease(&hashtable->batches[0].shared->lock);
 	if (curbatch != 0)
-		LWLockRelease(&batch0_accessor.shared->lock);
+		LWLockRelease(&hashtable->batches[curbatch].shared->lock);
 
 	Assert(HASH_CHUNK_DATA(chunk) == dsa_get_address(hashtable->area, *shared));
 	result = (HashJoinTuple) HASH_CHUNK_DATA(chunk);
@@ -3749,7 +3753,7 @@ static bool
 ExecParallelHashTuplePrealloc(HashJoinTable hashtable, int batchno, size_t size)
 {
 	ParallelHashJoinState *pstate = hashtable->parallel_state;
-	ParallelHashJoinBatchAccessor *batch = &hashtable->batches[batchno];
+	ParallelHashJoinBatchAccessor *batch_accessor = &hashtable->batches[batchno];
 	size_t		want = Max(size, HASH_CHUNK_SIZE - HASH_CHUNK_HEADER_SIZE);
 
 	Assert(batchno < hashtable->nbatch);
@@ -3774,49 +3778,43 @@ ExecParallelHashTuplePrealloc(HashJoinTable hashtable, int batchno, size_t size)
 		return false;
 	}
 
-	LWLockAcquire(&batch->shared->lock, LW_EXCLUSIVE);
+	LWLockAcquire(&batch_accessor->shared->lock, LW_EXCLUSIVE);
+
 	if (pstate->growth != PHJ_GROWTH_DISABLED &&
-		batch->at_least_one_chunk &&
-		(batch->shared->estimated_size + want + HASH_CHUNK_HEADER_SIZE
-		 > pstate->space_allowed))
+		batch_accessor->at_least_one_chunk &&
+		(batch_accessor->shared->estimated_size + want + HASH_CHUNK_HEADER_SIZE > pstate->space_allowed) &&
+		!batch_accessor->shared->hashloop_fallback)
 	{
 		/*
-		 * We have determined that this batch would exceed the space budget if
-		 * loaded into memory.
+		 * This batch is not marked to fall back so command all
+		 * participants to help repartition.
 		 */
-		if (!batch->shared->hashloop_fallback)
-		{
-			/*
-			 * This batch is not marked to fall back so command all
-			 * participants to help repartition.
-			 */
-			batch->shared->space_exhausted = true;
-			pstate->growth = PHJ_GROWTH_NEED_MORE_BATCHES;
-			LWLockRelease(&batch->shared->lock);
-			LWLockRelease(&pstate->lock);
-			return false;
-		}
-		else if (batch->shared->estimated_stripe_size + want +
-				 HASH_CHUNK_HEADER_SIZE > pstate->space_allowed)
-		{
-			/*
-			 * This batch is marked to fall back and the current (last) stripe
-			 * does not have enough space to handle the request so we must
-			 * increment the number of stripes in the batch and reset the size
-			 * of its new last stripe.
-			 */
-			batch->shared->maximum_stripe_number++;
-			batch->shared->estimated_stripe_size = 0;
-		}
+		batch_accessor->shared->space_exhausted = true;
+		pstate->growth = PHJ_GROWTH_NEED_MORE_BATCHES;
+		LWLockRelease(&batch_accessor->shared->lock);
+		LWLockRelease(&pstate->lock);
+		return false;
 	}
 
-	batch->shared->estimated_stripe_size += want + HASH_CHUNK_HEADER_SIZE;
-	batch->at_least_one_chunk = true;
-	batch->shared->estimated_size += want + HASH_CHUNK_HEADER_SIZE;
-	batch->preallocated = want;
-	LWLockRelease(&batch->shared->lock);
-	LWLockRelease(&pstate->lock);
+	if (batch_accessor->shared->estimated_stripe_size + want +
+		HASH_CHUNK_HEADER_SIZE > pstate->space_allowed)
+	{
+		/*
+		 * This batch is marked to fall back and the current (last) stripe
+		 * does not have enough space to handle the request so we must
+		 * increment the number of stripes in the batch and reset the size
+		 * of its new last stripe.
+		 */
+		batch_accessor->shared->maximum_stripe_number++;
+		batch_accessor->shared->estimated_stripe_size = 0;
+	}
+	batch_accessor->shared->estimated_stripe_size += want + HASH_CHUNK_HEADER_SIZE;
+	batch_accessor->at_least_one_chunk = true;
+	batch_accessor->shared->estimated_size += want + HASH_CHUNK_HEADER_SIZE;
+	batch_accessor->preallocated = want;
 
+	LWLockRelease(&batch_accessor->shared->lock);
+	LWLockRelease(&pstate->lock);
 	return true;
 }
 static void
@@ -3830,7 +3828,7 @@ ExecParallelHashRepartitionTuple(HashJoinTable hashtable,
 	HashJoinTuple copyTuple;
 	ParallelHashJoinState *pstate = hashtable->parallel_state;
 	bool spill = true;
-	bool hashtable_full = hashtable->batches[0].shared->space_exhausted;
+	bool hashtable_full = hashtable->batches[0].shared->size >= pstate->space_allowed;
 
 
 	ExecHashGetBucketAndBatch(hashtable, hashvalue, &bucketno, &batchno);
@@ -3860,7 +3858,11 @@ ExecParallelHashRepartitionTuple(HashJoinTable hashtable,
 
 	/* TODO: do we care about stripeno in the metadata? */
 	if (spill)
-		ExecParallelForceSpillTuple(hashtable, hashvalue, tuple, batchno);
+		ExecParallelForceSpillTuple(hashtable,
+		                            hashvalue,
+		                            tuple,
+		                            batchno,
+		                            2);
 
 	++hashtable->batches[0].old_ntuples;
 	++hashtable->batches[batchno].ntuples;

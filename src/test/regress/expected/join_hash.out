@@ -1864,7 +1864,7 @@ LEFT OUTER JOIN hashside_wide USING (a);
          ->  Parallel Hash (actual rows=21 loops=2)
                Buckets: 8 (originally 8)  Batches: 128 (originally 8)
                Batch: 1  Stripes: 3
-               Batch: 6  Stripes: 2
+               Batch: 6  Stripes: 3
                ->  Parallel Seq Scan on hashside_wide (actual rows=42 loops=1)
 (11 rows)
 
@@ -2482,8 +2482,8 @@ LEFT OUTER JOIN hashside_wide_batch0 USING (a);
          Hash Cond: (probeside_batch0.a = hashside_wide_batch0.a)
          ->  Parallel Seq Scan on probeside_batch0 (actual rows=14 loops=1)
          ->  Parallel Hash (actual rows=18 loops=2)
-               Buckets: 8  Batches: 8
-               Batch: 0  Stripes: 32
+               Buckets: 8 (originally 8)  Batches: 16 (originally 8)
+               Batch: 0  Stripes: 5
                ->  Parallel Seq Scan on hashside_wide_batch0 (actual rows=36 loops=1)
 (10 rows)
 
