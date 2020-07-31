@@ -1450,32 +1450,23 @@ ExecParallelHashRepartitionFirst(HashJoinTable hashtable)
 	ParallelHashJoinState *pstate = hashtable->parallel_state;
 
 	Assert(hashtable->nbatch == hashtable->parallel_state->nbatch);
-//	LWLockAcquire(&pstate->lock, LW_EXCLUSIVE);
-//	BarrierAttach(&pstate->repartition_barrier);
-//	LWLockRelease(&pstate->lock);
-//	switch(PHJ_REPARTITION_BATCH0_PHASE(BarrierPhase(&pstate->repartition_barrier)))
-//	{
-//		case PHJ_REPARTITION_BATCH0_DRAIN_QUEUE:
-//			while ((chunk = ExecParallelHashPopChunkQueue(hashtable, &chunk_shared)))
-//			{
-//				ExecParallelHashRepartitionChunk(hashtable, chunk);
-//				dsa_free(hashtable->area, chunk_shared);
-//				CHECK_FOR_INTERRUPTS();
-//			}
-//			BarrierArriveAndWait(&pstate->repartition_barrier, WAIT_EVENT_HASH_REPARTITION_BATCH0_DRAIN_QUEUE);
-//			/* FALLTHROUGH */
-//		case PHJ_REPARTITION_BATCH0_DRAIN_SPILL_FILE:
-//			Assert(old_shared->hashloop_fallback);
-//			ExecParallelHashRepartitionSpilledBatch(hashtable, old_inner_batch0_sts);
-//	}
-	while ((chunk = ExecParallelHashPopChunkQueue(hashtable, &chunk_shared)))
+	BarrierAttach(&pstate->repartition_barrier);
+	switch(PHJ_REPARTITION_BATCH0_PHASE(BarrierPhase(&pstate->repartition_barrier)))
 	{
-		ExecParallelHashRepartitionChunk(hashtable, chunk);
-		dsa_free(hashtable->area, chunk_shared);
-		CHECK_FOR_INTERRUPTS();
+		case PHJ_REPARTITION_BATCH0_DRAIN_QUEUE:
+			while ((chunk = ExecParallelHashPopChunkQueue(hashtable, &chunk_shared)))
+			{
+				ExecParallelHashRepartitionChunk(hashtable, chunk);
+				dsa_free(hashtable->area, chunk_shared);
+				CHECK_FOR_INTERRUPTS();
+			}
+			BarrierArriveAndWait(&pstate->repartition_barrier, WAIT_EVENT_HASH_REPARTITION_BATCH0_DRAIN_QUEUE);
+			/* FALLTHROUGH */
+		case PHJ_REPARTITION_BATCH0_DRAIN_SPILL_FILE:
+			Assert(old_shared->hashloop_fallback);
+			ExecParallelHashRepartitionSpilledBatch(hashtable, old_inner_batch0_sts);
 	}
-	ExecParallelHashRepartitionSpilledBatch(hashtable, old_inner_batch0_sts);
-
+	BarrierDetach(&pstate->repartition_barrier);
 }
 
 static void
