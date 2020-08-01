@@ -3856,3 +3856,99 @@ ExecParallelHashRepartitionTuple(HashJoinTable hashtable,
 	++hashtable->batches[0].old_ntuples;
 	++hashtable->batches[batchno].ntuples;
 }
+
+void
+ExecParallelHashCheck(HashJoinTable hashtable, HashJoinState *hjstate)
+{
+	ParallelHashJoinState *pstate = hashtable->parallel_state;
+	ParallelHashJoinBatch *batches = (ParallelHashJoinBatch *)
+		dsa_get_address(hashtable->area, pstate->batches);
+	Bitmapset *ht_rownums = NULL;
+	HashMemoryChunk chunk;
+	dsa_pointer chunk_shared;
+
+	//pg_usleep(20000000); //20s
+
+	/* Set up the accessor array and attach to the tuplestores. */
+	for (int i = 0; i < hashtable->nbatch; ++i)
+	{
+		Bitmapset *outer_rownums = NULL;
+		Bitmapset *inner_rownums = NULL;
+
+		ParallelHashJoinBatchAccessor *accessor = &hashtable->batches[i];
+		ParallelHashJoinBatch *shared = NthParallelHashJoinBatch(batches, i);
+		MinimalTuple tuple;
+		uint32 hashvalue;
+
+		accessor->shared = shared;
+		accessor->inner_tuples =
+			sts_attach(ParallelHashJoinBatchInner(shared),
+					   ParallelWorkerNumber + 1,
+					   &pstate->fileset);
+		accessor->outer_tuples =
+			sts_attach(ParallelHashJoinBatchOuter(shared,
+												  pstate->nparticipants),
+					   ParallelWorkerNumber + 1,
+					   &pstate->fileset);
+
+		/*
+		 * Collect tuple rownums from outer-rel spill files
+		 */
+		sts_begin_parallel_scan(accessor->outer_tuples);
+		while ((tuple = sts_parallel_scan_next(accessor->outer_tuples, &hashvalue)))
+		{
+			Datum values[20];
+			bool  isnull[20];
+			heap_deform_tuple(heap_tuple_from_minimal_tuple(tuple),
+							  hjstate->hj_OuterTupleSlot->tts_tupleDescriptor,
+							  values, isnull);
+			int outer_rownum = DatumGetInt32(values[hjstate->hj_OuterTupleSlot->tts_tupleDescriptor->natts - 1]);
+			outer_rownums = bms_add_member(outer_rownums, outer_rownum);
+		}
+		sts_end_parallel_scan(accessor->outer_tuples);
+
+		/*
+		 * Collect tuple rownums from inner-rel spill files
+		 */
+		sts_begin_parallel_scan(accessor->inner_tuples);
+		while ((tuple = sts_parallel_scan_next(accessor->inner_tuples, &hashvalue)))
+		{
+			Datum values[20];
+			bool  isnull[20];
+			heap_deform_tuple(heap_tuple_from_minimal_tuple(tuple),
+							  hjstate->hj_HashTupleSlot->tts_tupleDescriptor,
+							  values, isnull);
+			int inner_rownum = DatumGetInt32(values[hjstate->hj_HashTupleSlot->tts_tupleDescriptor->natts - 1]);
+			elog(NOTICE, "inner_rownum = %d", inner_rownum);
+			inner_rownums = bms_add_member(inner_rownums, inner_rownum);
+		}
+		sts_end_parallel_scan(accessor->inner_tuples);
+
+		// Do the check - just print for now
+		elog(NOTICE, "batch %d: outer_rownums = %s", i, bmsToString(outer_rownums));
+		elog(NOTICE, "batch %d: inner_rownums = %s", i, bmsToString(inner_rownums));
+	}
+
+	// Collect tuple rownums from hash table
+	while ((chunk = ExecParallelHashPopChunkQueue(hashtable, &chunk_shared)))
+	{
+		MinimalTuple tuple;
+		size_t idx = 0;
+		while (idx < chunk->used)
+		{
+			Datum values[20];
+			bool  isnull[20];
+			HashJoinTuple hashTuple = (HashJoinTuple) (HASH_CHUNK_DATA(chunk) + idx);
+			tuple = HJTUPLE_MINTUPLE(hashTuple);
+			heap_deform_tuple(heap_tuple_from_minimal_tuple(tuple),
+							  hjstate->hj_HashTupleSlot->tts_tupleDescriptor,
+							  values, isnull);
+			int ht_rownum = DatumGetInt32(values[hjstate->hj_HashTupleSlot->tts_tupleDescriptor->natts - 1]);
+			elog(NOTICE, "ht_rownum = %d", ht_rownum);
+			ht_rownums = bms_add_member(ht_rownums, ht_rownum);
+			idx++;
+		}
+	}
+
+	elog(NOTICE, "ht_rownums = %s", bmsToString(ht_rownums));
+}

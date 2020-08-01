@@ -666,16 +666,16 @@ ORDER BY 1, 2, 3, 4, 5;
 rollback to settings;
 
 -- Test spill of batch 0 gives correct results.
-CREATE TABLE probeside_batch0(a stub);
+CREATE TABLE probeside_batch0(a stub, outer_rownum int generated always as identity);
 ALTER TABLE probeside_batch0 ALTER COLUMN a SET STORAGE PLAIN;
-INSERT INTO probeside_batch0 SELECT '(0, "")' FROM generate_series(1, 13);
-INSERT INTO probeside_batch0 SELECT '(0, "unmatched outer")' FROM generate_series(1, 1);
+INSERT INTO probeside_batch0(a) SELECT '(0, "")' FROM generate_series(1, 13);
+INSERT INTO probeside_batch0(a) SELECT '(0, "unmatched outer")' FROM generate_series(1, 1);
 
-CREATE TABLE hashside_wide_batch0(a stub, id int);
+CREATE TABLE hashside_wide_batch0(a stub, id int, inner_rownum int generated always as identity);
 ALTER TABLE hashside_wide_batch0 ALTER COLUMN a SET STORAGE PLAIN;
-INSERT INTO hashside_wide_batch0 SELECT '(0, "")', 1 FROM generate_series(1, 9);
-INSERT INTO hashside_wide_batch0 SELECT '(0, "")', 1 FROM generate_series(1, 9);
-INSERT INTO hashside_wide_batch0 SELECT '(0, "")', 1 FROM generate_series(1, 9);
+INSERT INTO hashside_wide_batch0(a, id) SELECT '(0, "")', 1 FROM generate_series(1, 9);
+INSERT INTO hashside_wide_batch0(a, id) SELECT '(0, "")', 1 FROM generate_series(1, 9);
+INSERT INTO hashside_wide_batch0(a, id) SELECT '(0, "")', 1 FROM generate_series(1, 9);
 ANALYZE probeside_batch0, hashside_wide_batch0;
 
 SELECT (probeside_batch0.a).hash, ((((probeside_batch0.a).hash << 7) >> 3) & 31) AS batchno, TRIM((probeside_batch0.a).value), hashside_wide_batch0.id, hashside_wide_batch0.ctid, (hashside_wide_batch0.a).hash, TRIM((hashside_wide_batch0.a).value)
@@ -693,7 +693,7 @@ set max_parallel_workers_per_gather = 1;
 set enable_parallel_hash = on;
 set work_mem = '64kB';
 
-INSERT INTO hashside_wide_batch0 SELECT '(0, "")', 1 FROM generate_series(1, 9);
+INSERT INTO hashside_wide_batch0(a, id) SELECT '(0, "")', 1 FROM generate_series(1, 9);
 
 EXPLAIN (ANALYZE, summary off, timing off, costs off, usage off) SELECT * FROM probeside_batch0
 LEFT OUTER JOIN hashside_wide_batch0 USING (a);

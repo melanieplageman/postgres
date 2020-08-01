@@ -318,7 +318,8 @@ typedef struct ParallelHashJoinState
 #define PHJ_BUILD_ALLOCATING			1
 #define PHJ_BUILD_HASHING_INNER			2
 #define PHJ_BUILD_HASHING_OUTER			3
-#define PHJ_BUILD_DONE					4
+#define PHJ_DEBUG_CHECK_BUILT			4
+#define PHJ_BUILD_DONE					5
 
 /* The phases for probing each batch, used by for batch_barrier. */
 #define PHJ_BATCH_ELECTING				0
@@ -448,5 +449,7 @@ typedef struct HashJoinTableData
 	ParallelHashJoinBatchAccessor *batches;
 	dsa_pointer current_chunk_shared;
 }			HashJoinTableData;
+
+extern void ExecParallelHashCheck(HashJoinTable hashtable, HashJoinState *hjstate);
 
 #endif							/* HASHJOIN_H */
