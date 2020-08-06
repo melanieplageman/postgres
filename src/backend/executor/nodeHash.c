@@ -1356,11 +1356,6 @@ ExecParallelHashIncreaseNumBatches(HashJoinTable hashtable)
 				for (i = 0; i < hashtable->nbatch; ++i)
 				{
 					/*
-					 * This ParallelHashJoinBatch relies on the barrier for
-					 * protection.
-					 */
-
-					/*
 					 * All batches were just created anew during
 					 * repartitioning
 					 */
@@ -1370,19 +1365,16 @@ ExecParallelHashIncreaseNumBatches(HashJoinTable hashtable)
 					 * At the time of repartitioning, each batch updates its
 					 * estimated_size to reflect the size of the batch file on
 					 * disk. It is also updated when increasing preallocated
-					 * space in ExecParallelHashTuplePrealloc().  However,
-					 * batch 0 does not store anything on disk so it has no
-					 * estimated_size.
+					 * space in ExecParallelHashTuplePrealloc().
 					 *
-					 * We still want to allow batch 0 to trigger batch growth.
-					 * In order to do that, for batch 0 check whether the
-					 * actual size exceeds space_allowed. It is a little
-					 * backwards at this point as we would have already
-					 * exceeded inserted the allowed space.
+					 * Batch 0 is inserted into memory during the build stage,
+					 * it can spill to a file, so the size member, which reflects
+					 * the part of batch 0 in memory should never exceed the
+					 * space_allowed.
 					 */
+					Assert(hashtable->batches[i].shared->size <= pstate->space_allowed);
 					if (hashtable->batches[i].shared->space_exhausted ||
-						hashtable->batches[i].shared->estimated_size > pstate->space_allowed ||
-						hashtable->batches[i].shared->size > pstate->space_allowed)
+						hashtable->batches[i].shared->estimated_size > pstate->space_allowed)
 					{
 						int			parent;
 						float		frac_moved;
