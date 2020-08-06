@@ -2021,8 +2021,7 @@ ExecParallelHashJoinPartitionOuter(HashJoinState *hjstate)
 
 			sts_puttuple(hashtable->batches[batchno].outer_tuples,
 			             &metadata.hashvalue,
-			             mintup,
-			             false);
+			             mintup);
 
 			if (shouldFree)
 				heap_free_minimal_tuple(mintup);

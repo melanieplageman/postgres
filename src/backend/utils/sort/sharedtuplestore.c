@@ -343,10 +343,8 @@ sts_end_parallel_scan(SharedTuplestoreAccessor *accessor)
  * pointer to meta data of that size must be provided.
  */
 void
-sts_puttuple(SharedTuplestoreAccessor *accessor,
-             void *meta_data,
-             MinimalTuple tuple,
-             bool print)
+sts_puttuple(SharedTuplestoreAccessor *accessor, void *meta_data,
+			 MinimalTuple tuple)
 {
 	size_t		size;
 
@@ -358,8 +356,6 @@ sts_puttuple(SharedTuplestoreAccessor *accessor,
 
 		/* Create one.  Only this backend will write into it. */
 		sts_filename(name, accessor, accessor->participant);
-		//if (print)
-		//	elog(NOTICE, "making file %s\n", name);
 		accessor->write_file = BufFileCreateShared(accessor->fileset, name);
 
 		/* Set up the shared state for this backend's file. */
@@ -442,12 +438,6 @@ sts_puttuple(SharedTuplestoreAccessor *accessor,
 				size -= written_this_chunk;
 				written += written_this_chunk;
 			}
-			char name[MAXPGPATH];
-			if (print)
-			{
-				sts_filename(name, accessor, accessor->participant);
-			//	elog(NOTICE, "writing oversize tup into file %s", name);
-			}
 			return;
 		}
 	}
@@ -460,12 +450,6 @@ sts_puttuple(SharedTuplestoreAccessor *accessor,
 		   tuple->t_len);
 	accessor->write_pointer += size;
 	++accessor->write_chunk->ntuples;
-	char name[MAXPGPATH];
-	if (print)
-	{
-		sts_filename(name, accessor, accessor->participant);
-		//elog(NOTICE, "writing tup into file %s", name);
-	}
 }
 
 static MinimalTuple
