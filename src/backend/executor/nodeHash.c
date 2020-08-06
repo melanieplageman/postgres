@@ -3268,7 +3268,27 @@ ExecParallelHashTupleAlloc(HashJoinTable hashtable, size_t size,
 	 * TODO: fix this -- logic is confusing -- size will not be right for batches other than batch 0
 	 * also, it seems like the shared batch memory isn't valid anymore after build? investigate
 	 */
-	Assert(hashtable->batches[hashtable->curbatch].shared->size + chunk_size <= pstate->space_allowed);
+
+	/*
+	 * If not even one chunk would fit in the space_allowed, there isn't anything
+	 * we can do to avoid exceeding space_allowed.
+	 * Also, if we keep the rule that a backend should be allowed to allocate
+	 * at least one chunk, then we will end up tripping this assert some of the time
+	 * unless we make that exception (should we make that exception?)
+	 * TODO: should memory settings < chunk_size even be allowed. Should it error out?
+	 *
+	 * Another note is that because the pre-allocation is an estimate -- that is,
+	 * it estimates the tuple size to determine if it would exceed the space_allowed,
+	 * there is no guarantee that, given allocation in chunks and parallelism,
+	 * workers will not have numbered some tuples in such a way that, in a given
+	 * execution of loading them into memory, a tuple or so which is numbered
+	 * with the current stripe would cause another chunk to be allocated which
+	 * would exceed the space_allowed. This could be prevented by deciding stripes
+	 * during loading, but, with the current system, this is difficult to avoid.
+	 *
+	 * Thus, an assert like the following would not be possible
+	 * Assert(hashtable->batches[hashtable->curbatch].shared->size + chunk_size <= pstate->space_allowed);
+	 */
 
 	/* We are cleared to allocate a new chunk. */
 	chunk_shared = dsa_allocate(hashtable->area, chunk_size);
