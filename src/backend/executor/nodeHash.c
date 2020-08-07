@@ -3889,7 +3889,7 @@ ExecParallelHashCheck(HashJoinTable hashtable, HashJoinState *hjstate)
 			heap_deform_tuple(heap_tuple_from_minimal_tuple(tuple),
 							  hjstate->hj_OuterTupleSlot->tts_tupleDescriptor,
 							  values, isnull);
-			int outer_rownum = DatumGetInt32(values[hjstate->hj_OuterTupleSlot->tts_tupleDescriptor->natts - 1]);
+			int outer_rownum = DatumGetInt32(values[0]);
 			outer_rownums = bms_add_member(outer_rownums, outer_rownum);
 		}
 		sts_end_parallel_scan(accessor->outer_tuples);
@@ -3905,37 +3905,42 @@ ExecParallelHashCheck(HashJoinTable hashtable, HashJoinState *hjstate)
 			heap_deform_tuple(heap_tuple_from_minimal_tuple(tuple),
 							  hjstate->hj_HashTupleSlot->tts_tupleDescriptor,
 							  values, isnull);
-			int inner_rownum = DatumGetInt32(values[hjstate->hj_HashTupleSlot->tts_tupleDescriptor->natts - 1]);
-			elog(NOTICE, "inner_rownum = %d", inner_rownum);
+			int inner_rownum = DatumGetInt32(values[0]);
 			inner_rownums = bms_add_member(inner_rownums, inner_rownum);
 		}
 		sts_end_parallel_scan(accessor->inner_tuples);
 
 		// Do the check - just print for now
-		elog(NOTICE, "batch %d: outer_rownums = %s", i, bmsToString(outer_rownums));
-		elog(NOTICE, "batch %d: inner_rownums = %s", i, bmsToString(inner_rownums));
+		elog(NOTICE, "batch %d: outer_rownums = %d", i, bms_num_members(outer_rownums));
+		elog(NOTICE, "batch %d: inner_rownums = %d", i, bms_num_members(inner_rownums));
 	}
-
 	// Collect tuple rownums from hash table
+	dsa_pointer old = hashtable->batches[0].shared->chunks;
+	ExecParallelHashEnsureBatchAccessors(hashtable);
+	ExecParallelHashTableSetCurrentBatch(hashtable, 0);
 	while ((chunk = ExecParallelHashPopChunkQueue(hashtable, &chunk_shared)))
 	{
 		MinimalTuple tuple;
 		size_t idx = 0;
+		elog(NOTICE, "out here");
 		while (idx < chunk->used)
 		{
-			Datum values[20];
-			bool  isnull[20];
+			Datum value;
+			bool isnull;
 			HashJoinTuple hashTuple = (HashJoinTuple) (HASH_CHUNK_DATA(chunk) + idx);
 			tuple = HJTUPLE_MINTUPLE(hashTuple);
-			heap_deform_tuple(heap_tuple_from_minimal_tuple(tuple),
+			elog(NOTICE, "here");
+			/*heap_deform_tuple(heap_tuple_from_minimal_tuple(tuple),
 							  hjstate->hj_HashTupleSlot->tts_tupleDescriptor,
-							  values, isnull);
-			int ht_rownum = DatumGetInt32(values[hjstate->hj_HashTupleSlot->tts_tupleDescriptor->natts - 1]);
-			elog(NOTICE, "ht_rownum = %d", ht_rownum);
+							  values, isnull);*/
+			ExecForceStoreMinimalTuple(tuple, hjstate->hj_HashTupleSlot, false);
+			value = slot_getattr(hjstate->hj_HashTupleSlot, 1, &isnull);
+			int ht_rownum = DatumGetInt32(value);
 			ht_rownums = bms_add_member(ht_rownums, ht_rownum);
 			idx++;
 		}
 	}
+	hashtable->batches[0].shared->chunks = old;
 
 	elog(NOTICE, "ht_rownums = %s", bmsToString(ht_rownums));
 }

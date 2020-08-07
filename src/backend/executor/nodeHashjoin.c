@@ -442,7 +442,8 @@ ExecHashJoinImpl(PlanState *pstate, bool parallel)
 							ExecParallelHashCheck(hashtable, node);
 						}
 					}
-					BarrierArriveAndWait(build_barrier, WAIT_EVENT_HASH_BUILD_HASH_OUTER);
+					if (BarrierPhase(build_barrier) < PHJ_BUILD_DONE)
+						BarrierArriveAndWait(build_barrier, WAIT_EVENT_HASH_BUILD_HASH_OUTER);
 					Assert(BarrierPhase(build_barrier) == PHJ_BUILD_DONE);
 
 					/* Each backend should now select a batch to work on. */
