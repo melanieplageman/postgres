@@ -3083,6 +3083,7 @@ ExecParallelHashTableEvictBatch0(HashJoinTable hashtable)
 		case PHJ_EVICT_FINISHING:
 			if (BarrierArriveAndWait(&pstate->eviction_barrier, WAIT_EVENT_HASH_EVICT_FINISH))
 			{
+				dsa_pointer_atomic *buckets = NULL;
 				Assert(!LWLockHeldByMe(&pstate->lock));
 				LWLockAcquire(&pstate->lock, LW_EXCLUSIVE);
 				pstate->growth = PHJ_GROWTH_OK;
@@ -3091,6 +3092,13 @@ ExecParallelHashTableEvictBatch0(HashJoinTable hashtable)
 				LWLockAcquire(&hashtable->batches[0].shared->lock, LW_EXCLUSIVE);
 				hashtable->batches[0].shared->chunks = InvalidDsaPointer;
 				LWLockRelease(&hashtable->batches[0].shared->lock);
+
+				buckets = (dsa_pointer_atomic *)
+					dsa_get_address(hashtable->area, hashtable->batches[0].shared->buckets);
+
+				for (size_t i = 0; i < hashtable->nbuckets; ++i)
+					dsa_pointer_atomic_write(&buckets[i], InvalidDsaPointer);
+
 			}
 			/* FALLTHROUGH */
 		case PHJ_EVICT_DONE:
