@@ -435,8 +435,11 @@ ExecHashJoinImpl(PlanState *pstate, bool parallel)
 						 */
 						if (hashtable->nbatch > 1 || (hashtable->nbatch == 1 && hashtable->batches[0].shared->hashloop_fallback))
 							ExecParallelHashJoinPartitionOuter(node);
-						BarrierArriveAndWait(build_barrier,
-											 WAIT_EVENT_HASH_BUILD_HASH_OUTER);
+						if (BarrierArriveAndWait(build_barrier,
+											 WAIT_EVENT_HASH_BUILD_HASH_OUTER))
+						{
+							elog(NOTICE, "%d: ntuples in batch 0 hashtable: %ld", ParallelWorkerNumber, hashtable->batches[0].shared->ntuples);
+						}
 					}
 					Assert(BarrierPhase(build_barrier) == PHJ_BUILD_DONE);
 
