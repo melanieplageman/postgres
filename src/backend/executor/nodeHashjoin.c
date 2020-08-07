@@ -1675,25 +1675,24 @@ ExecParallelHashJoinLoadStripe(HashJoinState *hjstate)
 
 					while ((tuple = sts_parallel_scan_next(inner_tuples, &metadata)))
 					{
-						/* The tuple is from a previous stripe. Skip it */
-						if (metadata.stripe < PHJ_STRIPE_NUMBER(phase))
-							continue;
-
-						/*
-						 * tuple from future. time to back out read_page. end
-						 * of stripe
-						 */
-						if (metadata.stripe > PHJ_STRIPE_NUMBER(phase))
+						ParallelHashJoinBatchAccessor *local_accessor = &hashtable->batches[hashtable->curbatch];
+						ParallelHashJoinState *pstate = hashtable->parallel_state;
+						size_t        tuple_size =
+							                              MAXALIGN(HJTUPLE_OVERHEAD + tuple->t_len);
+						LWLockAcquire(&local_accessor->shared->lock, LW_SHARED);
+						if (local_accessor->shared->hashloop_fallback && local_accessor->shared->size + tuple_size > pstate->space_allowed)
 						{
 							sts_parallel_scan_rewind(inner_tuples);
+							LWLockRelease(&local_accessor->shared->lock);
 							continue;
 						}
+						LWLockRelease(&local_accessor->shared->lock);
 
 						ExecForceStoreMinimalTuple(tuple, hjstate->hj_HashTupleSlot, false);
 						ExecParallelHashTableInsertCurrentBatch(
-																hashtable,
-																hjstate->hj_HashTupleSlot,
-																metadata.hashvalue);
+							hashtable,
+							hjstate->hj_HashTupleSlot,
+							metadata.hashvalue);
 					}
 					BarrierArriveAndWait(stripe_barrier, WAIT_EVENT_HASH_STRIPE_LOAD);
 				}
