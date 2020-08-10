@@ -438,7 +438,7 @@ ExecHashJoinImpl(PlanState *pstate, bool parallel)
 						if (BarrierArriveAndWait(build_barrier,
 											 WAIT_EVENT_HASH_BUILD_HASH_OUTER))
 						{
-							elog(NOTICE, "%d: ntuples in batch 0 hashtable: %ld", ParallelWorkerNumber, hashtable->batches[0].shared->ntuples);
+							//elog(NOTICE, "%d: ntuples in batch 0 hashtable: %ld", ParallelWorkerNumber, hashtable->batches[0].shared->ntuples);
 						}
 					}
 					Assert(BarrierPhase(build_barrier) == PHJ_BUILD_DONE);
@@ -1674,28 +1674,21 @@ ExecParallelHashJoinLoadStripe(HashJoinState *hjstate)
 					 * TODO: sts_resume_parallel_scan() is overkill for stripe
 					 * 0 of each batch
 					 */
+					ParallelHashJoinBatchAccessor *local_accessor = &hashtable->batches[hashtable->curbatch];
+
 					sts_resume_parallel_scan(inner_tuples);
 
 					while ((tuple = sts_parallel_scan_next(inner_tuples, &metadata)))
 					{
-						ParallelHashJoinBatchAccessor *local_accessor = &hashtable->batches[hashtable->curbatch];
-						ParallelHashJoinState *pstate = hashtable->parallel_state;
-						size_t        tuple_size =
-							                              MAXALIGN(HJTUPLE_OVERHEAD + tuple->t_len);
-						LWLockAcquire(&local_accessor->shared->lock, LW_SHARED);
-						if (local_accessor->shared->hashloop_fallback && local_accessor->shared->size + tuple_size > pstate->space_allowed)
+						ExecForceStoreMinimalTuple(tuple, hjstate->hj_HashTupleSlot, false);
+
+						ExecParallelHashTableInsertCurrentBatch(hashtable, hjstate->hj_HashTupleSlot, metadata.hashvalue);
+						if (local_accessor->shared->space_exhausted)
 						{
 							sts_parallel_scan_rewind(inner_tuples);
-							LWLockRelease(&local_accessor->shared->lock);
 							continue;
 						}
-						LWLockRelease(&local_accessor->shared->lock);
 
-						ExecForceStoreMinimalTuple(tuple, hjstate->hj_HashTupleSlot, false);
-						ExecParallelHashTableInsertCurrentBatch(
-							hashtable,
-							hjstate->hj_HashTupleSlot,
-							metadata.hashvalue);
 					}
 					BarrierArriveAndWait(stripe_barrier, WAIT_EVENT_HASH_STRIPE_LOAD);
 				}
@@ -1739,6 +1732,8 @@ ExecParallelHashJoinLoadStripe(HashJoinState *hjstate)
 						dsa_pointer_atomic_write(&buckets[i], InvalidDsaPointer);
 					LWLockAcquire(&hashtable->batches[hashtable->curbatch].shared->lock, LW_EXCLUSIVE);
 					hashtable->batches[hashtable->curbatch].shared->size = 0;
+					hashtable->batches[hashtable->curbatch].shared->space_exhausted = false;
+					hashtable->batches[hashtable->curbatch].at_least_one_chunk = false;
 					LWLockRelease(&hashtable->batches[hashtable->curbatch].shared->lock);
 				}
 
@@ -1773,6 +1768,8 @@ fallback_stripe:
 
 	LWLockAcquire(&hashtable->batches[hashtable->curbatch].shared->lock, LW_EXCLUSIVE);
 	hashtable->batches[hashtable->curbatch].shared->size = 0;
+	hashtable->batches[hashtable->curbatch].shared->space_exhausted = false;
+	hashtable->batches[hashtable->curbatch].at_least_one_chunk = false;
 	LWLockRelease(&hashtable->batches[hashtable->curbatch].shared->lock);
 
 	/*

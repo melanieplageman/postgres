@@ -248,6 +248,9 @@ typedef struct ParallelHashJoinBatchAccessor
 	 * tuples have been emitted.
 	 */
 	int			last_participating_stripe_phase;
+
+	MinimalTuple my_chill_leftover_tuple;
+	uint32 my_chill_leftover_hashvalue;
 } ParallelHashJoinBatchAccessor;
 
 /*
@@ -267,7 +270,8 @@ typedef enum ParallelHashGrowth
 	/* Repartitioning didn't help last time, so don't try to do that again. */
 	/* TODO: get rid of PHJ_GROWTH_DISABLED */
 	PHJ_GROWTH_DISABLED,
-	PHJ_GROWTH_SPILL_BATCH0
+	PHJ_GROWTH_SPILL_BATCH0,
+	PHJ_GROWTH_LOADING
 } ParallelHashGrowth;
 
 typedef enum ParallelHashJoinBatchAccessorStatus

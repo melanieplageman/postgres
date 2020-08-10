@@ -374,7 +374,7 @@ MultiExecParallelHash(HashState *node)
 				 * tried to do that and gave up because we detected extreme
 				 * skew).
 				 */
-				pstate->growth = PHJ_GROWTH_DISABLED;
+				pstate->growth = PHJ_GROWTH_LOADING;
 			}
 	}
 
@@ -1972,7 +1972,7 @@ retry:
  * to other batches or to run out of memory, and should only be called with
  * tuples that belong in the current batch once growth has been disabled.
  */
-void
+MinimalTuple
 ExecParallelHashTableInsertCurrentBatch(HashJoinTable hashtable,
 										TupleTableSlot *slot,
 										uint32 hashvalue)
@@ -1990,10 +1990,11 @@ ExecParallelHashTableInsertCurrentBatch(HashJoinTable hashtable,
 										   HJTUPLE_OVERHEAD + tuple->t_len,
 										   &shared);
 	/* After finishing with the build phase, this function should never fail */
-	Assert(hashTuple);
-	LWLockAcquire(&hashtable->parallel_state->lock, LW_SHARED);
-	Assert(hashtable->parallel_state->growth == PHJ_GROWTH_DISABLED);
-	LWLockRelease(&hashtable->parallel_state->lock);
+	if (!hashTuple)
+	{
+		Assert(hashtable->batches[batchno].shared->space_exhausted);
+		return tuple;
+	}
 	hashTuple->hashvalue = hashvalue;
 	memcpy(HJTUPLE_MINTUPLE(hashTuple), tuple, tuple->t_len);
 	HeapTupleHeaderClearMatch(HJTUPLE_MINTUPLE(hashTuple));
@@ -2002,6 +2003,7 @@ ExecParallelHashTableInsertCurrentBatch(HashJoinTable hashtable,
 
 	if (shouldFree)
 		heap_free_minimal_tuple(tuple);
+	return NULL;
 }
 
 /*
@@ -3091,6 +3093,7 @@ ExecParallelHashTableEvictBatch0(HashJoinTable hashtable)
 
 				LWLockAcquire(&hashtable->batches[0].shared->lock, LW_EXCLUSIVE);
 				hashtable->batches[0].shared->chunks = InvalidDsaPointer;
+				hashtable->batches[0].shared->space_exhausted = false;
 				LWLockRelease(&hashtable->batches[0].shared->lock);
 
 				buckets = (dsa_pointer_atomic *)
@@ -3186,7 +3189,7 @@ ExecParallelHashTupleAlloc(HashJoinTable hashtable, size_t size,
 		chunk_size = HASH_CHUNK_SIZE;
 
 	/* Check if it's time to grow batches or buckets. */
-	if (pstate->growth != PHJ_GROWTH_DISABLED)
+	if (pstate->growth != PHJ_GROWTH_DISABLED && pstate->growth != PHJ_GROWTH_LOADING)
 	{
 		Assert(curbatch == 0);
 		Assert(BarrierPhase(&pstate->build_barrier) == PHJ_BUILD_HASHING_INNER);
@@ -3238,6 +3241,20 @@ ExecParallelHashTupleAlloc(HashJoinTable hashtable, size_t size,
 			}
 		}
 		LWLockRelease(&hashtable->batches[0].shared->lock);
+	}
+	if (pstate->growth == PHJ_GROWTH_LOADING)
+	{
+		int b = hashtable->curbatch;
+		LWLockAcquire(&hashtable->batches[b].shared->lock, LW_EXCLUSIVE);
+		if ((hashtable->batches[b].shared->hashloop_fallback || hashtable->batches[b].at_least_one_chunk) &&
+				hashtable->batches[b].shared->size + chunk_size > pstate->space_allowed && hashtable->batches[b].at_least_one_chunk)
+		{
+			hashtable->batches[b].shared->space_exhausted = true;
+			LWLockRelease(&pstate->lock);
+			LWLockRelease(&hashtable->batches[b].shared->lock);
+			return NULL;
+		}
+		LWLockRelease(&hashtable->batches[b].shared->lock);
 	}
 	/*
 	 * Because we set at_least_one_chunk to false before repartitioning, it will
