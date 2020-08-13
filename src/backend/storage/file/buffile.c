@@ -327,6 +327,11 @@ BufFileOpenShared(SharedFileSet *fileset, const char *name)
 
 	return file;
 }
+void set_writeable(BufFile *write_file)
+{
+	write_file->readOnly = false;
+
+}
 
 /*
  * Delete a BufFile that was created by BufFileCreateShared in the given

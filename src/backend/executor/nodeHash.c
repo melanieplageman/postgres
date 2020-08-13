@@ -56,9 +56,11 @@ static void ExecHashSkewTableInsert(HashJoinTable hashtable,
 static void ExecHashRemoveNextSkewBucket(HashJoinTable hashtable);
 
 static void *dense_alloc(HashJoinTable hashtable, Size size);
-static HashJoinTuple ExecParallelHashTupleAlloc(HashJoinTable hashtable,
-												size_t size,
-												dsa_pointer *shared);
+static HashJoinTuple
+ExecParallelHashTupleAlloc(HashJoinTable hashtable,
+                           size_t size,
+                           dsa_pointer *shared,
+                           int read_participant);
 static void
 ExecParallelHashTableEvictBatch0(HashJoinTable hashtable);
 static void MultiExecPrivateHash(HashState *node);
@@ -1513,7 +1515,9 @@ ExecParallelHashRepartitionSpilledBatch(HashJoinTable hashtable,
 	tupleMetadata metadata;
 
 	sts_begin_parallel_scan(old_inner_batch0_sts);
-	while ((tuple = sts_parallel_scan_next(old_inner_batch0_sts, &metadata.hashvalue)))
+	while ((tuple = sts_parallel_scan_next(old_inner_batch0_sts,
+	                                       &metadata.hashvalue,
+	                                       false)))
 		ExecParallelHashRepartitionTuple(hashtable, tuple, metadata.hashvalue);
 	sts_end_parallel_scan(old_inner_batch0_sts);
 }
@@ -1595,7 +1599,9 @@ ExecParallelHashRepartitionRest(HashJoinTable hashtable)
 
 		/* Scan one partition from the previous generation. */
 		sts_begin_parallel_scan(old_inner_tuples[i]);
-		while ((tuple = sts_parallel_scan_next(old_inner_tuples[i], &hashvalue)))
+		while ((tuple = sts_parallel_scan_next(old_inner_tuples[i],
+		                                       &hashvalue,
+		                                       false)))
 		{
 			int			bucketno;
 			int			batchno;
@@ -1634,6 +1640,7 @@ ExecParallelHashMergeCounters(HashJoinTable hashtable)
 		batch->shared->estimated_size += batch->estimated_size;
 		batch->shared->ntuples += batch->ntuples;
 		batch->shared->old_ntuples += batch->old_ntuples;
+		//pg_atomic_exchange_u64(&batch->shared->ntuples_in_memory, batch->shared->ntuples);
 		batch->size = 0;
 		batch->estimated_size = 0;
 		batch->ntuples = 0;
@@ -1921,8 +1928,8 @@ retry:
 		Assert(BarrierPhase(&hashtable->parallel_state->build_barrier) ==
 			   PHJ_BUILD_HASHING_INNER);
 		hashTuple = ExecParallelHashTupleAlloc(hashtable,
-											   HJTUPLE_OVERHEAD + tuple->t_len,
-											   &shared);
+		                                       HJTUPLE_OVERHEAD + tuple->t_len,
+		                                       &shared, -1);
 		if (!hashTuple)
 			goto retry;
 
@@ -1974,8 +1981,9 @@ retry:
  */
 MinimalTuple
 ExecParallelHashTableInsertCurrentBatch(HashJoinTable hashtable,
-										TupleTableSlot *slot,
-										uint32 hashvalue)
+                                        TupleTableSlot *slot,
+                                        uint32 hashvalue,
+                                        int read_participant)
 {
 	bool		shouldFree;
 	MinimalTuple tuple = ExecFetchSlotMinimalTuple(slot, &shouldFree);
@@ -1984,26 +1992,26 @@ ExecParallelHashTableInsertCurrentBatch(HashJoinTable hashtable,
 	int			batchno;
 	int			bucketno;
 
+
 	ExecHashGetBucketAndBatch(hashtable, hashvalue, &bucketno, &batchno);
 	Assert(batchno == hashtable->curbatch);
+
 	hashTuple = ExecParallelHashTupleAlloc(hashtable,
-										   HJTUPLE_OVERHEAD + tuple->t_len,
-										   &shared);
-	/* After finishing with the build phase, this function should never fail */
+	                                       HJTUPLE_OVERHEAD + tuple->t_len,
+	                                       &shared, read_participant);
 	if (!hashTuple)
-	{
-		Assert(hashtable->batches[batchno].shared->space_exhausted);
-		return tuple;
-	}
+		return NULL;
+
 	hashTuple->hashvalue = hashvalue;
 	memcpy(HJTUPLE_MINTUPLE(hashTuple), tuple, tuple->t_len);
 	HeapTupleHeaderClearMatch(HJTUPLE_MINTUPLE(hashTuple));
 	ExecParallelHashPushTuple(&hashtable->buckets.shared[bucketno],
 							  hashTuple, shared);
+	pg_atomic_add_fetch_u64(&hashtable->batches[hashtable->curbatch].shared->ntuples_in_memory, 1);
 
 	if (shouldFree)
 		heap_free_minimal_tuple(tuple);
-	return NULL;
+	return tuple;
 }
 
 /*
@@ -3094,6 +3102,11 @@ ExecParallelHashTableEvictBatch0(HashJoinTable hashtable)
 				LWLockAcquire(&hashtable->batches[0].shared->lock, LW_EXCLUSIVE);
 				hashtable->batches[0].shared->chunks = InvalidDsaPointer;
 				hashtable->batches[0].shared->space_exhausted = false;
+				hashtable->batches[0].shared->ntuples += hashtable->batches[0].ntuples;
+				hashtable->batches[0].shared->old_ntuples +=  hashtable->batches[0].old_ntuples;
+				hashtable->batches[0].ntuples = 0;
+				hashtable->batches[0].old_ntuples = 0;
+				pg_atomic_exchange_u64(&hashtable->batches[0].shared->ntuples_in_memory, 0);
 				LWLockRelease(&hashtable->batches[0].shared->lock);
 
 				buckets = (dsa_pointer_atomic *)
@@ -3121,8 +3134,10 @@ ExecParallelHashTableEvictBatch0(HashJoinTable hashtable)
  * possibility that the tuple no longer belongs in the same batch).
  */
 static HashJoinTuple
-ExecParallelHashTupleAlloc(HashJoinTable hashtable, size_t size,
-						   dsa_pointer *shared)
+ExecParallelHashTupleAlloc(HashJoinTable hashtable,
+                           size_t size,
+                           dsa_pointer *shared,
+                           int read_participant)
 {
 	ParallelHashJoinState *pstate = hashtable->parallel_state;
 	dsa_pointer chunk_shared;
@@ -3151,6 +3166,14 @@ ExecParallelHashTupleAlloc(HashJoinTable hashtable, size_t size,
 
 		Assert(chunk->used <= chunk->maxlen);
 		Assert(result == dsa_get_address(hashtable->area, *shared));
+
+		if (pstate->growth == PHJ_GROWTH_LOADING)
+		{
+			int b = hashtable->curbatch;
+			int64 ntuples = pg_atomic_read_u64(&hashtable->batches[b].shared->ntuples_in_memory);
+			elog(NOTICE, "%d: NO_ALLOC_NEEDED batch: %d. read_participant: %d. hashtable size: %ld. space_allowed: %ld. ntuples in memory: %ld",
+			     MyProcPid, b, read_participant, hashtable->batches[b].shared->size, pstate->space_allowed, ntuples);
+		}
 
 		return result;
 	}
@@ -3242,14 +3265,26 @@ ExecParallelHashTupleAlloc(HashJoinTable hashtable, size_t size,
 		}
 		LWLockRelease(&hashtable->batches[0].shared->lock);
 	}
+	/*
+	 * TODO: should I care about hashtable->batches[b].at_least_one_chunk here?
+	 */
 	if (pstate->growth == PHJ_GROWTH_LOADING)
 	{
 		int b = hashtable->curbatch;
 		LWLockAcquire(&hashtable->batches[b].shared->lock, LW_EXCLUSIVE);
-		if ((hashtable->batches[b].shared->hashloop_fallback || hashtable->batches[b].at_least_one_chunk) &&
-				hashtable->batches[b].shared->size + chunk_size > pstate->space_allowed && hashtable->batches[b].at_least_one_chunk)
+		if (hashtable->batches[b].shared->hashloop_fallback &&
+			(hashtable->batches[b].shared->space_exhausted ||
+				hashtable->batches[b].shared->size + chunk_size > pstate->space_allowed))
 		{
-			hashtable->batches[b].shared->space_exhausted = true;
+			bool space_exhausted = hashtable->batches[b].shared->space_exhausted;
+			if (!space_exhausted)
+				hashtable->batches[b].shared->space_exhausted = true;
+			int64 ntuples = pg_atomic_read_u64(&hashtable->batches[b].shared->ntuples_in_memory);
+			elog(NOTICE, "%d: ALLOC_FAILED Loading batch: %d. from participant %d. space_exhausted was: %d. Alloc chunk_size: %ld. hashtable size: %ld. space_allowed: %ld. ntuples in memory: %ld",
+						MyProcPid, b,
+						read_participant,
+						space_exhausted,
+						chunk_size, hashtable->batches[b].shared->size, pstate->space_allowed, ntuples);
 			LWLockRelease(&pstate->lock);
 			LWLockRelease(&hashtable->batches[b].shared->lock);
 			return NULL;
@@ -3280,6 +3315,15 @@ ExecParallelHashTupleAlloc(HashJoinTable hashtable, size_t size,
 	 * Thus, an assert like the following would not be possible
 	 * Assert(hashtable->batches[hashtable->curbatch].shared->size + chunk_size <= pstate->space_allowed);
 	 */
+
+	if (pstate->growth == PHJ_GROWTH_LOADING)
+	{
+		int b = hashtable->curbatch;
+		int64 ntuples = pg_atomic_read_u64(&hashtable->batches[b].shared->ntuples_in_memory);
+		elog(NOTICE, "%d: ALLOCATE_SUCCESS batch: %d. read_participant: %d. Alloc chunk_size: %ld + hashtable size: %ld. space_allowed: %ld. ntuples in memory: %ld",
+		     MyProcPid, b, read_participant,
+		     chunk_size, hashtable->batches[b].shared->size, pstate->space_allowed, ntuples);
+	}
 
 	/* We are cleared to allocate a new chunk. */
 	chunk_shared = dsa_allocate(hashtable->area, chunk_size);
@@ -3365,6 +3409,7 @@ ExecParallelHashJoinSetUpBatches(HashJoinTable hashtable, int nbatch)
 		char		sbname[MAXPGPATH];
 
 		shared->hashloop_fallback = false;
+		pg_atomic_init_u64(&shared->ntuples_in_memory, 0);
 		shared->dont_even_try_hashtable = false;
 		/* TODO: is it okay to use the same tranche for this lock? */
 		LWLockInitialize(&shared->lock, LWTRANCHE_PARALLEL_HASH_JOIN);
@@ -3844,7 +3889,10 @@ ExecParallelHashRepartitionTuple(HashJoinTable hashtable,
 	Assert(BarrierPhase(&pstate->build_barrier) == PHJ_BUILD_HASHING_INNER);
 	if (batchno == 0 && !hashtable_full)
 	{
-		copyTuple = ExecParallelHashTupleAlloc(hashtable, HJTUPLE_OVERHEAD + tuple->t_len, &shared);
+		copyTuple = ExecParallelHashTupleAlloc(hashtable,
+		                                       HJTUPLE_OVERHEAD + tuple->t_len,
+		                                       &shared,
+		                                       -1);
 		/* TODO: do we need to deal with PHJ_GROWTH_SPILL_BATCH0? */
 		if (copyTuple)
 		{

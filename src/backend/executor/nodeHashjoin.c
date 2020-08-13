@@ -340,7 +340,7 @@ ExecHashJoinImpl(PlanState *pstate, bool parallel)
 				 * from the outer plan node.  If we succeed, we have to stash
 				 * it away for later consumption by ExecHashJoinOuterGetTuple.
 				 */
-				//volatile int mybp = 0; while (mybp == 0){};
+//				volatile int mybp = 0; while (mybp == 0){};
 				if (HJ_FILL_INNER(node))
 				{
 					/* no chance to not build the hash table */
@@ -1106,8 +1106,9 @@ ExecParallelHashJoinOuterGetTuple(PlanState *outerNode,
 		MinimalTuple tuple;
 		LWLockRelease(&hashtable->batches[0].shared->lock);
 
-		tuple = sts_parallel_scan_next(hashtable->batches[curbatch].outer_tuples,
-									   &metadata);
+		tuple =
+			sts_parallel_scan_next(hashtable->batches[curbatch].outer_tuples,
+			                       &metadata, false);
 		*hashvalue = metadata.hashvalue;
 
 		if (tuple != NULL)
@@ -1628,6 +1629,10 @@ ExecParallelHashJoinLoadStripe(HashJoinState *hjstate)
 	 */
 	for (;;)
 	{
+		MinimalTuple tuple;
+		tupleMetadata metadata;
+
+		bool overflow_required = false;
 		int			phase = BarrierPhase(stripe_barrier);
 
 		switch (PHJ_STRIPE_PHASE(phase))
@@ -1636,12 +1641,6 @@ ExecParallelHashJoinLoadStripe(HashJoinState *hjstate)
 				if (BarrierArriveAndWait(stripe_barrier, WAIT_EVENT_HASH_STRIPE_ELECT))
 				{
 					sts_reinitialize(outer_tuples);
-
-					/*
-					 * set the rewound flag back to false to prepare for the
-					 * next stripe
-					 */
-					sts_reset_rewound(inner_tuples);
 				}
 
 				/* FALLTHROUGH */
@@ -1653,47 +1652,45 @@ ExecParallelHashJoinLoadStripe(HashJoinState *hjstate)
 
 			case PHJ_STRIPE_LOADING:
 				{
-					MinimalTuple tuple;
-					tupleMetadata metadata;
 
 					/*
 					 * Start (or join in) loading the next stripe of inner
 					 * tuples.
 					 */
+					sts_begin_parallel_scan(inner_tuples);
 
-					/*
-					 * I'm afraid there potential issue if a worker joins in
-					 * this phase and doesn't do the actions and resetting of
-					 * variables in sts_resume_parallel_scan. that is, if it
-					 * doesn't reset start_page and read_next_page in between
-					 * stripes. For now, call it. However, I think it might be
-					 * able to be removed.
-					 */
-
-					/*
-					 * TODO: sts_resume_parallel_scan() is overkill for stripe
-					 * 0 of each batch
-					 */
-					ParallelHashJoinBatchAccessor *local_accessor = &hashtable->batches[hashtable->curbatch];
-
-					sts_resume_parallel_scan(inner_tuples);
-
-					while ((tuple = sts_parallel_scan_next(inner_tuples, &metadata)))
+					while ((tuple = sts_parallel_scan_next(inner_tuples, &metadata, false)))
 					{
 						ExecForceStoreMinimalTuple(tuple, hjstate->hj_HashTupleSlot, false);
-
-						ExecParallelHashTableInsertCurrentBatch(hashtable, hjstate->hj_HashTupleSlot, metadata.hashvalue);
-						if (local_accessor->shared->space_exhausted)
+						if (!ExecParallelHashTableInsertCurrentBatch(hashtable,hjstate->hj_HashTupleSlot, metadata.hashvalue, sta_get_read_participant(inner_tuples)))
 						{
-							sts_parallel_scan_rewind(inner_tuples);
-							continue;
+							overflow_required = true;
+							sts_reset_tuples_read(inner_tuples);
+							break;
 						}
-
+						/*
+						 * Once InsertCurrentBatch returns NULL for a worker, that means that it needed to allocate a chunk
+						 * (no more space left in its current chunk) and that there was not enough space to do so
+						 * Each worker that exhausts its chunk, if that chunk is the last allowed or if space has already
+						 * been exhausted, that worker should rewind the read head in case another worker is able to pick
+						 * up more tuples to fill its current chunk, wait until all workers are done with their current chunks
+						 */
 					}
+
 					BarrierArriveAndWait(stripe_barrier, WAIT_EVENT_HASH_STRIPE_LOAD);
 				}
 				/* FALLTHROUGH */
+			case PHJ_STRIPE_OVERFLOWING:
+				if (overflow_required)
+				{
+					sts_spill_leftover_tuples(inner_tuples);
+				}
+				/*
+				 * TODO: replace this wait event
+				 */
+				BarrierArriveAndWait(stripe_barrier, WAIT_EVENT_HASH_STRIPE_LOAD);
 
+				/* FALLTHROUGH */
 			case PHJ_STRIPE_PROBING:
 
 				/*
@@ -1734,6 +1731,7 @@ ExecParallelHashJoinLoadStripe(HashJoinState *hjstate)
 					hashtable->batches[hashtable->curbatch].shared->size = 0;
 					hashtable->batches[hashtable->curbatch].shared->space_exhausted = false;
 					hashtable->batches[hashtable->curbatch].at_least_one_chunk = false;
+					pg_atomic_exchange_u64(&hashtable->batches[hashtable->curbatch].shared->ntuples_in_memory, 0);
 					LWLockRelease(&hashtable->batches[hashtable->curbatch].shared->lock);
 				}
 

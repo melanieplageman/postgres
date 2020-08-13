@@ -68,13 +68,26 @@ extern void sts_puttuple(SharedTuplestoreAccessor *accessor,
 						 void *meta_data,
 						 MinimalTuple tuple);
 
-extern MinimalTuple sts_parallel_scan_next(SharedTuplestoreAccessor *accessor,
-										   void *meta_data);
+extern MinimalTuple
+sts_parallel_scan_next(SharedTuplestoreAccessor *accessor,
+                       void *meta_data,
+                       bool inner);
 
-extern void sts_parallel_scan_rewind(SharedTuplestoreAccessor *accessor);
+extern void
+sts_parallel_scan_rewind(SharedTuplestoreAccessor *accessor,
+                         uint64 ntuples_in_memory,
+                         int curbatch);
+extern bool load_tuple(SharedTuplestoreAccessor *accessor);
 
 extern void sts_reset_rewound(SharedTuplestoreAccessor *accessor);
 extern uint32 sts_increment_ntuples(SharedTuplestoreAccessor *accessor);
 extern uint32 sts_get_tuplenum(SharedTuplestoreAccessor *accessor);
+extern void sta_reset_rewound(SharedTuplestoreAccessor *accessor);
+extern int sta_get_read_participant(SharedTuplestoreAccessor *accessor);
+extern int
+sts_spill_leftover_tuples(SharedTuplestoreAccessor *accessor);
+extern void overflow_filename(char *name, SharedTuplestoreAccessor *accessor, int participant);
+extern void sts_reset_tuples_read(SharedTuplestoreAccessor *accessor);
+
 
 #endif							/* SHAREDTUPLESTORE_H */

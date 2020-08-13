@@ -182,6 +182,7 @@ typedef struct ParallelHashJoinBatch
 	bool dont_even_try_hashtable;
 	int			maximum_stripe_number;	/* the number of stripes in the batch */
 	size_t		estimated_stripe_size;	/* size of last stripe in batch */
+	pg_atomic_uint64 ntuples_in_memory; /* number of tuples loaded into the hashtable */
 	LWLock		lock;
 
 	/*
@@ -334,10 +335,11 @@ typedef struct ParallelHashJoinState
 #define PHJ_STRIPE_ELECTING				0
 #define PHJ_STRIPE_RESETTING			1
 #define PHJ_STRIPE_LOADING				2
-#define PHJ_STRIPE_PROBING				3
-#define PHJ_STRIPE_DONE				    4
-#define PHJ_STRIPE_NUMBER(n)            ((n) / 5)
-#define PHJ_STRIPE_PHASE(n)             ((n) % 5)
+#define PHJ_STRIPE_OVERFLOWING          3
+#define PHJ_STRIPE_PROBING				4
+#define PHJ_STRIPE_DONE				    5
+#define PHJ_STRIPE_NUMBER(n)            ((n) / 6)
+#define PHJ_STRIPE_PHASE(n)             ((n) % 6)
 
 #define PHJ_EVICT_ELECTING 0
 #define PHJ_EVICT_RESETTING 1
