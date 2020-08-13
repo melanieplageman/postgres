@@ -3465,6 +3465,15 @@ ExecParallelHashJoinSetUpBatches(HashJoinTable hashtable, int nbatch)
 						   SHARED_TUPLESTORE_SINGLE_PASS,
 						   &pstate->fileset,
 						   name);
+		snprintf(name, sizeof(name), "i.over%dof%d", i, hashtable->nbatch);
+		accessor->overflow_tuples =
+			sts_initialize(ParallelHashJoinBatchInner(shared),
+			               pstate->nparticipants,
+			               ParallelWorkerNumber + 1,
+			               sizeof(tupleMetadata),
+			               SHARED_TUPLESTORE_SINGLE_PASS,
+			               &pstate->fileset,
+			               name);
 		snprintf(sbname, MAXPGPATH, "%s.bitmaps", name);
 		/* Use the same SharedFileset for the SharedTupleStore and SharedBits */
 		accessor->sba = sb_initialize(sbits, pstate->nparticipants,
@@ -3486,8 +3495,10 @@ ExecParallelHashCloseBatchAccessors(HashJoinTable hashtable)
 	{
 		/* Make sure no files are left open. */
 		sts_end_write(hashtable->batches[i].inner_tuples);
+		sts_end_write(hashtable->batches[i].overflow_tuples);
 		sts_end_write(hashtable->batches[i].outer_tuples);
 		sts_end_parallel_scan(hashtable->batches[i].inner_tuples);
+		sts_end_parallel_scan(hashtable->batches[i].overflow_tuples);
 		sts_end_parallel_scan(hashtable->batches[i].outer_tuples);
 	}
 	pfree(hashtable->batches);
@@ -3554,6 +3565,10 @@ ExecParallelHashEnsureBatchAccessors(HashJoinTable hashtable)
 												  pstate->nparticipants),
 					   ParallelWorkerNumber + 1,
 					   &pstate->fileset);
+		accessor->overflow_tuples =
+			sts_attach(ParallelHashJoinBatchInner(shared),
+			           ParallelWorkerNumber + 1,
+			           &pstate->fileset);
 		accessor->sba = sb_attach(sbits, ParallelWorkerNumber + 1, &pstate->fileset);
 	}
 
@@ -3594,6 +3609,7 @@ ExecHashTableDetachBatch(HashJoinTable hashtable)
 
 		/* Make sure any temporary files are closed. */
 		sts_end_parallel_scan(hashtable->batches[curbatch].inner_tuples);
+		sts_end_parallel_scan(hashtable->batches[curbatch].overflow_tuples);
 		sts_end_parallel_scan(hashtable->batches[curbatch].outer_tuples);
 
 		/* Detach from the batch we were last working on. */
@@ -3666,8 +3682,10 @@ ExecHashTableDetach(HashJoinTable hashtable)
 			for (i = 0; i < hashtable->nbatch; ++i)
 			{
 				sts_end_write(hashtable->batches[i].inner_tuples);
+				sts_end_write(hashtable->batches[i].overflow_tuples);
 				sts_end_write(hashtable->batches[i].outer_tuples);
 				sts_end_parallel_scan(hashtable->batches[i].inner_tuples);
+				sts_end_parallel_scan(hashtable->batches[i].overflow_tuples);
 				sts_end_parallel_scan(hashtable->batches[i].outer_tuples);
 			}
 		}

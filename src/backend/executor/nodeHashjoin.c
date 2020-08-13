@@ -1541,6 +1541,7 @@ ExecParallelHashJoinLoadStripe(HashJoinState *hjstate)
 
 	outer_tuples = hashtable->batches[batchno].outer_tuples;
 	inner_tuples = hashtable->batches[batchno].inner_tuples;
+	
 
 	if (hashtable->curstripe >= 0)
 	{

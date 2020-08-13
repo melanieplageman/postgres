@@ -689,7 +689,10 @@ sts_parallel_scan_next(SharedTuplestoreAccessor *accessor,
 			accessor->read_participant = (accessor->read_participant + 1) %
 				accessor->sts->nparticipants;
 			if (accessor->read_participant == accessor->participant)
+			{
+				// now go read overflow files if they exist
 				break;
+			}
 			accessor->read_next_page = 0;
 			accessor->start_page = 0;
 

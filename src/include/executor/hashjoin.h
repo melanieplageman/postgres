@@ -239,6 +239,7 @@ typedef struct ParallelHashJoinBatchAccessor
 	int			done;			/* flag to remember that a batch is done */
 	/* -1 for not done, 0 for tentatively done, 1 for done */
 	SharedTuplestoreAccessor *inner_tuples;
+	SharedTuplestoreAccessor *overflow_tuples;
 	SharedTuplestoreAccessor *outer_tuples;
 	SharedBitsAccessor *sba;
 
