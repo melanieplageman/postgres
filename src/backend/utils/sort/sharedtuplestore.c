@@ -595,11 +595,14 @@ sts_parallel_scan_next(SharedTuplestoreAccessor *accessor,
 		/* We can skip directly past overflow pages we know about. */
 		if (p->read_page < accessor->read_next_page)
 			p->read_page = accessor->read_next_page;
-		eof = p->read_page >= p->npages;
+		eof = p->read_page >= p->npages; // might need to change this
 		if (!eof)
 		{
 			if (inner)
 				read_page = accessor->start_page;
+			/*
+			 * TODO: move this up so that we do this regardless since we might not come in here -- might be EOF
+			 */
 			else
 			{
 				/* Claim the next chunk. */
