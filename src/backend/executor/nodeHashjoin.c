@@ -1665,16 +1665,8 @@ ExecParallelHashJoinLoadStripe(HashJoinState *hjstate)
 						if (!ExecParallelHashTableInsertCurrentBatch(hashtable,hjstate->hj_HashTupleSlot, metadata.hashvalue, sta_get_read_participant(inner_tuples)))
 						{
 							overflow_required = true;
-							sts_reset_tuples_read(inner_tuples);
 							break;
 						}
-						/*
-						 * Once InsertCurrentBatch returns NULL for a worker, that means that it needed to allocate a chunk
-						 * (no more space left in its current chunk) and that there was not enough space to do so
-						 * Each worker that exhausts its chunk, if that chunk is the last allowed or if space has already
-						 * been exhausted, that worker should rewind the read head in case another worker is able to pick
-						 * up more tuples to fill its current chunk, wait until all workers are done with their current chunks
-						 */
 					}
 
 					BarrierArriveAndWait(stripe_barrier, WAIT_EVENT_HASH_STRIPE_LOAD);
@@ -1683,7 +1675,8 @@ ExecParallelHashJoinLoadStripe(HashJoinState *hjstate)
 			case PHJ_STRIPE_OVERFLOWING:
 				if (overflow_required)
 				{
-					sts_spill_leftover_tuples(inner_tuples);
+					Assert(tuple);
+					sts_spill_leftover_tuples(inner_tuples, tuple, metadata.hashvalue);
 				}
 				/*
 				 * TODO: replace this wait event

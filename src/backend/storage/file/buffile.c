@@ -99,7 +99,6 @@ static BufFile *makeBufFile(File firstfile);
 static void extendBufFile(BufFile *file);
 static void BufFileLoadBuffer(BufFile *file);
 static void BufFileDumpBuffer(BufFile *file);
-static void BufFileFlush(BufFile *file);
 static File MakeNewSharedSegment(BufFile *file, int segment);
 
 /*
@@ -627,7 +626,7 @@ BufFileWrite(BufFile *file, void *ptr, size_t size)
  *
  * Like fflush(), except that I/O errors are reported with ereport().
  */
-static void
+void
 BufFileFlush(BufFile *file)
 {
 	if (file->dirty)

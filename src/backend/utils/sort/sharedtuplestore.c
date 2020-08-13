@@ -225,11 +225,10 @@ sts_end_write(SharedTuplestoreAccessor *accessor)
 	if (accessor->write_file != NULL)
 	{
 		sts_flush_chunk(accessor);
-		accessor->overflow_file = accessor->write_file;
-		//BufFileClose(accessor->write_file);
+		BufFileClose(accessor->write_file);
 		pfree(accessor->write_chunk);
 		accessor->write_chunk = NULL;
-		//accessor->write_file = NULL;
+		accessor->write_file = NULL;
 		accessor->write_pointer = NULL;
 		accessor->write_end = NULL;
 		accessor->sts->participants[accessor->participant].writing = false;
@@ -565,6 +564,17 @@ sts_read_tuple(SharedTuplestoreAccessor *accessor, void *meta_data, bool inner)
 	return tuple;
 }
 
+MinimalTuple
+sts_parallel_scan_chunk(SharedTuplestoreAccessor *accessor,
+                       void *meta_data,
+                       bool inner)
+{
+	Assert(accessor->read_file);
+	if (accessor->read_ntuples < accessor->read_ntuples_available)
+		return sts_read_tuple(accessor, meta_data, inner);
+	return NULL;
+}
+
 /*
  * Get the next tuple in the current parallel scan.
  */
@@ -595,22 +605,14 @@ sts_parallel_scan_next(SharedTuplestoreAccessor *accessor,
 		/* We can skip directly past overflow pages we know about. */
 		if (p->read_page < accessor->read_next_page)
 			p->read_page = accessor->read_next_page;
-		eof = p->read_page >= p->npages; // might need to change this
+		eof = p->read_page >= p->npages;
 		if (!eof)
 		{
-			if (inner)
-				read_page = accessor->start_page;
-			/*
-			 * TODO: move this up so that we do this regardless since we might not come in here -- might be EOF
-			 */
-			else
-			{
-				/* Claim the next chunk. */
-				read_page = p->read_page;
-				/* Advance the read head for the next reader. */
-				p->read_page += STS_CHUNK_PAGES;
-				accessor->read_next_page = p->read_page;
-			}
+			/* Claim the next chunk. */
+			read_page = p->read_page;
+			/* Advance the read head for the next reader. */
+			p->read_page += STS_CHUNK_PAGES;
+			accessor->read_next_page = p->read_page;
 			/*
 			 * initialize start_page to the read_page this participant will
 			 * start reading from
@@ -755,29 +757,36 @@ int sta_get_read_participant(SharedTuplestoreAccessor *accessor)
 	return accessor->read_participant;
 }
 
-int
-sts_spill_leftover_tuples(SharedTuplestoreAccessor *accessor)
+void
+sts_spill_leftover_tuples(SharedTuplestoreAccessor *accessor, MinimalTuple tuple, uint32 hashvalue)
 {
-	Assert(accessor->read_ntuples < accessor->read_ntuples_available);
-
-	char		name[MAXPGPATH];
 	/*
 	 * TODO: assert that no one is reading
 	 */
-	sts_filename(name, accessor, accessor->participant);
-	//accessor->write_file = BufFileOpenShared(accessor->fileset, name);
-	//set_writeable(accessor->write_file);
+	// in a do-while loop
+	// sts_parallel_scan_chunk
+	// BufFileTell -> saved
+	// seek to end
+	// write tuple
+	// BufFileSeek(saved)
+	tupleMetadata metadata;
+
+	metadata.hashvalue = hashvalue;
 	SharedTuplestoreParticipant *participant = &accessor->sts->participants[accessor->participant];
 	participant->writing = true;	/* for assertions only */
-	while (accessor->read_ntuples < accessor->read_ntuples_available)
-	{
-		tupleMetadata metadata;
-		MinimalTuple tuple = sts_parallel_scan_next(accessor, &metadata, true);
+	char		name[MAXPGPATH];
 
-		sts_puttuple(accessor,
-		             &metadata,
-		             tuple);
-	}
+	/* Create one.  Only this backend will write into it. */
+	sts_filename(name, accessor, accessor->participant);
+	accessor->write_file = BufFileOpenShared(accessor->fileset, name);
+	set_writeable(accessor->write_file);
+	do
+	{
+		sts_puttuple(accessor, &metadata, tuple);
+	} while ((tuple = sts_parallel_scan_chunk(accessor, &metadata, true)));
+
+	accessor->read_ntuples = 0;
+	accessor->read_ntuples_available = 0;
 	sts_end_write(accessor);
 }
 
