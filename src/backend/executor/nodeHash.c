@@ -95,6 +95,9 @@ ExecParallelHashRepartitionChunk(HashJoinTable hashtable, HashMemoryChunk chunk)
 static void
 ExecParallelHashRepartitionTuple(HashJoinTable hashtable, MinimalTuple tuple,
                                  uint32 hashvalue);
+
+bool phj_check;
+
 /* ----------------------------------------------------------------
  *		ExecHash
  *
@@ -276,6 +279,7 @@ MultiExecParallelHash(HashState *node)
 	uint32		hashvalue;
 	Barrier    *build_barrier;
 	int			i;
+	Bitmapset *inner_rownums = NULL;
 
 	/*
 	 * get state info from node
@@ -340,7 +344,12 @@ MultiExecParallelHash(HashState *node)
 				if (ExecHashGetHashValue(hashtable, econtext, hashkeys,
 										 false, hashtable->keepNulls,
 										 &hashvalue))
+				{
 					ExecParallelHashTableInsert(hashtable, slot, hashvalue);
+					if (phj_check)
+						inner_rownums = bms_add_member(inner_rownums,
+													   econtext->ecxt_outertuple->tts_values[0]);
+				}
 				hashtable->partialTuples++;
 			}
 
@@ -415,6 +424,20 @@ MultiExecParallelHash(HashState *node)
 	 */
 	Assert(BarrierPhase(build_barrier) == PHJ_BUILD_HASHING_OUTER ||
 		   BarrierPhase(build_barrier) == PHJ_BUILD_DONE);
+
+	if (phj_check)
+	{
+		LWLockAcquire(&pstate->lock, LW_EXCLUSIVE);
+		Bitmapset *shmem_inner_rownums = (Bitmapset *) dsa_get_address(hashtable->area,
+																	   pstate->inner_rownums);
+		Bitmapset *unioned = bms_union(shmem_inner_rownums, inner_rownums);
+		size_t bms_sz = offsetof(Bitmapset, words) + (unioned->nwords) * sizeof(bitmapword);
+		pstate->inner_rownums = dsa_allocate(hashtable->area, bms_sz);
+		shmem_inner_rownums = (Bitmapset *) dsa_get_address(hashtable->area,
+															pstate->inner_rownums);
+		memcpy(shmem_inner_rownums, unioned, bms_sz);
+		LWLockRelease(&pstate->lock);
+	}
 }
 
 /* ----------------------------------------------------------------
@@ -3613,6 +3636,8 @@ ExecHashTableDetach(HashJoinTable hashtable)
 		/* If we're last to detach, clean up shared memory. */
 		if (BarrierDetach(&pstate->build_barrier))
 		{
+			if (phj_check)
+				ExecParallelHashCheckOuter(hashtable);
 			if (DsaPointerIsValid(pstate->batches))
 			{
 				dsa_free(hashtable->area, pstate->batches);
@@ -3853,23 +3878,21 @@ ExecParallelHashRepartitionTuple(HashJoinTable hashtable,
 }
 
 void
-ExecParallelHashCheck(HashJoinTable hashtable, HashJoinState *hjstate)
+ExecParallelHashCheckOuterAddTuplesFromSTS(HashJoinTable hashtable, HashJoinState *hjstate)
 {
 	ParallelHashJoinState *pstate = hashtable->parallel_state;
 	ParallelHashJoinBatch *batches = (ParallelHashJoinBatch *)
 		dsa_get_address(hashtable->area, pstate->batches);
-	Bitmapset *ht_rownums = NULL;
-	HashMemoryChunk chunk;
-	dsa_pointer chunk_shared;
 
-	//pg_usleep(20000000); //20s
+	elog(NOTICE, "ExecParallelHashCheckOuterAddTuplesFromSTS(): worker: %d", ParallelWorkerNumber);
 
-	/* Set up the accessor array and attach to the tuplestores. */
+	LWLockAcquire(&pstate->lock, LW_EXCLUSIVE);
+	Bitmapset *shmem_outer_rownums_from_sts = (Bitmapset *) dsa_get_address(hashtable->area,
+																			pstate->outer_rownums_from_sts);
+	Bitmapset *unioned = bms_copy(shmem_outer_rownums_from_sts);
 	for (int i = 0; i < hashtable->nbatch; ++i)
 	{
-		Bitmapset *outer_rownums = NULL;
-		Bitmapset *inner_rownums = NULL;
-
+		Bitmapset *outer_spill_rownum_for_batch = NULL;
 		ParallelHashJoinBatchAccessor *accessor = &hashtable->batches[i];
 		ParallelHashJoinBatch *shared = NthParallelHashJoinBatch(batches, i);
 		MinimalTuple tuple;
@@ -3885,62 +3908,150 @@ ExecParallelHashCheck(HashJoinTable hashtable, HashJoinState *hjstate)
 												  pstate->nparticipants),
 					   ParallelWorkerNumber + 1,
 					   &pstate->fileset);
-
 		/*
 		 * Collect tuple rownums from outer-rel spill files
 		 */
 		sts_begin_parallel_scan(accessor->outer_tuples);
 		while ((tuple = sts_parallel_scan_next(accessor->outer_tuples, &hashvalue)))
 		{
-			Datum values[20];
-			bool  isnull[20];
-			heap_deform_tuple(heap_tuple_from_minimal_tuple(tuple),
-							  hjstate->hj_OuterTupleSlot->tts_tupleDescriptor,
-							  values, isnull);
-			int outer_rownum = DatumGetInt32(values[0]);
-			outer_rownums = bms_add_member(outer_rownums, outer_rownum);
+			Datum value;
+			bool isnull;
+			ExecForceStoreMinimalTuple(tuple, hjstate->hj_OuterTupleSlot, false);
+			value = slot_getattr(hjstate->hj_OuterTupleSlot, 1, &isnull);
+			int outer_rownum = DatumGetInt32(value);
+
+			outer_spill_rownum_for_batch = bms_add_member(outer_spill_rownum_for_batch, outer_rownum);
 		}
 		sts_end_parallel_scan(accessor->outer_tuples);
+		unioned = bms_union(unioned, outer_spill_rownum_for_batch);
+	}
 
+	if (unioned)
+	{
+		size_t bms_sz = offsetof(Bitmapset, words) + (unioned->nwords) * sizeof(bitmapword);
+		pstate->outer_rownums_from_sts = dsa_allocate(hashtable->area, bms_sz);
+		if (!DsaPointerIsValid(pstate->outer_rownums_from_sts))
+			elog(ERROR, "Insufficient memory for outer check setup");
+		shmem_outer_rownums_from_sts = (Bitmapset *) dsa_get_address(hashtable->area,
+																	 pstate->outer_rownums_from_sts);
+		memcpy(shmem_outer_rownums_from_sts, unioned, bms_sz);
+	}
+	LWLockRelease(&pstate->lock);
+}
+
+void
+ExecParallelHashCheckOuterAddTuplesFromExec(HashJoinTable hashtable, Bitmapset *outer_rownums)
+{
+	ParallelHashJoinState *parallel_state = hashtable->parallel_state;
+
+	elog(NOTICE, "ExecParallelHashCheckOuterAddTuplesFromExec(): worker: %d", ParallelWorkerNumber);
+
+	if (!outer_rownums)
+		return;
+	LWLockAcquire(&parallel_state->lock, LW_EXCLUSIVE);
+	Bitmapset *shmem_outer_rownums_outer_rownums_from_exec =
+				  (Bitmapset *) dsa_get_address(hashtable->area,
+												parallel_state->outer_rownums_from_exec);
+	Bitmapset *unioned = bms_union(shmem_outer_rownums_outer_rownums_from_exec, outer_rownums);
+	if (unioned)
+	{
+		size_t bms_sz = offsetof(Bitmapset, words) + (unioned->nwords) * sizeof(bitmapword);
+		parallel_state->outer_rownums_from_exec = dsa_allocate(hashtable->area, bms_sz);
+		if (!DsaPointerIsValid(parallel_state->outer_rownums_from_exec))
+			elog(ERROR, "Insufficient memory for check");
+		shmem_outer_rownums_outer_rownums_from_exec =
+			(Bitmapset *) dsa_get_address(hashtable->area,
+										  parallel_state->outer_rownums_from_exec);
+		memcpy(shmem_outer_rownums_outer_rownums_from_exec, unioned, bms_sz);
+	}
+	LWLockRelease(&parallel_state->lock);
+}
+
+void
+ExecParallelHashCheckOuter(HashJoinTable hashtable)
+{
+	ParallelHashJoinState *pstate = hashtable->parallel_state;
+
+	elog(NOTICE, "ExecParallelHashCheckOuter(): worker: %d", ParallelWorkerNumber);
+
+	LWLockAcquire(&pstate->lock, LW_SHARED);
+	Bitmapset *shmem_outer_rownums_from_exec = (Bitmapset *) dsa_get_address(hashtable->area,
+																			 pstate->outer_rownums_from_exec);
+	Bitmapset *shmem_outer_rownums_from_sts = (Bitmapset *) dsa_get_address(hashtable->area,
+																			pstate->outer_rownums_from_sts);
+	if (!bms_equal(shmem_outer_rownums_from_sts, shmem_outer_rownums_from_exec))
+	{
+		elog(NOTICE, "shmem_outer_rownums_from_exec = %s", bmsToString(shmem_outer_rownums_from_exec));
+		elog(NOTICE, "shmem_outer_rownums_from_sts %s", bmsToString(shmem_outer_rownums_from_sts));
+		elog(NOTICE, "outer: shmem_outer_rownums_from_exec - shmem_outer_rownums_from_sts = %s",
+			 bmsToString(bms_difference(shmem_outer_rownums_from_exec, shmem_outer_rownums_from_sts)));
+		elog(NOTICE, "outer: shmem_outer_rownums_from_sts - shmem_outer_rownums_from_exec = %s",
+			 bmsToString(bms_difference(shmem_outer_rownums_from_sts, shmem_outer_rownums_from_exec)));
+	}
+	LWLockRelease(&pstate->lock);
+}
+
+void
+ExecParallelHashCheckInner(HashJoinTable hashtable, HashJoinState *hjstate)
+{
+	ParallelHashJoinState *pstate = hashtable->parallel_state;
+	ParallelHashJoinBatch *batches = (ParallelHashJoinBatch *)
+		dsa_get_address(hashtable->area, pstate->batches);
+	Bitmapset *ht_rownums = NULL;
+	HashMemoryChunk chunk;
+	dsa_pointer chunk_shared;
+	Bitmapset *inner_rownums_post_build = NULL;
+
+	elog(NOTICE, "ExecParallelHashCheckInner(): worker: %d", ParallelWorkerNumber);
+
+	/* Set up the accessor array and attach to the tuplestores. */
+	for (int i = 0; i < hashtable->nbatch; ++i)
+	{
+		Bitmapset *inner_spill_rownum_for_batch = NULL;
+
+		ParallelHashJoinBatchAccessor *accessor = &hashtable->batches[i];
+		ParallelHashJoinBatch *shared = NthParallelHashJoinBatch(batches, i);
+		MinimalTuple tuple;
+		uint32 hashvalue;
+
+		accessor->shared = shared;
+		accessor->inner_tuples =
+			sts_attach(ParallelHashJoinBatchInner(shared),
+					   ParallelWorkerNumber + 1,
+					   &pstate->fileset);
 		/*
 		 * Collect tuple rownums from inner-rel spill files
 		 */
 		sts_begin_parallel_scan(accessor->inner_tuples);
 		while ((tuple = sts_parallel_scan_next(accessor->inner_tuples, &hashvalue)))
 		{
-			Datum values[20];
-			bool  isnull[20];
-			heap_deform_tuple(heap_tuple_from_minimal_tuple(tuple),
-							  hjstate->hj_HashTupleSlot->tts_tupleDescriptor,
-							  values, isnull);
-			int inner_rownum = DatumGetInt32(values[0]);
-			inner_rownums = bms_add_member(inner_rownums, inner_rownum);
+			Datum value;
+			bool isnull;
+			ExecForceStoreMinimalTuple(tuple, hjstate->hj_HashTupleSlot, false);
+			value = slot_getattr(hjstate->hj_HashTupleSlot, 1, &isnull);
+			int inner_rownum =  DatumGetInt32(hjstate->hj_HashTupleSlot->tts_values[0]);
+			inner_spill_rownum_for_batch = bms_add_member(inner_spill_rownum_for_batch, inner_rownum);
 		}
 		sts_end_parallel_scan(accessor->inner_tuples);
 
-		// Do the check - just print for now
-		elog(NOTICE, "batch %d: outer_rownums = %d", i, bms_num_members(outer_rownums));
-		elog(NOTICE, "batch %d: inner_rownums = %d", i, bms_num_members(inner_rownums));
+		inner_rownums_post_build = bms_union(inner_rownums_post_build, inner_spill_rownum_for_batch);
 	}
+
 	// Collect tuple rownums from hash table
 	dsa_pointer old = hashtable->batches[0].shared->chunks;
+	dsa_pointer old_chunk_work_queue = pstate->chunk_work_queue;
 	ExecParallelHashEnsureBatchAccessors(hashtable);
 	ExecParallelHashTableSetCurrentBatch(hashtable, 0);
 	while ((chunk = ExecParallelHashPopChunkQueue(hashtable, &chunk_shared)))
 	{
 		MinimalTuple tuple;
 		size_t idx = 0;
-		elog(NOTICE, "out here");
 		while (idx < chunk->used)
 		{
 			Datum value;
 			bool isnull;
 			HashJoinTuple hashTuple = (HashJoinTuple) (HASH_CHUNK_DATA(chunk) + idx);
 			tuple = HJTUPLE_MINTUPLE(hashTuple);
-			elog(NOTICE, "here");
-			/*heap_deform_tuple(heap_tuple_from_minimal_tuple(tuple),
-							  hjstate->hj_HashTupleSlot->tts_tupleDescriptor,
-							  values, isnull);*/
 			ExecForceStoreMinimalTuple(tuple, hjstate->hj_HashTupleSlot, false);
 			value = slot_getattr(hjstate->hj_HashTupleSlot, 1, &isnull);
 			int ht_rownum = DatumGetInt32(value);
@@ -3949,6 +4060,20 @@ ExecParallelHashCheck(HashJoinTable hashtable, HashJoinState *hjstate)
 		}
 	}
 	hashtable->batches[0].shared->chunks = old;
+	pstate->chunk_work_queue = old_chunk_work_queue;
 
-	elog(NOTICE, "ht_rownums = %s", bmsToString(ht_rownums));
+	inner_rownums_post_build = bms_union(inner_rownums_post_build, ht_rownums);
+
+	/* Validation for inner rownums */
+	LWLockAcquire(&pstate->lock, LW_SHARED);
+	Bitmapset *shmem_inner_rownums = (Bitmapset *) dsa_get_address(hashtable->area,
+																   pstate->inner_rownums);
+	if (!bms_equal(inner_rownums_post_build, shmem_inner_rownums))
+	{
+		elog(NOTICE, "inner: shmem_build - post_build = %s", bmsToString(bms_difference(shmem_inner_rownums,
+																						inner_rownums_post_build)));
+		elog(NOTICE, "inner: post_build - shmem_build = %s", bmsToString(bms_difference(inner_rownums_post_build,
+																						shmem_inner_rownums)));
+	}
+	LWLockRelease(&pstate->lock);
 }

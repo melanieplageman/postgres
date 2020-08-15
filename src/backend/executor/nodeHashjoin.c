@@ -177,6 +177,8 @@ static pg_attribute_always_inline bool
 
 #define UINT_BITS (sizeof(unsigned int) * CHAR_BIT)
 
+bool phj_check;
+
 static void
 set_match_bit(HashJoinState *hjstate)
 {
@@ -277,6 +279,7 @@ ExecHashJoinImpl(PlanState *pstate, bool parallel)
 	uint32		hashvalue;
 	int			batchno;
 	ParallelHashJoinState *parallel_state;
+	Bitmapset *outer_rownums = NULL;
 
 	/*
 	 * get information from HashJoin node
@@ -438,8 +441,12 @@ ExecHashJoinImpl(PlanState *pstate, bool parallel)
 						if (BarrierArriveAndWait(build_barrier,
 											 WAIT_EVENT_HASH_BUILD_HASH_OUTER))
 						{
-							elog(NOTICE, "In check %d", ParallelWorkerNumber);
-							ExecParallelHashCheck(hashtable, node);
+							if(phj_check)
+							{
+								ExecParallelHashCheckInner(hashtable, node);
+								ExecParallelHashCheckOuterAddTuplesFromSTS(hashtable,
+																		   node);
+							}
 						}
 					}
 					if (BarrierPhase(build_barrier) < PHJ_BUILD_DONE)
@@ -450,7 +457,15 @@ ExecHashJoinImpl(PlanState *pstate, bool parallel)
 					hashtable->curbatch = -1;
 
 					if (!ExecParallelHashJoinNewBatch(node))
+					{
+						if(phj_check)
+						{
+							ExecParallelHashCheckOuterAddTuplesFromExec(
+								hashtable,
+								outer_rownums);
+						}
 						return NULL;
+					}
 				}
 				node->hj_JoinState = HJ_NEED_NEW_OUTER;
 
@@ -536,6 +551,9 @@ ExecHashJoinImpl(PlanState *pstate, bool parallel)
 					continue;
 				}
 
+				if (phj_check)
+					outer_rownums = bms_add_member(outer_rownums,
+												   DatumGetInt32(outerTupleSlot->tts_values[0]));
 				/*
 				 * While probing the phantom stripe, don't increment
 				 * hj_CurNumOuterTuples or extend the bitmap
@@ -652,7 +670,15 @@ ExecHashJoinImpl(PlanState *pstate, bool parallel)
 					}
 
 					if (otherqual == NULL || ExecQual(otherqual, econtext))
+					{
+						if(phj_check)
+						{
+							ExecParallelHashCheckOuterAddTuplesFromExec(
+								hashtable,
+								outer_rownums);
+						}
 						return ExecProject(node->js.ps.ps_ProjInfo);
+					}
 					else
 						InstrCountFiltered2(node, 1);
 				}
@@ -695,7 +721,15 @@ ExecHashJoinImpl(PlanState *pstate, bool parallel)
 					econtext->ecxt_innertuple = node->hj_NullInnerTupleSlot;
 
 					if (otherqual == NULL || ExecQual(otherqual, econtext))
+					{
+						if(phj_check)
+						{
+							ExecParallelHashCheckOuterAddTuplesFromExec(
+								hashtable,
+								outer_rownums);
+						}
 						return ExecProject(node->js.ps.ps_ProjInfo);
+					}
 					else
 						InstrCountFiltered2(node, 1);
 				}
@@ -722,7 +756,14 @@ ExecHashJoinImpl(PlanState *pstate, bool parallel)
 				econtext->ecxt_outertuple = node->hj_NullOuterTupleSlot;
 
 				if (otherqual == NULL || ExecQual(otherqual, econtext))
+				{
+					if (phj_check)
+					{
+						ExecParallelHashCheckOuterAddTuplesFromExec(hashtable,
+																	outer_rownums);	
+					}
 					return ExecProject(node->js.ps.ps_ProjInfo);
+				}
 				else
 					InstrCountFiltered2(node, 1);
 				break;
@@ -738,7 +779,15 @@ ExecHashJoinImpl(PlanState *pstate, bool parallel)
 				{
 					if (!ExecParallelHashJoinLoadStripe(node) &&
 						!ExecParallelHashJoinNewBatch(node))
+					{
+						if(phj_check)
+						{
+							ExecParallelHashCheckOuterAddTuplesFromExec(
+								hashtable,
+								outer_rownums);
+						}
 						return NULL;	/* end of parallel-aware join */
+					}
 				}
 				else
 				{
@@ -2086,6 +2135,9 @@ ExecHashJoinInitializeDSM(HashJoinState *state, ParallelContext *pcxt)
 	pg_atomic_init_u32(&pstate->distributor, 0);
 	pstate->nparticipants = pcxt->nworkers + 1;
 	pstate->total_tuples = 0;
+	pstate->inner_rownums = InvalidDsaPointer;
+	pstate->outer_rownums_from_exec = InvalidDsaPointer;
+	pstate->outer_rownums_from_sts = InvalidDsaPointer;
 	LWLockInitialize(&pstate->lock,
 					 LWTRANCHE_PARALLEL_HASH_JOIN);
 	BarrierInit(&pstate->build_barrier, 0);

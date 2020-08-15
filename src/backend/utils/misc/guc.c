@@ -127,7 +127,6 @@ extern char *temp_tablespaces;
 extern bool ignore_checksum_failure;
 extern bool ignore_invalid_pages;
 extern bool synchronize_seqscans;
-
 #ifdef TRACE_SYNCSCAN
 extern bool trace_syncscan;
 #endif
@@ -1816,6 +1815,16 @@ static struct config_bool ConfigureNamesBool[] =
 		},
 		&synchronize_seqscans,
 		true,
+		NULL, NULL, NULL
+	},
+
+	{
+		{"phj_check", PGC_USERSET, DEVELOPER_OPTIONS,
+		 gettext_noop("Enable PHJ check."),
+		 NULL
+		},
+		&phj_check,
+		false,
 		NULL, NULL, NULL
 	},
 

@@ -542,7 +542,7 @@ ROLLBACK;
 -- Serial Adaptive Hash Join
 
 BEGIN;
-CREATE TYPE stub AS (hash INTEGER, value CHAR(8098));
+CREATE TYPE stub AS (hash INTEGER, value CHAR(8090));
 
 CREATE FUNCTION stub_hash(item stub)
 RETURNS INTEGER AS $$
@@ -666,22 +666,26 @@ ORDER BY 1, 2, 3, 4, 5;
 rollback to settings;
 
 -- Test spill of batch 0 gives correct results.
-CREATE TABLE probeside_batch0(a stub, outer_rownum int generated always as identity);
+CREATE TABLE probeside_batch0(id int generated always as identity, a stub);
 ALTER TABLE probeside_batch0 ALTER COLUMN a SET STORAGE PLAIN;
 INSERT INTO probeside_batch0(a) SELECT '(0, "")' FROM generate_series(1, 13);
 INSERT INTO probeside_batch0(a) SELECT '(0, "unmatched outer")' FROM generate_series(1, 1);
 
-CREATE TABLE hashside_wide_batch0(a stub, id int, inner_rownum int generated always as identity);
+CREATE TABLE hashside_wide_batch0(id int generated always as identity, a stub);
 ALTER TABLE hashside_wide_batch0 ALTER COLUMN a SET STORAGE PLAIN;
-INSERT INTO hashside_wide_batch0(a, id) SELECT '(0, "")', 1 FROM generate_series(1, 9);
-INSERT INTO hashside_wide_batch0(a, id) SELECT '(0, "")', 1 FROM generate_series(1, 9);
-INSERT INTO hashside_wide_batch0(a, id) SELECT '(0, "")', 1 FROM generate_series(1, 9);
+INSERT INTO hashside_wide_batch0(a) SELECT '(0, "")' FROM generate_series(1, 9);
+INSERT INTO hashside_wide_batch0(a) SELECT '(0, "")' FROM generate_series(1, 9);
+INSERT INTO hashside_wide_batch0(a) SELECT '(0, "")' FROM generate_series(1, 9);
 ANALYZE probeside_batch0, hashside_wide_batch0;
 
-SELECT (probeside_batch0.a).hash, ((((probeside_batch0.a).hash << 7) >> 3) & 31) AS batchno, TRIM((probeside_batch0.a).value), hashside_wide_batch0.id, hashside_wide_batch0.ctid, (hashside_wide_batch0.a).hash, TRIM((hashside_wide_batch0.a).value)
+SELECT
+    hashside_wide_batch0.id as hashside_id,
+    (hashside_wide_batch0.a).hash as hashside_hash,
+    probeside_batch0.id as probeside_id,
+    (probeside_batch0.a).hash as probeside_hash
 FROM probeside_batch0
-LEFT OUTER JOIN hashside_wide_batch0 USING (a)
-ORDER BY 1, 2, 3, 4, 5;
+         LEFT OUTER JOIN hashside_wide_batch0 USING (a)
+ORDER BY 1, 2, 3, 4;
 
 set local min_parallel_table_scan_size = 0;
 set local parallel_setup_cost = 0;
@@ -691,16 +695,16 @@ savepoint settings;
 set max_parallel_workers_per_gather = 1;
 set enable_parallel_hash = on;
 set work_mem = '64kB';
+set phj_check to on;
 
-INSERT INTO hashside_wide_batch0(a, id) SELECT '(0, "")', 1 FROM generate_series(1, 9);
-
-EXPLAIN (ANALYZE, summary off, timing off, costs off, usage off) SELECT * FROM probeside_batch0
-LEFT OUTER JOIN hashside_wide_batch0 USING (a);
-
-SELECT (probeside_batch0.a).hash, ((((probeside_batch0.a).hash << 7) >> 3) & 31) AS batchno, TRIM((probeside_batch0.a).value), hashside_wide_batch0.id, hashside_wide_batch0.ctid, (hashside_wide_batch0.a).hash, TRIM((hashside_wide_batch0.a).value)
+SELECT
+    hashside_wide_batch0.id as hashside_id,
+    (hashside_wide_batch0.a).hash as hashside_hash,
+    probeside_batch0.id as probeside_id,
+    (probeside_batch0.a).hash as probeside_hash
 FROM probeside_batch0
-LEFT OUTER JOIN hashside_wide_batch0 USING (a)
-ORDER BY 1, 2, 3, 4, 5;
+         LEFT OUTER JOIN hashside_wide_batch0 USING (a)
+ORDER BY 1, 2, 3, 4;
 rollback to settings;
 
 rollback;

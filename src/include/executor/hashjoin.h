@@ -310,6 +310,9 @@ typedef struct ParallelHashJoinState
 	pg_atomic_uint32 distributor;	/* counter for load balancing */
 
 	SharedFileSet fileset;		/* space for shared temporary files */
+	dsa_pointer   inner_rownums;
+	dsa_pointer   outer_rownums_from_exec;
+	dsa_pointer   outer_rownums_from_sts;
 } ParallelHashJoinState;
 
 /* The phases for building batches, used by build_barrier. */
@@ -449,6 +452,9 @@ typedef struct HashJoinTableData
 	dsa_pointer current_chunk_shared;
 }			HashJoinTableData;
 
-extern void ExecParallelHashCheck(HashJoinTable hashtable, HashJoinState *hjstate);
+extern void ExecParallelHashCheckOuterAddTuplesFromSTS(HashJoinTable hashtable, HashJoinState *hjstate);
+extern void ExecParallelHashCheckOuterAddTuplesFromExec(HashJoinTable hashtable, Bitmapset *outer_rownums);
+extern void ExecParallelHashCheckOuter(HashJoinTable hashtable);
+extern void ExecParallelHashCheckInner(HashJoinTable hashtable, HashJoinState *hjstate);
 
 #endif							/* HASHJOIN_H */
