@@ -328,6 +328,7 @@
   proname => 'unknownout', prorettype => 'cstring', proargtypes => 'unknown',
   prosrc => 'unknownout' },
 { oid => '111',
+  descr => 'implementation of deprecated ! and !! factorial operators',
   proname => 'numeric_fac', prorettype => 'numeric', proargtypes => 'int8',
   prosrc => 'numeric_fac' },
 
@@ -7806,6 +7807,15 @@
   proallargtypes => '{text,int8,int8,int8}', proargmodes => '{o,o,o,o}',
   proargnames => '{name,off,size,allocated_size}',
   prosrc => 'pg_get_shmem_allocations' },
+
+# memory context of local backend
+{ oid => '2282', descr => 'information about all memory contexts of local backend',
+  proname => 'pg_get_backend_memory_contexts', prorows => '100', proretset => 't',
+  provolatile => 'v', proparallel => 'r', prorettype => 'record', proargtypes => '',
+  proallargtypes => '{text,text,text,int4,int8,int8,int8,int8,int8}',
+  proargmodes => '{o,o,o,o,o,o,o,o,o}',
+  proargnames => '{name, ident, parent, level, total_bytes, total_nblocks, free_bytes, free_chunks, used_bytes}',
+  prosrc => 'pg_get_backend_memory_contexts' },
 
 # non-persistent series generator
 { oid => '1066', descr => 'non-persistent series generator',

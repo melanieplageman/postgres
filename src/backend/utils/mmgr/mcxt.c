@@ -67,6 +67,7 @@ static void MemoryContextStatsPrint(MemoryContext context, void *passthru,
 #define AssertNotInCriticalSection(context) \
 	Assert(CritSectionCount == 0 || (context)->allowInCritSection)
 
+
 /*****************************************************************************
  *	  EXPORTED ROUTINES														 *
  *****************************************************************************/

@@ -867,6 +867,8 @@ typedef struct SubPlanState
 	MemoryContext hashtablecxt; /* memory context containing hash tables */
 	MemoryContext hashtempcxt;	/* temp memory context for hash tables */
 	ExprContext *innerecontext; /* econtext for computing inner tuples */
+	int			numCols;		/* number of columns being hashed */
+	/* each of the remaining fields is an array of length numCols: */
 	AttrNumber *keyColIdx;		/* control data for hash tables */
 	Oid		   *tab_eq_funcoids;	/* equality func oids for table
 									 * datatype(s) */
@@ -1957,6 +1959,10 @@ typedef struct HashJoinState
 	int			hj_JoinState;
 	bool		hj_MatchedOuter;
 	bool		hj_OuterNotEmpty;
+	/* Adaptive Hashjoin variables */
+	int			hj_CurNumOuterTuples;	/* number of outer tuples in a batch */
+	unsigned int hj_CurOuterMatchStatus;
+	int			hj_EmitOuterTupleId;
 } HashJoinState;
 
 
@@ -2385,6 +2391,7 @@ typedef struct HashInstrumentation
 	int			nbatch;			/* number of batches at end of execution */
 	int			nbatch_original;	/* planned number of batches */
 	Size		space_peak;		/* peak memory usage in bytes */
+	List	   *fallback_batches_stats; /* per hashjoin batch stats */
 } HashInstrumentation;
 
 /* ----------------
