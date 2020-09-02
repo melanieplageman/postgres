@@ -3845,6 +3845,18 @@ pgstat_get_wait_ipc(WaitEventIPC w)
 		case WAIT_EVENT_HASH_GROW_BUCKETS_REINSERT:
 			event_name = "HashGrowBucketsReinsert";
 			break;
+		case WAIT_EVENT_HASH_INNER_VALIDATION_ELECT:
+			event_name = "HashInnerValidateElect";
+			break;
+		case WAIT_EVENT_HASH_INNER_VALIDATION_DIFF:
+			event_name = "HashInnerValidateDiff";
+			break;
+		case WAIT_EVENT_HASH_OUTER_VALIDATION_ELECT:
+			event_name = "HashOuterValidateElect";
+			break;
+		case WAIT_EVENT_HASH_OUTER_VALIDATION_DIFF:
+			event_name = "HashOuterValidateDiff";
+			break;
 		case WAIT_EVENT_LOGICAL_SYNC_DATA:
 			event_name = "LogicalSyncData";
 			break;

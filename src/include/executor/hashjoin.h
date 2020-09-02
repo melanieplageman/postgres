@@ -319,8 +319,24 @@ typedef struct ParallelHashJoinState
 	Barrier		grow_buckets_barrier;
 	pg_atomic_uint32 distributor;	/* counter for load balancing */
 
+	Barrier     inner_validation_barrier;
+	Barrier     outer_validation_barrier;
+	dsa_pointer inner_rownums;
+	dsa_pointer outer_rownums_from_exec;
+	dsa_pointer outer_rownums_from_sts;
+
 	SharedFileSet fileset;		/* space for shared temporary files */
 } ParallelHashJoinState;
+
+//#define HJDEBUG 1
+
+#define PHJ_BUILD_INNER_VALIDATION_ELECTING 0
+#define PHJ_BUILD_INNER_VALIDATION_DIFFING 1
+#define PHJ_BUILD_INNER_VALIDATION_DONE 2
+
+#define PHJ_BUILD_OUTER_VALIDATION_ELECTING 0
+#define PHJ_BUILD_OUTER_VALIDATION_DIFFING 1
+#define PHJ_BUILD_OUTER_VALIDATION_DONE 2
 
 /* The phases for building batches, used by build_barrier. */
 #define PHJ_BUILD_ELECTING				0

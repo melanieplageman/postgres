@@ -177,6 +177,8 @@ static pg_attribute_always_inline bool
 
 #define UINT_BITS (sizeof(unsigned int) * CHAR_BIT)
 
+bool phj_check;
+
 static void
 set_match_bit(HashJoinState *hjstate)
 {
@@ -436,6 +438,8 @@ ExecHashJoinImpl(PlanState *pstate, bool parallel)
 							ExecParallelHashJoinPartitionOuter(node);
 						BarrierArriveAndWait(build_barrier,
 											 WAIT_EVENT_HASH_BUILD_HASH_OUTER);
+						if (phj_check)
+							ExecParallelHashValidateOuter(node, hashNode);
 
 					}
 					Assert(BarrierPhase(build_barrier) == PHJ_BUILD_DONE);
@@ -928,7 +932,7 @@ ExecInitHashJoin(HashJoin *node, EState *estate, int eflags)
 	hjstate->hj_OuterNotEmpty = false;
 	hjstate->hj_CurNumOuterTuples = 0;
 	hjstate->hj_CurOuterMatchStatus = 0;
-
+	hjstate->expected_outer_tuples = NULL;
 	return hjstate;
 }
 
@@ -1985,6 +1989,11 @@ ExecParallelHashJoinPartitionOuter(HashJoinState *hjstate)
 		slot = ExecProcNode(outerState);
 		if (TupIsNull(slot))
 			break;
+		if (phj_check)
+		{
+			bool isnull;
+			hjstate->expected_outer_tuples = bms_add_member(hjstate->expected_outer_tuples, DatumGetInt32(slot_getattr(slot, 1, &isnull)));
+		}
 		econtext->ecxt_outertuple = slot;
 		if (ExecHashGetHashValue(hashtable, econtext,
 								 hjstate->hj_OuterHashKeys,
@@ -2073,7 +2082,11 @@ ExecHashJoinInitializeDSM(HashJoinState *state, ParallelContext *pcxt)
 	BarrierInit(&pstate->repartition_barrier, 0);
 	BarrierInit(&pstate->grow_batches_barrier, 0);
 	BarrierInit(&pstate->grow_buckets_barrier, 0);
-
+	pstate->inner_rownums = InvalidDsaPointer;
+	pstate->outer_rownums_from_exec = InvalidDsaPointer;
+	pstate->outer_rownums_from_sts = InvalidDsaPointer;
+	BarrierInit(&pstate->inner_validation_barrier, 0);
+	BarrierInit(&pstate->outer_validation_barrier, 0);
 	/* Set up the space we'll use for shared temporary files. */
 	SharedFileSetInit(&pstate->fileset, pcxt->seg);
 

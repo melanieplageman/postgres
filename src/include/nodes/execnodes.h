@@ -1963,6 +1963,7 @@ typedef struct HashJoinState
 	int			hj_CurNumOuterTuples;	/* number of outer tuples in a batch */
 	unsigned int hj_CurOuterMatchStatus;
 	int			hj_EmitOuterTupleId;
+	Bitmapset *expected_outer_tuples;
 } HashJoinState;
 
 
@@ -2428,6 +2429,8 @@ typedef struct HashState
 	 * memory; either way it's for just one process.
 	 */
 	HashInstrumentation *hinstrument;
+
+	Bitmapset *expected_inner_tuples; /* For debugging of Build Stage */
 
 	/* Parallel hash state. */
 	struct ParallelHashJoinState *parallel_state;
