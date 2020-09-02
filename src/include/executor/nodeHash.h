@@ -80,5 +80,7 @@ extern void ExecHashRetrieveInstrumentation(HashState *node);
 extern void ExecShutdownHash(HashState *node);
 extern void ExecHashAccumInstrumentation(HashInstrumentation *instrument,
 										 HashJoinTable hashtable);
+extern void
+ExecParallelHashValidateOuter(HashJoinState *hjstate, HashState *hashstate);
 
 #endif							/* NODEHASH_H */
