@@ -92,6 +92,7 @@ static bool ExecParallelHashTuplePrealloc(HashJoinTable hashtable,
 static void ExecParallelHashMergeCounters(HashJoinTable hashtable);
 static void ExecParallelHashCloseBatchAccessors(HashJoinTable hashtable);
 
+bool phj_check;
 
 /* ----------------------------------------------------------------
  *		ExecHash
@@ -340,14 +341,10 @@ MultiExecParallelHash(HashState *node)
 										 &hashvalue))
 				{
 					ExecParallelHashTableInsert(hashtable, slot, hashvalue);
-#ifdef HJDEBUG
-
-					/*
-					 * TODO: does this need to be deformed?
-					 */
-					node->expected_inner_tuples = bms_add_member(node->expected_inner_tuples,
+					if (phj_check)
+					/* TODO: does this need to be deformed? */
+						node->expected_inner_tuples = bms_add_member(node->expected_inner_tuples,
 																 DatumGetInt32(econtext->ecxt_outertuple->tts_values[0]));
-#endif
 				}
 				hashtable->partialTuples++;
 			}
@@ -395,9 +392,8 @@ MultiExecParallelHash(HashState *node)
 	hashtable->log2_nbuckets = my_log2(hashtable->nbuckets);
 	hashtable->totalTuples = pstate->total_tuples;
 	ExecParallelHashEnsureBatchAccessors(hashtable);
-#ifdef HJDEBUG
-	ExecParallelHashValidateInner(node, econtext->ecxt_outertuple);
-#endif
+	if (phj_check)
+		ExecParallelHashValidateInner(node, econtext->ecxt_outertuple);
 
 	/*
 	 * The next synchronization point is in ExecHashJoin's HJ_BUILD_HASHTABLE

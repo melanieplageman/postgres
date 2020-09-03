@@ -1815,6 +1815,16 @@ static struct config_bool ConfigureNamesBool[] =
 	},
 
 	{
+		{"phj_check", PGC_USERSET, DEVELOPER_OPTIONS,
+		 gettext_noop("Enable PHJ check."),
+		 NULL
+		},
+		&phj_check,
+		false,
+		NULL, NULL, NULL
+	},
+
+	{
 		{"recovery_target_inclusive", PGC_POSTMASTER, WAL_RECOVERY_TARGET,
 			gettext_noop("Sets whether to include or exclude transaction with recovery target."),
 			NULL

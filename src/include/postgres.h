@@ -761,4 +761,6 @@ extern Datum Float8GetDatum(float8 X);
 #define Float8GetDatumFast(X) PointerGetDatum(&(X))
 #endif
 
+extern bool phj_check;
+
 #endif							/* POSTGRES_H */
