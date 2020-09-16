@@ -664,12 +664,6 @@ sts_get_tuplenum(SharedTuplestoreAccessor *accessor)
 	return pg_atomic_read_u32(&accessor->sts->ntuples);
 }
 
-int
-sta_get_read_participant(SharedTuplestoreAccessor *accessor)
-{
-	return accessor->read_participant;
-}
-
 void
 sts_spill_leftover_tuples(SharedTuplestoreAccessor *accessor, MinimalTuple tuple, uint32 hashvalue)
 {

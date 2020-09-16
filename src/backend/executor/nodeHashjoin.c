@@ -1686,7 +1686,7 @@ ExecParallelHashJoinLoadStripe(HashJoinState *hjstate)
 				while ((tuple = sts_parallel_scan_next(inner_tuples, &metadata)))
 				{
 					ExecForceStoreMinimalTuple(tuple, hjstate->hj_HashTupleSlot, false);
-					if (!ExecParallelHashTableInsertCurrentBatch(hashtable, hjstate->hj_HashTupleSlot, metadata.hashvalue, sta_get_read_participant(inner_tuples)))
+					if (!ExecParallelHashTableInsertCurrentBatch(hashtable, hjstate->hj_HashTupleSlot, metadata.hashvalue))
 					{
 						overflow_required = true;
 						pg_atomic_test_set_flag(&batch->overflow_required);

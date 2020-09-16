@@ -2019,8 +2019,7 @@ retry:
 MinimalTuple
 ExecParallelHashTableInsertCurrentBatch(HashJoinTable hashtable,
 										TupleTableSlot *slot,
-										uint32 hashvalue,
-										int read_participant)
+										uint32 hashvalue)
 {
 	bool		shouldFree;
 	MinimalTuple tuple = ExecFetchSlotMinimalTuple(slot, &shouldFree);

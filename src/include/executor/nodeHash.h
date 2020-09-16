@@ -44,8 +44,7 @@ extern void ExecParallelHashTableInsert(HashJoinTable hashtable,
 extern MinimalTuple
 			ExecParallelHashTableInsertCurrentBatch(HashJoinTable hashtable,
 													TupleTableSlot *slot,
-													uint32 hashvalue,
-													int read_participant);
+													uint32 hashvalue);
 extern bool ExecHashGetHashValue(HashJoinTable hashtable,
 								 ExprContext *econtext,
 								 List *hashkeys,

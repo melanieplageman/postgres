@@ -27,11 +27,7 @@ typedef struct tupleMetadata tupleMetadata;
 struct tupleMetadata
 {
 	uint32		hashvalue;
-	union
-	{
-		uint32		tupleid;	/* tuple number or id on the outer side */
-		int			stripe;		/* stripe number for inner side */
-	};
+	uint32		tupleid;	/* tuple number or id used for outer side */
 };
 
 /*
@@ -71,7 +67,6 @@ extern MinimalTuple sts_parallel_scan_next(SharedTuplestoreAccessor *accessor,
 
 extern uint32 sts_increment_ntuples(SharedTuplestoreAccessor *accessor);
 extern uint32 sts_get_tuplenum(SharedTuplestoreAccessor *accessor);
-extern int	sta_get_read_participant(SharedTuplestoreAccessor *accessor);
 extern void sts_spill_leftover_tuples(SharedTuplestoreAccessor *accessor, MinimalTuple tuple, uint32 hashvalue);
 
 extern MinimalTuple sts_parallel_scan_chunk(SharedTuplestoreAccessor *accessor,
