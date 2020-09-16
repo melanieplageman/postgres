@@ -655,6 +655,7 @@ FROM probeside WHERE NOT EXISTS (SELECT * FROM hashside_wide WHERE probeside.a=a
 
 -- parallel LOJ test case with two batches falling back
 savepoint settings;
+set phj_check to on;
 set local max_parallel_workers_per_gather = 1;
 set local min_parallel_table_scan_size = 0;
 set local parallel_setup_cost = 0;
@@ -682,6 +683,7 @@ INSERT INTO hashside_wide_batch0(a) SELECT '(0, "")' FROM generate_series(1, 9);
 INSERT INTO hashside_wide_batch0(a) SELECT '(0, "")' FROM generate_series(1, 9);
 ANALYZE probeside_batch0, hashside_wide_batch0;
 
+set phj_check to on;
 SELECT
        hashside_wide_batch0.id as hashside_id, 
        (hashside_wide_batch0.a).hash as hashside_hash,
@@ -704,6 +706,7 @@ set work_mem = '64kB';
 
 INSERT INTO hashside_wide_batch0(a) SELECT '(0, "")' FROM generate_series(1, 9);
 
+set phj_check to on;
 EXPLAIN (ANALYZE, summary off, timing off, costs off, usage off) SELECT * FROM probeside_batch0
 LEFT OUTER JOIN hashside_wide_batch0 USING (a);
 

@@ -74,6 +74,7 @@ typedef struct HashJoinTupleData
 		dsa_pointer shared;
 	}			next;
 	uint32		hashvalue;		/* tuple's hash code */
+	uint32		tupleid;		/* unique identifier for tuple used for debugging */
 	/* Tuple data, in MinimalTuple format, follows on a MAXALIGN boundary */
 }			HashJoinTupleData;
 

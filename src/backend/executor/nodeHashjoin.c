@@ -438,8 +438,8 @@ ExecHashJoinImpl(PlanState *pstate, bool parallel)
 							ExecParallelHashJoinPartitionOuter(node);
 						BarrierArriveAndWait(build_barrier,
 											 WAIT_EVENT_HASH_BUILD_HASH_OUTER);
-						if (phj_check)
-							ExecParallelHashValidateOuter(node, hashNode);
+//						if (phj_check)
+//							ExecParallelHashValidateOuter(node, hashNode);
 
 					}
 					Assert(BarrierPhase(build_barrier) == PHJ_BUILD_DONE);
@@ -1690,7 +1690,7 @@ ExecParallelHashJoinLoadStripe(HashJoinState *hjstate)
 				while ((tuple = sts_parallel_scan_next(inner_tuples, &metadata)))
 				{
 					ExecForceStoreMinimalTuple(tuple, hjstate->hj_HashTupleSlot, false);
-					if (!ExecParallelHashTableInsertCurrentBatch(hashtable, hjstate->hj_HashTupleSlot, metadata.hashvalue, sta_get_read_participant(inner_tuples)))
+					if (!ExecParallelHashTableInsertCurrentBatch(hashtable, hjstate->hj_HashTupleSlot, &metadata, sta_get_read_participant(inner_tuples)))
 					{
 						overflow_required = true;
 						pg_atomic_test_set_flag(&batch->overflow_required);
@@ -1989,11 +1989,6 @@ ExecParallelHashJoinPartitionOuter(HashJoinState *hjstate)
 		slot = ExecProcNode(outerState);
 		if (TupIsNull(slot))
 			break;
-		if (phj_check)
-		{
-			bool isnull;
-			hjstate->expected_outer_tuples = bms_add_member(hjstate->expected_outer_tuples, DatumGetInt32(slot_getattr(slot, 1, &isnull)));
-		}
 		econtext->ecxt_outertuple = slot;
 		if (ExecHashGetHashValue(hashtable, econtext,
 								 hjstate->hj_OuterHashKeys,
@@ -2014,9 +2009,10 @@ ExecParallelHashJoinPartitionOuter(HashJoinState *hjstate)
 
 			/* cannot count on deterministic order of tupleids */
 			metadata.tupleid = sts_increment_ntuples(accessor);
-
+			if (phj_check)
+				hjstate->expected_outer_tuples = bms_add_member(hjstate->expected_outer_tuples, metadata.tupleid);
 			sts_puttuple(hashtable->batches[batchno].outer_tuples,
-						 &metadata.hashvalue,
+						 &metadata,
 						 mintup);
 
 			if (shouldFree)

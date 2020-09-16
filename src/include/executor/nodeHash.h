@@ -40,11 +40,11 @@ extern void ExecHashTableInsert(HashJoinTable hashtable,
 								uint32 hashvalue);
 extern void ExecParallelHashTableInsert(HashJoinTable hashtable,
 										TupleTableSlot *slot,
-										uint32 hashvalue);
+										tupleMetadata *metadata);
 extern MinimalTuple
 			ExecParallelHashTableInsertCurrentBatch(HashJoinTable hashtable,
 													TupleTableSlot *slot,
-													uint32 hashvalue,
+													tupleMetadata *metadata,
 													int read_participant);
 extern bool ExecHashGetHashValue(HashJoinTable hashtable,
 								 ExprContext *econtext,

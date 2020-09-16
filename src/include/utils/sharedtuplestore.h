@@ -27,11 +27,7 @@ typedef struct tupleMetadata tupleMetadata;
 struct tupleMetadata
 {
 	uint32		hashvalue;
-	union
-	{
-		uint32		tupleid;	/* tuple number or id on the outer side */
-		int			stripe;		/* stripe number for inner side */
-	};
+	uint32		tupleid;	/* tuple number or id */
 };
 
 /*

@@ -82,7 +82,7 @@ static void ExecParallelHashEnsureBatchAccessors(HashJoinTable hashtable);
 static void ExecParallelHashRepartitionFirst(HashJoinTable hashtable);
 static void ExecParallelHashRepartitionBatch0Tuple(HashJoinTable hashtable,
 												   MinimalTuple tuple,
-												   uint32 hashvalue);
+												   tupleMetadata *metadata);
 static void ExecParallelHashRepartitionRest(HashJoinTable hashtable);
 static HashMemoryChunk ExecParallelHashPopChunkQueue(HashJoinTable table,
 													 dsa_pointer *shared);
@@ -272,6 +272,7 @@ MultiExecParallelHash(HashState *node)
 	HashJoinTable hashtable;
 	TupleTableSlot *slot;
 	ExprContext *econtext;
+	tupleMetadata metadata;
 	uint32		hashvalue;
 	Barrier    *build_barrier;
 	int			i;
@@ -340,11 +341,13 @@ MultiExecParallelHash(HashState *node)
 										 false, hashtable->keepNulls,
 										 &hashvalue))
 				{
-					ExecParallelHashTableInsert(hashtable, slot, hashvalue);
+					metadata.hashvalue = hashvalue;
 					if (phj_check)
-					/* TODO: does this need to be deformed? */
-						node->expected_inner_tuples = bms_add_member(node->expected_inner_tuples,
-																 DatumGetInt32(econtext->ecxt_outertuple->tts_values[0]));
+					{
+						metadata.tupleid = sts_increment_ntuples(hashtable->batches[0].inner_tuples);
+						node->expected_inner_tuples = bms_add_member(node->expected_inner_tuples, metadata.tupleid);
+					}
+					ExecParallelHashTableInsert(hashtable, slot, &metadata);
 				}
 				hashtable->partialTuples++;
 			}
@@ -392,8 +395,10 @@ MultiExecParallelHash(HashState *node)
 	hashtable->log2_nbuckets = my_log2(hashtable->nbuckets);
 	hashtable->totalTuples = pstate->total_tuples;
 	ExecParallelHashEnsureBatchAccessors(hashtable);
-	if (phj_check)
-		ExecParallelHashValidateInner(node, econtext->ecxt_outertuple);
+//	if (phj_check)
+//		ExecParallelHashValidateInner(node, econtext->ecxt_outertuple);
+	if (phj_check && node->expected_inner_tuples)
+		elog(NOTICE, "%d: inner tuples %s", ParallelWorkerNumber, bmsToString(node->expected_inner_tuples));
 
 	/*
 	 * The next synchronization point is in ExecHashJoin's HJ_BUILD_HASHTABLE
@@ -670,6 +675,8 @@ ExecParallelHashValidateOuterBuildActual(HashJoinTable hashtable, HashJoinState 
 		ParallelHashJoinBatch *shared = NthParallelHashJoinBatch(batches, i);
 		MinimalTuple tuple;
 		uint32		hashvalue;
+		tupleMetadata metadata;
+
 
 		accessor->shared = shared;
 		accessor->outer_tuples =
@@ -682,16 +689,13 @@ ExecParallelHashValidateOuterBuildActual(HashJoinTable hashtable, HashJoinState 
 		 * Collect tuple rownums from outer-rel spill files
 		 */
 		sts_begin_parallel_scan(accessor->outer_tuples);
-		while ((tuple = sts_parallel_scan_next(accessor->outer_tuples, &hashvalue)))
+		while ((tuple = sts_parallel_scan_next(accessor->outer_tuples, &metadata)))
 		{
 			Datum		value;
 			bool		isnull;
 			int			outer_rownum;
 
-			ExecForceStoreMinimalTuple(tuple, hjstate->hj_OuterTupleSlot, false);
-			value = slot_getattr(hjstate->hj_OuterTupleSlot, 1, &isnull);
-			outer_rownum = DatumGetInt32(value);
-			outer_spill_rownum_for_batch = bms_add_member(outer_spill_rownum_for_batch, outer_rownum);
+			outer_spill_rownum_for_batch = bms_add_member(outer_spill_rownum_for_batch, metadata.tupleid);
 		}
 		sts_end_parallel_scan(accessor->outer_tuples);
 		unioned = bms_union(unioned, outer_spill_rownum_for_batch);
@@ -1785,6 +1789,7 @@ static void
 ExecParallelHashRepartitionFirst(HashJoinTable hashtable)
 {
 	ParallelHashJoinState *pstate;
+	tupleMetadata metadata;
 
 	ParallelHashJoinBatch *old_shared;
 	SharedTuplestoreAccessor *old_inner_batch0_sts;
@@ -1821,9 +1826,11 @@ ExecParallelHashRepartitionFirst(HashJoinTable hashtable)
 
 					tuple = HJTUPLE_MINTUPLE(hashTuple);
 
+					metadata.hashvalue = hashTuple->hashvalue;
+					metadata.tupleid = hashTuple->tupleid;
 					ExecParallelHashRepartitionBatch0Tuple(hashtable,
 														   tuple,
-														   hashTuple->hashvalue);
+														   &metadata);
 
 					idx += MAXALIGN(HJTUPLE_OVERHEAD + HJTUPLE_MINTUPLE(hashTuple)->t_len);
 				}
@@ -1836,7 +1843,6 @@ ExecParallelHashRepartitionFirst(HashJoinTable hashtable)
 		case PHJ_REPARTITION_BATCH0_DRAIN_SPILL_FILE:
 			{
 				MinimalTuple tuple;
-				tupleMetadata metadata;
 
 				/*
 				 * Repartition all of the tuples in this spill file. These
@@ -1846,12 +1852,12 @@ ExecParallelHashRepartitionFirst(HashJoinTable hashtable)
 				 */
 				sts_begin_parallel_scan(old_inner_batch0_sts);
 				while ((tuple = sts_parallel_scan_next(old_inner_batch0_sts,
-													   &metadata.hashvalue)))
+													   &metadata)))
 				{
 
 					ExecParallelHashRepartitionBatch0Tuple(hashtable,
 														   tuple,
-														   metadata.hashvalue);
+														   &metadata);
 				}
 				sts_end_parallel_scan(old_inner_batch0_sts);
 			}
@@ -1862,7 +1868,7 @@ ExecParallelHashRepartitionFirst(HashJoinTable hashtable)
 static void
 ExecParallelHashRepartitionBatch0Tuple(HashJoinTable hashtable,
 									   MinimalTuple tuple,
-									   uint32 hashvalue)
+									   tupleMetadata *metadata)
 {
 	int			batchno;
 	int			bucketno;
@@ -1874,7 +1880,7 @@ ExecParallelHashRepartitionBatch0Tuple(HashJoinTable hashtable,
 	size_t		tuple_size =
 	MAXALIGN(HJTUPLE_OVERHEAD + tuple->t_len);
 
-	ExecHashGetBucketAndBatch(hashtable, hashvalue, &bucketno, &batchno);
+	ExecHashGetBucketAndBatch(hashtable, metadata->hashvalue, &bucketno, &batchno);
 
 	/*
 	 * We don't take a lock to read pstate->space_allowed because it should
@@ -1895,9 +1901,11 @@ ExecParallelHashRepartitionBatch0Tuple(HashJoinTable hashtable,
 		if (copyTuple)
 		{
 			/* Store the hash value in the HashJoinTuple header. */
-			copyTuple->hashvalue = hashvalue;
+			copyTuple->hashvalue = metadata->hashvalue;
+			copyTuple->tupleid = metadata->tupleid;
 			memcpy(HJTUPLE_MINTUPLE(copyTuple), tuple, tuple->t_len);
 
+			elog(NOTICE, "%d: inserting tuple with tupleid %d into hashtable. repartitionbatch0tuple", ParallelWorkerNumber, metadata->tupleid);
 			/* Push it onto the front of the bucket's list */
 			ExecParallelHashPushTuple(&hashtable->buckets.shared[bucketno],
 									  copyTuple, shared);
@@ -1909,9 +1917,6 @@ ExecParallelHashRepartitionBatch0Tuple(HashJoinTable hashtable,
 
 	if (spill)
 	{
-
-		tupleMetadata metadata;
-
 		ParallelHashJoinBatchAccessor *batch_accessor = &(hashtable->batches[batchno]);
 
 		/*
@@ -1923,8 +1928,8 @@ ExecParallelHashRepartitionBatch0Tuple(HashJoinTable hashtable,
 		 * counters after the build phase
 		 */
 		batch_accessor->estimated_size += tuple_size;
-		metadata.hashvalue = hashvalue;
 
+		elog(NOTICE, "%d: repartition batch 0 tuple with tupleid %d to batch %d spill file", ParallelWorkerNumber, metadata->tupleid, batchno);
 		sts_puttuple(batch_accessor->inner_tuples,
 					 &metadata,
 					 tuple);
@@ -1944,6 +1949,7 @@ ExecParallelHashRepartitionRest(HashJoinTable hashtable)
 	SharedTuplestoreAccessor **old_inner_tuples;
 	ParallelHashJoinBatch *old_batches;
 	int			i;
+	tupleMetadata metadata;
 
 	/* Get our hands on the previous generation of batches. */
 	old_batches = (ParallelHashJoinBatch *)
@@ -1963,22 +1969,20 @@ ExecParallelHashRepartitionRest(HashJoinTable hashtable)
 	for (i = 1; i < old_nbatch; ++i)
 	{
 		MinimalTuple tuple;
-		uint32		hashvalue;
 
 		/* Scan one partition from the previous generation. */
 		sts_begin_parallel_scan(old_inner_tuples[i]);
 		while ((tuple = sts_parallel_scan_next(old_inner_tuples[i],
-											   &hashvalue)))
+											   &metadata)))
 		{
 			int			bucketno;
 			int			batchno;
 			size_t		tuple_size;
-			tupleMetadata metadata;
 			ParallelHashJoinBatchAccessor *batch_accessor;
 
 
 			/* Decide which partition it goes to in the new generation. */
-			ExecHashGetBucketAndBatch(hashtable, hashvalue, &bucketno,
+			ExecHashGetBucketAndBatch(hashtable, metadata.hashvalue, &bucketno,
 									  &batchno);
 
 			tuple_size =
@@ -1995,8 +1999,9 @@ ExecParallelHashRepartitionRest(HashJoinTable hashtable)
 			 * it and will merge counters after the build phase
 			 */
 			batch_accessor->estimated_size += tuple_size;
-			metadata.hashvalue = hashvalue;
 
+			elog(NOTICE, "%d: repartition batch %d tuple with tupleid %d to batch %d spill file",
+					ParallelWorkerNumber, i, metadata.tupleid, batchno);
 			sts_puttuple(batch_accessor->inner_tuples,
 						 &metadata,
 						 tuple);
@@ -2176,6 +2181,7 @@ ExecParallelHashIncreaseNumBuckets(HashJoinTable hashtable)
 					ExecHashGetBucketAndBatch(hashtable, hashTuple->hashvalue,
 											  &bucketno, &batchno);
 					Assert(batchno == 0);
+					elog(NOTICE, "%d: as part of grow buckets, inserting tuple with tupleid %d into hashtable", ParallelWorkerNumber, hashTuple->tupleid);
 
 					/* add the tuple to the proper bucket */
 					ExecParallelHashPushTuple(&hashtable->buckets.shared[bucketno],
@@ -2297,7 +2303,7 @@ ExecHashTableInsert(HashJoinTable hashtable,
 void
 ExecParallelHashTableInsert(HashJoinTable hashtable,
 							TupleTableSlot *slot,
-							uint32 hashvalue)
+							tupleMetadata *metadata)
 {
 	bool		shouldFree;
 	MinimalTuple tuple = ExecFetchSlotMinimalTuple(slot, &shouldFree);
@@ -2306,7 +2312,7 @@ ExecParallelHashTableInsert(HashJoinTable hashtable,
 	int			batchno;
 
 retry:
-	ExecHashGetBucketAndBatch(hashtable, hashvalue, &bucketno, &batchno);
+	ExecHashGetBucketAndBatch(hashtable, metadata->hashvalue, &bucketno, &batchno);
 
 	if (batchno == 0)
 	{
@@ -2322,9 +2328,11 @@ retry:
 			goto retry;
 
 		/* Store the hash value in the HashJoinTuple header. */
-		hashTuple->hashvalue = hashvalue;
+		hashTuple->hashvalue = metadata->hashvalue;
+		hashTuple->tupleid = metadata->tupleid;
 		memcpy(HJTUPLE_MINTUPLE(hashTuple), tuple, tuple->t_len);
 
+		elog(NOTICE, "%d: inserting tuple with tupleid %d into hashtable. ExecParallelHashTableInsert", ParallelWorkerNumber, metadata->tupleid);
 		/* Push it onto the front of the bucket's list */
 		ExecParallelHashPushTuple(&hashtable->buckets.shared[bucketno],
 								  hashTuple, shared);
@@ -2334,7 +2342,6 @@ retry:
 	else
 	{
 		size_t		tuple_size = MAXALIGN(HJTUPLE_OVERHEAD + tuple->t_len);
-		tupleMetadata metadata;
 
 		Assert(batchno > 0);
 
@@ -2348,8 +2355,8 @@ retry:
 		Assert(hashtable->batches[batchno].preallocated >= tuple_size);
 		hashtable->batches[batchno].preallocated -= tuple_size;
 
-		metadata.hashvalue = hashvalue;
-
+		elog(NOTICE, "%d: inserting tuple with tuple id %d into batch %d spill file",
+	   ParallelWorkerNumber, metadata->tupleid, batchno);
 		sts_puttuple(hashtable->batches[batchno].inner_tuples,
 					 &metadata,
 					 tuple);
@@ -2369,7 +2376,7 @@ retry:
 MinimalTuple
 ExecParallelHashTableInsertCurrentBatch(HashJoinTable hashtable,
 										TupleTableSlot *slot,
-										uint32 hashvalue,
+										tupleMetadata *metadata,
 										int read_participant)
 {
 	bool		shouldFree;
@@ -2380,7 +2387,7 @@ ExecParallelHashTableInsertCurrentBatch(HashJoinTable hashtable,
 	int			bucketno;
 
 
-	ExecHashGetBucketAndBatch(hashtable, hashvalue, &bucketno, &batchno);
+	ExecHashGetBucketAndBatch(hashtable, metadata->hashvalue, &bucketno, &batchno);
 	Assert(batchno == hashtable->curbatch);
 
 	hashTuple = ExecParallelHashTupleAlloc(hashtable,
@@ -2389,9 +2396,13 @@ ExecParallelHashTableInsertCurrentBatch(HashJoinTable hashtable,
 	if (!hashTuple)
 		return NULL;
 
-	hashTuple->hashvalue = hashvalue;
+	hashTuple->hashvalue = metadata->hashvalue;
+	hashTuple->tupleid = metadata->tupleid;
 	memcpy(HJTUPLE_MINTUPLE(hashTuple), tuple, tuple->t_len);
 	HeapTupleHeaderClearMatch(HJTUPLE_MINTUPLE(hashTuple));
+	elog(NOTICE, "%d: inserting tuple with tupleid %d into hashtable. ExecParallelHashTableInsertCurrentBatch",
+	  ParallelWorkerNumber, metadata->tupleid);
+
 	ExecParallelHashPushTuple(&hashtable->buckets.shared[bucketno],
 							  hashTuple, shared);
 	pg_atomic_add_fetch_u64(&hashtable->batches[hashtable->curbatch].shared->ntuples_in_memory, 1);
@@ -3526,7 +3537,9 @@ ExecParallelHashTableEvictBatch0(HashJoinTable hashtable)
 						 */
 						batch0_accessor->estimated_size += tuple_size;
 						metadata.hashvalue = hashTuple->hashvalue;
+						metadata.tupleid = hashTuple->tupleid;
 
+						elog(NOTICE, "%d: evicting tuple with tupleid %d to batch 0 spill file", ParallelWorkerNumber, metadata.tupleid);
 						sts_puttuple(batch0_accessor->inner_tuples,
 									 &metadata,
 									 minTuple);
