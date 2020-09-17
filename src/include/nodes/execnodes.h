@@ -1921,6 +1921,7 @@ typedef struct MergeJoinState
  *								tuple, or NULL if starting search
  *								(hj_CurXXX variables are undefined if
  *								OuterTupleSlot is empty!)
+ *		hj_AllocatedBucketRange	range allocated for parallel unmatched scan
  *		hj_OuterTupleSlot		tuple slot for outer tuples
  *		hj_HashTupleSlot		tuple slot for inner (hashed) tuples
  *		hj_NullOuterTupleSlot	prepared null tuple for right/full outer joins
@@ -1947,6 +1948,7 @@ typedef struct HashJoinState
 	uint32		hj_CurHashValue;
 	int			hj_CurBucketNo;
 	int			hj_CurSkewBucketNo;
+	int			hj_AllocatedBucketRange;
 	HashJoinTuple hj_CurTuple;
 	TupleTableSlot *hj_OuterTupleSlot;
 	TupleTableSlot *hj_HashTupleSlot;

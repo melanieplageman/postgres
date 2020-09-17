@@ -2056,6 +2056,7 @@ ExecPrepHashTableForUnmatched(HashJoinState *hjstate)
 	hjstate->hj_CurBucketNo = 0;
 	hjstate->hj_CurSkewBucketNo = 0;
 	hjstate->hj_CurTuple = NULL;
+	hjstate->hj_AllocatedBucketRange = 0;
 }
 
 /*
@@ -2131,6 +2132,87 @@ ExecScanHashTableForUnmatched(HashJoinState *hjstate, ExprContext *econtext)
 	 */
 	return false;
 }
+
+/*
+ * ExecParallelScanHashTableForUnmatched
+ *		scan the hash table for unmatched inner tuples, in parallel
+ *
+ * On success, the inner tuple is stored into hjstate->hj_CurTuple and
+ * econtext->ecxt_innertuple, using hjstate->hj_HashTupleSlot as the slot
+ * for the latter.
+ */
+bool
+ExecParallelScanHashTableForUnmatched(HashJoinState *hjstate,
+									  ExprContext *econtext)
+{
+	HashJoinTable hashtable = hjstate->hj_HashTable;
+	HashJoinTuple hashTuple = hjstate->hj_CurTuple;
+
+	for (;;)
+	{
+		/*
+		 * hj_CurTuple is the address of the tuple last returned from the
+		 * current bucket, or NULL if it's time to start scanning a new
+		 * bucket.
+		 */
+		if (hashTuple != NULL)
+			hashTuple = ExecParallelHashNextTuple(hashtable, hashTuple);
+		else if (hjstate->hj_CurBucketNo < hjstate->hj_AllocatedBucketRange)
+			hashTuple = ExecParallelHashFirstTuple(hashtable,
+												   hjstate->hj_CurBucketNo++);
+		else if (hjstate->hj_CurBucketNo < hashtable->nbuckets)
+		{
+			/*
+			 * Allocate a few cachelines' worth of buckets and loop around.
+			 * Testing shows that 8 is a good factor.
+			 */
+			int step = (PG_CACHE_LINE_SIZE * 8) / sizeof(dsa_pointer_atomic);
+
+			hjstate->hj_CurBucketNo =
+				pg_atomic_fetch_add_u32(&hashtable->batches[hashtable->curbatch].shared->bucket,
+										step);
+			hjstate->hj_AllocatedBucketRange =
+				Min(hjstate->hj_CurBucketNo + step, hashtable->nbuckets);
+		}
+		else
+			break;				/* finished all buckets */
+
+		while (hashTuple != NULL)
+		{
+			if (!HeapTupleHeaderHasMatch(HJTUPLE_MINTUPLE(hashTuple)))
+			{
+				TupleTableSlot *inntuple;
+
+				/* insert hashtable's tuple into exec slot */
+				inntuple = ExecStoreMinimalTuple(HJTUPLE_MINTUPLE(hashTuple),
+												 hjstate->hj_HashTupleSlot,
+												 false);	/* do not pfree */
+				econtext->ecxt_innertuple = inntuple;
+
+				/*
+				 * Reset temp memory each time; although this function doesn't
+				 * do any qual eval, the caller will, so let's keep it
+				 * parallel to ExecScanHashBucket.
+				 */
+				ResetExprContext(econtext);
+
+				hjstate->hj_CurTuple = hashTuple;
+				return true;
+			}
+
+			hashTuple = ExecParallelHashNextTuple(hashtable, hashTuple);
+		}
+
+		/* allow this loop to be cancellable */
+		CHECK_FOR_INTERRUPTS();
+	}
+
+	/*
+	 * no more unmatched tuples
+	 */
+	return false;
+}
+
 
 /*
  * ExecHashTableReset
@@ -2971,6 +3053,7 @@ ExecParallelHashJoinSetUpBatches(HashJoinTable hashtable, int nbatch)
 		 * up the Barrier.
 		 */
 		BarrierInit(&shared->batch_barrier, 0);
+		pg_atomic_init_u32(&shared->bucket, 0);
 		if (i == 0)
 		{
 			/* Batch 0 doesn't need to be loaded. */
@@ -3131,13 +3214,6 @@ ExecHashTableDetachBatch(HashJoinTable hashtable)
 		/* Detach from the batch we were last working on. */
 		if (BarrierArriveAndDetach(&batch->batch_barrier))
 		{
-			/*
-			 * Technically we shouldn't access the barrier because we're no
-			 * longer attached, but since there is no way it's moving after
-			 * this point it seems safe to make the following assertion.
-			 */
-			Assert(BarrierPhase(&batch->batch_barrier) == PHJ_BATCH_DONE);
-
 			/* Free shared chunks and buckets. */
 			while (DsaPointerIsValid(batch->chunks))
 			{
