@@ -82,6 +82,7 @@
  *  PHJ_BATCH_ALLOCATING     -- one allocates buckets
  *  PHJ_BATCH_LOADING        -- all load the hash table from disk
  *  PHJ_BATCH_PROBING        -- all probe
+ *  PHJ_BATCH_SCAN_INNER     -- scan unmatched inner tuples
  *  PHJ_BATCH_DONE           -- end
  *
  * Batch 0 is a special case, because it starts out in phase
@@ -97,9 +98,9 @@
  * all other backends attached to it are actively executing the node or have
  * already arrived.  Practically, that means that we never return a tuple
  * while attached to a barrier, unless the barrier has reached its final
- * state.  In the slightly special case of the per-batch barrier, we return
- * tuples while in PHJ_BATCH_PROBING phase, but that's OK because we use
- * BarrierArriveAndDetach() to advance it to PHJ_BATCH_DONE without waiting.
+ * state.
+ *
+ * TODO: WIP: That's now not true, because of PHJ_SCAN_INNER.
  *
  *-------------------------------------------------------------------------
  */
@@ -144,6 +145,7 @@ static TupleTableSlot *ExecHashJoinGetSavedTuple(HashJoinState *hjstate,
 												 uint32 *hashvalue,
 												 TupleTableSlot *tupleSlot);
 static bool ExecHashJoinNewBatch(HashJoinState *hjstate);
+static void ExecParallelHashEndProbe(HashJoinState *hjstate);
 static bool ExecParallelHashJoinNewBatch(HashJoinState *hjstate);
 static void ExecParallelHashJoinPartitionOuter(HashJoinState *node);
 
@@ -358,6 +360,9 @@ ExecHashJoinImpl(PlanState *pstate, bool parallel)
 				if (TupIsNull(outerTupleSlot))
 				{
 					/* end of batch, or maybe whole join */
+					if (parallel)
+						ExecParallelHashEndProbe(node);
+
 					if (HJ_FILL_INNER(node))
 					{
 						/* set up to scan for unmatched inner tuples */
@@ -455,25 +460,13 @@ ExecHashJoinImpl(PlanState *pstate, bool parallel)
 				{
 					node->hj_MatchedOuter = true;
 
-					if (parallel)
-					{
-						/*
-						 * Full/right outer joins are currently not supported
-						 * for parallel joins, so we don't need to set the
-						 * match bit.  Experiments show that it's worth
-						 * avoiding the shared memory traffic on large
-						 * systems.
-						 */
-						Assert(!HJ_FILL_INNER(node));
-					}
-					else
-					{
-						/*
-						 * This is really only needed if HJ_FILL_INNER(node),
-						 * but we'll avoid the branch and just set it always.
-						 */
+
+					/*
+					 * This is really only needed if HJ_FILL_INNER(node),
+					 * but we'll avoid the branch and just set it always.
+					 */
+					if (!HeapTupleHeaderHasMatch(HJTUPLE_MINTUPLE(node->hj_CurTuple)))
 						HeapTupleHeaderSetMatch(HJTUPLE_MINTUPLE(node->hj_CurTuple));
-					}
 
 					/* In an antijoin, we never return a matched tuple */
 					if (node->js.jointype == JOIN_ANTI)
@@ -531,7 +524,8 @@ ExecHashJoinImpl(PlanState *pstate, bool parallel)
 				 * so any unmatched inner tuples in the hashtable have to be
 				 * emitted before we continue to the next batch.
 				 */
-				if (!ExecScanHashTableForUnmatched(node, econtext))
+				if (!(parallel ? ExecParallelScanHashTableForUnmatched(node, econtext)
+							   : ExecScanHashTableForUnmatched(node, econtext)))
 				{
 					/* no more unmatched tuples */
 					node->hj_JoinState = HJ_NEED_NEW_BATCH;
@@ -742,6 +736,7 @@ ExecInitHashJoin(HashJoin *node, EState *estate, int eflags)
 	hjstate->hj_CurBucketNo = 0;
 	hjstate->hj_CurSkewBucketNo = INVALID_SKEW_BUCKET_NO;
 	hjstate->hj_CurTuple = NULL;
+	hjstate->hj_AllocatedBucketRange = 0;
 
 	hjstate->hj_OuterHashKeys = ExecInitExprList(node->hashkeys,
 												 (PlanState *) hjstate);
@@ -1079,6 +1074,18 @@ ExecHashJoinNewBatch(HashJoinState *hjstate)
 	return true;
 }
 
+static void
+ExecParallelHashEndProbe(HashJoinState *hjstate)
+{
+	HashJoinTable hashtable = hjstate->hj_HashTable;
+	Barrier *batch_barrier =
+		&hashtable->batches[hashtable->curbatch].shared->batch_barrier;
+
+	Assert(BarrierPhase(batch_barrier) == PHJ_BATCH_PROBING);
+	BarrierArriveAndWait(batch_barrier, WAIT_EVENT_HASH_BATCH_PROBE);
+	Assert(BarrierPhase(batch_barrier) == PHJ_BATCH_SCAN_INNER);
+}
+
 /*
  * Choose a batch to work on, and attach to it.  Returns true if successful,
  * false if there are no more batches.
@@ -1174,12 +1181,15 @@ ExecParallelHashJoinNewBatch(HashJoinState *hjstate)
 					 * probing it, but no participant is allowed to wait at
 					 * this barrier again (or else a deadlock could occur).
 					 * All attached participants must eventually call
-					 * BarrierArriveAndDetach() so that the final phase
-					 * PHJ_BATCH_DONE can be reached.
+					 * BarrierArriveAndDetach() so that the next phase can be
+					 * reached.
 					 */
 					ExecParallelHashTableSetCurrentBatch(hashtable, batchno);
 					sts_begin_parallel_scan(hashtable->batches[batchno].outer_tuples);
 					return true;
+
+				case PHJ_BATCH_SCAN_INNER:
+					/* TODO -- not right */
 
 				case PHJ_BATCH_DONE:
 
@@ -1360,6 +1370,7 @@ ExecReScanHashJoin(HashJoinState *node)
 	node->hj_CurBucketNo = 0;
 	node->hj_CurSkewBucketNo = INVALID_SKEW_BUCKET_NO;
 	node->hj_CurTuple = NULL;
+	node->hj_AllocatedBucketRange = 0;
 
 	node->hj_MatchedOuter = false;
 	node->hj_FirstOuterTupleSlot = NULL;

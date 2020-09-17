@@ -221,7 +221,6 @@ BarrierAttach(Barrier *barrier)
 	++barrier->participants;
 	phase = barrier->phase;
 	SpinLockRelease(&barrier->mutex);
-
 	return phase;
 }
 

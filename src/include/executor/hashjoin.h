@@ -160,6 +160,8 @@ typedef struct ParallelHashJoinBatch
 	size_t		old_ntuples;	/* number of tuples before repartitioning */
 	bool		space_exhausted;
 
+	pg_atomic_uint32 bucket;	/* bucket allocator for unmatched inner scan */
+
 	/*
 	 * Variable-sized SharedTuplestore objects follow this struct in memory.
 	 * See the accessor macros below.
@@ -265,7 +267,8 @@ typedef struct ParallelHashJoinState
 #define PHJ_BATCH_ALLOCATING			1
 #define PHJ_BATCH_LOADING				2
 #define PHJ_BATCH_PROBING				3
-#define PHJ_BATCH_DONE					4
+#define PHJ_BATCH_SCAN_INNER			4
+#define PHJ_BATCH_DONE					5
 
 /* The phases of batch growth while hashing, for grow_batches_barrier. */
 #define PHJ_GROW_BATCHES_ELECTING		0
