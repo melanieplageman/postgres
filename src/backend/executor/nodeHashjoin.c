@@ -1598,6 +1598,7 @@ ExecParallelHashJoinLoadStripe(HashJoinState *hjstate)
 		{
 			sb_end_write(batch_accessor->sba);
 			hashtable->curstripe = STRIPE_DETACHED;
+
 			return false;
 		}
 
@@ -1693,6 +1694,7 @@ ExecParallelHashJoinLoadStripe(HashJoinState *hjstate)
 						break;
 					}
 				}
+				/* TODO: don't need to wait */
 
 				if (BarrierArriveAndWait(stripe_barrier, WAIT_EVENT_HASH_STRIPE_LOAD))
 				{
