@@ -2206,6 +2206,7 @@ ExecParallelScanHashTableForUnmatched(HashJoinState *hjstate,
 		/* allow this loop to be cancellable */
 		CHECK_FOR_INTERRUPTS();
 	}
+	hashtable->batches[hashtable->curbatch].shared->emitted = true;
 
 	/*
 	 * no more unmatched tuples

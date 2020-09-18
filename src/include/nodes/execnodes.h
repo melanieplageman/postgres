@@ -1958,6 +1958,7 @@ typedef struct HashJoinState
 	int			hj_JoinState;
 	bool		hj_MatchedOuter;
 	bool		hj_OuterNotEmpty;
+	bool elected_worker;
 } HashJoinState;
 
 

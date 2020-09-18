@@ -134,6 +134,9 @@
 /* Returns true if doing null-fill on inner relation */
 #define HJ_FILL_INNER(hjstate)	((hjstate)->hj_NullOuterTupleSlot != NULL)
 
+#define BATCHES_EXHAUSTED -2
+#define FILL_INNER_SCAN -1
+
 static TupleTableSlot *ExecHashJoinOuterGetTuple(PlanState *outerNode,
 												 HashJoinState *hjstate,
 												 uint32 *hashvalue);
@@ -145,8 +148,7 @@ static TupleTableSlot *ExecHashJoinGetSavedTuple(HashJoinState *hjstate,
 												 uint32 *hashvalue,
 												 TupleTableSlot *tupleSlot);
 static bool ExecHashJoinNewBatch(HashJoinState *hjstate);
-static void ExecParallelHashEndProbe(HashJoinState *hjstate);
-static bool ExecParallelHashJoinNewBatch(HashJoinState *hjstate);
+static int ExecParallelHashJoinNewBatch(HashJoinState *hjstate);
 static void ExecParallelHashJoinPartitionOuter(HashJoinState *node);
 
 
@@ -240,6 +242,7 @@ ExecHashJoinImpl(PlanState *pstate, bool parallel)
 				 * from the outer plan node.  If we succeed, we have to stash
 				 * it away for later consumption by ExecHashJoinOuterGetTuple.
 				 */
+			//	volatile int mybp = 0; while (mybp == 0){};
 				if (HJ_FILL_INNER(node))
 				{
 					/* no chance to not build the hash table */
@@ -360,17 +363,14 @@ ExecHashJoinImpl(PlanState *pstate, bool parallel)
 				if (TupIsNull(outerTupleSlot))
 				{
 					/* end of batch, or maybe whole join */
-					if (parallel)
-						ExecParallelHashEndProbe(node);
-
-					if (HJ_FILL_INNER(node))
+					if (!parallel && HJ_FILL_INNER(node))
 					{
 						/* set up to scan for unmatched inner tuples */
 						ExecPrepHashTableForUnmatched(node);
 						node->hj_JoinState = HJ_FILL_INNER_TUPLES;
+						continue;
 					}
-					else
-						node->hj_JoinState = HJ_NEED_NEW_BATCH;
+					node->hj_JoinState = HJ_NEED_NEW_BATCH;
 					continue;
 				}
 
@@ -549,10 +549,17 @@ ExecHashJoinImpl(PlanState *pstate, bool parallel)
 				/*
 				 * Try to advance to next batch.  Done if there are no more.
 				 */
+
 				if (parallel)
 				{
-					if (!ExecParallelHashJoinNewBatch(node))
+					int batch_status = ExecParallelHashJoinNewBatch(node);
+					if (batch_status == BATCHES_EXHAUSTED)
 						return NULL;	/* end of parallel-aware join */
+					else if (batch_status == FILL_INNER_SCAN)
+					{
+						node->hj_JoinState = HJ_FILL_INNER_TUPLES;
+						continue;
+					}
 				}
 				else
 				{
@@ -746,6 +753,7 @@ ExecInitHashJoin(HashJoin *node, EState *estate, int eflags)
 	hjstate->hj_JoinState = HJ_BUILD_HASHTABLE;
 	hjstate->hj_MatchedOuter = false;
 	hjstate->hj_OuterNotEmpty = false;
+	hjstate->elected_worker = false;
 
 	return hjstate;
 }
@@ -1074,23 +1082,12 @@ ExecHashJoinNewBatch(HashJoinState *hjstate)
 	return true;
 }
 
-static void
-ExecParallelHashEndProbe(HashJoinState *hjstate)
-{
-	HashJoinTable hashtable = hjstate->hj_HashTable;
-	Barrier *batch_barrier =
-		&hashtable->batches[hashtable->curbatch].shared->batch_barrier;
-
-	Assert(BarrierPhase(batch_barrier) == PHJ_BATCH_PROBING);
-	BarrierArriveAndWait(batch_barrier, WAIT_EVENT_HASH_BATCH_PROBE);
-	Assert(BarrierPhase(batch_barrier) == PHJ_BATCH_SCAN_INNER);
-}
-
 /*
  * Choose a batch to work on, and attach to it.  Returns true if successful,
  * false if there are no more batches.
  */
-static bool
+#define FINISHED_FILL_INNER_SCAN -2
+static int
 ExecParallelHashJoinNewBatch(HashJoinState *hjstate)
 {
 	HashJoinTable hashtable = hjstate->hj_HashTable;
@@ -1103,7 +1100,7 @@ ExecParallelHashJoinNewBatch(HashJoinState *hjstate)
 	 * ExecParallelHashEnsureBatchAccessors().
 	 */
 	if (hashtable->batches == NULL)
-		return false;
+		return BATCHES_EXHAUSTED;
 
 	/*
 	 * If we were already attached to a batch, remember not to bother checking
@@ -1112,8 +1109,59 @@ ExecParallelHashJoinNewBatch(HashJoinState *hjstate)
 	 */
 	if (hashtable->curbatch >= 0)
 	{
+		int curbatch = hashtable->curbatch;
+		ParallelHashJoinBatch *batch = hashtable->batches[curbatch].shared;
+
+		/*
+		 * if last worker and already emitted unmatched inner tuples,
+		 * detach from the barrier and clean up the hashtable
+		 */
+		if (hjstate->elected_worker && batch->emitted)
+		{
+			Assert(HJ_FILL_INNER(hjstate));
+			hjstate->elected_worker = false;
+			BarrierDetach(&batch->batch_barrier);
+			/* Free shared chunks and buckets. */
+			while (DsaPointerIsValid(batch->chunks))
+			{
+				HashMemoryChunk chunk =
+					                dsa_get_address(hashtable->area, batch->chunks);
+				dsa_pointer next = chunk->next.shared;
+
+				dsa_free(hashtable->area, batch->chunks);
+				batch->chunks = next;
+			}
+			if (DsaPointerIsValid(batch->buckets))
+			{
+				dsa_free(hashtable->area, batch->buckets);
+				batch->buckets = InvalidDsaPointer;
+			}
+		}
+		/*
+		 * If you were not the last worker or unmatched inner tuples haven't been
+		 * emitted yet, detach from the barrier and elect a worker to emit
+		 * unmatched inner tuples as relevant
+		 */
+		// TODO: make a BarrierArriveAndDetach that doesn't detach the elected worker
+		else if (BarrierArriveAndDetach(&batch->batch_barrier))
+		{
+			if (HJ_FILL_INNER(hjstate) && !batch->emitted)
+			{
+				BarrierAttach(&batch->batch_barrier);
+				ExecPrepHashTableForUnmatched(hjstate);
+				hjstate->elected_worker = true;
+				return FILL_INNER_SCAN;
+			}
+		}
+		sts_end_parallel_scan(hashtable->batches[curbatch].inner_tuples);
+		sts_end_parallel_scan(hashtable->batches[curbatch].outer_tuples);
 		hashtable->batches[hashtable->curbatch].done = true;
-		ExecHashTableDetachBatch(hashtable);
+		hashtable->spacePeak =
+			Max(hashtable->spacePeak,
+			    batch->size + sizeof(dsa_pointer_atomic) * hashtable->nbuckets);
+
+		/* Remember that we are not attached to a batch. */
+		hashtable->curbatch = -1;
 	}
 
 	/*
@@ -1186,10 +1234,7 @@ ExecParallelHashJoinNewBatch(HashJoinState *hjstate)
 					 */
 					ExecParallelHashTableSetCurrentBatch(hashtable, batchno);
 					sts_begin_parallel_scan(hashtable->batches[batchno].outer_tuples);
-					return true;
-
-				case PHJ_BATCH_SCAN_INNER:
-					/* TODO -- not right */
+					return batchno;
 
 				case PHJ_BATCH_DONE:
 
@@ -1210,7 +1255,7 @@ ExecParallelHashJoinNewBatch(HashJoinState *hjstate)
 		batchno = (batchno + 1) % hashtable->nbatch;
 	} while (batchno != start_batchno);
 
-	return false;
+	return BATCHES_EXHAUSTED;
 }
 
 /*
