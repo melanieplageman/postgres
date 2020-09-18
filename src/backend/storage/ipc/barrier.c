@@ -204,6 +204,28 @@ BarrierArriveAndDetach(Barrier *barrier)
 {
 	return BarrierDetachImpl(barrier, true);
 }
+/*
+ * Upon arriving at the barrier, if this worker is not the last worker attached,
+ * detach from the barrier and return false. If this worker is the last worker,
+ * remain attached and advance the phase of the barrier, return true to indicate
+ * you are the last or "elected" worker who is still attached to the barrier.
+ * Another name I considered was BarrierUniqueify or BarrierSoloAssign
+ */
+bool
+BarrierDetachOrElect(Barrier *barrier)
+{
+	SpinLockAcquire(&barrier->mutex);
+	if (barrier->participants > 1)
+	{
+		--barrier->participants;
+		SpinLockRelease(&barrier->mutex);
+		return false;
+	}
+	Assert(barrier->participants == 1);
+	++barrier->phase;
+	SpinLockRelease(&barrier->mutex);
+	return true;
+}
 
 /*
  * Attach to a barrier.  All waiting participants will now wait for this

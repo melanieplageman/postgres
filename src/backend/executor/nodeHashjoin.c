@@ -83,6 +83,7 @@
  *  PHJ_BATCH_LOADING        -- all load the hash table from disk
  *  PHJ_BATCH_PROBING        -- all probe
  *  PHJ_BATCH_SCAN_INNER     -- scan unmatched inner tuples
+
  *  PHJ_BATCH_DONE           -- end
  *
  * Batch 0 is a special case, because it starts out in phase
@@ -98,9 +99,9 @@
  * all other backends attached to it are actively executing the node or have
  * already arrived.  Practically, that means that we never return a tuple
  * while attached to a barrier, unless the barrier has reached its final
- * state.
- *
- * TODO: WIP: That's now not true, because of PHJ_SCAN_INNER.
+ * state.  In the slightly special case of the per-batch barrier, we return
+ * tuples while in PHJ_BATCH_PROBING phase, but that's OK because we use
+ * BarrierArriveAndDetach() to advance it to PHJ_BATCH_DONE without waiting.
  *
  *-------------------------------------------------------------------------
  */
@@ -145,7 +146,6 @@ static TupleTableSlot *ExecHashJoinGetSavedTuple(HashJoinState *hjstate,
 												 uint32 *hashvalue,
 												 TupleTableSlot *tupleSlot);
 static bool ExecHashJoinNewBatch(HashJoinState *hjstate);
-static void ExecParallelHashEndProbe(HashJoinState *hjstate);
 static bool ExecParallelHashJoinNewBatch(HashJoinState *hjstate);
 static void ExecParallelHashJoinPartitionOuter(HashJoinState *node);
 
@@ -360,14 +360,21 @@ ExecHashJoinImpl(PlanState *pstate, bool parallel)
 				if (TupIsNull(outerTupleSlot))
 				{
 					/* end of batch, or maybe whole join */
-					if (parallel)
-						ExecParallelHashEndProbe(node);
-
 					if (HJ_FILL_INNER(node))
 					{
-						/* set up to scan for unmatched inner tuples */
-						ExecPrepHashTableForUnmatched(node);
-						node->hj_JoinState = HJ_FILL_INNER_TUPLES;
+						if (parallel)
+						{
+							if (ExecParallelPrepHashTableForUnmatched(node))
+								node->hj_JoinState = HJ_FILL_INNER_TUPLES;
+							else
+								node->hj_JoinState = HJ_NEED_NEW_BATCH;
+						}
+						else
+						{
+							/* set up to scan for unmatched inner tuples */
+							ExecPrepHashTableForUnmatched(node);
+							node->hj_JoinState = HJ_FILL_INNER_TUPLES;
+						}
 					}
 					else
 						node->hj_JoinState = HJ_NEED_NEW_BATCH;
@@ -1074,18 +1081,6 @@ ExecHashJoinNewBatch(HashJoinState *hjstate)
 	return true;
 }
 
-static void
-ExecParallelHashEndProbe(HashJoinState *hjstate)
-{
-	HashJoinTable hashtable = hjstate->hj_HashTable;
-	Barrier *batch_barrier =
-		&hashtable->batches[hashtable->curbatch].shared->batch_barrier;
-
-	Assert(BarrierPhase(batch_barrier) == PHJ_BATCH_PROBING);
-	BarrierArriveAndWait(batch_barrier, WAIT_EVENT_HASH_BATCH_PROBE);
-	Assert(BarrierPhase(batch_barrier) == PHJ_BATCH_SCAN_INNER);
-}
-
 /*
  * Choose a batch to work on, and attach to it.  Returns true if successful,
  * false if there are no more batches.
@@ -1180,16 +1175,15 @@ ExecParallelHashJoinNewBatch(HashJoinState *hjstate)
 					 * hash table stays alive until everyone's finished
 					 * probing it, but no participant is allowed to wait at
 					 * this barrier again (or else a deadlock could occur).
-					 * All attached participants must eventually call
-					 * BarrierArriveAndDetach() so that the next phase can be
-					 * reached.
+					 * All attached participants must eventually detach from
+					 * the barrier and one worker must advance the phase
+					 * so that the final phase is reached.
 					 */
 					ExecParallelHashTableSetCurrentBatch(hashtable, batchno);
 					sts_begin_parallel_scan(hashtable->batches[batchno].outer_tuples);
 					return true;
-
 				case PHJ_BATCH_SCAN_INNER:
-					/* TODO -- not right */
+					/* Fall through. */
 
 				case PHJ_BATCH_DONE:
 
