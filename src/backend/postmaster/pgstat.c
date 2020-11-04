@@ -3928,6 +3928,9 @@ pgstat_get_wait_ipc(WaitEventIPC w)
 		case WAIT_EVENT_HASH_BATCH_LOAD:
 			event_name = "HashBatchLoad";
 			break;
+		case WAIT_EVENT_HASH_BATCH_PROBE:
+			event_name = "HashBatchProbe";
+			break;
 		case WAIT_EVENT_HASH_BUILD_ALLOCATE:
 			event_name = "HashBuildAllocate";
 			break;

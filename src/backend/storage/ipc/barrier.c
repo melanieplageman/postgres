@@ -206,6 +206,27 @@ BarrierArriveAndDetach(Barrier *barrier)
 }
 
 /*
+ * Upon arriving at the barrier, if the caller is not the last worker attached,
+ * detach from the barrier and return false. If this worker is the last worker,
+ * remain attached and advance the phase of the barrier, returning true.
+ */
+bool
+BarrierArriveAndDetachExceptLast(Barrier *barrier)
+{
+	SpinLockAcquire(&barrier->mutex);
+	if (barrier->participants > 1)
+	{
+		--barrier->participants;
+		SpinLockRelease(&barrier->mutex);
+		return false;
+	}
+	Assert(barrier->participants == 1);
+	++barrier->phase;
+	SpinLockRelease(&barrier->mutex);
+	return true;
+}
+
+/*
  * Attach to a barrier.  All waiting participants will now wait for this
  * participant to call BarrierArriveAndWait(), BarrierDetach() or
  * BarrierArriveAndDetach().  Return the current phase.
