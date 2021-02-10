@@ -1858,6 +1858,7 @@ ApplyRetrieveRule(Query *parsetree,
 			rte->selectedCols = NULL;
 			rte->insertedCols = NULL;
 			rte->updatedCols = NULL;
+			rte->scanCols = NULL;
 			rte->extraUpdatedCols = NULL;
 
 			/*
@@ -1967,6 +1968,7 @@ ApplyRetrieveRule(Query *parsetree,
 	rte->insertedCols = NULL;
 	rte->updatedCols = NULL;
 	rte->extraUpdatedCols = NULL;
+	rte->scanCols = NULL;
 
 	return parsetree;
 }
