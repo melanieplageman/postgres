@@ -274,8 +274,8 @@ typedef struct ParallelHashJoinState
 #define PHJ_BATCH_ALLOCATING			1
 #define PHJ_BATCH_LOADING				2
 #define PHJ_BATCH_PROBING				3
-#define PHJ_BATCH_DONE			        4
-#define PHJ_BATCH_FILL_INNER_DONE		5
+#define PHJ_BATCH_FILLING_INNER			4
+#define PHJ_BATCH_DONE		            5
 
 /* The phases of batch growth while hashing, for grow_batches_barrier. */
 #define PHJ_GROW_BATCHES_ELECTING		0

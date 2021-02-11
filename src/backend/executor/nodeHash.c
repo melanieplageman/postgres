@@ -2047,11 +2047,10 @@ void
 ExecPrepHashTableForUnmatched(HashJoinState *hjstate)
 {
 	/*----------
-	 * During this scan we use the HashJoinState fields as follows:
+	 * During this scan we use the HashJoinTable fields as follows:
 	 *
-	 * hj_CurBucketNo: next regular bucket to scan
-	 * hj_CurSkewBucketNo: next skew bucket (an index into skewBucketNums)
-	 * hj_CurTuple: last tuple returned, or NULL to start next bucket
+	 * current_chunk: current HashMemoryChunk to scan
+	 * current_chunk_idx: index in current HashMemoryChunk
 	 *----------
 	 */
 	HashJoinTable hashtable = hjstate->hj_HashTable;
@@ -2064,13 +2063,21 @@ ExecPrepHashTableForUnmatched(HashJoinState *hjstate)
 }
 
 /*
- * ExecPrepHashTableForUnmatched
- *		set up for a series of ExecScanHashTableForUnmatched calls
+ * ExecParallelPrepHashTableForUnmatched
+ *		set up for a series of ExecParallelScanHashTableForUnmatched calls
  *		return true if this worker is elected to do the unmatched inner scan
  */
 bool
 ExecParallelPrepHashTableForUnmatched(HashJoinState *hjstate)
 {
+	/*----------
+	 * During this scan we use the ParallelHashJoinBatchAccessor fields for the
+	 * current batch as follows:
+	 *
+	 * current_chunk: current HashMemoryChunk to scan
+	 * current_chunk_idx: index in current HashMemoryChunk
+	 *----------
+	 */
 	HashJoinTable hashtable = hjstate->hj_HashTable;
 	int			curbatch = hashtable->curbatch;
 	ParallelHashJoinBatchAccessor *batch_accessor = &hashtable->batches[curbatch];

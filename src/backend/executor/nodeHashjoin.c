@@ -1183,10 +1183,10 @@ ExecParallelHashJoinNewBatch(HashJoinState *hjstate)
 					ExecParallelHashTableSetCurrentBatch(hashtable, batchno);
 					sts_begin_parallel_scan(hashtable->batches[batchno].outer_tuples);
 					return true;
-				case PHJ_BATCH_DONE:
+				case PHJ_BATCH_FILLING_INNER:
 					/* Fall through. */
 
-				case PHJ_BATCH_FILL_INNER_DONE:
+				case PHJ_BATCH_DONE:
 
 					/*
 					 * Already done.  Detach and go around again (if any
