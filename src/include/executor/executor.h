@@ -625,5 +625,7 @@ extern void
 PopulateNeededColumnsForNode(Node *expr, int n, Bitmapset **scanCols);
 extern Bitmapset *
 PopulateNeededColumnsForScan(ScanState *scanstate, int ncol);
+extern Bitmapset *
+ColumnarAttrNeeded(ScanState *ss);
 
 #endif							/* EXECUTOR_H  */

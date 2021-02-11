@@ -22,6 +22,7 @@
 #include "miscadmin.h"
 #include "nodes/nodeFuncs.h"
 #include "utils/memutils.h"
+#include "optimizer/optimizer.h"
 
 
 
@@ -340,6 +341,47 @@ ExecScanReScan(ScanState *node)
 			}
 		}
 	}
+}
+
+Bitmapset *
+ColumnarAttrNeeded(ScanState *ss)
+{
+	TupleTableSlot *slot = ss->ss_ScanTupleSlot;
+	int natts = slot->tts_tupleDescriptor->natts;
+	Bitmapset *attr_needed = NULL;
+	Plan *plan = ss->ps.plan;
+	int flags = PVC_RECURSE_AGGREGATES |
+		PVC_RECURSE_WINDOWFUNCS | PVC_RECURSE_PLACEHOLDERS;
+	List *vars = list_concat(pull_var_clause((Node *) plan->targetlist, flags),
+	                         pull_var_clause((Node *) plan->qual, flags));
+	ListCell *lc;
+
+	foreach(lc, vars)
+	{
+		Var *var = lfirst(lc);
+
+		if (var->varattno < 0)
+		{
+//			ereport(ERROR, (errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+//				errmsg(
+//					"UPDATE and CTID scans not supported for ColumnarScan")));
+			continue;
+		}
+
+//		if (var->varattno == 0)
+//		{
+////			elog(DEBUG1, "Need attribute: all");
+//
+//			/* all attributes are required, we don't need to add more so break*/
+//			attr_needed = bms_add_range(attr_needed, 0, natts - 1);
+//			break;
+//		}
+
+//		elog(DEBUG1, "Need attribute: %d", var->varattno);
+		attr_needed = bms_add_member(attr_needed, var->varattno);
+	}
+
+	return attr_needed;
 }
 
 typedef struct neededColumnContext

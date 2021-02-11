@@ -69,24 +69,33 @@ SeqNext(SeqScanState *node)
 		 * used cols extracted now from the ScanState
 		 */
 		int plan_col_num;
-		Bitmapset *execution_cols = NULL;
-		Scan *planNode = (Scan *)node->ss.ps.plan;
-		int ncols = node->ss.ss_currentRelation->rd_att->natts;
-		int rti = planNode->scanrelid;
-		RangeTblEntry *rangeTblEntry = list_nth(estate->es_plannedstmt->rtable, rti - 1);
+		Bitmapset *vmware_execution_cols = NULL;
+		Bitmapset *citus_execution_cols = NULL;
+		Scan *planNode                   = (Scan *)node->ss.ps.plan;
+		int ncols                        = node->ss.ss_currentRelation->rd_att->natts;
+		int rti                          = planNode->scanrelid;
+		RangeTblEntry *rangeTblEntry     = list_nth(estate->es_plannedstmt->rtable, rti - 1);
 
 		Bitmapset *plan_cols = rangeTblEntry->scanCols;
 #ifdef USE_ASSERT_CHECKING
 		while ((plan_col_num = bms_next_member(plan_cols, ncols)) >= 0)
 			Assert(plan_col_num <= ncols);
 #endif
-		execution_cols = PopulateNeededColumnsForScan(&node->ss, ncols);
+		vmware_execution_cols = PopulateNeededColumnsForScan(&node->ss, ncols);
 
-		if (bms_is_empty(bms_difference(plan_cols, execution_cols)) == false)
-			elog(NOTICE, "table: %s.\n exec-time cols: %s\n plan-time cols: %s",
+		if (bms_is_empty(bms_difference(plan_cols, vmware_execution_cols)) == false)
+			elog(NOTICE, "table: %s.\n vmware exec-time cols: %s\n plan-time cols: %s",
 				RelationGetRelationName(node->ss.ss_currentRelation),
-				bmsToString(execution_cols),
+				bmsToString(vmware_execution_cols),
 				bmsToString(plan_cols));
+
+		citus_execution_cols = ColumnarAttrNeeded(&node->ss);
+		elog(NOTICE, "citus exec-time cols: table: %s. cols: %s\n", RelationGetRelationName(node->ss.ss_currentRelation), bmsToString(citus_execution_cols));
+		if (bms_is_empty(bms_difference(citus_execution_cols, vmware_execution_cols)) == false)
+			elog(NOTICE, "table: %s.\n citus exec-time cols: %s\n vmware exec-time cols: %s",
+			     RelationGetRelationName(node->ss.ss_currentRelation),
+			     bmsToString(citus_execution_cols),
+			     bmsToString(vmware_execution_cols));
 
 		/*
 		 * We reach here if the scan is not parallel, or if we're serially
@@ -97,6 +106,8 @@ SeqNext(SeqScanState *node)
 								   0, NULL);
 		node->ss.ss_currentScanDesc = scandesc;
 	}
+	else
+		elog(NOTICE, "scandesc wasn't null");
 
 	/*
 	 * get the next tuple from the table
