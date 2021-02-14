@@ -142,6 +142,40 @@ static MdfdVec *_mdfd_getseg(SMgrRelation reln, ForkNumber forkno,
 static BlockNumber _mdnblocks(SMgrRelation reln, ForkNumber forknum,
 							  MdfdVec *seg);
 
+static inline int
+_mdfd_open_flags(ForkNumber forkNum)
+{
+	int		flags = O_RDWR | PG_BINARY;
+
+	/*
+	 * XXX: not clear if direct IO ever is interesting for other forks?  The
+	 * FSM fork currently often ends up very fragmented when using direct IO,
+	 * for example.
+	 */
+	if (io_data_direct /* && forkNum == MAIN_FORKNUM */)
+		flags |= PG_O_DIRECT;
+
+	return flags;
+}
+
+static inline void
+mdfd_post_open(int fd)
+{
+#if !defined(O_DIRECT) && defined(F_NOCACHE)
+	/*
+	 * macOS didn't adopt IRIX's O_DIRECT like everyone else, and instead
+	 * requires a separate system call to ask for that.
+	 */
+	if (io_data_direct && fcntl(fd, F_NOCACHE, 1) == -1)
+	{
+		int save_errno = errno;
+
+		close(fd);
+		errno = save_errno;
+		elog(ERROR, "could not disable caching: %m");
+	}
+#endif
+}
 
 /*
  *	mdinit() -- Initialize private state for magnetic disk storage manager.
@@ -205,14 +239,14 @@ mdcreate(SMgrRelation reln, ForkNumber forkNum, bool isRedo)
 
 	path = relpath(reln->smgr_rnode, forkNum);
 
-	fd = PathNameOpenFile(path, O_RDWR | O_CREAT | O_EXCL | PG_BINARY);
+	fd = PathNameOpenFile(path, _mdfd_open_flags(forkNum) | O_CREAT | O_EXCL);
 
 	if (fd < 0)
 	{
 		int			save_errno = errno;
 
 		if (isRedo)
-			fd = PathNameOpenFile(path, O_RDWR | PG_BINARY);
+			fd = PathNameOpenFile(path, _mdfd_open_flags(forkNum));
 		if (fd < 0)
 		{
 			/* be sure to report the error reported by create, not open */
@@ -224,6 +258,8 @@ mdcreate(SMgrRelation reln, ForkNumber forkNum, bool isRedo)
 	}
 
 	pfree(path);
+
+	mdfd_post_open(FileGetRawDesc(fd));
 
 	_fdvec_resize(reln, forkNum, 1);
 	mdfd = &reln->md_seg_fds[forkNum][0];
@@ -494,7 +530,7 @@ mdopenfork(SMgrRelation reln, ForkNumber forknum, int behavior)
 
 	path = relpath(reln->smgr_rnode, forknum);
 
-	fd = PathNameOpenFile(path, O_RDWR | PG_BINARY);
+	fd = PathNameOpenFile(path, _mdfd_open_flags(forknum));
 
 	if (fd < 0)
 	{
@@ -510,6 +546,8 @@ mdopenfork(SMgrRelation reln, ForkNumber forknum, int behavior)
 	}
 
 	pfree(path);
+
+	mdfd_post_open(FileGetRawDesc(fd));
 
 	_fdvec_resize(reln, forknum, 1);
 	mdfd = &reln->md_seg_fds[forknum][0];
@@ -590,6 +628,8 @@ void
 mdwriteback(SMgrRelation reln, ForkNumber forknum,
 			BlockNumber blocknum, BlockNumber nblocks)
 {
+	Assert(!io_data_direct);
+
 	/*
 	 * Issue flush requests in as few requests as possible; have to split at
 	 * segment boundaries though, since those are actually separate files.
@@ -1163,12 +1203,14 @@ _mdfd_openseg(SMgrRelation reln, ForkNumber forknum, BlockNumber segno,
 	fullpath = _mdfd_segpath(reln, forknum, segno);
 
 	/* open the file */
-	fd = PathNameOpenFile(fullpath, O_RDWR | PG_BINARY | oflags);
+	fd = PathNameOpenFile(fullpath, _mdfd_open_flags(forknum) | oflags);
 
 	pfree(fullpath);
 
 	if (fd < 0)
 		return NULL;
+
+	mdfd_post_open(FileGetRawDesc(fd));
 
 	/*
 	 * Segments are always opened in order from lowest to highest, so we must
@@ -1372,7 +1414,7 @@ mdsyncfiletag(const FileTag *ftag, char *path)
 		strlcpy(path, p, MAXPGPATH);
 		pfree(p);
 
-		file = PathNameOpenFile(path, O_RDWR | PG_BINARY);
+		file = PathNameOpenFile(path, _mdfd_open_flags(ftag->forknum));
 		if (file < 0)
 			return -1;
 		need_to_close = true;
