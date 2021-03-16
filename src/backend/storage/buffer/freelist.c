@@ -88,6 +88,14 @@ typedef struct BufferAccessStrategyData
 	bool		current_was_in_ring;
 
 	/*
+	 * If we could chose a buffer from this list and we end up having to write
+	 * it out because it is dirty when we actually could have found a clean
+	 * buffer in either the freelist or through doing a clock sweep of shared
+	 * buffers, this flag will indicate that
+	 */
+	bool chose_buffer_in_ring;
+
+	/*
 	 * Array of buffer numbers.  InvalidBuffer (that is, zero) indicates we
 	 * have not yet selected a buffer for this ring slot.  For allocation
 	 * simplicity this is palloc'd together with the fixed fields of the
@@ -212,8 +220,10 @@ StrategyGetBuffer(BufferAccessStrategy strategy, uint32 *buf_state)
 	if (strategy != NULL)
 	{
 		buf = GetBufferFromRing(strategy, buf_state);
-		if (buf != NULL)
+		if (buf != NULL) {
+			StrategyChooseBufferBufferFromRing(strategy);
 			return buf;
+		}
 	}
 
 	/*
@@ -701,4 +711,21 @@ StrategyRejectBuffer(BufferAccessStrategy strategy, BufferDesc *buf)
 	strategy->buffers[strategy->current] = InvalidBuffer;
 
 	return true;
+}
+void
+StrategyUnChooseBufferFromRing(BufferAccessStrategy strategy)
+{
+	strategy->chose_buffer_in_ring = false;
+}
+
+void
+StrategyChooseBufferBufferFromRing(BufferAccessStrategy strategy)
+{
+	strategy->chose_buffer_in_ring = true;
+}
+
+bool
+StrategyIsBufferFromRing(BufferAccessStrategy strategy)
+{
+	return strategy->chose_buffer_in_ring;
 }

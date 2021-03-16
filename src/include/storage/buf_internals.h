@@ -314,6 +314,9 @@ extern BufferDesc *StrategyGetBuffer(BufferAccessStrategy strategy,
 extern void StrategyFreeBuffer(BufferDesc *buf);
 extern bool StrategyRejectBuffer(BufferAccessStrategy strategy,
 								 BufferDesc *buf);
+extern void StrategyUnChooseBufferFromRing(BufferAccessStrategy strategy);
+extern void StrategyChooseBufferBufferFromRing(BufferAccessStrategy strategy);
+extern bool StrategyIsBufferFromRing(BufferAccessStrategy strategy);
 
 extern int	StrategySyncStart(uint32 *complete_passes, uint32 *num_buf_alloc);
 extern void StrategyNotifyBgWriter(int bgwprocno);

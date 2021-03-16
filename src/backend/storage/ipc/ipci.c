@@ -240,6 +240,7 @@ CreateSharedMemoryAndSemaphores(void)
 		InitProcGlobal();
 	CreateSharedProcArray();
 	CreateSharedBackendStatus();
+	CreateSharedBuffersWrittenCounters();
 	TwoPhaseShmemInit();
 	BackgroundWorkerShmemInit();
 

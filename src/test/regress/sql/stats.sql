@@ -176,4 +176,5 @@ FROM prevstats AS pr;
 
 DROP TABLE trunc_stats_test, trunc_stats_test1, trunc_stats_test2, trunc_stats_test3, trunc_stats_test4;
 DROP TABLE prevstats;
+SELECT * FROM pg_stat_buffers_written;
 -- End of Stats Test

@@ -386,6 +386,10 @@ static void pgstat_recv_connstat(PgStat_MsgConn *msg, int len);
 static void pgstat_recv_replslot(PgStat_MsgReplSlot *msg, int len);
 static void pgstat_recv_tempfile(PgStat_MsgTempFile *msg, int len);
 
+static int
+pgstat_get_index_buffers_written(BufferActionType buffer_action_type,
+								 BackendType backend_type);
+
 /* ------------------------------------------------------------
  * Public functions called from postmaster follow
  * ------------------------------------------------------------
@@ -2923,6 +2927,7 @@ static PgBackendGSSStatus *BackendGssStatusBuffer = NULL;
 #endif
 
 
+static int *BuffersWrittenCountersArray = NULL;
 /*
  * Report shared-memory space needed by CreateSharedBackendStatus.
  */
@@ -2953,6 +2958,19 @@ BackendStatusShmemSize(void)
 					mul_size(sizeof(PgBackendGSSStatus), NumBackendStatSlots));
 #endif
 	return size;
+}
+
+void
+CreateSharedBuffersWrittenCounters(void)
+{
+	bool found;
+	Size size = 0;
+
+	size = mul_size(sizeof(int), BuffersWrittenCountersArrayLength);
+	BuffersWrittenCountersArray = (int *)
+		ShmemInitStruct("Buffers written by various backend types", size, &found);
+	if (!found)
+		MemSet(BuffersWrittenCountersArray, 0, size);
 }
 
 /*
@@ -3253,6 +3271,10 @@ pgstat_bestart(void)
 	lbeentry.st_state = STATE_UNDEFINED;
 	lbeentry.st_progress_command = PROGRESS_COMMAND_INVALID;
 	lbeentry.st_progress_command_target = InvalidOid;
+	lbeentry.num_extends = 0;
+	lbeentry.num_writes = 0;
+	lbeentry.num_writes_strat = 0;
+	lbeentry.num_fsyncs = 0;
 
 	/*
 	 * we don't zero st_progress_param here to save cycles; nobody should
@@ -3338,6 +3360,16 @@ pgstat_beshutdown_hook(int code, Datum arg)
 	beentry->st_procpid = 0;	/* mark invalid */
 
 	PGSTAT_END_WRITE_ACTIVITY(beentry);
+
+	/*
+	 * Because the stats tracking shared buffers written and extended do not go
+	 * through the stats collector, it didn't make sense to add them to
+	 * pgstat_report_stat()
+	 * At least the DatabaseId should be valid. Otherwise we can't be sure that
+	 * the members were zero-initialized (TODO: is that true?)
+	 */
+	if (OidIsValid(MyDatabaseId))
+		pgstat_record_dead_backend_buffers_written();
 }
 
 
@@ -6928,8 +6960,6 @@ pgstat_recv_bgwriter(PgStat_MsgBgWriter *msg, int len)
 	globalStats.buf_written_checkpoints += msg->m_buf_written_checkpoints;
 	globalStats.buf_written_clean += msg->m_buf_written_clean;
 	globalStats.maxwritten_clean += msg->m_maxwritten_clean;
-	globalStats.buf_written_backend += msg->m_buf_written_backend;
-	globalStats.buf_fsync_backend += msg->m_buf_fsync_backend;
 	globalStats.buf_alloc += msg->m_buf_alloc;
 }
 
@@ -7466,4 +7496,207 @@ void
 pgstat_count_slru_truncate(int slru_idx)
 {
 	slru_entry(slru_idx)->m_truncate += 1;
+}
+
+void
+pgstat_increment_buffers_written(BufferActionType ba_type)
+{
+	volatile PgBackendStatus *beentry   = MyBEEntry;
+	BackendType bt;
+
+	if (!beentry || !pgstat_track_activities)
+		return;
+	bt = beentry->st_backendType;
+	if (bt != B_CHECKPOINTER && bt != B_AUTOVAC_WORKER && bt != B_BG_WRITER && bt != B_BACKEND)
+		return;
+
+	PGSTAT_BEGIN_WRITE_ACTIVITY(beentry);
+	if (ba_type == BA_Write)
+		beentry->num_writes++;
+	else if (ba_type == BA_Extend)
+		beentry->num_extends++;
+	else if (ba_type == BA_Write_Strat)
+		beentry->num_writes_strat++;
+	else if (ba_type == BA_Fsync)
+	    beentry->num_fsyncs++;
+	PGSTAT_END_WRITE_ACTIVITY(beentry);
+}
+
+
+/*
+ * Used for a single backend of a BackendType when needing its stats on the
+ * various BufferActionTypes it has done.
+ */
+// TODO: should this be a size_t of some kind?
+static int
+pgstat_get_index_buffers_written(BufferActionType buffer_action_type, BackendType backend_type)
+{
+	/*
+	 * The order is:
+	 * BLACK HOLE - 0
+	 * buffers_autovacuum_write - 1
+	 * buffers_autovacuum_write_strat - 2
+	 * buffers_backend_extend - 3
+	 * buffers_backend_write - 4
+	 * buffers_backend_write_strat - 5
+	 * buffers_backend_fsync - 6
+	 * buffers_bgwriter_write - 7
+	 * buffers_checkpointer_write - 8
+	 *
+	 * This function is responsible for maintaining BuffersWrittenCountersArray
+	 * in the following order
+	 * [
+	 *  BLACK_HOLE,
+	 *  buffers_autovaccum_write,buffers_autovacuum_write_strat,
+	 *  buffers_backend_extend,buffers_backend_write,
+	 *  buffers_backend_write_strat,buffers_backend_fsync,
+	 *  buffers_bgwriter_write,buffers_checkpointer_write
+	 *  ]
+	 *
+	 * Note that if a BufferActionType is unimplemented for a particular
+	 * BackendType, B_BUFFERS_WRITTEN_BLACK_HOLE is returned
+	 */
+	Assert(buffer_action_type < BA_NUM_TYPES && buffer_action_type >= 0);
+
+	// TODO: silence the compiler on -wswitch uncovered cases
+	switch (backend_type)
+	{
+		case B_AUTOVAC_WORKER:
+			switch (buffer_action_type)
+			{
+				case BA_Write:
+					return B_AUTOVAC_WORKER_BA_WRITE;
+				case BA_Write_Strat:
+					return B_AUTOVAC_WORKER_BA_WRITE_STRAT;
+			}
+			break;
+		case B_BACKEND:
+			switch (buffer_action_type)
+			{
+				case BA_Extend:
+					return B_BACKEND_BA_EXTEND;
+				case BA_Write:
+					return B_BACKEND_BA_WRITE;
+				case BA_Write_Strat:
+					return B_BACKEND_BA_WRITE_STRAT;
+			    case BA_Fsync:
+			        return B_BACKEND_BA_FSYNC;
+			}
+			break;
+		case B_BG_WRITER:
+			switch (buffer_action_type)
+			{
+				case BA_Write:
+					return B_BG_WRITER_BA_WRITE;
+			}
+			break;
+		case B_CHECKPOINTER:
+			switch (buffer_action_type)
+			{
+				case BA_Write:
+					return B_CHECKPOINTER_WRITE;
+			}
+			break;
+		default:
+			// TODO: is this ERROR even a good idea? is it better to only return the black hole?
+			elog(ERROR, "Unrecognized backend type, %d, for buffers written counting.", backend_type);
+	}
+	return B_BUFFERS_WRITTEN_BLACK_HOLE;
+}
+
+/*
+ * Called for a single backend at the time of death to persist its I/O stats
+ * For now, only used by pgstat_beshutdown_hook(), however, could be of use
+ * elsewhere, so keep it public.
+ */
+void
+pgstat_record_dead_backend_buffers_written(void)
+{
+	BackendType bt;
+	volatile PgBackendStatus *beentry = MyBEEntry;
+
+	if (beentry->st_procpid != 0)
+		return;
+	bt = beentry->st_backendType;
+	if (bt != B_CHECKPOINTER && bt != B_AUTOVAC_WORKER && bt != B_BG_WRITER && bt != B_BACKEND)
+		return;
+
+	for (;;)
+	{
+		int			before_changecount;
+		int			after_changecount;
+
+		pgstat_begin_read_activity(beentry, before_changecount);
+
+		/*
+		 * It is guaranteed that the index will be within bounds of the array
+		 * because pgstat_get_index_buffers_written() only returns indexes within
+		 * bounds of BuffersWrittenCountersArray
+		 */
+		BuffersWrittenCountersArray[pgstat_get_index_buffers_written(BA_Write_Strat, beentry->st_backendType)] += beentry->num_writes_strat;
+		BuffersWrittenCountersArray[pgstat_get_index_buffers_written(BA_Write, beentry->st_backendType)] += beentry->num_writes;
+		BuffersWrittenCountersArray[pgstat_get_index_buffers_written(BA_Extend, beentry->st_backendType)] += beentry->num_extends;
+        BuffersWrittenCountersArray[pgstat_get_index_buffers_written(BA_Fsync, beentry->st_backendType)] += beentry->num_fsyncs;
+
+        pgstat_end_read_activity(beentry, after_changecount);
+
+		if (pgstat_read_activity_complete(before_changecount, after_changecount))
+			break;
+
+		/* Make sure we can break out of loop if stuck... */
+		CHECK_FOR_INTERRUPTS();
+	}
+}
+
+/*
+ * Input parameter, length, is the length of the values array passed in
+ * Output parameter is values, an array to be filled
+ */
+void
+pgstat_recount_all_backends_buffers_written(Datum *values, int length)
+{
+	int   beid;
+	int   tot_backends   = pgstat_fetch_stat_numbackends();
+
+	Assert(length == BuffersWrittenCountersArrayLength);
+
+	/*
+	 * Add stats from all exited backends
+	 *
+	 * TODO: I thought maybe it is okay to just access this lock-free since it is
+	 * only written to when a process dies in pgstat_record_dead_backend_buffers_written()
+	 * and is read at the time of querying the view with the stats.
+	 * It's okay if we don't have 100% up-to-date stats.
+	 * However, I was wondering about torn values and platforms without
+	 * 64bit "single copy atomicity"
+	 *
+	 * Because the values array is datums and BuffersWrittenCountersArrayLength
+	 * is int64s, can't do a simple memcpy
+	 *
+	 */
+	for (int i = 0; i < BuffersWrittenCountersArrayLength; i++)
+		values[i] += BuffersWrittenCountersArray[i];
+
+	/*
+	 * Loop through all live backends and count their writes
+	 */
+	for (beid = 1; beid <= tot_backends; beid++)
+	{
+		BackendType bt;
+		PgBackendStatus *beentry = pgstat_fetch_stat_beentry(beid);
+		if (beentry->st_procpid == 0)
+			continue;
+		bt = beentry->st_backendType;
+		if (bt != B_CHECKPOINTER && bt != B_AUTOVAC_WORKER && bt != B_BG_WRITER && bt != B_BACKEND)
+			continue;
+
+		values[pgstat_get_index_buffers_written(BA_Extend,
+		                                        beentry->st_backendType)] += beentry->num_extends;
+		values[pgstat_get_index_buffers_written(BA_Write,
+		                                        beentry->st_backendType)] += beentry->num_writes;
+		values[pgstat_get_index_buffers_written(BA_Write_Strat,
+		                                        beentry->st_backendType)] += beentry->num_writes_strat;
+        values[pgstat_get_index_buffers_written(BA_Fsync,
+                                                beentry->st_backendType)] += beentry->num_fsyncs;
+	}
 }

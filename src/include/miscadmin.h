@@ -326,6 +326,29 @@ typedef enum BackendType
 
 extern BackendType MyBackendType;
 
+typedef enum BufferActionType
+{
+	BA_Extend,
+	BA_Write,
+	BA_Write_Strat,
+	BA_Fsync,
+	BA_NUM_TYPES,
+} BufferActionType;
+
+// TODO: does this belong here?
+typedef enum BuffersWrittenCountersIndex {
+	B_BUFFERS_WRITTEN_BLACK_HOLE = 0,
+	B_AUTOVAC_WORKER_BA_WRITE,
+	B_AUTOVAC_WORKER_BA_WRITE_STRAT,
+	B_BACKEND_BA_EXTEND,
+	B_BACKEND_BA_WRITE,
+	B_BACKEND_BA_WRITE_STRAT,
+	B_BACKEND_BA_FSYNC,
+	B_BG_WRITER_BA_WRITE,
+	B_CHECKPOINTER_WRITE,
+	BuffersWrittenCountersArrayLength,
+} BuffersWrittenCountersIndex;
+
 extern const char *GetBackendTypeDesc(BackendType backendType);
 
 extern void SetDatabasePath(const char *path);

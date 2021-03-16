@@ -456,8 +456,6 @@ typedef struct PgStat_MsgBgWriter
 	PgStat_Counter m_buf_written_checkpoints;
 	PgStat_Counter m_buf_written_clean;
 	PgStat_Counter m_maxwritten_clean;
-	PgStat_Counter m_buf_written_backend;
-	PgStat_Counter m_buf_fsync_backend;
 	PgStat_Counter m_buf_alloc;
 	PgStat_Counter m_checkpoint_write_time; /* times in milliseconds */
 	PgStat_Counter m_checkpoint_sync_time;
@@ -830,7 +828,6 @@ typedef struct PgStat_GlobalStats
 	PgStat_Counter buf_written_checkpoints;
 	PgStat_Counter buf_written_clean;
 	PgStat_Counter maxwritten_clean;
-	PgStat_Counter buf_written_backend;
 	PgStat_Counter buf_fsync_backend;
 	PgStat_Counter buf_alloc;
 	TimestampTz stat_reset_timestamp;
@@ -1263,6 +1260,10 @@ typedef struct PgBackendStatus
 	 */
 	ProgressCommandType st_progress_command;
 	Oid			st_progress_command_target;
+	int num_extends;
+	int num_writes;
+	int num_writes_strat;
+	int num_fsyncs;
 	int64		st_progress_param[PGSTAT_NUM_PROGRESS_PARAM];
 } PgBackendStatus;
 
@@ -1411,7 +1412,7 @@ extern SessionEndType pgStatSessionEndCause;
  */
 extern Size BackendStatusShmemSize(void);
 extern void CreateSharedBackendStatus(void);
-
+extern void CreateSharedBuffersWrittenCounters(void);
 extern void pgstat_init(void);
 extern int	pgstat_start(void);
 extern void pgstat_reset_all(void);
@@ -1633,5 +1634,9 @@ extern void pgstat_count_slru_flush(int slru_idx);
 extern void pgstat_count_slru_truncate(int slru_idx);
 extern const char *pgstat_slru_name(int slru_idx);
 extern int	pgstat_slru_index(const char *name);
+
+extern void pgstat_increment_buffers_written(BufferActionType ba_type);
+extern void pgstat_record_dead_backend_buffers_written(void);
+extern void pgstat_recount_all_backends_buffers_written(Datum *values, int length);
 
 #endif							/* PGSTAT_H */

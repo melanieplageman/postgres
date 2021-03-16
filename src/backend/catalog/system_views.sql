@@ -1062,8 +1062,6 @@ CREATE VIEW pg_stat_bgwriter AS
         pg_stat_get_bgwriter_buf_written_checkpoints() AS buffers_checkpoint,
         pg_stat_get_bgwriter_buf_written_clean() AS buffers_clean,
         pg_stat_get_bgwriter_maxwritten_clean() AS maxwritten_clean,
-        pg_stat_get_buf_written_backend() AS buffers_backend,
-        pg_stat_get_buf_fsync_backend() AS buffers_backend_fsync,
         pg_stat_get_buf_alloc() AS buffers_alloc,
         pg_stat_get_bgwriter_stat_reset_time() AS stats_reset;
 
@@ -1079,6 +1077,18 @@ CREATE VIEW pg_stat_wal AS
         w.wal_sync_time,
         w.stats_reset
     FROM pg_stat_get_wal() w;
+
+CREATE VIEW pg_stat_buffers_written AS
+    SELECT
+        b.buffers_autovacuum_write,
+        b.buffers_autovacuum_write_strat,
+        b.buffers_backend_extend,
+        b.buffers_backend_write,
+        b.buffers_backend_write_strat,
+        b.buffers_backend_fsync,
+        b.buffers_bgwriter_write,
+        b.buffers_checkpointer_write
+FROM pg_stat_get_buffers_written() b;
 
 CREATE VIEW pg_stat_progress_analyze AS
     SELECT

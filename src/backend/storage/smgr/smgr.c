@@ -25,7 +25,7 @@
 #include "storage/smgr.h"
 #include "utils/hsearch.h"
 #include "utils/inval.h"
-
+#include "miscadmin.h"
 
 /*
  * This struct of function pointers defines the API between smgr.c and

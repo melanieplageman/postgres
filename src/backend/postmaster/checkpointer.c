@@ -127,9 +127,6 @@ typedef struct
 	ConditionVariable start_cv; /* signaled when ckpt_started advances */
 	ConditionVariable done_cv;	/* signaled when ckpt_done advances */
 
-	uint32		num_backend_writes; /* counts user backend buffer writes */
-	uint32		num_backend_fsync;	/* counts user backend fsync calls */
-
 	int			num_requests;	/* current # of requests */
 	int			max_requests;	/* allocated array size */
 	CheckpointerRequest requests[FLEXIBLE_ARRAY_MEMBER];
@@ -1092,10 +1089,6 @@ ForwardSyncRequest(const FileTag *ftag, SyncRequestType type)
 
 	LWLockAcquire(CheckpointerCommLock, LW_EXCLUSIVE);
 
-	/* Count all backend writes regardless of if they fit in the queue */
-	if (!AmBackgroundWriterProcess())
-		CheckpointerShmem->num_backend_writes++;
-
 	/*
 	 * If the checkpointer isn't running or the request queue is full, the
 	 * backend will have to perform its own fsync request.  But before forcing
@@ -1109,8 +1102,9 @@ ForwardSyncRequest(const FileTag *ftag, SyncRequestType type)
 		 * Count the subset of writes where backends have to do their own
 		 * fsync
 		 */
+		// TODO: should we count fsyncs for all types of procs?
 		if (!AmBackgroundWriterProcess())
-			CheckpointerShmem->num_backend_fsync++;
+		    pgstat_increment_buffers_written(BA_Fsync);
 		LWLockRelease(CheckpointerCommLock);
 		return false;
 	}
@@ -1266,13 +1260,6 @@ AbsorbSyncRequests(void)
 		return;
 
 	LWLockAcquire(CheckpointerCommLock, LW_EXCLUSIVE);
-
-	/* Transfer stats counts into pending pgstats message */
-	BgWriterStats.m_buf_written_backend += CheckpointerShmem->num_backend_writes;
-	BgWriterStats.m_buf_fsync_backend += CheckpointerShmem->num_backend_fsync;
-
-	CheckpointerShmem->num_backend_writes = 0;
-	CheckpointerShmem->num_backend_fsync = 0;
 
 	/*
 	 * We try to avoid holding the lock for a long time by copying the request
