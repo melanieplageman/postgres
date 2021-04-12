@@ -2963,8 +2963,8 @@ BackendStatusShmemSize(void)
 void
 CreateSharedBuffersWrittenCounters(void)
 {
-	bool found;
-	Size size = 0;
+	bool		found;
+	Size		size = 0;
 
 	size = mul_size(sizeof(int), BuffersWrittenCountersArrayLength);
 	BuffersWrittenCountersArray = (int *)
@@ -3362,11 +3362,11 @@ pgstat_beshutdown_hook(int code, Datum arg)
 	PGSTAT_END_WRITE_ACTIVITY(beentry);
 
 	/*
-	 * Because the stats tracking shared buffers written and extended do not go
-	 * through the stats collector, it didn't make sense to add them to
-	 * pgstat_report_stat()
-	 * At least the DatabaseId should be valid. Otherwise we can't be sure that
-	 * the members were zero-initialized (TODO: is that true?)
+	 * Because the stats tracking shared buffers written and extended do not
+	 * go through the stats collector, it didn't make sense to add them to
+	 * pgstat_report_stat() At least the DatabaseId should be valid. Otherwise
+	 * we can't be sure that the members were zero-initialized (TODO: is that
+	 * true?)
 	 */
 	if (OidIsValid(MyDatabaseId))
 		pgstat_record_dead_backend_buffers_written();
@@ -7518,7 +7518,7 @@ pgstat_increment_buffers_written(BufferActionType ba_type)
 	else if (ba_type == BA_Write_Strat)
 		beentry->num_writes_strat++;
 	else if (ba_type == BA_Fsync)
-	    beentry->num_fsyncs++;
+		beentry->num_fsyncs++;
 	PGSTAT_END_WRITE_ACTIVITY(beentry);
 }
 
@@ -7527,38 +7527,30 @@ pgstat_increment_buffers_written(BufferActionType ba_type)
  * Used for a single backend of a BackendType when needing its stats on the
  * various BufferActionTypes it has done.
  */
-// TODO: should this be a size_t of some kind?
+/*  TODO: should this be a size_t of some kind? */
 static int
 pgstat_get_index_buffers_written(BufferActionType buffer_action_type, BackendType backend_type)
 {
 	/*
-	 * The order is:
-	 * BLACK HOLE - 0
-	 * buffers_autovacuum_write - 1
-	 * buffers_autovacuum_write_strat - 2
-	 * buffers_backend_extend - 3
-	 * buffers_backend_write - 4
-	 * buffers_backend_write_strat - 5
-	 * buffers_backend_fsync - 6
-	 * buffers_bgwriter_write - 7
+	 * The order is: BLACK HOLE - 0 buffers_autovacuum_write - 1
+	 * buffers_autovacuum_write_strat - 2 buffers_backend_extend - 3
+	 * buffers_backend_write - 4 buffers_backend_write_strat - 5
+	 * buffers_backend_fsync - 6 buffers_bgwriter_write - 7
 	 * buffers_checkpointer_write - 8
 	 *
-	 * This function is responsible for maintaining BuffersWrittenCountersArray
-	 * in the following order
-	 * [
-	 *  BLACK_HOLE,
-	 *  buffers_autovaccum_write,buffers_autovacuum_write_strat,
-	 *  buffers_backend_extend,buffers_backend_write,
-	 *  buffers_backend_write_strat,buffers_backend_fsync,
-	 *  buffers_bgwriter_write,buffers_checkpointer_write
-	 *  ]
+	 * This function is responsible for maintaining
+	 * BuffersWrittenCountersArray in the following order [ BLACK_HOLE,
+	 * buffers_autovaccum_write,buffers_autovacuum_write_strat,
+	 * buffers_backend_extend,buffers_backend_write,
+	 * buffers_backend_write_strat,buffers_backend_fsync,
+	 * buffers_bgwriter_write,buffers_checkpointer_write ]
 	 *
 	 * Note that if a BufferActionType is unimplemented for a particular
 	 * BackendType, B_BUFFERS_WRITTEN_BLACK_HOLE is returned
 	 */
 	Assert(buffer_action_type < BA_NUM_TYPES && buffer_action_type >= 0);
 
-	// TODO: silence the compiler on -wswitch uncovered cases
+	/* TODO: silence the compiler on -wswitch uncovered cases */
 	switch (backend_type)
 	{
 		case B_AUTOVAC_WORKER:
@@ -7579,8 +7571,8 @@ pgstat_get_index_buffers_written(BufferActionType buffer_action_type, BackendTyp
 					return B_BACKEND_BA_WRITE;
 				case BA_Write_Strat:
 					return B_BACKEND_BA_WRITE_STRAT;
-			    case BA_Fsync:
-			        return B_BACKEND_BA_FSYNC;
+				case BA_Fsync:
+					return B_BACKEND_BA_FSYNC;
 			}
 			break;
 		case B_BG_WRITER:
@@ -7598,7 +7590,11 @@ pgstat_get_index_buffers_written(BufferActionType buffer_action_type, BackendTyp
 			}
 			break;
 		default:
-			// TODO: is this ERROR even a good idea? is it better to only return the black hole?
+
+			/*
+			 * TODO: is this ERROR even a good idea? is it better to only
+			 * return the black hole?
+			 */
 			elog(ERROR, "Unrecognized backend type, %d, for buffers written counting.", backend_type);
 	}
 	return B_BUFFERS_WRITTEN_BLACK_HOLE;
@@ -7613,7 +7609,7 @@ void
 pgstat_record_dead_backend_buffers_written(void)
 {
 	BackendType bt;
-	volatile PgBackendStatus *beentry = MyBEEntry;
+	volatile	PgBackendStatus *beentry = MyBEEntry;
 
 	if (beentry->st_procpid != 0)
 		return;
@@ -7630,15 +7626,15 @@ pgstat_record_dead_backend_buffers_written(void)
 
 		/*
 		 * It is guaranteed that the index will be within bounds of the array
-		 * because pgstat_get_index_buffers_written() only returns indexes within
-		 * bounds of BuffersWrittenCountersArray
+		 * because pgstat_get_index_buffers_written() only returns indexes
+		 * within bounds of BuffersWrittenCountersArray
 		 */
 		BuffersWrittenCountersArray[pgstat_get_index_buffers_written(BA_Write_Strat, beentry->st_backendType)] += beentry->num_writes_strat;
 		BuffersWrittenCountersArray[pgstat_get_index_buffers_written(BA_Write, beentry->st_backendType)] += beentry->num_writes;
 		BuffersWrittenCountersArray[pgstat_get_index_buffers_written(BA_Extend, beentry->st_backendType)] += beentry->num_extends;
-        BuffersWrittenCountersArray[pgstat_get_index_buffers_written(BA_Fsync, beentry->st_backendType)] += beentry->num_fsyncs;
+		BuffersWrittenCountersArray[pgstat_get_index_buffers_written(BA_Fsync, beentry->st_backendType)] += beentry->num_fsyncs;
 
-        pgstat_end_read_activity(beentry, after_changecount);
+		pgstat_end_read_activity(beentry, after_changecount);
 
 		if (pgstat_read_activity_complete(before_changecount, after_changecount))
 			break;
@@ -7653,25 +7649,25 @@ pgstat_record_dead_backend_buffers_written(void)
  * Output parameter is values, an array to be filled
  */
 void
-pgstat_recount_all_backends_buffers_written(Datum *values, int length)
+pgstat_recount_all_backends_buffers_written(Datum * values, int length)
 {
-	int   beid;
-	int   tot_backends   = pgstat_fetch_stat_numbackends();
+	int			beid;
+	int			tot_backends = pgstat_fetch_stat_numbackends();
 
 	Assert(length == BuffersWrittenCountersArrayLength);
 
 	/*
 	 * Add stats from all exited backends
 	 *
-	 * TODO: I thought maybe it is okay to just access this lock-free since it is
-	 * only written to when a process dies in pgstat_record_dead_backend_buffers_written()
-	 * and is read at the time of querying the view with the stats.
-	 * It's okay if we don't have 100% up-to-date stats.
-	 * However, I was wondering about torn values and platforms without
-	 * 64bit "single copy atomicity"
+	 * TODO: I thought maybe it is okay to just access this lock-free since it
+	 * is only written to when a process dies in
+	 * pgstat_record_dead_backend_buffers_written() and is read at the time of
+	 * querying the view with the stats. It's okay if we don't have 100%
+	 * up-to-date stats. However, I was wondering about torn values and
+	 * platforms without 64bit "single copy atomicity"
 	 *
-	 * Because the values array is datums and BuffersWrittenCountersArrayLength
-	 * is int64s, can't do a simple memcpy
+	 * Because the values array is datums and
+	 * BuffersWrittenCountersArrayLength is int64s, can't do a simple memcpy
 	 *
 	 */
 	for (int i = 0; i < BuffersWrittenCountersArrayLength; i++)
@@ -7684,6 +7680,7 @@ pgstat_recount_all_backends_buffers_written(Datum *values, int length)
 	{
 		BackendType bt;
 		PgBackendStatus *beentry = pgstat_fetch_stat_beentry(beid);
+
 		if (beentry->st_procpid == 0)
 			continue;
 		bt = beentry->st_backendType;
@@ -7691,12 +7688,12 @@ pgstat_recount_all_backends_buffers_written(Datum *values, int length)
 			continue;
 
 		values[pgstat_get_index_buffers_written(BA_Extend,
-		                                        beentry->st_backendType)] += beentry->num_extends;
+												beentry->st_backendType)] += beentry->num_extends;
 		values[pgstat_get_index_buffers_written(BA_Write,
-		                                        beentry->st_backendType)] += beentry->num_writes;
+												beentry->st_backendType)] += beentry->num_writes;
 		values[pgstat_get_index_buffers_written(BA_Write_Strat,
-		                                        beentry->st_backendType)] += beentry->num_writes_strat;
-        values[pgstat_get_index_buffers_written(BA_Fsync,
-                                                beentry->st_backendType)] += beentry->num_fsyncs;
+												beentry->st_backendType)] += beentry->num_writes_strat;
+		values[pgstat_get_index_buffers_written(BA_Fsync,
+												beentry->st_backendType)] += beentry->num_fsyncs;
 	}
 }

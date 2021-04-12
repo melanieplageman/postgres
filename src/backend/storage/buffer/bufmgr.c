@@ -1176,25 +1176,37 @@ BufferAlloc(SMgrRelation smgr, char relpersistence, ForkNumber forkNum,
 						UnpinBuffer(buf, true);
 						continue;
 					}
-					// TODO: there is certainly a better way to write this logic
-					// buffers_backend_write, buffers_backend_write_strat, buffers_autovacuum_write, or buffers_autovacuum_write_strat
-					// are all incremented in the next 20 or so lines
+
 					/*
-					 * The dirty buffer that will be written out was selected from
-					 * the ring and we did not bother checking the freelist or
-					 * doing a clock sweep to look for a clean buffer to use, thus,
-					 * this write will be counted as a strategy write -- one that
-					 * may be unnecessary without a strategy
+					 * TODO: there is certainly a better way to write this
+					 * logic
+					 */
+
+					/*
+					 * buffers_backend_write, buffers_backend_write_strat,
+					 * buffers_autovacuum_write, or
+					 * buffers_autovacuum_write_strat
+					 */
+					/* are all incremented in the next 20 or so lines */
+
+					/*
+					 * The dirty buffer that will be written out was selected
+					 * from the ring and we did not bother checking the
+					 * freelist or doing a clock sweep to look for a clean
+					 * buffer to use, thus, this write will be counted as a
+					 * strategy write -- one that may be unnecessary without a
+					 * strategy
 					 */
 					if (StrategyIsBufferFromRing(strategy))
 					{
 						pgstat_increment_buffers_written(BA_Write_Strat);
 					}
+
 					/*
-					 * If the dirty buffer was one we grabbed from the freelist
-					 * or through a clock sweep, it could have been written out
-					 * by bgwriter or checkpointer, thus, we will count it as
-					 * a regular write
+					 * If the dirty buffer was one we grabbed from the
+					 * freelist or through a clock sweep, it could have been
+					 * written out by bgwriter or checkpointer, thus, we will
+					 * count it as a regular write
 					 */
 					else
 						pgstat_increment_buffers_written(BA_Write);
@@ -1203,9 +1215,9 @@ BufferAlloc(SMgrRelation smgr, char relpersistence, ForkNumber forkNum,
 				{
 					/*
 					 * If strategy is NULL, we could only be doing a write.
-					 * Extend operations will be counted in smgrextend. That is
-					 * separate I/O than any flushing of dirty buffers.
-					 * If we add more Backend Access Types, perhaps we will need
+					 * Extend operations will be counted in smgrextend. That
+					 * is separate I/O than any flushing of dirty buffers. If
+					 * we add more Backend Access Types, perhaps we will need
 					 * additional checks here
 					 */
 					pgstat_increment_buffers_written(BA_Write);
@@ -2878,15 +2890,15 @@ FlushBuffer(BufferDesc *buf, SMgrRelation reln)
 	/*
 	 * TODO: consider that if we did not need to distinguish between a buffer
 	 * flushed that was grabbed from the ring buffer and written out as part
-	 * of a strategy which was not from main Shared Buffers (and thus preventable
-	 * by bgwriter or checkpointer), then we could move all calls to
-	 * pgstat_increment_buffers_written() here except for the one for extends,
-	 * which would remain in ReadBuffer_common() before smgrextend() (unless
-	 * we decide to start counting other extends). That includes the call to count
-	 * buffers written by bgwriter and checkpointer which go through FlushBuffer()
-	 * but not BufferAlloc(). That would make it simpler. Perhaps instead we can
-	 * find somewhere else to indicate that the buffer is from the ring of buffers
-	 * to reuse.
+	 * of a strategy which was not from main Shared Buffers (and thus
+	 * preventable by bgwriter or checkpointer), then we could move all calls
+	 * to pgstat_increment_buffers_written() here except for the one for
+	 * extends, which would remain in ReadBuffer_common() before smgrextend()
+	 * (unless we decide to start counting other extends). That includes the
+	 * call to count buffers written by bgwriter and checkpointer which go
+	 * through FlushBuffer() but not BufferAlloc(). That would make it
+	 * simpler. Perhaps instead we can find somewhere else to indicate that
+	 * the buffer is from the ring of buffers to reuse.
 	 */
 	smgrwrite(reln,
 			  buf->tag.forkNum,

@@ -1782,13 +1782,14 @@ pg_stat_get_buf_alloc(PG_FUNCTION_ARGS)
 Datum
 pg_stat_get_buffers_written(PG_FUNCTION_ARGS)
 {
-	TupleDesc tupdesc;
-	Datum values[BuffersWrittenCountersArrayLength];
+	TupleDesc	tupdesc;
+	Datum		values[BuffersWrittenCountersArrayLength];
+
 	/*
 	 * Values will be filled from BuffersWrittenCountersArray, which has an
 	 * extra spot for data that is not needed, a black hole
 	 */
-	bool  nulls[BuffersWrittenCountersArrayLength];
+	bool		nulls[BuffersWrittenCountersArrayLength];
 
 	/* Initialise values and NULL flags arrays */
 	MemSet(values, 0, sizeof(values));
@@ -1797,28 +1798,28 @@ pg_stat_get_buffers_written(PG_FUNCTION_ARGS)
 	/* Initialise attributes information in the tuple descriptor */
 	tupdesc = CreateTemplateTupleDesc(BuffersWrittenCountersArrayLength - 1);
 	TupleDescInitEntry(tupdesc, (AttrNumber) 1, "buffers_autovacuum_write",
-	                   INT8OID, -1, 0);
+					   INT8OID, -1, 0);
 	TupleDescInitEntry(tupdesc, (AttrNumber) 2, "buffers_autovacuum_write_strat",
-	                   INT8OID, -1, 0);
+					   INT8OID, -1, 0);
 	TupleDescInitEntry(tupdesc, (AttrNumber) 3, "buffers_backend_extend",
-	                   INT8OID, -1, 0);
+					   INT8OID, -1, 0);
 	TupleDescInitEntry(tupdesc, (AttrNumber) 4, "buffers_backend_write",
-	                   INT8OID, -1, 0);
+					   INT8OID, -1, 0);
 	TupleDescInitEntry(tupdesc, (AttrNumber) 5, "buffers_backend_write_strat",
-	                   INT8OID, -1, 0);
-    TupleDescInitEntry(tupdesc, (AttrNumber) 6, "buffers_backend_fsync",
-                       INT8OID, -1, 0);
+					   INT8OID, -1, 0);
+	TupleDescInitEntry(tupdesc, (AttrNumber) 6, "buffers_backend_fsync",
+					   INT8OID, -1, 0);
 	TupleDescInitEntry(tupdesc, (AttrNumber) 7, "buffers_bgwriter_write",
-	                   INT8OID, -1, 0);
+					   INT8OID, -1, 0);
 	TupleDescInitEntry(tupdesc, (AttrNumber) 8, "buffers_checkpointer_write",
-	                   INT8OID, -1, 0);
+					   INT8OID, -1, 0);
 
 	BlessTupleDesc(tupdesc);
 
 	/*
-	 * Fill values and NULLs.
-	 * values will be filled with the number of writes by all live regular backends
-	 * and relevant auxiliary backends as well as exited backends
+	 * Fill values and NULLs. values will be filled with the number of writes
+	 * by all live regular backends and relevant auxiliary backends as well as
+	 * exited backends
 	 */
 	pgstat_recount_all_backends_buffers_written(values, BuffersWrittenCountersArrayLength);
 	/* Returns the record as Datum */

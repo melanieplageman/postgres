@@ -93,7 +93,7 @@ typedef struct BufferAccessStrategyData
 	 * buffer in either the freelist or through doing a clock sweep of shared
 	 * buffers, this flag will indicate that
 	 */
-	bool chose_buffer_in_ring;
+	bool		chose_buffer_in_ring;
 
 	/*
 	 * Array of buffer numbers.  InvalidBuffer (that is, zero) indicates we

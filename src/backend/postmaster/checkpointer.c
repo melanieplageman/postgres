@@ -1102,9 +1102,9 @@ ForwardSyncRequest(const FileTag *ftag, SyncRequestType type)
 		 * Count the subset of writes where backends have to do their own
 		 * fsync
 		 */
-		// TODO: should we count fsyncs for all types of procs?
+		/* TODO: should we count fsyncs for all types of procs? */
 		if (!AmBackgroundWriterProcess())
-		    pgstat_increment_buffers_written(BA_Fsync);
+			pgstat_increment_buffers_written(BA_Fsync);
 		LWLockRelease(CheckpointerCommLock);
 		return false;
 	}

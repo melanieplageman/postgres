@@ -333,10 +333,11 @@ typedef enum BufferActionType
 	BA_Write_Strat,
 	BA_Fsync,
 	BA_NUM_TYPES,
-} BufferActionType;
+}			BufferActionType;
 
-// TODO: does this belong here?
-typedef enum BuffersWrittenCountersIndex {
+/*  TODO: does this belong here? */
+typedef enum BuffersWrittenCountersIndex
+{
 	B_BUFFERS_WRITTEN_BLACK_HOLE = 0,
 	B_AUTOVAC_WORKER_BA_WRITE,
 	B_AUTOVAC_WORKER_BA_WRITE_STRAT,
@@ -347,7 +348,7 @@ typedef enum BuffersWrittenCountersIndex {
 	B_BG_WRITER_BA_WRITE,
 	B_CHECKPOINTER_WRITE,
 	BuffersWrittenCountersArrayLength,
-} BuffersWrittenCountersIndex;
+}			BuffersWrittenCountersIndex;
 
 extern const char *GetBackendTypeDesc(BackendType backendType);
 
