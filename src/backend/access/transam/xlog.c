@@ -8546,6 +8546,20 @@ GetRedoRecPtr(void)
 	return RedoRecPtr;
 }
 
+bool
+RedoRecPtrChanged(XLogRecPtr comparator_ptr)
+{
+	XLogRecPtr	ptr;
+
+	SpinLockAcquire(&XLogCtl->info_lck);
+	ptr = XLogCtl->RedoRecPtr;
+	SpinLockRelease(&XLogCtl->info_lck);
+
+	if (RedoRecPtr < ptr)
+		RedoRecPtr = ptr;
+	return RedoRecPtr != comparator_ptr;
+}
+
 /*
  * Return information needed to decide whether a modified block needs a
  * full-page image to be included in the WAL record.

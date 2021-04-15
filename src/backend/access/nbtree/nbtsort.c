@@ -233,6 +233,7 @@ typedef struct BTPageState
 {
 	Page		btps_page;		/* workspace for page building */
 	BlockNumber btps_blkno;		/* block # to write this page at */
+	Buffer btps_buf; /* buffer to write this page to */
 	IndexTuple	btps_lowkey;	/* page's strict lower bound pivot tuple */
 	OffsetNumber btps_lastoff;	/* last item offset loaded */
 	Size		btps_lastextra; /* last item's extra posting list space */
@@ -250,9 +251,11 @@ typedef struct BTWriteState
 	Relation	index;
 	BTScanInsert inskey;		/* generic insertion scankey */
 	bool		btws_use_wal;	/* dump pages to WAL? */
-	BlockNumber btws_pages_alloced; /* # pages allocated */
-	BlockNumber btws_pages_written; /* # pages written out */
+	BlockNumber btws_pages_alloced; /* # pages allocated for index build outside SB */
+	BlockNumber btws_pages_written; /* # pages written out for index build outside SB */
 	Page		btws_zeropage;	/* workspace for filling zeroes */
+	XLogRecPtr redo; /* cached redo pointer to determine if backend fsync is required at end of index build */
+	bool use_shared_buffers;
 } BTWriteState;
 
 
@@ -261,10 +264,11 @@ static double _bt_spools_heapscan(Relation heap, Relation index,
 static void _bt_spooldestroy(BTSpool *btspool);
 static void _bt_spool(BTSpool *btspool, ItemPointer self,
 					  Datum *values, bool *isnull);
-static void _bt_leafbuild(BTSpool *btspool, BTSpool *btspool2);
+static void _bt_leafbuild(BTSpool *btspool, BTSpool *btspool2,
+						  bool use_shared_buffers);
 static void _bt_build_callback(Relation index, ItemPointer tid, Datum *values,
 							   bool *isnull, bool tupleIsAlive, void *state);
-static Page _bt_blnewpage(uint32 level);
+static Page _bt_blnewpage(uint32 level, Buffer buf);
 static BTPageState *_bt_pagestate(BTWriteState *wstate, uint32 level);
 static void _bt_slideleft(Page rightmostpage);
 static void _bt_sortaddtup(Page page, Size itemsize,
@@ -275,7 +279,8 @@ static void _bt_buildadd(BTWriteState *wstate, BTPageState *state,
 static void _bt_sort_dedup_finish_pending(BTWriteState *wstate,
 										  BTPageState *state,
 										  BTDedupState dstate);
-static void _bt_uppershutdown(BTWriteState *wstate, BTPageState *state);
+static void _bt_uppershutdown(BTWriteState *wstate, BTPageState *state,
+							  Buffer metabuf, Page metapage);
 static void _bt_load(BTWriteState *wstate,
 					 BTSpool *btspool, BTSpool *btspool2);
 static void _bt_begin_parallel(BTBuildState *buildstate, bool isconcurrent,
@@ -323,13 +328,24 @@ btbuild(Relation heap, Relation index, IndexInfo *indexInfo)
 			 RelationGetRelationName(index));
 
 	reltuples = _bt_spools_heapscan(heap, index, &buildstate, indexInfo);
+	/*
+	 * Based on the number of tuples, either create a buffered or unbuffered
+	 * write state. if the number of tuples is small, make a buffered write
+	 * if the number of tuples is larger, then we make an unbuffered write state
+	 * and must ensure that we check the redo pointer to know whether or not we
+	 * need to fsync ourselves
+	 */
 
 	/*
 	 * Finish the build by (1) completing the sort of the spool file, (2)
 	 * inserting the sorted tuples into btree pages and (3) building the upper
 	 * levels.  Finally, it may also be necessary to end use of parallelism.
 	 */
-	_bt_leafbuild(buildstate.spool, buildstate.spool2);
+	if (reltuples > 1000)
+		_bt_leafbuild(buildstate.spool, buildstate.spool2, false);
+	else
+		_bt_leafbuild(buildstate.spool, buildstate.spool2, true);
+
 	_bt_spooldestroy(buildstate.spool);
 	if (buildstate.spool2)
 		_bt_spooldestroy(buildstate.spool2);
@@ -535,7 +551,7 @@ _bt_spool(BTSpool *btspool, ItemPointer self, Datum *values, bool *isnull)
  * create an entire btree.
  */
 static void
-_bt_leafbuild(BTSpool *btspool, BTSpool *btspool2)
+_bt_leafbuild(BTSpool *btspool, BTSpool *btspool2, bool use_shared_buffers)
 {
 	BTWriteState wstate;
 
@@ -565,9 +581,11 @@ _bt_leafbuild(BTSpool *btspool, BTSpool *btspool2)
 	wstate.btws_use_wal = RelationNeedsWAL(wstate.index);
 
 	/* reserve the metapage */
-	wstate.btws_pages_alloced = BTREE_METAPAGE + 1;
+	wstate.btws_pages_alloced = 0;
 	wstate.btws_pages_written = 0;
 	wstate.btws_zeropage = NULL;	/* until needed */
+	wstate.redo = InvalidXLogRecPtr;
+	wstate.use_shared_buffers = use_shared_buffers;
 
 	pgstat_progress_update_param(PROGRESS_CREATEIDX_SUBPHASE,
 								 PROGRESS_BTREE_PHASE_LEAF_LOAD);
@@ -605,14 +623,18 @@ _bt_build_callback(Relation index,
 
 /*
  * allocate workspace for a new, clean btree page, not linked to any siblings.
+ * If index is not built in shared buffers, buf should be InvalidBuffer
  */
 static Page
-_bt_blnewpage(uint32 level)
+_bt_blnewpage(uint32 level, Buffer buf)
 {
 	Page		page;
 	BTPageOpaque opaque;
 
-	page = (Page) palloc(BLCKSZ);
+	if (buf)
+		page = BufferGetPage(buf);
+	else
+		page = (Page) palloc(BLCKSZ);
 
 	/* Zero the page and set up standard page header info */
 	_bt_pageinit(page, BLCKSZ);
@@ -634,8 +656,20 @@ _bt_blnewpage(uint32 level)
  * emit a completed btree page, and release the working storage.
  */
 static void
-_bt_blwritepage(BTWriteState *wstate, Page page, BlockNumber blkno)
+_bt_blwritepage(BTWriteState *wstate, Page page, BlockNumber blkno, Buffer buf)
 {
+	if (wstate->use_shared_buffers)
+	{
+		Assert(buf);
+		START_CRIT_SECTION();
+		MarkBufferDirty(buf);
+		if (wstate->btws_use_wal)
+			log_newpage_buffer(buf, true);
+		END_CRIT_SECTION();
+		_bt_relbuf(wstate->index, buf);
+		return;
+	}
+
 	/* Ensure rd_smgr is open (could have been closed by relcache flush!) */
 	RelationOpenSmgr(wstate->index);
 
@@ -661,7 +695,7 @@ _bt_blwritepage(BTWriteState *wstate, Page page, BlockNumber blkno)
 		smgrextend(wstate->index->rd_smgr, MAIN_FORKNUM,
 				   wstate->btws_pages_written++,
 				   (char *) wstate->btws_zeropage,
-				   true);
+				   false);
 	}
 
 	PageSetChecksumInplace(page, blkno);
@@ -674,14 +708,14 @@ _bt_blwritepage(BTWriteState *wstate, Page page, BlockNumber blkno)
 	{
 		/* extending the file... */
 		smgrextend(wstate->index->rd_smgr, MAIN_FORKNUM, blkno,
-				   (char *) page, true);
+				   (char *) page, false);
 		wstate->btws_pages_written++;
 	}
 	else
 	{
 		/* overwriting a block we zero-filled before */
 		smgrwrite(wstate->index->rd_smgr, MAIN_FORKNUM, blkno,
-				  (char *) page, true);
+				  (char *) page, false);
 	}
 
 	pfree(page);
@@ -694,13 +728,37 @@ _bt_blwritepage(BTWriteState *wstate, Page page, BlockNumber blkno)
 static BTPageState *
 _bt_pagestate(BTWriteState *wstate, uint32 level)
 {
+	Buffer       buf;
+	BlockNumber blkno;
+
 	BTPageState *state = (BTPageState *) palloc0(sizeof(BTPageState));
 
-	/* create initial page for level */
-	state->btps_page = _bt_blnewpage(level);
+	if (wstate->use_shared_buffers)
+	{
+		/*
+		 * Because we don't need to lock the relation for extension (since
+		 * noone knows about it yet) and we don't need to initialize the
+		 * new page, as it is done below by _bt_blnewpage(), _bt_getbuf()
+		 * (with P_NEW and BT_WRITE) is overkill. However, it might be worth
+		 * either modifying it or adding a new helper function instead of
+		 * calling ReadBufferExtended() directly. We pass mode RBM_ZERO_AND_LOCK
+		 * because we want to hold an exclusive lock on the buffer content
+		 */
+		buf = ReadBufferExtended(wstate->index, MAIN_FORKNUM, P_NEW, RBM_ZERO_AND_LOCK, NULL);
 
+		blkno = BufferGetBlockNumber(buf);
+	}
+	else
+	{
+		buf = InvalidBuffer;
+		blkno = wstate->btws_pages_alloced++;
+	}
+
+	/* create initial page for level */
+	state->btps_page = _bt_blnewpage(level, buf);
 	/* and assign it a page position */
-	state->btps_blkno = wstate->btws_pages_alloced++;
+	state->btps_blkno = blkno;
+	state->btps_buf = buf;
 
 	state->btps_lowkey = NULL;
 	/* initialize lastoff so first item goes into P_FIRSTKEY */
@@ -835,6 +893,7 @@ _bt_buildadd(BTWriteState *wstate, BTPageState *state, IndexTuple itup,
 {
 	Page		npage;
 	BlockNumber nblkno;
+	Buffer nbuf;
 	OffsetNumber last_off;
 	Size		last_truncextra;
 	Size		pgspc;
@@ -849,6 +908,7 @@ _bt_buildadd(BTWriteState *wstate, BTPageState *state, IndexTuple itup,
 
 	npage = state->btps_page;
 	nblkno = state->btps_blkno;
+	nbuf = state->btps_buf;
 	last_off = state->btps_lastoff;
 	last_truncextra = state->btps_lastextra;
 	state->btps_lastextra = truncextra;
@@ -905,16 +965,37 @@ _bt_buildadd(BTWriteState *wstate, BTPageState *state, IndexTuple itup,
 		 */
 		Page		opage = npage;
 		BlockNumber oblkno = nblkno;
+		Buffer obuf = nbuf;
 		ItemId		ii;
 		ItemId		hii;
 		IndexTuple	oitup;
 
+		if (wstate->use_shared_buffers)
+		{
+			/*
+			 * Get a new shared buffer.
+			 * Because we don't need to lock the relation for extension (since
+			 * noone knows about it yet) and we don't need to initialize the
+			 * new page, as it is done below by _bt_blnewpage(), _bt_getbuf()
+			 * (with P_NEW and BT_WRITE) is overkill. However, it might be worth
+			 * either modifying it or adding a new helper function instead of
+			 * calling ReadBufferExtended() directly. We pass mode RBM_ZERO_AND_LOCK
+			 * because we want to hold an exclusive lock on the buffer content
+			 */
+			nbuf = ReadBufferExtended(wstate->index, MAIN_FORKNUM, P_NEW, RBM_ZERO_AND_LOCK, NULL);
+
+			/* assign a page position */
+			nblkno = BufferGetBlockNumber(nbuf);
+		}
+		else
+		{
+			nbuf = InvalidBuffer;
+			/* assign a page position */
+			nblkno = wstate->btws_pages_alloced++;
+		}
+
 		/* Create new page of same level */
-		npage = _bt_blnewpage(state->btps_level);
-
-		/* and assign it a page position */
-		nblkno = wstate->btws_pages_alloced++;
-
+		npage = _bt_blnewpage(state->btps_level, nbuf);
 		/*
 		 * We copy the last item on the page into the new page, and then
 		 * rearrange the old page so that the 'last item' becomes its high key
@@ -1023,10 +1104,10 @@ _bt_buildadd(BTWriteState *wstate, BTPageState *state, IndexTuple itup,
 
 		/*
 		 * Write out the old page.  We never need to touch it again, so we can
-		 * free the opage workspace too.
+		 * free the opage workspace too. obuf has been released and is no longer
+		 * valid.
 		 */
-		_bt_blwritepage(wstate, opage, oblkno);
-
+		 _bt_blwritepage(wstate, opage, oblkno, obuf);
 		/*
 		 * Reset last_off to point to new page
 		 */
@@ -1060,6 +1141,7 @@ _bt_buildadd(BTWriteState *wstate, BTPageState *state, IndexTuple itup,
 
 	state->btps_page = npage;
 	state->btps_blkno = nblkno;
+	state->btps_buf = nbuf;
 	state->btps_lastoff = last_off;
 }
 
@@ -1105,12 +1187,11 @@ _bt_sort_dedup_finish_pending(BTWriteState *wstate, BTPageState *state,
  * Finish writing out the completed btree.
  */
 static void
-_bt_uppershutdown(BTWriteState *wstate, BTPageState *state)
+_bt_uppershutdown(BTWriteState *wstate, BTPageState *state, Buffer metabuf, Page metapage)
 {
 	BTPageState *s;
 	BlockNumber rootblkno = P_NONE;
 	uint32		rootlevel = 0;
-	Page		metapage;
 
 	/*
 	 * Each iteration of this loop completes one more level of the tree.
@@ -1156,20 +1237,22 @@ _bt_uppershutdown(BTWriteState *wstate, BTPageState *state)
 		 * back one slot.  Then we can dump out the page.
 		 */
 		_bt_slideleft(s->btps_page);
-		_bt_blwritepage(wstate, s->btps_page, s->btps_blkno);
+		_bt_blwritepage(wstate, s->btps_page, s->btps_blkno, s->btps_buf);
+		s->btps_buf = InvalidBuffer;
 		s->btps_page = NULL;	/* writepage freed the workspace */
 	}
 
 	/*
-	 * As the last step in the process, construct the metapage and make it
+	 * As the last step in the process, initialize the metapage and make it
 	 * point to the new root (unless we had no data at all, in which case it's
 	 * set to point to "P_NONE").  This changes the index to the "valid" state
 	 * by filling in a valid magic number in the metapage.
+	 * After this, metapage will have been freed or invalid and metabuf, if ever
+	 * valid, will have been released.
 	 */
-	metapage = (Page) palloc(BLCKSZ);
 	_bt_initmetapage(metapage, rootblkno, rootlevel,
 					 wstate->inskey->allequalimage);
-	_bt_blwritepage(wstate, metapage, BTREE_METAPAGE);
+	_bt_blwritepage(wstate, metapage, BTREE_METAPAGE, metabuf);
 }
 
 /*
@@ -1190,9 +1273,46 @@ _bt_load(BTWriteState *wstate, BTSpool *btspool, BTSpool *btspool2)
 	SortSupport sortKeys;
 	int64		tuples_done = 0;
 	bool		deduplicate;
+	Buffer metabuf;
+	Page metapage;
 
 	deduplicate = wstate->inskey->allequalimage && !btspool->isunique &&
 		BTGetDeduplicateItems(wstate->index);
+
+	/*
+	 * Extend the index relation upfront to reserve the metapage
+	 */
+	if (wstate->use_shared_buffers)
+	{
+		/*
+		 * We should not need to LockRelationForExtension() as no one else knows
+		 * about this index yet?
+		 * Extend the index relation by one block for the metapage. _bt_getbuf()
+		 * is not used here as it does _bt_pageinit() which is one later by
+		 * _bt_initmetapage(). We will fill in the metapage and write it out at
+		 * the end of index build when we have all of the information required
+		 * for the metapage. However, we initially extend the relation for it to
+		 * occupy block 0 because it is much easier when using shared buffers to
+		 * extend the relation with a block number that is always increasing by
+		 * 1. Also, by passing RBM_ZERO_AND_LOCK, we have LW_EXCLUSIVE on the
+		 * buffer content and thus don't need _bt_lockbuf().
+		 */
+		metabuf = ReadBufferExtended(wstate->index, MAIN_FORKNUM, P_NEW, RBM_ZERO_AND_LOCK, NULL);
+		metapage = BufferGetPage(metabuf);
+	}
+	else
+	{
+		wstate->redo = GetRedoRecPtr();
+		metabuf = InvalidBuffer;
+		metapage = (Page) palloc(BLCKSZ);
+		RelationOpenSmgr(wstate->index);
+
+		/* extending the file... */
+		smgrextend(wstate->index->rd_smgr, MAIN_FORKNUM, BTREE_METAPAGE,
+		           (char *) metapage, false);
+		wstate->btws_pages_written++;
+		wstate->btws_pages_alloced++;
+	}
 
 	if (merge)
 	{
@@ -1415,7 +1535,7 @@ _bt_load(BTWriteState *wstate, BTSpool *btspool, BTSpool *btspool2)
 	}
 
 	/* Close down final pages and write the metapage */
-	_bt_uppershutdown(wstate, state);
+	_bt_uppershutdown(wstate, state, metabuf, metapage);
 
 	/*
 	 * When we WAL-logged index pages, we must nonetheless fsync index files.
@@ -1428,8 +1548,11 @@ _bt_load(BTWriteState *wstate, BTSpool *btspool, BTSpool *btspool2)
 	 */
 	if (wstate->btws_use_wal)
 	{
-		RelationOpenSmgr(wstate->index);
-		smgrimmedsync(wstate->index->rd_smgr, MAIN_FORKNUM);
+		if (!wstate->use_shared_buffers && RedoRecPtrChanged(wstate->redo))
+		{
+			RelationOpenSmgr(wstate->index);
+			smgrimmedsync(wstate->index->rd_smgr, MAIN_FORKNUM);
+		}
 	}
 }
 

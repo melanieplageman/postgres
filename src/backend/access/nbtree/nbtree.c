@@ -150,30 +150,29 @@ void
 btbuildempty(Relation index)
 {
 	Page		metapage;
+	Buffer metabuf;
 
-	/* Construct metapage. */
-	metapage = (Page) palloc(BLCKSZ);
+	// TODO: test this.
+	/*
+	 * Construct metapage.
+	 * Because we don't need to lock the relation for extension (since
+	 * noone knows about it yet) and we don't need to initialize the
+	 * new page, as it is done below by _bt_blnewpage(), _bt_getbuf()
+	 * (with P_NEW and BT_WRITE) is overkill. However, it might be worth
+	 * either modifying it or adding a new helper function instead of
+	 * calling ReadBufferExtended() directly. We pass mode RBM_ZERO_AND_LOCK
+	 * because we want to hold an exclusive lock on the buffer content
+	 */
+	metabuf = ReadBufferExtended(index, MAIN_FORKNUM, P_NEW, RBM_ZERO_AND_LOCK, NULL);
+
+	metapage = BufferGetPage(metabuf);
 	_bt_initmetapage(metapage, P_NONE, 0, _bt_allequalimage(index, false));
 
-	/*
-	 * Write the page and log it.  It might seem that an immediate sync would
-	 * be sufficient to guarantee that the file exists on disk, but recovery
-	 * itself might remove it while replaying, for example, an
-	 * XLOG_DBASE_CREATE or XLOG_TBLSPC_CREATE record.  Therefore, we need
-	 * this even when wal_level=minimal.
-	 */
-	PageSetChecksumInplace(metapage, BTREE_METAPAGE);
-	smgrwrite(index->rd_smgr, INIT_FORKNUM, BTREE_METAPAGE,
-			  (char *) metapage, true);
-	log_newpage(&index->rd_smgr->smgr_rnode.node, INIT_FORKNUM,
-				BTREE_METAPAGE, metapage, true);
-
-	/*
-	 * An immediate sync is required even if we xlog'd the page, because the
-	 * write did not go through shared_buffers and therefore a concurrent
-	 * checkpoint may have moved the redo pointer past our xlog record.
-	 */
-	smgrimmedsync(index->rd_smgr, INIT_FORKNUM);
+	START_CRIT_SECTION();
+	MarkBufferDirty(metabuf);
+	log_newpage_buffer(metabuf, true);
+	END_CRIT_SECTION();
+	_bt_relbuf(index, metabuf);
 }
 
 /*
