@@ -19,6 +19,7 @@
 #include "storage/buf_internals.h"
 #include "storage/bufmgr.h"
 #include "storage/proc.h"
+#include "utils/backend_status.h"
 
 #define INT_ACCESS_ONCE(var)	((int)(*((volatile int *)&(var))))
 
@@ -51,7 +52,6 @@ typedef struct
 	 * overflow during a single bgwriter cycle.
 	 */
 	uint32		completePasses; /* Complete cycles of the clock sweep */
-	pg_atomic_uint32 numBufferAllocs;	/* Buffers allocated since last reset */
 
 	/*
 	 * Bgworker process to be notified upon activity or -1 if none. See
@@ -86,6 +86,13 @@ typedef struct BufferAccessStrategyData
 	 * ring already.
 	 */
 	bool		current_was_in_ring;
+	/*
+	 * If we could chose a buffer from this list and we end up having to write
+	 * it out because it is dirty when we actually could have found a clean
+	 * buffer in either the freelist or through doing a clock sweep of shared
+	 * buffers, this flag will indicate that
+	 */
+	bool		chose_buffer_in_ring;
 
 	/*
 	 * Array of buffer numbers.  InvalidBuffer (that is, zero) indicates we
@@ -213,7 +220,10 @@ StrategyGetBuffer(BufferAccessStrategy strategy, uint32 *buf_state)
 	{
 		buf = GetBufferFromRing(strategy, buf_state);
 		if (buf != NULL)
+		{
+			StrategyChooseBufferBufferFromRing(strategy);
 			return buf;
+		}
 	}
 
 	/*
@@ -247,7 +257,7 @@ StrategyGetBuffer(BufferAccessStrategy strategy, uint32 *buf_state)
 	 * the rate of buffer consumption.  Note that buffers recycled by a
 	 * strategy object are intentionally not counted here.
 	 */
-	pg_atomic_fetch_add_u32(&StrategyControl->numBufferAllocs, 1);
+	pgstat_increment_buffer_action(BA_Alloc);
 
 	/*
 	 * First check, without acquiring the lock, whether there's buffers in the
@@ -411,11 +421,6 @@ StrategySyncStart(uint32 *complete_passes, uint32 *num_buf_alloc)
 		 */
 		*complete_passes += nextVictimBuffer / NBuffers;
 	}
-
-	if (num_buf_alloc)
-	{
-		*num_buf_alloc = pg_atomic_exchange_u32(&StrategyControl->numBufferAllocs, 0);
-	}
 	SpinLockRelease(&StrategyControl->buffer_strategy_lock);
 	return result;
 }
@@ -517,7 +522,6 @@ StrategyInitialize(bool init)
 
 		/* Clear statistics */
 		StrategyControl->completePasses = 0;
-		pg_atomic_init_u32(&StrategyControl->numBufferAllocs, 0);
 
 		/* No pending notification */
 		StrategyControl->bgwprocno = -1;
@@ -701,4 +705,21 @@ StrategyRejectBuffer(BufferAccessStrategy strategy, BufferDesc *buf)
 	strategy->buffers[strategy->current] = InvalidBuffer;
 
 	return true;
+}
+void
+StrategyUnChooseBufferFromRing(BufferAccessStrategy strategy)
+{
+	strategy->chose_buffer_in_ring = false;
+}
+
+void
+StrategyChooseBufferBufferFromRing(BufferAccessStrategy strategy)
+{
+	strategy->chose_buffer_in_ring = true;
+}
+
+bool
+StrategyIsBufferFromRing(BufferAccessStrategy strategy)
+{
+	return strategy->chose_buffer_in_ring;
 }

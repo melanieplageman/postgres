@@ -969,6 +969,11 @@ ReadBuffer_common(SMgrRelation smgr, char relpersistence, ForkNumber forkNum,
 
 	if (isExtend)
 	{
+		/*
+		 * Extends counted here are only those that go through shared buffers
+		 */
+		pgstat_increment_buffer_action(BA_Extend);
+
 		/* new buffers are zero-filled */
 		MemSet((char *) bufBlock, 0, BLCKSZ);
 		/* don't set checksum for all-zero page */
@@ -1235,11 +1240,60 @@ BufferAlloc(SMgrRelation smgr, char relpersistence, ForkNumber forkNum,
 					if (XLogNeedsFlush(lsn) &&
 						StrategyRejectBuffer(strategy, buf))
 					{
+						/*
+						 * Unset the strat write flag, as we will not be writing
+						 * this particular buffer from our ring out and may end
+						 * up having to find a buffer from main shared buffers,
+						 * which, if it is dirty, we may have to write out, which
+						 * could have been prevented by checkpointing and background
+						 * writing
+						 */
+						StrategyUnChooseBufferFromRing(strategy);
+
 						/* Drop lock/pin and loop around for another buffer */
 						LWLockRelease(BufferDescriptorGetContentLock(buf));
 						UnpinBuffer(buf, true);
 						continue;
 					}
+
+					/*
+					 * TODO: there is certainly a better way to write this
+					 * logic
+					 */
+
+					/*
+					 * The dirty buffer that will be written out was selected
+					 * from the ring and we did not bother checking the
+					 * freelist or doing a clock sweep to look for a clean
+					 * buffer to use, thus, this write will be counted as a
+					 * strategy write -- one that may be unnecessary without a
+					 * strategy
+					 */
+					if (StrategyIsBufferFromRing(strategy))
+					{
+						pgstat_increment_buffer_action(BA_Write_Strat);
+					}
+
+						/*
+						 * If the dirty buffer was one we grabbed from the
+						 * freelist or through a clock sweep, it could have been
+						 * written out by bgwriter or checkpointer, thus, we will
+						 * count it as a regular write
+						 */
+					else
+						pgstat_increment_buffer_action(BA_Write);
+				}
+				else
+				{
+					/*
+					 * If strategy is NULL, we could only be doing a write.
+					 * Extend operations will be counted in smgrextend. That
+					 * is separate I/O than any flushing of dirty buffers. If
+					 * we add more Backend Access Types, perhaps we will need
+					 * additional checks here
+					 */
+					pgstat_increment_buffer_action(BA_Write);
+
 				}
 
 				/* OK, do the I/O */
@@ -2252,9 +2306,6 @@ BgBufferSync(WritebackContext *wb_context)
 	 */
 	strategy_buf_id = StrategySyncStart(&strategy_passes, &recent_alloc);
 
-	/* Report buffer alloc counts to pgstat */
-	BgWriterStats.m_buf_alloc += recent_alloc;
-
 	/*
 	 * If we're not running the LRU scan, just stop after doing the stats
 	 * stuff.  We mark the saved state invalid so that we can recover sanely
@@ -2549,6 +2600,8 @@ SyncOneBuffer(int buf_id, bool skip_recently_used, WritebackContext *wb_context)
 	 * Pin it, share-lock it, write it.  (FlushBuffer will do nothing if the
 	 * buffer is clean by the time we've locked it.)
 	 */
+	pgstat_increment_buffer_action(BA_Write);
+
 	PinBuffer_Locked(bufHdr);
 	LWLockAcquire(BufferDescriptorGetContentLock(bufHdr), LW_SHARED);
 
@@ -2900,6 +2953,20 @@ FlushBuffer(BufferDesc *buf, SMgrRelation reln)
 
 	/*
 	 * bufToWrite is either the shared buffer or a copy, as appropriate.
+	 */
+
+	/*
+	 * TODO: consider that if we did not need to distinguish between a buffer
+	 * flushed that was grabbed from the ring buffer and written out as part
+	 * of a strategy which was not from main Shared Buffers (and thus
+	 * preventable by bgwriter or checkpointer), then we could move all calls
+	 * to pgstat_increment_buffer_action() here except for the one for
+	 * extends, which would remain in ReadBuffer_common() before smgrextend()
+	 * (unless we decide to start counting other extends). That includes the
+	 * call to count buffers written by bgwriter and checkpointer which go
+	 * through FlushBuffer() but not BufferAlloc(). That would make it
+	 * simpler. Perhaps instead we can find somewhere else to indicate that
+	 * the buffer is from the ring of buffers to reuse.
 	 */
 	smgrwrite(reln,
 			  buf->tag.forkNum,

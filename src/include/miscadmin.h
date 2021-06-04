@@ -336,7 +336,19 @@ typedef enum BackendType
 	B_ARCHIVER,
 	B_STATS_COLLECTOR,
 	B_LOGGER,
+	BACKEND_NUM_TYPES,
 } BackendType;
+
+typedef enum BufferActionType
+{
+	BA_Invalid = 0,
+	BA_Alloc,
+	BA_Extend,
+	BA_Fsync,
+	BA_Write,
+	BA_Write_Strat,
+	BUFFER_ACTION_NUM_TYPES,
+}			BufferActionType;
 
 extern BackendType MyBackendType;
 

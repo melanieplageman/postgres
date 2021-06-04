@@ -1780,21 +1780,50 @@ pg_stat_get_bgwriter_stat_reset_time(PG_FUNCTION_ARGS)
 }
 
 Datum
-pg_stat_get_buf_written_backend(PG_FUNCTION_ARGS)
+pg_stat_get_buffer_actions(PG_FUNCTION_ARGS)
 {
-	PG_RETURN_INT64(pgstat_fetch_global()->buf_written_backend);
-}
+	ReturnSetInfo *rsinfo = (ReturnSetInfo *) fcinfo->resultinfo;
+	TupleDesc	tupdesc;
+	Tuplestorestate *tupstore;
+	MemoryContext per_query_ctx;
+	MemoryContext oldcontext;
 
-Datum
-pg_stat_get_buf_fsync_backend(PG_FUNCTION_ARGS)
-{
-	PG_RETURN_INT64(pgstat_fetch_global()->buf_fsync_backend);
-}
+	/* Build a tuple descriptor for our result type */
+	if (get_call_result_type(fcinfo, NULL, &tupdesc) != TYPEFUNC_COMPOSITE)
+		elog(ERROR, "return type must be a row type");
 
-Datum
-pg_stat_get_buf_alloc(PG_FUNCTION_ARGS)
-{
-	PG_RETURN_INT64(pgstat_fetch_global()->buf_alloc);
+	per_query_ctx = rsinfo->econtext->ecxt_per_query_memory;
+	oldcontext = MemoryContextSwitchTo(per_query_ctx);
+
+	tupstore = tuplestore_begin_heap(true, false, work_mem);
+	rsinfo->returnMode = SFRM_Materialize;
+	rsinfo->setResult = tupstore;
+	rsinfo->setDesc = tupdesc;
+
+	MemoryContextSwitchTo(oldcontext);
+	for (size_t i = 0; i < BACKEND_NUM_TYPES; i++)
+	{
+		/*
+		 * Currently, the only supported backend types for stats are the following.
+		 * If this were to change, pg_proc.dat would need to be changed as well
+		 * to reflect the new expected number of rows.
+		 */
+		Datum values[BUFFER_ACTION_NUM_TYPES];
+		bool nulls[BUFFER_ACTION_NUM_TYPES];
+		if (!(i == B_BG_WRITER || i == B_CHECKPOINTER || i == B_AUTOVAC_WORKER || i == B_BACKEND))
+			continue;
+
+		MemSet(values, 0, sizeof(values));
+		MemSet(nulls, 0, sizeof(nulls));
+
+		values[0] = CStringGetTextDatum(GetBackendTypeDesc(i));
+		pgstat_recount_all_buffer_actions(i, values);
+		tuplestore_putvalues(tupstore, tupdesc, values, nulls);
+	}
+	/* clean up and return the tuplestore */
+	tuplestore_donestoring(tupstore);
+
+	return (Datum) 0;
 }
 
 /*

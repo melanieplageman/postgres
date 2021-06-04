@@ -55,6 +55,7 @@ static char *BackendAppnameBuffer = NULL;
 static char *BackendClientHostnameBuffer = NULL;
 static char *BackendActivityBuffer = NULL;
 static Size BackendActivityBufferSize = 0;
+static int *BufferActionStatsArray    = NULL;
 #ifdef USE_SSL
 static PgBackendSSLStatus *BackendSslStatusBuffer = NULL;
 #endif
@@ -75,6 +76,7 @@ static MemoryContext backendStatusSnapContext;
 static void pgstat_beshutdown_hook(int code, Datum arg);
 static void pgstat_read_current_status(void);
 static void pgstat_setup_backend_status_context(void);
+static void pgstat_record_dead_backend_buffer_actions(void);
 
 
 /*
@@ -235,6 +237,22 @@ CreateSharedBackendStatus(void)
 	}
 #endif
 }
+
+void
+CreateBufferActionStatsCounters(void)
+{
+	bool		found;
+	Size		size = 0;
+	int length;
+
+	length = BACKEND_NUM_TYPES * BUFFER_ACTION_NUM_TYPES;
+	size                   = mul_size(sizeof(int), length);
+	BufferActionStatsArray = (int *)
+		ShmemInitStruct("Buffer actions taken by each backend type", size, &found);
+	if (!found)
+		MemSet(BufferActionStatsArray, 0, size);
+}
+
 
 /*
  * Initialize pgstats backend activity state, and set up our on-proc-exit
@@ -399,6 +417,11 @@ pgstat_bestart(void)
 	lbeentry.st_progress_command = PROGRESS_COMMAND_INVALID;
 	lbeentry.st_progress_command_target = InvalidOid;
 	lbeentry.st_query_id = UINT64CONST(0);
+	lbeentry.num_allocs = 0;
+	lbeentry.num_extends = 0;
+	lbeentry.num_fsyncs = 0;
+	lbeentry.num_writes = 0;
+	lbeentry.num_writes_strat = 0;
 
 	/*
 	 * we don't zero st_progress_param here to save cycles; nobody should
@@ -469,6 +492,16 @@ pgstat_beshutdown_hook(int code, Datum arg)
 	beentry->st_procpid = 0;	/* mark invalid */
 
 	PGSTAT_END_WRITE_ACTIVITY(beentry);
+
+	/*
+	 * Because the stats tracking shared buffers written and extended do not
+	 * go through the stats collector, it didn't make sense to add them to
+	 * pgstat_report_stat() At least the DatabaseId should be valid. Otherwise
+	 * we can't be sure that the members were zero-initialized (TODO: is that
+	 * true?)
+	 */
+	if (OidIsValid(MyDatabaseId))
+		pgstat_record_dead_backend_buffer_actions();
 }
 
 /*
@@ -1040,6 +1073,117 @@ pgstat_get_my_query_id(void)
 	 * backend which means that there won't be concurrent writes.
 	 */
 	return MyBEEntry->st_query_id;
+}
+void
+pgstat_increment_buffer_action(BufferActionType ba_type)
+{
+	volatile PgBackendStatus *beentry   = MyBEEntry;
+
+	if (!beentry || !pgstat_track_activities)
+		return;
+
+	PGSTAT_BEGIN_WRITE_ACTIVITY(beentry);
+	if (ba_type == BA_Alloc)
+		beentry->num_allocs++;
+	else if (ba_type == BA_Extend)
+		beentry->num_extends++;
+	else if (ba_type == BA_Fsync)
+		beentry->num_fsyncs++;
+	else if (ba_type == BA_Write)
+		beentry->num_writes++;
+	else if (ba_type == BA_Write_Strat)
+		beentry->num_writes_strat++;
+	PGSTAT_END_WRITE_ACTIVITY(beentry);
+}
+
+/*
+ * Called for a single backend at the time of death to persist its I/O stats
+ */
+void
+pgstat_record_dead_backend_buffer_actions(void)
+{
+	BackendType bt;
+	volatile	PgBackendStatus *beentry = MyBEEntry;
+
+	if (beentry->st_procpid != 0)
+		return;
+	bt = beentry->st_backendType;
+
+	for (;;)
+	{
+		int			before_changecount;
+		int			after_changecount;
+
+		pgstat_begin_read_activity(beentry, before_changecount);
+		BufferActionStatsArray[(bt * BUFFER_ACTION_NUM_TYPES) + BA_Alloc] += beentry->num_allocs;
+		BufferActionStatsArray[(bt * BUFFER_ACTION_NUM_TYPES) + BA_Extend] += beentry->num_extends;
+		BufferActionStatsArray[(bt * BUFFER_ACTION_NUM_TYPES) + BA_Fsync] += beentry->num_fsyncs;
+		BufferActionStatsArray[(bt * BUFFER_ACTION_NUM_TYPES) + BA_Write] += beentry->num_writes;
+		BufferActionStatsArray[(bt * BUFFER_ACTION_NUM_TYPES) + BA_Write_Strat] += beentry->num_writes_strat;
+		pgstat_end_read_activity(beentry, after_changecount);
+
+		if (pgstat_read_activity_complete(before_changecount, after_changecount))
+			break;
+
+		/* Make sure we can break out of loop if stuck... */
+		CHECK_FOR_INTERRUPTS();
+	}
+}
+
+/*
+ * Fill the provided values array with the accumulated counts of buffer actions
+ * taken by all backends of type backend_type (input parameter), both alive and
+ * dead. This is currently only used by pg_stat_get_buffer_actions() to create
+ * the rows in the pg_stat_buffer_actions system view.
+ */
+void
+pgstat_recount_all_buffer_actions(BackendType backend_type, Datum * values)
+{
+	int			beid;
+	int			tot_backends = pgstat_fetch_stat_numbackends();
+
+	/*
+	 * Add stats from all exited backends
+	 *
+	 * TODO: I thought maybe it is okay to just access this lock-free since it
+	 * is only written to when a process dies in
+	 * pgstat_record_dead_backend_buffer_actions() and is read at the time of
+	 * querying the view with the stats. It's okay if we don't have 100%
+	 * up-to-date stats. However, I was wondering about torn values and
+	 * platforms without 64bit "single copy atomicity"
+	 *
+	 * Because the values array is datums and
+	 * BufferActionStatsArray is int64s, can't do a simple memcpy
+	 *
+	 */
+	values[BA_Alloc] = BufferActionStatsArray[(backend_type * BUFFER_ACTION_NUM_TYPES) + BA_Alloc];
+	values[BA_Extend] = BufferActionStatsArray[(backend_type * BUFFER_ACTION_NUM_TYPES) + BA_Extend];
+	values[BA_Fsync] = BufferActionStatsArray[(backend_type * BUFFER_ACTION_NUM_TYPES) + BA_Fsync];
+	values[BA_Write] = BufferActionStatsArray[(backend_type * BUFFER_ACTION_NUM_TYPES) + BA_Write];
+	values[BA_Write_Strat] = BufferActionStatsArray[(backend_type * BUFFER_ACTION_NUM_TYPES) + BA_Write_Strat];
+
+	/*
+	 * Loop through all live backends and count their buffer actions
+	 */
+	// TODO: is there a more efficient to do this, since we will potentially loop
+	//  through all backends for each backend type
+	for (beid = 1; beid <= tot_backends; beid++)
+	{
+		BackendType bt;
+		PgBackendStatus *beentry = pgstat_fetch_stat_beentry(beid);
+
+		if (beentry->st_procpid == 0)
+			continue;
+		bt = beentry->st_backendType;
+		if (bt != backend_type)
+			continue;
+
+		values[BA_Alloc] += beentry->num_allocs;
+		values[BA_Extend] += beentry->num_extends;
+		values[BA_Fsync] += beentry->num_fsyncs;
+		values[BA_Write] += beentry->num_writes;
+		values[BA_Write_Strat] += beentry->num_writes_strat;
+	}
 }
 
 

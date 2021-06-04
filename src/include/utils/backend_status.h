@@ -168,6 +168,11 @@ typedef struct PgBackendStatus
 
 	/* query identifier, optionally computed using post_parse_analyze_hook */
 	uint64		st_query_id;
+	int num_allocs;
+	int num_extends;
+	int num_fsyncs;
+	int num_writes;
+	int num_writes_strat;
 } PgBackendStatus;
 
 
@@ -282,7 +287,7 @@ extern PGDLLIMPORT PgBackendStatus *MyBEEntry;
  */
 extern Size BackendStatusShmemSize(void);
 extern void CreateSharedBackendStatus(void);
-
+extern void CreateBufferActionStatsCounters(void);
 
 /* ----------
  * Functions called from backends
@@ -305,6 +310,8 @@ extern const char *pgstat_get_backend_current_activity(int pid, bool checkUser);
 extern const char *pgstat_get_crashed_backend_activity(int pid, char *buffer,
 													   int buflen);
 extern uint64 pgstat_get_my_query_id(void);
+extern void pgstat_increment_buffer_action(BufferActionType ba_type);
+extern void pgstat_recount_all_buffer_actions(BackendType backend_type, Datum *values);
 
 
 /* ----------

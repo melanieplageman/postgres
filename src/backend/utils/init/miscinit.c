@@ -277,6 +277,8 @@ GetBackendTypeDesc(BackendType backendType)
 		case B_LOGGER:
 			backendDesc = "logger";
 			break;
+		case BACKEND_NUM_TYPES:
+			break;
 	}
 
 	return backendDesc;
