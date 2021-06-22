@@ -786,7 +786,7 @@ typedef struct TableAmRoutine
 	 * scan_bitmap_next_tuple need to exist, or neither.
 	 */
 	bool		(*scan_bitmap_next_block) (TableScanDesc scan,
-										   struct TBMIterateResult *tbmres);
+										   struct TBMIterateResult **tbmres);
 
 	/*
 	 * Fetch the next tuple of a bitmap table scan into `slot` and return true
@@ -1929,7 +1929,7 @@ table_relation_estimate_size(Relation rel, int32 *attr_widths,
  */
 static inline bool
 table_scan_bitmap_next_block(TableScanDesc scan,
-							 struct TBMIterateResult *tbmres)
+							 struct TBMIterateResult **tbmres)
 {
 	/*
 	 * We don't expect direct calls to table_scan_bitmap_next_block with valid

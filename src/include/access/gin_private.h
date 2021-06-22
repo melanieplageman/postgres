@@ -352,6 +352,11 @@ typedef struct GinScanEntryData
 	TIDBitmap  *matchBitmap;
 	TBMIterator *matchIterator;
 	TBMIterateResult *matchResult;
+	// TODO: a temporary hack to deal with the fact that I am
+	//  1) not sure if InvalidBlockNumber can come up for other reasons than exhausting the bitmap
+	// and 2) not having taken the time yet to check all the places where matchResult == NULL
+	// is used to make sure I can replace it with something else
+	TBMIterateResult *savedMatchResult;
 
 	/* used for Posting list and one page in Posting tree */
 	ItemPointerData *list;

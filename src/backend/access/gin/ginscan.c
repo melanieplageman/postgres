@@ -107,6 +107,7 @@ ginFillScanEntry(GinScanOpaque so, OffsetNumber attnum,
 	scanEntry->matchBitmap = NULL;
 	scanEntry->matchIterator = NULL;
 	scanEntry->matchResult = NULL;
+	scanEntry->savedMatchResult = NULL;
 	scanEntry->list = NULL;
 	scanEntry->nlist = 0;
 	scanEntry->offset = InvalidOffsetNumber;
@@ -246,7 +247,10 @@ ginFreeScanKeys(GinScanOpaque so)
 		if (entry->list)
 			pfree(entry->list);
 		if (entry->matchIterator)
+		{
 			tbm_end_iterate(entry->matchIterator);
+			pfree(entry->savedMatchResult);
+		}
 		if (entry->matchBitmap)
 			tbm_free(entry->matchBitmap);
 	}

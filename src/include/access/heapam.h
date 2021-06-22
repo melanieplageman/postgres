@@ -20,6 +20,7 @@
 #include "access/skey.h"
 #include "access/table.h"		/* for backward compatibility */
 #include "access/tableam.h"
+#include "nodes/execnodes.h"
 #include "nodes/lockoptions.h"
 #include "nodes/primnodes.h"
 #include "storage/bufpage.h"
@@ -225,5 +226,6 @@ extern bool ResolveCminCmaxDuringDecoding(struct HTAB *tuplecid_data,
 										  CommandId *cmin, CommandId *cmax);
 extern void HeapCheckForSerializableConflictOut(bool valid, Relation relation, HeapTuple tuple,
 												Buffer buffer, Snapshot snapshot);
+extern void bitmapheap_pgsr_alloc(BitmapHeapScanState *scanstate);
 
 #endif							/* HEAPAM_H */

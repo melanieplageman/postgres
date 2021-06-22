@@ -311,6 +311,8 @@ collectMatchBitmap(GinBtreeData *btree, GinBtreeStack *stack,
 	}
 }
 
+#define MAX_TUPLES_PER_PAGE  MaxHeapTuplesPerPage
+
 /*
  * Start* functions setup beginning state of searches: finds correct buffer and pins it.
  */
@@ -332,6 +334,7 @@ restartScanEntry:
 	entry->nlist = 0;
 	entry->matchBitmap = NULL;
 	entry->matchResult = NULL;
+	entry->savedMatchResult = NULL;
 	entry->reduceResult = false;
 	entry->predictNumberResult = 0;
 
@@ -372,7 +375,10 @@ restartScanEntry:
 			if (entry->matchBitmap)
 			{
 				if (entry->matchIterator)
+				{
 					tbm_end_iterate(entry->matchIterator);
+					pfree(entry->savedMatchResult);
+				}
 				entry->matchIterator = NULL;
 				tbm_free(entry->matchBitmap);
 				entry->matchBitmap = NULL;
@@ -385,6 +391,8 @@ restartScanEntry:
 		if (entry->matchBitmap && !tbm_is_empty(entry->matchBitmap))
 		{
 			entry->matchIterator = tbm_begin_iterate(entry->matchBitmap);
+			entry->savedMatchResult = (TBMIterateResult *) palloc0(sizeof(TBMIterateResult) +
+				                                                        MAX_TUPLES_PER_PAGE * sizeof(OffsetNumber));
 			entry->isFinished = false;
 		}
 	}
@@ -790,6 +798,7 @@ entryLoadMoreItems(GinState *ginstate, GinScanEntry entry,
 #define gin_rand() (((double) random()) / ((double) MAX_RANDOM_VALUE))
 #define dropItem(e) ( gin_rand() > ((double)GinFuzzySearchLimit)/((double)((e)->predictNumberResult)) )
 
+
 /*
  * Sets entry->curItem to next heap item pointer > advancePast, for one entry
  * of one scan key, or sets entry->isFinished to true if there are no more.
@@ -817,7 +826,6 @@ entryGetItem(GinState *ginstate, GinScanEntry entry,
 		/* A bitmap result */
 		BlockNumber advancePastBlk = GinItemPointerGetBlockNumber(&advancePast);
 		OffsetNumber advancePastOff = GinItemPointerGetOffsetNumber(&advancePast);
-
 		for (;;)
 		{
 			/*
@@ -831,12 +839,18 @@ entryGetItem(GinState *ginstate, GinScanEntry entry,
 				   (ItemPointerIsLossyPage(&advancePast) &&
 					entry->matchResult->blockno == advancePastBlk))
 			{
-				entry->matchResult = tbm_iterate(entry->matchIterator);
+
+				tbm_iterate(entry->matchIterator, entry->savedMatchResult);
+				if (!BlockNumberIsValid(entry->savedMatchResult->blockno))
+					entry->matchResult = NULL;
+				else
+					entry->matchResult = entry->savedMatchResult;
 
 				if (entry->matchResult == NULL)
 				{
 					ItemPointerSetInvalid(&entry->curItem);
 					tbm_end_iterate(entry->matchIterator);
+					pfree(entry->savedMatchResult);
 					entry->matchIterator = NULL;
 					entry->isFinished = true;
 					break;
