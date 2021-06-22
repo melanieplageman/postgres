@@ -119,15 +119,6 @@ BitmapHeapNext(BitmapHeapScanState *node)
 			node->tbm = tbm;
 			node->tbmiterator = tbmiterator = tbm_begin_iterate(tbm);
 			node->tbmres = tbmres = NULL;
-
-#ifdef USE_PREFETCH
-			if (node->prefetch_maximum > 0)
-			{
-				node->prefetch_iterator = tbm_begin_iterate(tbm);
-				node->prefetch_pages = 0;
-				node->prefetch_target = -1;
-			}
-#endif							/* USE_PREFETCH */
 		}
 		else
 		{
@@ -150,20 +141,6 @@ BitmapHeapNext(BitmapHeapScanState *node)
 				 * multiple processes to iterate jointly.
 				 */
 				pstate->tbmiterator = tbm_prepare_shared_iterate(tbm);
-#ifdef USE_PREFETCH
-				if (node->prefetch_maximum > 0)
-				{
-					pstate->prefetch_iterator =
-						tbm_prepare_shared_iterate(tbm);
-
-					/*
-					 * We don't need the mutex here as we haven't yet woke up
-					 * others.
-					 */
-					pstate->prefetch_pages = 0;
-					pstate->prefetch_target = -1;
-				}
-#endif
 
 				/* We have initialized the shared state so wake up others. */
 				BitmapDoneInitializingSharedState(pstate);
@@ -174,13 +151,6 @@ BitmapHeapNext(BitmapHeapScanState *node)
 				tbm_attach_shared_iterate(dsa, pstate->tbmiterator);
 			node->tbmres = tbmres = NULL;
 
-#ifdef USE_PREFETCH
-			if (node->prefetch_maximum > 0)
-			{
-				node->shared_prefetch_iterator =
-					tbm_attach_shared_iterate(dsa, pstate->prefetch_iterator);
-			}
-#endif							/* USE_PREFETCH */
 		}
 		node->initialized = true;
 	}
@@ -206,7 +176,6 @@ BitmapHeapNext(BitmapHeapScanState *node)
 				break;
 			}
 
-			BitmapAdjustPrefetchIterator(node, tbmres);
 
 			/*
 			 * We can skip fetching the heap page if we don't need any fields
@@ -243,49 +212,12 @@ BitmapHeapNext(BitmapHeapScanState *node)
 				node->exact_pages++;
 			else
 				node->lossy_pages++;
-
-			/* Adjust the prefetch target */
-			BitmapAdjustPrefetchTarget(node);
-		}
-		else
-		{
-			/*
-			 * Continuing in previously obtained page.
-			 */
-
-#ifdef USE_PREFETCH
-
-			/*
-			 * Try to prefetch at least a few pages even before we get to the
-			 * second page if we don't stop reading after the first tuple.
-			 */
-			if (!pstate)
-			{
-				if (node->prefetch_target < node->prefetch_maximum)
-					node->prefetch_target++;
-			}
-			else if (pstate->prefetch_target < node->prefetch_maximum)
-			{
-				/* take spinlock while updating shared state */
-				SpinLockAcquire(&pstate->mutex);
-				if (pstate->prefetch_target < node->prefetch_maximum)
-					pstate->prefetch_target++;
-				SpinLockRelease(&pstate->mutex);
-			}
-#endif							/* USE_PREFETCH */
 		}
 
 		/*
-		 * We issue prefetch requests *after* fetching the current page to try
-		 * to avoid having prefetching interfere with the main I/O. Also, this
-		 * should happen only when we have determined there is still something
-		 * to do on the current page, else we may uselessly prefetch the same
-		 * page we are just about to request for real.
-		 *
 		 * XXX: It's a layering violation that we do these checks above
 		 * tableam, they should probably moved below it at some point.
 		 */
-		BitmapPrefetch(node, scan);
 
 		if (node->return_empty_tuples > 0)
 		{

@@ -468,7 +468,7 @@ initscan(HeapScanDesc scan, ScanKey key, bool keep_startblock)
 	 */
 	scan->pgsr = NULL;
 	if (!RelationUsesLocalBuffers(scan->rs_base.rs_rd) &&
-		(scan->rs_base.rs_flags & SO_TYPE_SEQSCAN))
+		((scan->rs_base.rs_flags & SO_TYPE_SEQSCAN) || (scan->rs_base.rs_flags & SO_TYPE_BITMAPSCAN)))
 	{
 		if (scan->rs_base.rs_parallel)
 			scan->pgsr = heap_pgsr_parallel_alloc(scan);
