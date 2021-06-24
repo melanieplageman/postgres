@@ -14,6 +14,7 @@
 #ifndef AIO_H
 #define AIO_H
 
+#include <nodes/tidbitmap.h>
 #include "common/relpath.h"
 #include "storage/block.h"
 #include "storage/buf.h"
@@ -39,7 +40,7 @@ typedef enum IoMethod
 } IoMethod;
 
 /* We'll default to bgworker. */
-#define DEFAULT_IO_METHOD IOMETHOD_WORKER
+#define DEFAULT_IO_METHOD IOMETHOD_IO_URING
 
 /* GUCs */
 extern int io_method;
@@ -274,6 +275,7 @@ extern PgStreamingRead *pg_streaming_read_alloc(uint32 iodepth, uintptr_t pgsr_p
 												PgStreamingReadDetermineNextCB determine_next_cb,
 												PgStreamingReadRelease release_cb);
 extern void pg_streaming_read_free(PgStreamingRead *pgsr);
-extern uintptr_t pg_streaming_read_get_next(PgStreamingRead *pgsr);
+extern uintptr_t
+pg_streaming_read_get_next(PgStreamingRead *pgsr);
 
 #endif							/* AIO_H */

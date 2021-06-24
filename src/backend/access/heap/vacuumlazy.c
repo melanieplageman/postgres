@@ -1983,7 +1983,8 @@ lazy_vacuum_heap(Relation onerel, LVRelStats *vacrelstats)
 
 	while (true)
 	{
-		VacuumHeapBlockState *bs = (VacuumHeapBlockState *) pg_streaming_read_get_next(pgsr);
+		VacuumHeapBlockState *bs = (VacuumHeapBlockState *) pg_streaming_read_get_next(
+			pgsr);
 
 		if (bs == NULL)
 			break;

@@ -1585,6 +1585,7 @@ typedef struct BitmapHeapScanState
 	TIDBitmap  *tbm;
 	TBMIterator *tbmiterator;
 	TBMIterateResult *tbmres;
+	bool hit_end;
 	bool		can_skip_fetch;
 	int			return_empty_tuples;
 	Buffer		vmbuffer;

@@ -36,6 +36,8 @@
 #include "postgres.h"
 
 #include <math.h>
+// TODO: delete me
+#include "access/heapam.h"
 
 #include "access/relscan.h"
 #include "access/tableam.h"
@@ -46,6 +48,7 @@
 #include "miscadmin.h"
 #include "pgstat.h"
 #include "storage/aio.h"
+#include "storage/aio_internal.h"
 #include "storage/bufmgr.h"
 #include "storage/predicate.h"
 #include "utils/memutils.h"
@@ -117,6 +120,7 @@ BitmapHeapNext(BitmapHeapScanState *node)
 				elog(ERROR, "unrecognized result from subplan");
 
 			node->tbm = tbm;
+			scan->tid_bitmap = tbm;
 			node->tbmiterator = tbmiterator = tbm_begin_iterate(tbm);
 			node->tbmres = tbmres = NULL;
 		}
@@ -157,7 +161,7 @@ BitmapHeapNext(BitmapHeapScanState *node)
 
 	for (;;)
 	{
-		bool		skip_fetch;
+//		bool		skip_fetch;
 
 		CHECK_FOR_INTERRUPTS();
 
@@ -166,16 +170,16 @@ BitmapHeapNext(BitmapHeapScanState *node)
 		 */
 		if (tbmres == NULL)
 		{
-			if (!pstate)
-				node->tbmres = tbmres = tbm_iterate(tbmiterator);
-			else
-				node->tbmres = tbmres = tbm_shared_iterate(shared_tbmiterator);
-			if (tbmres == NULL)
+			if (pstate)
 			{
-				/* no more entries in the bitmap */
-				break;
-			}
 
+				node->tbmres = tbmres = tbm_shared_iterate(shared_tbmiterator);
+				if (tbmres == NULL)
+				{
+					/* no more entries in the bitmap */
+					break;
+				}
+			}
 
 			/*
 			 * We can skip fetching the heap page if we don't need any fields
@@ -185,33 +189,42 @@ BitmapHeapNext(BitmapHeapScanState *node)
 			 * XXX: It's a layering violation that we do these checks above
 			 * tableam, they should probably moved below it at some point.
 			 */
-			skip_fetch = (node->can_skip_fetch &&
-						  !tbmres->recheck &&
-						  VM_ALL_VISIBLE(node->ss.ss_currentRelation,
-										 tbmres->blockno,
-										 &node->vmbuffer));
-
-			if (skip_fetch)
-			{
-				/* can't be lossy in the skip_fetch case */
-				Assert(tbmres->ntuples >= 0);
-
-				/*
-				 * The number of tuples on this page is put into
-				 * node->return_empty_tuples.
-				 */
-				node->return_empty_tuples = tbmres->ntuples;
-			}
-			else if (!table_scan_bitmap_next_block(scan, tbmres))
+			// TODO: comment this back in
+//			skip_fetch = (node->can_skip_fetch &&
+//						  !tbmres->recheck &&
+//						  VM_ALL_VISIBLE(node->ss.ss_currentRelation,
+//										 tbmres->blockno,
+//										 &node->vmbuffer));
+//
+//			if (skip_fetch)
+//			{
+//				/* can't be lossy in the skip_fetch case */
+//				Assert(tbmres->ntuples >= 0);
+//
+//				/*
+//				 * The number of tuples on this page is put into
+//				 * node->return_empty_tuples.
+//				 */
+//				node->return_empty_tuples = tbmres->ntuples;
+//			}
+// TODO: get rid of using tbmres here?
+			TBMIterateResult *tbmres_temp = palloc(sizeof(TBMIterateResult));
+			if (!table_scan_bitmap_next_block(scan, tbmres_temp))
 			{
 				/* AM doesn't think this block is valid, skip */
 				continue;
 			}
+			// we set blockno to InvalidBlockNumber when we hit_end
+			if (tbmres_temp->blockno == InvalidBlockNumber)
+			{
+				node->tbmres = tbmres = NULL;
+				break;
+			}
 
-			if (tbmres->ntuples >= 0)
-				node->exact_pages++;
-			else
-				node->lossy_pages++;
+//			if (tbmres->ntuples >= 0)
+			node->exact_pages++;
+//			else
+//				node->lossy_pages++;
 		}
 
 		/*
@@ -248,17 +261,17 @@ BitmapHeapNext(BitmapHeapScanState *node)
 			 * If we are using lossy info, we have to recheck the qual
 			 * conditions at every tuple.
 			 */
-			if (tbmres->recheck)
-			{
-				econtext->ecxt_scantuple = slot;
-				if (!ExecQualAndReset(node->bitmapqualorig, econtext))
-				{
-					/* Fails recheck, so drop it and loop back for another */
-					InstrCountFiltered2(node, 1);
-					ExecClearTuple(slot);
-					continue;
-				}
-			}
+//			if (tbmres->recheck)
+//			{
+//				econtext->ecxt_scantuple = slot;
+//				if (!ExecQualAndReset(node->bitmapqualorig, econtext))
+//				{
+//					/* Fails recheck, so drop it and loop back for another */
+//					InstrCountFiltered2(node, 1);
+//					ExecClearTuple(slot);
+//					continue;
+//				}
+//			}
 		}
 
 		/* OK to return this tuple */
@@ -650,6 +663,44 @@ ExecEndBitmapHeapScan(BitmapHeapScanState *node)
 	table_endscan(scanDesc);
 }
 
+static void
+bitmapheapscan_pgsr_release(uintptr_t pgsr_private, uintptr_t read_private)
+{
+	Buffer buf = (Buffer) read_private;
+	Assert(BufferIsValid(buf));
+	ReleaseBuffer(buf);
+}
+
+static PgStreamingReadNextStatus
+bitmapheapscan_pgsr_next_single(uintptr_t pgsr_private, PgAioInProgress *aio, uintptr_t *read_private)
+{
+	Buffer buf;
+	bool already_valid;
+	TBMIterateResult *tbm_iterate_result;
+	BitmapHeapScanState *bhs_state = (BitmapHeapScanState *) pgsr_private;
+	TBMIterator *tbmiterator = bhs_state->tbmiterator;
+	HeapScanDesc hdesc = (HeapScanDesc ) bhs_state->ss.ss_currentScanDesc;
+
+	Assert(bhs_state->initialized);
+	tbm_iterate_result = tbm_iterate(tbmiterator);
+	if (tbm_iterate_result == NULL)
+	{
+		*read_private = 0;
+		return PGSR_NEXT_END;
+	}
+
+	buf = ReadBufferAsync(hdesc->rs_base.rs_rd, MAIN_FORKNUM, tbm_iterate_result->blockno,
+	                      RBM_NORMAL, hdesc->rs_strategy, &already_valid,
+	                      &aio);
+
+	*read_private = (uintptr_t) buf;
+
+	if (already_valid)
+		return PGSR_NEXT_NO_IO;
+	else
+		return PGSR_NEXT_IO;
+}
+
 /* ----------------------------------------------------------------
  *		ExecInitBitmapHeapScan
  *
@@ -661,6 +712,8 @@ ExecInitBitmapHeapScan(BitmapHeapScan *node, EState *estate, int eflags)
 {
 	BitmapHeapScanState *scanstate;
 	Relation	currentRelation;
+	HeapScanDesc hdesc;
+	int iodepth;
 
 	/* check for unsupported flags */
 	Assert(!(eflags & (EXEC_FLAG_BACKWARD | EXEC_FLAG_MARK)));
@@ -695,6 +748,7 @@ ExecInitBitmapHeapScan(BitmapHeapScan *node, EState *estate, int eflags)
 	scanstate->shared_tbmiterator = NULL;
 	scanstate->shared_prefetch_iterator = NULL;
 	scanstate->pstate = NULL;
+	scanstate->hit_end = false;
 
 	/*
 	 * We can potentially skip fetching heap pages if we do not need any
@@ -757,6 +811,13 @@ ExecInitBitmapHeapScan(BitmapHeapScan *node, EState *estate, int eflags)
 														  estate->es_snapshot,
 														  0,
 														  NULL);
+	hdesc = (HeapScanDesc ) scanstate->ss.ss_currentScanDesc;
+	iodepth = Max(Min(128, NBuffers / 128), 1);
+
+	hdesc->pgsr = pg_streaming_read_alloc(iodepth, (uintptr_t) scanstate,
+	                                     bitmapheapscan_pgsr_next_single,
+	                                      bitmapheapscan_pgsr_release);
+
 
 	/*
 	 * all done.

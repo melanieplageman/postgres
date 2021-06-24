@@ -47,7 +47,8 @@ typedef struct TBMIterateResult
 } TBMIterateResult;
 
 /* function prototypes in nodes/tidbitmap.c */
-
+extern TBMIterateResult *
+tbm_scrape_offsets(TIDBitmap *tid_bitmap, BlockNumber blockno);
 extern TIDBitmap *tbm_create(long maxbytes, dsa_area *dsa);
 extern void tbm_free(TIDBitmap *tbm);
 extern void tbm_free_shared_area(dsa_area *dsa, dsa_pointer dp);

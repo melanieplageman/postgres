@@ -20,6 +20,7 @@
 #include "storage/buf.h"
 #include "storage/spin.h"
 #include "utils/relcache.h"
+#include "nodes/tidbitmap.h"
 
 
 struct ParallelTableScanDescData;
@@ -39,6 +40,7 @@ typedef struct TableScanDescData
 	/* Range of ItemPointers for table_scan_getnextslot_tidrange() to scan. */
 	ItemPointerData rs_mintid;
 	ItemPointerData rs_maxtid;
+	TIDBitmap *tid_bitmap;
 
 	/*
 	 * Information about type and behaviour of the scan, a bitmask of members

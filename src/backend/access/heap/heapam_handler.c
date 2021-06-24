@@ -36,6 +36,7 @@
 #include "executor/executor.h"
 #include "miscadmin.h"
 #include "pgstat.h"
+#include "storage/aio.h"
 #include "storage/bufmgr.h"
 #include "storage/bufpage.h"
 #include "storage/lmgr.h"
@@ -2112,13 +2113,41 @@ heapam_scan_bitmap_next_block(TableScanDesc scan,
 							  TBMIterateResult *tbmres)
 {
 	HeapScanDesc hscan = (HeapScanDesc) scan;
-	BlockNumber page = tbmres->blockno;
+	BlockNumber page;
 	Buffer		buffer;
 	Snapshot	snapshot;
 	int			ntup;
+	BlockNumber blockno;
 
 	hscan->rs_cindex = 0;
 	hscan->rs_ntuples = 0;
+
+	if (!hscan->rs_inited)
+	{
+		hscan->rs_inited = true;
+	}
+	if (hscan->pgsr)
+	{
+		hscan->rs_cbuf = pg_streaming_read_get_next(hscan->pgsr);
+		if (!(BufferIsValid(hscan->rs_cbuf)))
+		{
+			tbmres->blockno = InvalidBlockNumber;
+			return true;
+		}
+		blockno = BufferGetBlockNumber(hscan->rs_cbuf);
+		tbmres = tbm_scrape_offsets(scan->tid_bitmap, blockno);
+	}
+	/*
+	 * Acquire pin on the target heap page, trading in any pin we held before.
+	 */
+	else
+	{
+
+		hscan->rs_cbuf = ReleaseAndReadBuffer(hscan->rs_cbuf,
+		                                      scan->rs_rd,
+		                                      tbmres->blockno);
+	}
+	page = tbmres->blockno;
 
 	/*
 	 * Ignore any claimed entries past what we think is the end of the
@@ -2128,13 +2157,6 @@ heapam_scan_bitmap_next_block(TableScanDesc scan,
 	 */
 	if (page >= hscan->rs_nblocks)
 		return false;
-
-	/*
-	 * Acquire pin on the target heap page, trading in any pin we held before.
-	 */
-	hscan->rs_cbuf = ReleaseAndReadBuffer(hscan->rs_cbuf,
-										  scan->rs_rd,
-										  page);
 	hscan->rs_cblock = page;
 	buffer = hscan->rs_cbuf;
 	snapshot = scan->rs_snapshot;

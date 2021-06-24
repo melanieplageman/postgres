@@ -538,7 +538,6 @@ pg_streaming_read_prefetch_one(PgStreamingRead *pgsr)
 	pgsr->prefetched_total_count++;
 
 	status = pgsr->determine_next_cb(pgsr->pgsr_private, this_read->aio, &this_read->read_private);
-
 	if (status == PGSR_NEXT_END)
 	{
 		pgsr->inflight_count--;
