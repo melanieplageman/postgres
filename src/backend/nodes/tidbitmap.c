@@ -1041,19 +1041,19 @@ tbm_iterate(TBMIterator *iterator)
 }
 
 // won't work for lossy
-TBMIterateResult *
-tbm_scrape_offsets(TIDBitmap *tid_bitmap, BlockNumber blockno)
+void
+tbm_scrape_offsets(TIDBitmap *tid_bitmap,
+                   BlockNumber blockno,
+                   TBMIterateResult **tbmres)
 {
 	int ntuples;
-	TBMIterateResult *result = palloc(sizeof(TBMIterateResult));
 	PagetableEntry *page = tbm_get_pageentry(tid_bitmap, blockno);
 
 	// fill offsets
-	ntuples = tbm_extract_page_tuple(page, result);
-	result->ntuples = ntuples;
-	result->recheck = page->recheck;
-	result->blockno = blockno;
-	return result;
+	ntuples = tbm_extract_page_tuple(page, (*tbmres));
+	(*tbmres)->ntuples = ntuples;
+	(*tbmres)->recheck = page->recheck;
+	(*tbmres)->blockno = blockno;
 }
 
 /*

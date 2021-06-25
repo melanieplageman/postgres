@@ -2110,7 +2110,7 @@ heapam_estimate_rel_size(Relation rel, int32 *attr_widths,
 
 static bool
 heapam_scan_bitmap_next_block(TableScanDesc scan,
-							  TBMIterateResult *tbmres)
+							  TBMIterateResult **tbmres)
 {
 	HeapScanDesc hscan = (HeapScanDesc) scan;
 	BlockNumber page;
@@ -2131,11 +2131,11 @@ heapam_scan_bitmap_next_block(TableScanDesc scan,
 		hscan->rs_cbuf = pg_streaming_read_get_next(hscan->pgsr);
 		if (!(BufferIsValid(hscan->rs_cbuf)))
 		{
-			tbmres->blockno = InvalidBlockNumber;
+			(*tbmres)->blockno = InvalidBlockNumber;
 			return true;
 		}
 		blockno = BufferGetBlockNumber(hscan->rs_cbuf);
-		tbmres = tbm_scrape_offsets(scan->tid_bitmap, blockno);
+		tbm_scrape_offsets(scan->tid_bitmap, blockno, tbmres);
 	}
 	/*
 	 * Acquire pin on the target heap page, trading in any pin we held before.
@@ -2145,9 +2145,9 @@ heapam_scan_bitmap_next_block(TableScanDesc scan,
 
 		hscan->rs_cbuf = ReleaseAndReadBuffer(hscan->rs_cbuf,
 		                                      scan->rs_rd,
-		                                      tbmres->blockno);
+		                                      (*tbmres)->blockno);
 	}
-	page = tbmres->blockno;
+	page = (*tbmres)->blockno;
 
 	/*
 	 * Ignore any claimed entries past what we think is the end of the
@@ -2178,7 +2178,7 @@ heapam_scan_bitmap_next_block(TableScanDesc scan,
 	/*
 	 * We need two separate strategies for lossy and non-lossy cases.
 	 */
-	if (tbmres->ntuples >= 0)
+	if ((*tbmres)->ntuples >= 0)
 	{
 		/*
 		 * Bitmap is non-lossy, so we just look through the offsets listed in
@@ -2187,9 +2187,9 @@ heapam_scan_bitmap_next_block(TableScanDesc scan,
 		 */
 		int			curslot;
 
-		for (curslot = 0; curslot < tbmres->ntuples; curslot++)
+		for (curslot = 0; curslot < (*tbmres)->ntuples; curslot++)
 		{
-			OffsetNumber offnum = tbmres->offsets[curslot];
+			OffsetNumber offnum = (*tbmres)->offsets[curslot];
 			ItemPointerData tid;
 			HeapTupleData heapTuple;
 

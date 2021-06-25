@@ -122,6 +122,7 @@ BitmapHeapNext(BitmapHeapScanState *node)
 			node->tbm = tbm;
 			scan->tid_bitmap = tbm;
 			node->tbmiterator = tbmiterator = tbm_begin_iterate(tbm);
+			node->prefetch_iterator = tbm_begin_iterate(tbm);
 			node->tbmres = tbmres = NULL;
 		}
 		else
@@ -208,8 +209,13 @@ BitmapHeapNext(BitmapHeapScanState *node)
 //				node->return_empty_tuples = tbmres->ntuples;
 //			}
 // TODO: get rid of using tbmres here?
-			TBMIterateResult *tbmres_temp = palloc(sizeof(TBMIterateResult));
-			if (!table_scan_bitmap_next_block(scan, tbmres_temp))
+			TBMIterateResult *tbmres_temp = tbm_iterate(node->tbmiterator);
+			if (!tbmres_temp)
+			{
+				node->tbmres = tbmres = NULL;
+				break;
+			}
+			if (!table_scan_bitmap_next_block(scan, &tbmres_temp))
 			{
 				/* AM doesn't think this block is valid, skip */
 				continue;
@@ -220,6 +226,7 @@ BitmapHeapNext(BitmapHeapScanState *node)
 				node->tbmres = tbmres = NULL;
 				break;
 			}
+			node->tbmres = tbmres = tbmres_temp;
 
 //			if (tbmres->ntuples >= 0)
 			node->exact_pages++;
@@ -678,7 +685,7 @@ bitmapheapscan_pgsr_next_single(uintptr_t pgsr_private, PgAioInProgress *aio, ui
 	bool already_valid;
 	TBMIterateResult *tbm_iterate_result;
 	BitmapHeapScanState *bhs_state = (BitmapHeapScanState *) pgsr_private;
-	TBMIterator *tbmiterator = bhs_state->tbmiterator;
+	TBMIterator *tbmiterator = bhs_state->prefetch_iterator;
 	HeapScanDesc hdesc = (HeapScanDesc ) bhs_state->ss.ss_currentScanDesc;
 
 	Assert(bhs_state->initialized);
