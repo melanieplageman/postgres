@@ -291,6 +291,7 @@ typedef struct PgStat_MsgTabstat
 	int			m_xact_rollback;
 	PgStat_Counter m_block_read_time;	/* times in microseconds */
 	PgStat_Counter m_block_write_time;
+	PgStat_Counter m_io_wait_time;
 	PgStat_TableEntry m_entry[PGSTAT_NUM_TABENTRIES];
 } PgStat_MsgTabstat;
 
@@ -732,6 +733,7 @@ typedef struct PgStat_StatDBEntry
 	TimestampTz last_checksum_failure;
 	PgStat_Counter n_block_read_time;	/* times in microseconds */
 	PgStat_Counter n_block_write_time;
+	PgStat_Counter n_io_wait_time;
 	PgStat_Counter n_sessions;
 	PgStat_Counter total_session_time;
 	PgStat_Counter total_active_time;
@@ -1417,6 +1419,8 @@ extern PgStat_MsgWal WalStats;
 extern PgStat_Counter pgStatBlockReadTime;
 extern PgStat_Counter pgStatBlockWriteTime;
 
+extern PgStat_Counter pgStatIOWaitTime;
+
 /*
  * Updated by the traffic cop and in errfinish()
  */
@@ -1593,6 +1597,8 @@ pgstat_report_wait_end(void)
 	(pgStatBlockReadTime += (n))
 #define pgstat_count_buffer_write_time(n)							\
 	(pgStatBlockWriteTime += (n))
+#define pgstat_count_io_wait_time(n)							\
+	(pgStatIOWaitTime  += (n))
 
 extern void pgstat_count_heap_insert(Relation rel, PgStat_Counter n);
 extern void pgstat_count_heap_update(Relation rel, bool hot);

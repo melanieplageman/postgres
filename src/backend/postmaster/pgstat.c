@@ -258,6 +258,7 @@ static int	pgStatXactCommit = 0;
 static int	pgStatXactRollback = 0;
 PgStat_Counter pgStatBlockReadTime = 0;
 PgStat_Counter pgStatBlockWriteTime = 0;
+PgStat_Counter pgStatIOWaitTime = 0;
 static PgStat_Counter pgStatActiveTime = 0;
 static PgStat_Counter pgStatTransactionIdleTime = 0;
 SessionEndType pgStatSessionEndCause = DISCONNECT_NORMAL;
@@ -1004,10 +1005,12 @@ pgstat_send_tabstat(PgStat_MsgTabstat *tsmsg)
 		tsmsg->m_xact_rollback = pgStatXactRollback;
 		tsmsg->m_block_read_time = pgStatBlockReadTime;
 		tsmsg->m_block_write_time = pgStatBlockWriteTime;
+		tsmsg->m_io_wait_time = pgStatIOWaitTime;
 		pgStatXactCommit = 0;
 		pgStatXactRollback = 0;
 		pgStatBlockReadTime = 0;
 		pgStatBlockWriteTime = 0;
+		pgStatIOWaitTime = 0;
 	}
 	else
 	{
@@ -1015,6 +1018,7 @@ pgstat_send_tabstat(PgStat_MsgTabstat *tsmsg)
 		tsmsg->m_xact_rollback = 0;
 		tsmsg->m_block_read_time = 0;
 		tsmsg->m_block_write_time = 0;
+		tsmsg->m_io_wait_time = 0;
 	}
 
 	n = tsmsg->m_nentries;
@@ -5122,6 +5126,7 @@ reset_dbentry_counters(PgStat_StatDBEntry *dbentry)
 	dbentry->last_checksum_failure = 0;
 	dbentry->n_block_read_time = 0;
 	dbentry->n_block_write_time = 0;
+	dbentry->n_io_wait_time = 0;
 	dbentry->n_sessions = 0;
 	dbentry->total_session_time = 0;
 	dbentry->total_active_time = 0;
@@ -6442,6 +6447,7 @@ pgstat_recv_tabstat(PgStat_MsgTabstat *msg, int len)
 	dbentry->n_xact_rollback += (PgStat_Counter) (msg->m_xact_rollback);
 	dbentry->n_block_read_time += msg->m_block_read_time;
 	dbentry->n_block_write_time += msg->m_block_write_time;
+	dbentry->n_io_wait_time += msg->m_io_wait_time;
 
 	/*
 	 * Process all table entries in the message.

@@ -145,6 +145,8 @@ bool		track_io_timing = false;
  */
 int			effective_io_concurrency = 0;
 
+int  io_bitmap_prefetch_depth = 128;
+
 /*
  * Like effective_io_concurrency, but used by maintenance code paths that might
  * benefit from a higher setting because they work on behalf of many sessions.

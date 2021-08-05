@@ -417,8 +417,6 @@ pg_streaming_read_alloc(uint32 iodepth, uintptr_t pgsr_private,
 {
 	PgStreamingRead *pgsr;
 
-	iodepth = Max(Min(iodepth, NBuffers / 128), 1);
-
 	pgsr = palloc0(offsetof(PgStreamingRead, all_items) +
 				   sizeof(PgStreamingReadItem) * iodepth * 2);
 

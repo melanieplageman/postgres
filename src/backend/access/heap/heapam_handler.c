@@ -2221,7 +2221,7 @@ void bitmapheap_pgsr_alloc(BitmapHeapScanState *scanstate)
 	HeapScanDesc hscan = (HeapScanDesc ) scanstate->ss.ss_currentScanDesc;
 	if (!hscan->rs_inited)
 	{
-		int iodepth = Max(Min(128, NBuffers / 128), 1);
+		int iodepth = io_bitmap_prefetch_depth;
 		hscan->pgsr = pg_streaming_read_alloc(iodepth, (uintptr_t) scanstate,
 		                                      bitmapheapscan_pgsr_next_single,
 		                                      bitmapheapscan_pgsr_release);

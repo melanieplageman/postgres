@@ -36,6 +36,8 @@
 #include "utils/guc.h"
 #include "utils/memutils.h"
 #include "utils/resowner_private.h"
+#include "executor/instrument.h"
+#include "storage/bufmgr.h"
 
 
 #define PGAIO_VERBOSE
@@ -1729,6 +1731,12 @@ wait_ref_again:
 		}
 		else if (io_method != IOMETHOD_WORKER && (flags & PGAIOIP_INFLIGHT))
 		{
+			int io_wait_start, io_wait_time;
+			if (track_io_timing)
+				INSTR_TIME_SET_CURRENT(io_wait_start);
+			else
+				INSTR_TIME_SET_ZERO(io_wait_start);
+
 			/* note that this is allowed to spuriously return */
 			if (io_method == IOMETHOD_WORKER)
 				ConditionVariableSleep(&io->cv, WAIT_EVENT_AIO_IO_COMPLETE_ONE);
@@ -1741,6 +1749,14 @@ wait_ref_again:
 			else if (io_method == IOMETHOD_POSIX)
 				pgaio_posix_wait_one(io, ref_generation);
 #endif
+
+			if (track_io_timing)
+			{
+				INSTR_TIME_SET_CURRENT(io_wait_time);
+				INSTR_TIME_SUBTRACT(io_wait_time, io_wait_start);
+				pgstat_count_io_wait_time(INSTR_TIME_GET_MICROSEC(io_wait_time));
+				INSTR_TIME_ADD(pgBufferUsage.io_wait_time, io_wait_time);
+			}
 		}
 #ifdef USE_POSIX_AIO
 		/* XXX untangle this */

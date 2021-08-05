@@ -1615,6 +1615,8 @@ pg_stat_get_db_blk_read_time(PG_FUNCTION_ARGS)
 	PG_RETURN_FLOAT8(result);
 }
 
+// TODO: add one for io wait time
+
 Datum
 pg_stat_get_db_blk_write_time(PG_FUNCTION_ARGS)
 {

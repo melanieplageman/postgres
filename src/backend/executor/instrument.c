@@ -218,6 +218,8 @@ BufferUsageAdd(BufferUsage *dst, const BufferUsage *add)
 	dst->temp_blks_written += add->temp_blks_written;
 	INSTR_TIME_ADD(dst->blk_read_time, add->blk_read_time);
 	INSTR_TIME_ADD(dst->blk_write_time, add->blk_write_time);
+	INSTR_TIME_ADD(dst->io_wait_time, add->io_wait_time);
+
 }
 
 /* dst += add - sub */
@@ -240,6 +242,8 @@ BufferUsageAccumDiff(BufferUsage *dst,
 						  add->blk_read_time, sub->blk_read_time);
 	INSTR_TIME_ACCUM_DIFF(dst->blk_write_time,
 						  add->blk_write_time, sub->blk_write_time);
+	INSTR_TIME_ACCUM_DIFF(dst->io_wait_time,
+						  add->io_wait_time, sub->io_wait_time);
 }
 
 /* helper functions for WAL usage accumulation */

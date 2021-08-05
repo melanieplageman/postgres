@@ -3029,6 +3029,16 @@ static struct config_int ConfigureNamesInt[] =
 		0, MAX_IO_CONCURRENCY,
 		check_maintenance_io_concurrency, NULL, NULL
 	},
+	{
+		{"io_bitmap_prefetch_depth", PGC_USERSET, RESOURCES_ASYNCHRONOUS,
+			gettext_noop("Maximum pre-fetch distance for bitmapheapscan"),
+			NULL,
+			GUC_EXPLAIN
+		},
+		&io_bitmap_prefetch_depth,
+		128, 0, MAX_IO_CONCURRENCY,
+		NULL, NULL, NULL
+	},
 
 	{
 		{"io_wal_concurrency", PGC_POSTMASTER, RESOURCES_ASYNCHRONOUS,

@@ -30,6 +30,7 @@ typedef struct BufferUsage
 	long		temp_blks_written;	/* # of temp blocks written */
 	instr_time	blk_read_time;	/* time spent reading */
 	instr_time	blk_write_time; /* time spent writing */
+	instr_time io_wait_time;
 } BufferUsage;
 
 typedef struct WalUsage
