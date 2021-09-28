@@ -314,6 +314,7 @@ extern XLogRecPtr GetRedoRecPtr(void);
 extern XLogRecPtr GetInsertRecPtr(void);
 extern XLogRecPtr GetFlushRecPtr(void);
 extern XLogRecPtr GetLastImportantRecPtr(void);
+extern bool RedoRecPtrChanged(XLogRecPtr comparator_ptr);
 extern void RemovePromoteSignalFiles(void);
 
 extern bool PromoteIsTriggered(void);

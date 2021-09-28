@@ -38,6 +38,7 @@
 #include "pgstat.h"
 #include "storage/bufmgr.h"
 #include "storage/bufpage.h"
+#include "storage/directmgr.h"
 #include "storage/lmgr.h"
 #include "storage/predicate.h"
 #include "storage/procarray.h"
@@ -575,6 +576,7 @@ heapam_relation_set_new_filenode(Relation rel,
 								 MultiXactId *minmulti)
 {
 	SMgrRelation srel;
+	UnBufferedWriteState ub_wstate;
 
 	/*
 	 * Initialize to the minimum XID that could put tuples in the table. We
@@ -594,15 +596,15 @@ heapam_relation_set_new_filenode(Relation rel,
 	*minmulti = GetOldestMultiXactId();
 
 	srel = RelationCreateStorage(*newrnode, persistence);
+	ub_wstate.smgr_rel = srel;
+	unbuffered_prep(&ub_wstate);
 
 	/*
 	 * If required, set up an init fork for an unlogged table so that it can
-	 * be correctly reinitialized on restart.  An immediate sync is required
-	 * even if the page has been logged, because the write did not go through
-	 * shared_buffers and therefore a concurrent checkpoint may have moved the
-	 * redo pointer past our xlog record.  Recovery may as well remove it
-	 * while replaying, for example, XLOG_DBASE_CREATE or XLOG_TBLSPC_CREATE
-	 * record. Therefore, logging is necessary even if wal_level=minimal.
+	 * be correctly reinitialized on restart.
+	 * Recovery may as well remove our xlog record while replaying, for
+	 * example, XLOG_DBASE_CREATE or XLOG_TBLSPC_CREATE record. Therefore,
+	 * logging is necessary even if wal_level=minimal.
 	 */
 	if (persistence == RELPERSISTENCE_UNLOGGED)
 	{
@@ -611,7 +613,7 @@ heapam_relation_set_new_filenode(Relation rel,
 			   rel->rd_rel->relkind == RELKIND_TOASTVALUE);
 		smgrcreate(srel, INIT_FORKNUM, false);
 		log_smgrcreate(newrnode, INIT_FORKNUM);
-		smgrimmedsync(srel, INIT_FORKNUM);
+		unbuffered_finish(&ub_wstate, INIT_FORKNUM);
 	}
 
 	smgrclose(srel);

@@ -12941,6 +12941,19 @@ CheckForStandbyTrigger(void)
 	return false;
 }
 
+bool RedoRecPtrChanged(XLogRecPtr comparator_ptr)
+{
+	XLogRecPtr ptr;
+	SpinLockAcquire(&XLogCtl->info_lck);
+	ptr = XLogCtl->RedoRecPtr;
+	SpinLockRelease(&XLogCtl->info_lck);
+
+	if (RedoRecPtr < ptr)
+		RedoRecPtr = ptr;
+
+	return RedoRecPtr != comparator_ptr;
+}
+
 /*
  * Remove the files signaling a standby promotion request.
  */

@@ -92,6 +92,7 @@
 #include "miscadmin.h"
 #include "port/pg_bitutils.h"
 #include "storage/bufmgr.h"
+#include "storage/directmgr.h"
 #include "storage/lmgr.h"
 #include "storage/smgr.h"
 #include "utils/inval.h"
@@ -616,7 +617,9 @@ vm_extend(Relation rel, BlockNumber vm_nblocks)
 	BlockNumber vm_nblocks_now;
 	PGAlignedBlock pg;
 	SMgrRelation reln;
+	UnBufferedWriteState ub_wstate;
 
+	ub_wstate.smgr_rel = RelationGetSmgr(rel);
 	PageInit((Page) pg.data, BLCKSZ, 0);
 
 	/*
@@ -654,9 +657,8 @@ vm_extend(Relation rel, BlockNumber vm_nblocks)
 	/* Now extend the file */
 	while (vm_nblocks_now < vm_nblocks)
 	{
-		PageSetChecksumInplace((Page) pg.data, vm_nblocks_now);
-
-		smgrextend(reln, VISIBILITYMAP_FORKNUM, vm_nblocks_now, pg.data, false);
+		// TODO: aren't these pages empty? why checksum them
+		unbuffered_extend(&ub_wstate, VISIBILITYMAP_FORKNUM, vm_nblocks_now, (Page) pg.data, false);
 		vm_nblocks_now++;
 	}
 

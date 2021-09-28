@@ -43,6 +43,7 @@
 #include "miscadmin.h"
 #include "optimizer/optimizer.h"
 #include "storage/bufmgr.h"
+#include "storage/directmgr.h"
 #include "storage/smgr.h"
 #include "utils/memutils.h"
 #include "utils/rel.h"
@@ -91,6 +92,7 @@ typedef struct
 
 	int64		indtuples;		/* number of tuples indexed */
 
+	UnBufferedWriteState ub_wstate;
 	/*
 	 * Extra data structures used during a buffering build. 'gfbb' contains
 	 * information related to managing the build buffers. 'parentMap' is a
@@ -194,6 +196,7 @@ gistbuild(Relation heap, Relation index, IndexInfo *indexInfo)
 	buildstate.heaprel = heap;
 	buildstate.sortstate = NULL;
 	buildstate.giststate = initGISTstate(index);
+	buildstate.ub_wstate.smgr_rel = RelationGetSmgr(index);
 
 	/*
 	 * Create a temporary memory context that is reset once for each tuple
@@ -403,14 +406,14 @@ gist_indexsortbuild(GISTBuildState *state)
 	state->pages_allocated = 0;
 	state->pages_written = 0;
 	state->ready_num_pages = 0;
+	unbuffered_prep(&state->ub_wstate);
 
 	/*
 	 * Write an empty page as a placeholder for the root page. It will be
 	 * replaced with the real root page at the end.
 	 */
 	page = palloc0(BLCKSZ);
-	smgrextend(RelationGetSmgr(state->indexrel), MAIN_FORKNUM, GIST_ROOT_BLKNO,
-			   page, true);
+	unbuffered_extend(&state->ub_wstate, MAIN_FORKNUM, GIST_ROOT_BLKNO, page, true);
 	state->pages_allocated++;
 	state->pages_written++;
 
@@ -450,13 +453,12 @@ gist_indexsortbuild(GISTBuildState *state)
 
 	/* Write out the root */
 	PageSetLSN(pagestate->page, GistBuildLSN);
-	PageSetChecksumInplace(pagestate->page, GIST_ROOT_BLKNO);
-	smgrwrite(RelationGetSmgr(state->indexrel), MAIN_FORKNUM, GIST_ROOT_BLKNO,
-			  pagestate->page, true);
+	unbuffered_write(&state->ub_wstate, MAIN_FORKNUM, GIST_ROOT_BLKNO, pagestate->page);
 	if (RelationNeedsWAL(state->indexrel))
 		log_newpage(&state->indexrel->rd_node, MAIN_FORKNUM, GIST_ROOT_BLKNO,
 					pagestate->page, true);
 
+	unbuffered_finish(&state->ub_wstate, MAIN_FORKNUM);
 	pfree(pagestate->page);
 	pfree(pagestate);
 }
@@ -570,9 +572,7 @@ gist_indexsortbuild_flush_ready_pages(GISTBuildState *state)
 			elog(ERROR, "unexpected block number to flush GiST sorting build");
 
 		PageSetLSN(page, GistBuildLSN);
-		PageSetChecksumInplace(page, blkno);
-		smgrextend(RelationGetSmgr(state->indexrel), MAIN_FORKNUM, blkno, page,
-				   true);
+		unbuffered_extend(&state->ub_wstate, MAIN_FORKNUM, blkno, page, false);
 
 		state->pages_written++;
 	}

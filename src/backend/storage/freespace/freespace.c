@@ -26,6 +26,7 @@
 #include "access/htup_details.h"
 #include "access/xlogutils.h"
 #include "miscadmin.h"
+#include "storage/directmgr.h"
 #include "storage/freespace.h"
 #include "storage/fsm_internals.h"
 #include "storage/lmgr.h"
@@ -608,6 +609,9 @@ fsm_extend(Relation rel, BlockNumber fsm_nblocks)
 	BlockNumber fsm_nblocks_now;
 	PGAlignedBlock pg;
 	SMgrRelation reln;
+	UnBufferedWriteState ub_wstate;
+
+	ub_wstate.smgr_rel = RelationGetSmgr(rel);
 
 	PageInit((Page) pg.data, BLCKSZ, 0);
 
@@ -647,10 +651,8 @@ fsm_extend(Relation rel, BlockNumber fsm_nblocks)
 	/* Extend as needed. */
 	while (fsm_nblocks_now < fsm_nblocks)
 	{
-		PageSetChecksumInplace((Page) pg.data, fsm_nblocks_now);
-
-		smgrextend(reln, FSM_FORKNUM, fsm_nblocks_now,
-				   pg.data, false);
+		// TODO: why was it checksumming all zero pages?
+		unbuffered_extend(&ub_wstate, FSM_FORKNUM, fsm_nblocks_now, (Page) pg.data, false);
 		fsm_nblocks_now++;
 	}
 

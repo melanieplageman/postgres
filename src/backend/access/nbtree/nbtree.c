@@ -29,6 +29,7 @@
 #include "pgstat.h"
 #include "postmaster/autovacuum.h"
 #include "storage/condition_variable.h"
+#include "storage/directmgr.h"
 #include "storage/indexfsm.h"
 #include "storage/ipc.h"
 #include "storage/lmgr.h"
@@ -150,6 +151,11 @@ void
 btbuildempty(Relation index)
 {
 	Page		metapage;
+	UnBufferedWriteState wstate;
+
+	wstate.smgr_rel = RelationGetSmgr(index);
+
+	unbuffered_prep(&wstate);
 
 	/* Construct metapage. */
 	metapage = (Page) palloc(BLCKSZ);
@@ -162,18 +168,15 @@ btbuildempty(Relation index)
 	 * XLOG_DBASE_CREATE or XLOG_TBLSPC_CREATE record.  Therefore, we need
 	 * this even when wal_level=minimal.
 	 */
-	PageSetChecksumInplace(metapage, BTREE_METAPAGE);
-	smgrwrite(RelationGetSmgr(index), INIT_FORKNUM, BTREE_METAPAGE,
-			  (char *) metapage, true);
+	unbuffered_write(&wstate, INIT_FORKNUM, BTREE_METAPAGE, metapage);
 	log_newpage(&RelationGetSmgr(index)->smgr_rnode.node, INIT_FORKNUM,
 				BTREE_METAPAGE, metapage, true);
 
 	/*
-	 * An immediate sync is required even if we xlog'd the page, because the
-	 * write did not go through shared_buffers and therefore a concurrent
-	 * checkpoint may have moved the redo pointer past our xlog record.
+	 * Even though we xlog'd the page, a concurrent checkpoint may have moved
+	 * the redo pointer past our xlog record, so we may still need to fsync.
 	 */
-	smgrimmedsync(RelationGetSmgr(index), INIT_FORKNUM);
+	unbuffered_finish(&wstate, INIT_FORKNUM);
 }
 
 /*

@@ -32,6 +32,7 @@
 #include "access/hash_xlog.h"
 #include "miscadmin.h"
 #include "port/pg_bitutils.h"
+#include "storage/directmgr.h"
 #include "storage/lmgr.h"
 #include "storage/predicate.h"
 #include "storage/smgr.h"
@@ -990,8 +991,10 @@ _hash_alloc_buckets(Relation rel, BlockNumber firstblock, uint32 nblocks)
 	PGAlignedBlock zerobuf;
 	Page		page;
 	HashPageOpaque ovflopaque;
+	UnBufferedWriteState ub_wstate;
 
 	lastblock = firstblock + nblocks - 1;
+	ub_wstate.smgr_rel = RelationGetSmgr(rel);
 
 	/*
 	 * Check for overflow in block number calculation; if so, we cannot extend
@@ -999,6 +1002,8 @@ _hash_alloc_buckets(Relation rel, BlockNumber firstblock, uint32 nblocks)
 	 */
 	if (lastblock < firstblock || lastblock == InvalidBlockNumber)
 		return false;
+
+	unbuffered_prep(&ub_wstate);
 
 	page = (Page) zerobuf.data;
 
@@ -1024,9 +1029,7 @@ _hash_alloc_buckets(Relation rel, BlockNumber firstblock, uint32 nblocks)
 					zerobuf.data,
 					true);
 
-	PageSetChecksumInplace(page, lastblock);
-	smgrextend(RelationGetSmgr(rel), MAIN_FORKNUM, lastblock, zerobuf.data,
-			   false);
+	unbuffered_extend(&ub_wstate, MAIN_FORKNUM, lastblock, zerobuf.data, false);
 
 	return true;
 }
