@@ -225,6 +225,58 @@ static const int MultiXactStatusLock[MaxMultiXactStatus + 1] =
  *						 heap support routines
  * ----------------------------------------------------------------
  */
+#define MAX_TUPLES_PER_PAGE  MaxHeapTuplesPerPage
+
+static BlockNumber
+bitmapheap_pgsr_next_single(PgStreamingRead *pgsr,
+		uintptr_t pgsr_private, void *io_private, Relation *rel, ForkNumber *fork,
+		ReadBufferMode *mode)
+{
+	TBMIterateResult *tbmres;
+	HeapScanDesc hdesc = (HeapScanDesc ) pgsr_private;
+	/*
+	 * The info we are getting from the HeapScanDesc is unchanging for this
+	 * relation, so it is okay to access it here. Notice that we do not use the
+	 * current buffer or current tuple members of the HeapScanDesc at all here.
+	 * Those are used when yielding tuples, so don't use those members here.
+	 */
+	BlockNumber rs_nblocks = hdesc->rs_nblocks;
+	Relation rs_rd = hdesc->rs_base.rs_rd;
+
+	*rel = rs_rd;
+	*fork = MAIN_FORKNUM;
+	*mode = RBM_NORMAL;
+
+	tbmres = (TBMIterateResult *) io_private;
+
+	for (;;)
+	{
+		if (hdesc->rs_base.shared_tbmiterator)
+			tbm_shared_iterate(hdesc->rs_base.shared_tbmiterator, tbmres);
+		else
+			tbm_iterate(hdesc->rs_base.tbmiterator, tbmres);
+
+		if (!BlockNumberIsValid(tbmres->blockno))
+			return tbmres->blockno;
+
+		/*
+		 * Ignore any claimed entries past what we think is the end of the
+		 * relation. It may have been extended after the start of our scan (we
+		 * only hold an AccessShareLock, and it could be inserts from this
+		 * backend).
+		 */
+		if (tbmres->blockno >= rs_nblocks)
+			continue;
+
+		if (tbmres->ntuples >= 0)
+			hdesc->rs_base.exact_pages++;
+		else
+			hdesc->rs_base.lossy_pages++;
+
+		return tbmres->blockno;
+	}
+}
+
 
 static BlockNumber
 heap_pgsr_next_single(PgStreamingRead *pgsr,
@@ -290,6 +342,8 @@ heap_pgsr_next_parallel(PgStreamingRead *pgsr,
 	return table_block_parallelscan_nextpage(scan->rs_base.rs_rd,
 											 pbscanwork, pbscan);
 }
+
+
 
 static PgStreamingRead *
 heap_pgsr_single_alloc(HeapScanDesc scan)
@@ -438,18 +492,37 @@ initscan(HeapScanDesc scan, ScanKey key, bool keep_startblock)
 		pg_streaming_read_free(scan->pgsr);
 		scan->pgsr = NULL;
 	}
+	if (scan->vmbuffer != InvalidBuffer)
+	{
+		ReleaseBuffer(scan->vmbuffer);
+		scan->vmbuffer = InvalidBuffer;
+	}
 
 	/*
 	 * FIXME: This probably should be done in the !rs_inited blocks instead.
 	 */
 	scan->pgsr = NULL;
-	if (!RelationUsesLocalBuffers(scan->rs_base.rs_rd) &&
-		(scan->rs_base.rs_flags & SO_TYPE_SEQSCAN))
+	if (scan->rs_base.rs_flags & SO_TYPE_SEQSCAN)
 	{
-		if (scan->rs_base.rs_parallel)
-			scan->pgsr = heap_pgsr_parallel_alloc(scan);
-		else
-			scan->pgsr = heap_pgsr_single_alloc(scan);
+		if (!RelationUsesLocalBuffers(scan->rs_base.rs_rd))
+		{
+				if (scan->rs_base.rs_parallel)
+					scan->pgsr = heap_pgsr_parallel_alloc(scan);
+				else
+					scan->pgsr = heap_pgsr_single_alloc(scan);
+		}
+	}
+	// TODO: put non-pgsr code back so that this is conditioned on non-local buffers
+	else if (scan->rs_base.rs_flags & SO_TYPE_BITMAPSCAN)
+	{
+		int iodepth = Max(Min(128, NBuffers / 128), 1);
+
+		scan->pgsr = pg_streaming_read_buffer_alloc(iodepth,
+				offsetof(TBMIterateResult, offsets) + MAX_TUPLES_PER_PAGE * sizeof(OffsetNumber),
+				(uintptr_t) scan, scan->rs_strategy, bitmapheap_pgsr_next_single);
+
+
+		scan->rs_inited = true;
 	}
 }
 
@@ -1134,6 +1207,11 @@ heap_beginscan(Relation relation, Snapshot snapshot,
 	scan->rs_strategy = NULL;	/* set in initscan */
 
 	scan->pgsr = NULL;
+	scan->vmbuffer = InvalidBuffer;
+	scan->rs_base.exact_pages = 0;
+	scan->rs_base.lossy_pages = 0;
+	scan->rs_base.tbmiterator = NULL;
+	scan->rs_base.shared_tbmiterator = NULL;
 
 	/*
 	 * Disable page-at-a-time mode if it's not a MVCC-safe snapshot.
