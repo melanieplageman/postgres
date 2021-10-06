@@ -20,6 +20,7 @@
 #include "access/skey.h"
 #include "access/table.h"		/* for backward compatibility */
 #include "access/tableam.h"
+#include "nodes/execnodes.h"
 #include "nodes/lockoptions.h"
 #include "nodes/primnodes.h"
 #include "storage/bufpage.h"
@@ -76,6 +77,11 @@ typedef struct HeapScanDescData
 	struct PgStreamingRead *pgsr;
 
 	/* these fields only used in page-at-a-time mode and for bitmap scans */
+	// TODO: currently gets freed before rescan. make it stick around. tricky
+	// because now it is in heapscandescdata and only executor node knows if it
+	// is a rescan or not so seems wrong to stick it in EndNode func
+	List *available_tbmres;
+	Buffer		vmbuffer;
 	int			rs_cindex;		/* current tuple's index in vistuples */
 	int			rs_ntuples;		/* number of visible tuples on page */
 	OffsetNumber rs_vistuples[MaxHeapTuplesPerPage];	/* their offsets */
