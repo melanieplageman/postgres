@@ -314,6 +314,8 @@ collectMatchBitmap(GinBtreeData *btree, GinBtreeStack *stack,
 	}
 }
 
+#define MAX_TUPLES_PER_PAGE  MaxHeapTuplesPerPage
+
 /*
  * Start* functions setup beginning state of searches: finds correct buffer and pins it.
  */
@@ -375,7 +377,10 @@ restartScanEntry:
 			if (entry->matchBitmap)
 			{
 				if (entry->matchIterator)
+				{
 					tbm_end_iterate(entry->matchIterator);
+					pfree(entry->matchResult);
+				}
 				entry->matchIterator = NULL;
 				tbm_free(entry->matchBitmap);
 				entry->matchBitmap = NULL;
@@ -388,6 +393,9 @@ restartScanEntry:
 		if (entry->matchBitmap && !tbm_is_empty(entry->matchBitmap))
 		{
 			entry->matchIterator = tbm_begin_iterate(entry->matchBitmap);
+			entry->matchResult = (TBMIterateResult *)
+				palloc0(sizeof(TBMIterateResult) + MAX_TUPLES_PER_PAGE *
+						sizeof(OffsetNumber));
 			entry->isFinished = false;
 		}
 	}
@@ -820,26 +828,32 @@ entryGetItem(GinState *ginstate, GinScanEntry entry,
 		/* A bitmap result */
 		BlockNumber advancePastBlk = GinItemPointerGetBlockNumber(&advancePast);
 		OffsetNumber advancePastOff = GinItemPointerGetOffsetNumber(&advancePast);
-
 		for (;;)
 		{
 			/*
 			 * If we've exhausted all items on this block, move to next block
-			 * in the bitmap.
+			 * in the bitmap. Note that tbm_iterate() sets the TBMIterateResult
+			 * blockno to InvalidBlockNumber to indicate that the relation has
+			 * been exhausted. Therefore, any comparison to blockno that would
+			 * evaluate to true unintentionally when it is InvalidBlockNumber
+			 * must be protected with a check to see if the block number is
+			 * invalid first.
 			 */
-			while (entry->matchResult == NULL ||
+			while ((!BlockNumberIsValid(entry->matchResult->blockno)) ||
 				   (entry->matchResult->ntuples >= 0 &&
 					entry->offset >= entry->matchResult->ntuples) ||
 				   entry->matchResult->blockno < advancePastBlk ||
 				   (ItemPointerIsLossyPage(&advancePast) &&
 					entry->matchResult->blockno == advancePastBlk))
 			{
-				entry->matchResult = tbm_iterate(entry->matchIterator);
 
-				if (entry->matchResult == NULL)
+				tbm_iterate(entry->matchIterator, entry->matchResult);
+				if (!BlockNumberIsValid(entry->matchResult->blockno))
 				{
 					ItemPointerSetInvalid(&entry->curItem);
 					tbm_end_iterate(entry->matchIterator);
+					pfree(entry->matchResult);
+					entry->matchResult = NULL;
 					entry->matchIterator = NULL;
 					entry->isFinished = true;
 					break;
