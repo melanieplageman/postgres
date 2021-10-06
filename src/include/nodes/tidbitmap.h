@@ -23,6 +23,7 @@
 #define TIDBITMAP_H
 
 #include "storage/itemptr.h"
+#include "storage/buf.h"
 #include "utils/dsa.h"
 
 
@@ -40,6 +41,13 @@ typedef struct TBMSharedIterator TBMSharedIterator;
 typedef struct TBMIterateResult
 {
 	BlockNumber blockno;		/* page number containing tuples */
+	int id;
+	/*
+	 * Once the target block has been read into a buffer, it is convenient to
+	 * track that buffer along with the other information about the page needed
+	 * while it is in use.
+	 */
+	Buffer buffer;
 	int			ntuples;		/* -1 indicates lossy result */
 	bool		recheck;		/* should the tuples be rechecked? */
 	/* Note: recheck is always true if ntuples < 0 */
@@ -64,8 +72,8 @@ extern bool tbm_is_empty(const TIDBitmap *tbm);
 
 extern TBMIterator *tbm_begin_iterate(TIDBitmap *tbm);
 extern dsa_pointer tbm_prepare_shared_iterate(TIDBitmap *tbm);
-extern TBMIterateResult *tbm_iterate(TBMIterator *iterator);
-extern TBMIterateResult *tbm_shared_iterate(TBMSharedIterator *iterator);
+extern void tbm_iterate(TBMIterator *iterator, TBMIterateResult *tbmres);
+extern void tbm_shared_iterate(TBMSharedIterator *iterator, TBMIterateResult *tbmres);
 extern void tbm_end_iterate(TBMIterator *iterator);
 extern void tbm_end_shared_iterate(TBMSharedIterator *iterator);
 extern TBMSharedIterator *tbm_attach_shared_iterate(dsa_area *dsa,

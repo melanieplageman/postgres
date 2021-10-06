@@ -613,6 +613,8 @@ pg_streaming_read_prefetch(PgStreamingRead *pgsr)
 	{
 		min_issue = Min(pgsr->iodepth_max, pgsr->current_window / 4);
 	}
+	/* elog(WARNING, "pg_streaming_read_prefetch: pgsr->inflight_count %d. pgsr->current_window %d. pgsr->completed_count %d", */
+	/* 		pgsr->inflight_count, pgsr->current_window, pgsr->completed_count); */
 
 	Assert(pgsr->inflight_count <= pgsr->current_window);
 	Assert(pgsr->completed_count <= (pgsr->iodepth_max + pgsr->distance_max));
