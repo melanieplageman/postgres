@@ -352,7 +352,6 @@ typedef struct GinScanEntryData
 	TIDBitmap  *matchBitmap;
 	TBMIterator *matchIterator;
 	TBMIterateResult *matchResult;
-
 	/* used for Posting list and one page in Posting tree */
 	ItemPointerData *list;
 	int			nlist;

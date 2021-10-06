@@ -99,7 +99,8 @@ GetTableAmRoutine(Oid amhandler)
 
 	/* optional, but one callback implies presence of the other */
 	Assert((routine->scan_bitmap_next_block == NULL) ==
-		   (routine->scan_bitmap_next_tuple == NULL));
+		   (routine->scan_bitmap_next_tuple == NULL) ==
+		   (routine->scan_bitmap_setup == NULL));
 	Assert(routine->scan_sample_next_block != NULL);
 	Assert(routine->scan_sample_next_tuple != NULL);
 

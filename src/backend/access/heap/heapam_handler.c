@@ -27,6 +27,7 @@
 #include "access/syncscan.h"
 #include "access/tableam.h"
 #include "access/tsmapi.h"
+#include "access/visibilitymap.h"
 #include "access/xact.h"
 #include "catalog/catalog.h"
 #include "catalog/index.h"
@@ -36,6 +37,7 @@
 #include "executor/executor.h"
 #include "miscadmin.h"
 #include "pgstat.h"
+#include "storage/aio.h"
 #include "storage/bufmgr.h"
 #include "storage/bufpage.h"
 #include "storage/lmgr.h"
@@ -2109,36 +2111,141 @@ heapam_estimate_rel_size(Relation rel, int32 *attr_widths,
  * Executor related callbacks for the heap AM
  * ------------------------------------------------------------------------
  */
+#define MAX_TUPLES_PER_PAGE  MaxHeapTuplesPerPage
+
+static PgStreamingReadNextStatus
+bitmapheap_pgsr_next_single(uintptr_t pgsr_private, PgAioInProgress *aio, uintptr_t *read_private)
+{
+	TBMIterateResult *tbmres;
+	BitmapHeapScanState *bhs_state = (BitmapHeapScanState *) pgsr_private;
+	HeapScanDesc hdesc = (HeapScanDesc ) bhs_state->ss.ss_currentScanDesc;
+	/*
+	 * The info we are getting from the HeapScanDesc is unchanging for this
+	 * relation, so it is okay to access it here. Notice that we do not use the
+	 * current buffer or current tuple members of the HeapScanDesc at all here.
+	 * Those are used when yielding tuples, so don't use those members here.
+	 */
+	BufferAccessStrategy rs_strategy = hdesc->rs_strategy;
+	BlockNumber rs_nblocks = hdesc->rs_nblocks;
+	Relation rs_rd = hdesc->rs_base.rs_rd;
+
+	Assert(bhs_state->initialized);
+
+	/*
+	 * Until we exhaust the relation, this will be freed by the caller of
+	 * pg_streaming_read_get_next().
+	 */
+	tbmres = (TBMIterateResult *)
+		palloc0(sizeof(TBMIterateResult) + MAX_TUPLES_PER_PAGE *
+				sizeof(OffsetNumber));
+
+	for (;;)
+	{
+		if (bhs_state->pstate)
+			tbm_shared_iterate(bhs_state->shared_tbmiterator, tbmres);
+		else
+			tbm_iterate(bhs_state->tbmiterator, tbmres);
+
+		if (!BlockNumberIsValid(tbmres->blockno))
+			break;
+
+		/*
+		 * Ignore any claimed entries past what we think is the end of the
+		 * relation. It may have been extended after the start of our scan (we
+		 * only hold an AccessShareLock, and it could be inserts from this
+		 * backend).
+		 */
+		if (tbmres->blockno >= rs_nblocks)
+			continue;
+
+		if (tbmres->ntuples >= 0)
+			bhs_state->exact_pages++;
+		else
+			bhs_state->lossy_pages++;
+
+		*read_private = (uintptr_t) tbmres;
+
+		/*
+		 * If we can skip fetching the relation, do so. In that case, ensure
+		 * the buffer is marked as invalid to indicate to the caller that NULL
+		 * tuples should be returned instead of reading from the buffer. We
+		 * still need ntuples in order to know how many to return, though.
+		 */
+		if (bhs_state->can_skip_fetch &&
+			!tbmres->recheck &&
+			VM_ALL_VISIBLE(rs_rd, tbmres->blockno, &bhs_state->vmbuffer))
+		{
+			tbmres->buffer = InvalidBuffer;
+			return PGSR_NEXT_NO_IO;
+		}
+		else
+		{
+			bool already_valid;
+			tbmres->buffer = ReadBufferAsync(rs_rd, MAIN_FORKNUM,
+					tbmres->blockno, RBM_NORMAL, rs_strategy, &already_valid,
+					&aio);
+			return already_valid ? PGSR_NEXT_NO_IO : PGSR_NEXT_IO;
+		}
+	}
+
+	/*
+	 * Block number was set to invalid when the relation was exhausted. Free
+	 * tbmres as it is not returned to the caller.
+	 */
+	pfree(tbmres);
+	return PGSR_NEXT_END;
+}
 
 static bool
-heapam_scan_bitmap_next_block(TableScanDesc scan,
-							  TBMIterateResult *tbmres)
+heapam_scan_bitmap_next_block(TableScanDesc scan, bool *recheck)
 {
 	HeapScanDesc hscan = (HeapScanDesc) scan;
-	BlockNumber page = tbmres->blockno;
+	TBMIterateResult *tbmres;
 	Buffer		buffer;
 	Snapshot	snapshot;
 	int			ntup;
 
+	Assert(hscan->pgsr);
+
+	/*
+	 * Release the buffer containing the previous block and reset the per-page
+	 * counters. Reset hscan->rs_ntuples here just to be safe.
+	 */
+	if (BufferIsValid(hscan->rs_cbuf))
+	{
+		ReleaseBuffer(hscan->rs_cbuf);
+		hscan->rs_cbuf = InvalidBuffer;
+	}
 	hscan->rs_cindex = 0;
 	hscan->rs_ntuples = 0;
 
+	tbmres = (TBMIterateResult *) pg_streaming_read_get_next(hscan->pgsr);
 	/*
-	 * Ignore any claimed entries past what we think is the end of the
-	 * relation. It may have been extended after the start of our scan (we
-	 * only hold an AccessShareLock, and it could be inserts from this
-	 * backend).
+	 * Hit the end of the relation. The memory for tbmres should have been
+	 * freed by the streaming read helper.
 	 */
-	if (page >= hscan->rs_nblocks)
+	if (tbmres == NULL)
 		return false;
 
+	*recheck = tbmres->recheck;
+
+	hscan->rs_cblock = tbmres->blockno;
+	hscan->rs_cbuf = tbmres->buffer;
 	/*
-	 * Acquire pin on the target heap page, trading in any pin we held before.
+	 * If we skipped fetching, the streaming read helper would have set
+	 * tbmres->buffer to InvalidBuffer. We still need rs_ntuples to determine
+	 * how many NULL-filled tuples to return, though. If the page was lossy and
+	 * tbmres->ntuples is -1, hscan->rs_ntuples will still be set to the
+	 * correct value before returning.
 	 */
-	hscan->rs_cbuf = ReleaseAndReadBuffer(hscan->rs_cbuf,
-										  scan->rs_rd,
-										  page);
-	hscan->rs_cblock = page;
+	hscan->rs_ntuples = tbmres->ntuples;
+
+	if (!(BufferIsValid(hscan->rs_cbuf)))
+	{
+		pfree(tbmres);
+		return true;
+	}
+
 	buffer = hscan->rs_cbuf;
 	snapshot = scan->rs_snapshot;
 
@@ -2174,7 +2281,7 @@ heapam_scan_bitmap_next_block(TableScanDesc scan,
 			ItemPointerData tid;
 			HeapTupleData heapTuple;
 
-			ItemPointerSet(&tid, page, offnum);
+			ItemPointerSet(&tid, tbmres->blockno, offnum);
 			if (heap_hot_search_buffer(&tid, scan->rs_rd, buffer, snapshot,
 									   &heapTuple, NULL, true))
 				hscan->rs_vistuples[ntup++] = ItemPointerGetOffsetNumber(&tid);
@@ -2202,7 +2309,7 @@ heapam_scan_bitmap_next_block(TableScanDesc scan,
 			loctup.t_data = (HeapTupleHeader) PageGetItem((Page) dp, lp);
 			loctup.t_len = ItemIdGetLength(lp);
 			loctup.t_tableOid = scan->rs_rd->rd_id;
-			ItemPointerSet(&loctup.t_self, page, offnum);
+			ItemPointerSet(&loctup.t_self, tbmres->blockno, offnum);
 			valid = HeapTupleSatisfiesVisibility(&loctup, snapshot, buffer);
 			if (valid)
 			{
@@ -2220,13 +2327,19 @@ heapam_scan_bitmap_next_block(TableScanDesc scan,
 	Assert(ntup <= MaxHeapTuplesPerPage);
 	hscan->rs_ntuples = ntup;
 
-	return ntup > 0;
+	/*
+	 * We have used tbmres to fill in all of the information needed while
+	 * yielding tuples so tbmres itself can be freed. We still have
+	 * hscan->rs_cbuf pinned, though. It will be released when we come for the
+	 * next block.
+	 */
+	pfree(tbmres);
+
+	return true;
 }
 
 static bool
-heapam_scan_bitmap_next_tuple(TableScanDesc scan,
-							  TBMIterateResult *tbmres,
-							  TupleTableSlot *slot)
+heapam_scan_bitmap_next_tuple(TableScanDesc scan, TupleTableSlot *slot)
 {
 	HeapScanDesc hscan = (HeapScanDesc) scan;
 	OffsetNumber targoffset;
@@ -2239,29 +2352,75 @@ heapam_scan_bitmap_next_tuple(TableScanDesc scan,
 	if (hscan->rs_cindex < 0 || hscan->rs_cindex >= hscan->rs_ntuples)
 		return false;
 
-	targoffset = hscan->rs_vistuples[hscan->rs_cindex];
-	dp = (Page) BufferGetPage(hscan->rs_cbuf);
-	lp = PageGetItemId(dp, targoffset);
-	Assert(ItemIdIsNormal(lp));
-
-	hscan->rs_ctup.t_data = (HeapTupleHeader) PageGetItem((Page) dp, lp);
-	hscan->rs_ctup.t_len = ItemIdGetLength(lp);
-	hscan->rs_ctup.t_tableOid = scan->rs_rd->rd_id;
-	ItemPointerSet(&hscan->rs_ctup.t_self, hscan->rs_cblock, targoffset);
-
-	pgstat_count_heap_fetch(scan->rs_rd);
-
 	/*
-	 * Set up the result slot to point to this tuple.  Note that the slot
-	 * acquires a pin on the buffer.
+	 * Skipped fetching so fill slot with NULLs
 	 */
-	ExecStoreBufferHeapTuple(&hscan->rs_ctup,
-							 slot,
-							 hscan->rs_cbuf);
+	if (BufferIsInvalid(hscan->rs_cbuf))
+	{
+		ExecStoreAllNullTuple(slot);
+	}
+	else
+	{
+		targoffset = hscan->rs_vistuples[hscan->rs_cindex];
+		dp = (Page) BufferGetPage(hscan->rs_cbuf);
+		lp = PageGetItemId(dp, targoffset);
+		Assert(ItemIdIsNormal(lp));
+
+		hscan->rs_ctup.t_data = (HeapTupleHeader) PageGetItem((Page) dp, lp);
+		hscan->rs_ctup.t_len = ItemIdGetLength(lp);
+		hscan->rs_ctup.t_tableOid = scan->rs_rd->rd_id;
+		ItemPointerSet(&hscan->rs_ctup.t_self, hscan->rs_cblock, targoffset);
+
+		pgstat_count_heap_fetch(scan->rs_rd);
+
+		/*
+		* Set up the result slot to point to this tuple.  Note that the slot
+		* acquires a pin on the buffer.
+		*/
+		ExecStoreBufferHeapTuple(&hscan->rs_ctup,
+								slot,
+								hscan->rs_cbuf);
+	}
 
 	hscan->rs_cindex++;
 
 	return true;
+}
+
+static void
+bitmapheap_pgsr_release(uintptr_t pgsr_private, uintptr_t read_private)
+{
+	BitmapHeapScanState *bhs_state = (BitmapHeapScanState *) pgsr_private;
+	HeapScanDesc hdesc = (HeapScanDesc ) bhs_state->ss.ss_currentScanDesc;
+	TBMIterateResult *tbmres = (TBMIterateResult *) read_private;
+
+	ereport(DEBUG3, errmsg("pgsr %s: releasing buf %d",
+				NameStr(hdesc->rs_base.rs_rd->rd_rel->relname),
+				tbmres->buffer), errhidestmt(true), errhidecontext(true));
+
+	Assert(BufferIsValid(tbmres->buffer));
+	ReleaseBuffer(tbmres->buffer);
+}
+
+static void
+bitmapheap_pgsr_alloc(BitmapHeapScanState *scanstate)
+{
+	HeapScanDesc hscan = (HeapScanDesc ) scanstate->ss.ss_currentScanDesc;
+	if (!hscan->rs_inited)
+	{
+		int iodepth = Max(Min(128, NBuffers / 128), 1);
+		hscan->pgsr = pg_streaming_read_alloc(iodepth, (uintptr_t) scanstate,
+				bitmapheap_pgsr_next_single, bitmapheap_pgsr_release);
+
+		hscan->rs_inited = true;
+	}
+	hscan->rs_cindex = 0;
+}
+
+static void
+heapam_scan_bitmap_setup(TableScanDesc scan, BitmapHeapScanState *scanstate)
+{
+	bitmapheap_pgsr_alloc(scanstate);
 }
 
 static bool
@@ -2590,6 +2749,7 @@ static const TableAmRoutine heapam_methods = {
 
 	.scan_bitmap_next_block = heapam_scan_bitmap_next_block,
 	.scan_bitmap_next_tuple = heapam_scan_bitmap_next_tuple,
+	.scan_bitmap_setup = heapam_scan_bitmap_setup,
 	.scan_sample_next_block = heapam_scan_sample_next_block,
 	.scan_sample_next_tuple = heapam_scan_sample_next_tuple
 };
