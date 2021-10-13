@@ -1625,6 +1625,7 @@ typedef struct BitmapHeapScanState
 	long		lossy_pages;
 	Size		pscan_len;
 	bool		initialized;
+	TBMIterateResult *all_tbmres;
 	TBMSharedIterator *shared_tbmiterator;
 	ParallelBitmapHeapState *pstate;
 } BitmapHeapScanState;

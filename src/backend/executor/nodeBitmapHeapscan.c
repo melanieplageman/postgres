@@ -64,6 +64,7 @@ static bool BitmapShouldInitializeSharedState(ParallelBitmapHeapState *pstate);
  *		Retrieve next tuple from the BitmapHeapScan node's currentRelation
  * ----------------------------------------------------------------
  */
+#define MAX_TUPLES_PER_PAGE  MaxHeapTuplesPerPage
 static TupleTableSlot *
 BitmapHeapNext(BitmapHeapScanState *node)
 {
@@ -133,9 +134,16 @@ BitmapHeapNext(BitmapHeapScanState *node)
 		/* do any required setup, such as setting up streaming read helper */
 		table_scan_bitmap_setup(scan, node);
 
+
+		node->all_tbmres = palloc0((sizeof(TBMIterateResult) + MAX_TUPLES_PER_PAGE * sizeof(OffsetNumber)) * 256);
+
+
 		/* Get the first block. if none, end of scan */
 		if (!table_scan_bitmap_next_block(scan, &node->recheck))
+		{
+			pfree(node->all_tbmres);
 			return NULL;
+		}
 	}
 
 	do
@@ -157,6 +165,7 @@ BitmapHeapNext(BitmapHeapScanState *node)
 		}
 	} while (table_scan_bitmap_next_block(scan, &node->recheck));
 
+	pfree(node->all_tbmres);
 	return NULL;
 }
 

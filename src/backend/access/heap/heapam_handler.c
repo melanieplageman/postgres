@@ -2117,6 +2117,9 @@ static PgStreamingReadNextStatus
 bitmapheap_pgsr_next_single(uintptr_t pgsr_private, PgAioInProgress *aio, uintptr_t *read_private)
 {
 	TBMIterateResult *tbmres;
+	TBMIterateResult *current;
+	bool found;
+	int i;
 	BitmapHeapScanState *bhs_state = (BitmapHeapScanState *) pgsr_private;
 	HeapScanDesc hdesc = (HeapScanDesc ) bhs_state->ss.ss_currentScanDesc;
 	/*
@@ -2135,9 +2138,29 @@ bitmapheap_pgsr_next_single(uintptr_t pgsr_private, PgAioInProgress *aio, uintpt
 	 * Until we exhaust the relation, this will be freed by the caller of
 	 * pg_streaming_read_get_next().
 	 */
-	tbmres = (TBMIterateResult *)
-		palloc0(sizeof(TBMIterateResult) + MAX_TUPLES_PER_PAGE *
-				sizeof(OffsetNumber));
+
+	current = bhs_state->all_tbmres;
+	found = false;
+
+	for (i = 0; i < 256; i++)
+	{
+		if (current->in_use)
+		{
+			current = (TBMIterateResult *) (
+				(char *) current + sizeof(TBMIterateResult) + MAX_TUPLES_PER_PAGE * sizeof(OffsetNumber)
+			);
+			continue;
+		}
+		current->in_use = true;
+		current->id = i;
+		/* elog(WARNING, "submitting an IO using tbmres %d", i); */
+		found = true;
+		break;
+	}
+	if (found)
+		tbmres = current;
+	else
+		elog(ERROR, "not enough tbmres");
 
 	for (;;)
 	{
@@ -2192,7 +2215,7 @@ bitmapheap_pgsr_next_single(uintptr_t pgsr_private, PgAioInProgress *aio, uintpt
 	 * Block number was set to invalid when the relation was exhausted. Free
 	 * tbmres as it is not returned to the caller.
 	 */
-	pfree(tbmres);
+	tbmres->in_use = false;
 	return PGSR_NEXT_END;
 }
 
@@ -2227,6 +2250,7 @@ heapam_scan_bitmap_next_block(TableScanDesc scan, bool *recheck)
 	if (tbmres == NULL)
 		return false;
 
+	/* elog(WARNING, "got tbmres %d from pgsr", tbmres->id); */
 	*recheck = tbmres->recheck;
 
 	hscan->rs_cblock = tbmres->blockno;
@@ -2242,7 +2266,7 @@ heapam_scan_bitmap_next_block(TableScanDesc scan, bool *recheck)
 
 	if (!(BufferIsValid(hscan->rs_cbuf)))
 	{
-		pfree(tbmres);
+		tbmres->in_use = false;
 		return true;
 	}
 
@@ -2333,7 +2357,7 @@ heapam_scan_bitmap_next_block(TableScanDesc scan, bool *recheck)
 	 * hscan->rs_cbuf pinned, though. It will be released when we come for the
 	 * next block.
 	 */
-	pfree(tbmres);
+	tbmres->in_use = false;
 
 	return true;
 }
@@ -2406,9 +2430,9 @@ static void
 bitmapheap_pgsr_alloc(BitmapHeapScanState *scanstate)
 {
 	HeapScanDesc hscan = (HeapScanDesc ) scanstate->ss.ss_currentScanDesc;
+	int iodepth = Max(Min(128, NBuffers / 128), 1);
 	if (!hscan->rs_inited)
 	{
-		int iodepth = Max(Min(128, NBuffers / 128), 1);
 		hscan->pgsr = pg_streaming_read_alloc(iodepth, (uintptr_t) scanstate,
 				bitmapheap_pgsr_next_single, bitmapheap_pgsr_release);
 
