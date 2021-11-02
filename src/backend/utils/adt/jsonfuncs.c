@@ -1926,30 +1926,20 @@ each_worker_jsonb(FunctionCallInfo fcinfo, const char *funcname, bool as_text)
 						funcname)));
 
 	rsi = (ReturnSetInfo *) fcinfo->resultinfo;
-
-	if (!rsi || !IsA(rsi, ReturnSetInfo) ||
-		(rsi->allowedModes & SFRM_Materialize) == 0 ||
-		rsi->expectedDesc == NULL)
+	if (!rsi->expectedDesc)
 		ereport(ERROR,
-				(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
-				 errmsg("set-valued function called in context that "
-						"cannot accept a set")));
+				(errcode(ERRCODE_E_R_I_E_SRF_PROTOCOL_VIOLATED),
+				 errmsg("expected tuple format not specified as required for "
+						"set-returning function.")));
 
 	rsi->returnMode = SFRM_Materialize;
 
-	if (get_call_result_type(fcinfo, NULL, &tupdesc) != TYPEFUNC_COMPOSITE)
-		ereport(ERROR,
-				(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
-				 errmsg("function returning record called in context "
-						"that cannot accept type record")));
-
 	old_cxt = MemoryContextSwitchTo(rsi->econtext->ecxt_per_query_memory);
+
+	tuple_store = MakeFuncResultTuplestore(fcinfo, &tupdesc);
 
 	ret_tdesc = CreateTupleDescCopy(tupdesc);
 	BlessTupleDesc(ret_tdesc);
-	tuple_store =
-		tuplestore_begin_heap(rsi->allowedModes & SFRM_Materialize_Random,
-							  false, work_mem);
 
 	MemoryContextSwitchTo(old_cxt);
 
@@ -2038,27 +2028,21 @@ each_worker(FunctionCallInfo fcinfo, bool as_text)
 	sem = palloc0(sizeof(JsonSemAction));
 
 	rsi = (ReturnSetInfo *) fcinfo->resultinfo;
-
-	if (!rsi || !IsA(rsi, ReturnSetInfo) ||
-		(rsi->allowedModes & SFRM_Materialize) == 0 ||
-		rsi->expectedDesc == NULL)
+	if (!rsi->expectedDesc)
 		ereport(ERROR,
-				(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
-				 errmsg("set-valued function called in context that "
-						"cannot accept a set")));
+				(errcode(ERRCODE_E_R_I_E_SRF_PROTOCOL_VIOLATED),
+				 errmsg("expected tuple format not specified as required for "
+						"set-returning function.")));
 
 	rsi->returnMode = SFRM_Materialize;
-
-	(void) get_call_result_type(fcinfo, NULL, &tupdesc);
 
 	/* make these in a sufficiently long-lived memory context */
 	old_cxt = MemoryContextSwitchTo(rsi->econtext->ecxt_per_query_memory);
 
+	state->tuple_store = MakeFuncResultTuplestore(fcinfo, &tupdesc);
+
 	state->ret_tdesc = CreateTupleDescCopy(tupdesc);
 	BlessTupleDesc(state->ret_tdesc);
-	state->tuple_store =
-		tuplestore_begin_heap(rsi->allowedModes & SFRM_Materialize_Random,
-							  false, work_mem);
 
 	MemoryContextSwitchTo(old_cxt);
 
@@ -2226,14 +2210,11 @@ elements_worker_jsonb(FunctionCallInfo fcinfo, const char *funcname,
 				 errmsg("cannot extract elements from an object")));
 
 	rsi = (ReturnSetInfo *) fcinfo->resultinfo;
-
-	if (!rsi || !IsA(rsi, ReturnSetInfo) ||
-		(rsi->allowedModes & SFRM_Materialize) == 0 ||
-		rsi->expectedDesc == NULL)
+	if (!rsi->expectedDesc)
 		ereport(ERROR,
-				(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
-				 errmsg("set-valued function called in context that "
-						"cannot accept a set")));
+				(errcode(ERRCODE_E_R_I_E_SRF_PROTOCOL_VIOLATED),
+				 errmsg("expected tuple format not specified as required for "
+						"set-returning function.")));
 
 	rsi->returnMode = SFRM_Materialize;
 
@@ -2244,9 +2225,7 @@ elements_worker_jsonb(FunctionCallInfo fcinfo, const char *funcname,
 
 	ret_tdesc = CreateTupleDescCopy(tupdesc);
 	BlessTupleDesc(ret_tdesc);
-	tuple_store =
-		tuplestore_begin_heap(rsi->allowedModes & SFRM_Materialize_Random,
-							  false, work_mem);
+	tuple_store = MakeFuncResultTuplestore(fcinfo, NULL);
 
 	MemoryContextSwitchTo(old_cxt);
 
@@ -2335,14 +2314,12 @@ elements_worker(FunctionCallInfo fcinfo, const char *funcname, bool as_text)
 	sem = palloc0(sizeof(JsonSemAction));
 
 	rsi = (ReturnSetInfo *) fcinfo->resultinfo;
-
-	if (!rsi || !IsA(rsi, ReturnSetInfo) ||
-		(rsi->allowedModes & SFRM_Materialize) == 0 ||
-		rsi->expectedDesc == NULL)
+	if (!rsi->expectedDesc)
 		ereport(ERROR,
-				(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
-				 errmsg("set-valued function called in context that "
-						"cannot accept a set")));
+				(errcode(ERRCODE_E_R_I_E_SRF_PROTOCOL_VIOLATED),
+				 errmsg("expected tuple format not specified as required for "
+						"set-returning function.")));
+
 
 	rsi->returnMode = SFRM_Materialize;
 
@@ -2354,9 +2331,7 @@ elements_worker(FunctionCallInfo fcinfo, const char *funcname, bool as_text)
 
 	state->ret_tdesc = CreateTupleDescCopy(tupdesc);
 	BlessTupleDesc(state->ret_tdesc);
-	state->tuple_store =
-		tuplestore_begin_heap(rsi->allowedModes & SFRM_Materialize_Random,
-							  false, work_mem);
+	state->tuple_store = MakeFuncResultTuplestore(fcinfo, NULL);
 
 	MemoryContextSwitchTo(old_cxt);
 
@@ -3798,13 +3773,6 @@ populate_recordset_worker(FunctionCallInfo fcinfo, const char *funcname,
 
 	rsi = (ReturnSetInfo *) fcinfo->resultinfo;
 
-	if (!rsi || !IsA(rsi, ReturnSetInfo) ||
-		(rsi->allowedModes & SFRM_Materialize) == 0)
-		ereport(ERROR,
-				(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
-				 errmsg("set-valued function called in context that "
-						"cannot accept a set")));
-
 	rsi->returnMode = SFRM_Materialize;
 
 	/*
@@ -3871,9 +3839,7 @@ populate_recordset_worker(FunctionCallInfo fcinfo, const char *funcname,
 
 	/* make tuplestore in a sufficiently long-lived memory context */
 	old_cxt = MemoryContextSwitchTo(rsi->econtext->ecxt_per_query_memory);
-	state->tuple_store = tuplestore_begin_heap(rsi->allowedModes &
-											   SFRM_Materialize_Random,
-											   false, work_mem);
+	state->tuple_store = MakeFuncResultTuplestore(fcinfo, NULL);
 	MemoryContextSwitchTo(old_cxt);
 
 	state->function_name = funcname;
