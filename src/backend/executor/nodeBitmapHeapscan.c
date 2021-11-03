@@ -135,13 +135,18 @@ BitmapHeapNext(BitmapHeapScanState *node)
 		table_scan_bitmap_setup(scan, node);
 
 
-		node->all_tbmres = palloc0((sizeof(TBMIterateResult) + MAX_TUPLES_PER_PAGE * sizeof(OffsetNumber)) * 256);
+		node->all_tbmres = NIL;
+		for (int i = 0; i < 256; i++)
+		{
+			TBMIterateResult *tbmres_temp = palloc0(sizeof(TBMIterateResult) + MAX_TUPLES_PER_PAGE * sizeof(OffsetNumber));
+			node->all_tbmres = lappend(node->all_tbmres, tbmres_temp);
+		}
 
 
 		/* Get the first block. if none, end of scan */
 		if (!table_scan_bitmap_next_block(scan, &node->recheck))
 		{
-			pfree(node->all_tbmres);
+			list_free_deep(node->all_tbmres);
 			return NULL;
 		}
 	}
@@ -165,7 +170,7 @@ BitmapHeapNext(BitmapHeapScanState *node)
 		}
 	} while (table_scan_bitmap_next_block(scan, &node->recheck));
 
-	pfree(node->all_tbmres);
+	list_free_deep(node->all_tbmres);
 	return NULL;
 }
 
@@ -334,6 +339,7 @@ ExecInitBitmapHeapScan(BitmapHeapScan *node, EState *estate, int eflags)
 
 	scanstate->tbm = NULL;
 	scanstate->tbmiterator = NULL;
+	scanstate->all_tbmres = NIL;
 	scanstate->vmbuffer = InvalidBuffer;
 	scanstate->exact_pages = 0;
 	scanstate->lossy_pages = 0;

@@ -2117,9 +2117,6 @@ static PgStreamingReadNextStatus
 bitmapheap_pgsr_next_single(uintptr_t pgsr_private, PgAioInProgress *aio, uintptr_t *read_private)
 {
 	TBMIterateResult *tbmres;
-	TBMIterateResult *current;
-	bool found;
-	int i;
 	BitmapHeapScanState *bhs_state = (BitmapHeapScanState *) pgsr_private;
 	HeapScanDesc hdesc = (HeapScanDesc ) bhs_state->ss.ss_currentScanDesc;
 	/*
@@ -2135,32 +2132,19 @@ bitmapheap_pgsr_next_single(uintptr_t pgsr_private, PgAioInProgress *aio, uintpt
 	Assert(bhs_state->initialized);
 
 	/*
-	 * Until we exhaust the relation, this will be freed by the caller of
-	 * pg_streaming_read_get_next().
+	 * Until we exhaust the relation, this will be appended back to the free
+	 * list by the caller of pg_streaming_read_get_next().
 	 */
 
-	current = bhs_state->all_tbmres;
-	found = false;
-
-	for (i = 0; i < 256; i++)
-	{
-		if (current->in_use)
-		{
-			current = (TBMIterateResult *) (
-				(char *) current + sizeof(TBMIterateResult) + MAX_TUPLES_PER_PAGE * sizeof(OffsetNumber)
-			);
-			continue;
-		}
-		current->in_use = true;
-		current->id = i;
-		/* elog(WARNING, "submitting an IO using tbmres %d", i); */
-		found = true;
-		break;
-	}
-	if (found)
-		tbmres = current;
+	if (bhs_state->all_tbmres == NIL)
+		tbmres = palloc0(sizeof(TBMIterateResult) + MAX_TUPLES_PER_PAGE * sizeof(OffsetNumber));
 	else
-		elog(ERROR, "not enough tbmres");
+	{
+		tbmres = (TBMIterateResult *) linitial(bhs_state->all_tbmres);
+		// TODO: list_remove_ptr doesn't exist in the list API -- it would
+		// essentially truncate the list to not include this member - without freeing any memory
+		bhs_state->all_tbmres = list_remove_ptr(bhs_state->all_tbmres, tbmres);
+	}
 
 	for (;;)
 	{
@@ -2212,10 +2196,9 @@ bitmapheap_pgsr_next_single(uintptr_t pgsr_private, PgAioInProgress *aio, uintpt
 	}
 
 	/*
-	 * Block number was set to invalid when the relation was exhausted. Free
-	 * tbmres as it is not returned to the caller.
+	 * Block number was set to invalid when the relation was exhausted.
 	 */
-	tbmres->in_use = false;
+	bhs_state->all_tbmres = lappend(bhs_state->all_tbmres, tbmres);
 	return PGSR_NEXT_END;
 }
 
@@ -2244,8 +2227,8 @@ heapam_scan_bitmap_next_block(TableScanDesc scan, bool *recheck)
 
 	tbmres = (TBMIterateResult *) pg_streaming_read_get_next(hscan->pgsr);
 	/*
-	 * Hit the end of the relation. The memory for tbmres should have been
-	 * freed by the streaming read helper.
+	 * Hit the end of the relation. tbmres should have been appended to the
+	 * free list by the streaming read helper.
 	 */
 	if (tbmres == NULL)
 		return false;
@@ -2266,6 +2249,7 @@ heapam_scan_bitmap_next_block(TableScanDesc scan, bool *recheck)
 
 	if (!(BufferIsValid(hscan->rs_cbuf)))
 	{
+		// TODO: need to put it back on the free list all_tbmres but don't have access to the node
 		tbmres->in_use = false;
 		return true;
 	}
@@ -2357,6 +2341,7 @@ heapam_scan_bitmap_next_block(TableScanDesc scan, bool *recheck)
 	 * hscan->rs_cbuf pinned, though. It will be released when we come for the
 	 * next block.
 	 */
+	// TODO: need to reappend tbmres to the free list (all_tbmres) in the node but don't have access to the node here
 	tbmres->in_use = false;
 
 	return true;
