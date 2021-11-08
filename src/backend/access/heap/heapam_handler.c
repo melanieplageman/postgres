@@ -2143,9 +2143,8 @@ bitmapheap_pgsr_next_single(uintptr_t pgsr_private, PgAioInProgress *aio, uintpt
 		tbmres = palloc0(sizeof(TBMIterateResult) + MAX_TUPLES_PER_PAGE * sizeof(OffsetNumber));
 	else
 	{
-		ListCell *cell = linitial(hdesc->available_tbmres);
-		tbmres = (TBMIterateResult *) cell;
-		hdesc->available_tbmres = list_delete(hdesc->available_tbmres, cell);
+		tbmres = (TBMIterateResult *) linitial(hdesc->available_tbmres);
+		hdesc->available_tbmres = list_delete(hdesc->available_tbmres, tbmres);
 	}
 
 	for (;;)
@@ -2232,8 +2231,9 @@ heapam_scan_bitmap_next_block(TableScanDesc scan, bool *recheck)
 
 	tbmres = (TBMIterateResult *) pg_streaming_read_get_next(hscan->pgsr);
 	/*
-	 * Hit the end of the relation. tbmres should have been appended to the
-	 * free list by the streaming read helper.
+	 * Hit the end of the relation. All tbmres should have been appended to the
+	 * free list by the streaming read helper, so they can be deleted here
+	 * without leaking memory.
 	 */
 	if (tbmres == NULL)
 	{
@@ -2241,7 +2241,6 @@ heapam_scan_bitmap_next_block(TableScanDesc scan, bool *recheck)
 		return false;
 	}
 
-	/* elog(WARNING, "got tbmres %d from pgsr", tbmres->id); */
 	*recheck = tbmres->recheck;
 
 	hscan->rs_cblock = tbmres->blockno;
@@ -2257,6 +2256,9 @@ heapam_scan_bitmap_next_block(TableScanDesc scan, bool *recheck)
 
 	if (!(BufferIsValid(hscan->rs_cbuf)))
 	{
+		/*
+		 * Done with the TBMIterateResult so it can be put back on the list.
+		 */
 		hscan->available_tbmres = lappend(hscan->available_tbmres, tbmres);
 		return true;
 	}
@@ -2438,14 +2440,15 @@ heapam_scan_bitmap_setup(TableScanDesc scan, BitmapHeapScanState *scanstate)
 {
 	HeapScanDesc hscan = (HeapScanDesc) scan;
 	hscan->available_tbmres = NIL;
-	// TODO: replace this with variable for prefetch window * 2
-	for (int i = 0; i < 256; i++)
+	int iodepth = Max(Min(128, NBuffers / 128), 1);
+	for (int i = 0; i < iodepth; i++)
 	{
 		TBMIterateResult *tbmres_temp = palloc0(
 				sizeof(TBMIterateResult) + MAX_TUPLES_PER_PAGE * sizeof(OffsetNumber)
 				);
 		hscan->available_tbmres = lappend(hscan->available_tbmres, tbmres_temp);
 	}
+
 	bitmapheap_pgsr_alloc(scanstate);
 }
 
