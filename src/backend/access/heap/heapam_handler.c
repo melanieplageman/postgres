@@ -2132,17 +2132,20 @@ bitmapheap_pgsr_next_single(uintptr_t pgsr_private, PgAioInProgress *aio, uintpt
 	Assert(bhs_state->initialized);
 
 	/*
-	 * Until we exhaust the relation, this will be appended back to the free
-	 * list by the caller of pg_streaming_read_get_next().
+	 * If no TBMIterateResult are available to use, allocate a new one.
+	 * If one is available, claim it by removing it from the list.
+	 * When the caller of pg_streaming_read_get_next() is done with the
+	 * TBMIterateResult, they will append it back to the list of available
+	 * TBMIterateResults.
+	 * The memory will be freed when the relation is exhausted.
 	 */
-
-	if (hdesc->all_tbmres == NIL)
+	if (hdesc->available_tbmres == NIL)
 		tbmres = palloc0(sizeof(TBMIterateResult) + MAX_TUPLES_PER_PAGE * sizeof(OffsetNumber));
 	else
 	{
-		ListCell *cell = linitial(hdesc->all_tbmres);
+		ListCell *cell = linitial(hdesc->available_tbmres);
 		tbmres = (TBMIterateResult *) cell;
-		hdesc->all_tbmres = list_delete(hdesc->all_tbmres, cell);
+		hdesc->available_tbmres = list_delete(hdesc->available_tbmres, cell);
 	}
 
 	for (;;)
@@ -2196,8 +2199,11 @@ bitmapheap_pgsr_next_single(uintptr_t pgsr_private, PgAioInProgress *aio, uintpt
 
 	/*
 	 * Block number was set to invalid when the relation was exhausted.
+	 * Put the tbmres back on the list so that it can be accounted for by the
+	 * caller.
+	 * The caller will free the list of TBMIterateResult.
 	 */
-	hdesc->all_tbmres = lappend(hdesc->all_tbmres, tbmres);
+	hdesc->available_tbmres = lappend(hdesc->available_tbmres, tbmres);
 	return PGSR_NEXT_END;
 }
 
@@ -2231,7 +2237,7 @@ heapam_scan_bitmap_next_block(TableScanDesc scan, bool *recheck)
 	 */
 	if (tbmres == NULL)
 	{
-		list_free_deep(hscan->all_tbmres);
+		list_free_deep(hscan->available_tbmres);
 		return false;
 	}
 
@@ -2251,9 +2257,7 @@ heapam_scan_bitmap_next_block(TableScanDesc scan, bool *recheck)
 
 	if (!(BufferIsValid(hscan->rs_cbuf)))
 	{
-		// TODO: need to put it back on the free list all_tbmres but don't have access to the node
-		tbmres->in_use = false;
-		hscan->all_tbmres = lappend(hscan->all_tbmres, tbmres);
+		hscan->available_tbmres = lappend(hscan->available_tbmres, tbmres);
 		return true;
 	}
 
@@ -2340,13 +2344,12 @@ heapam_scan_bitmap_next_block(TableScanDesc scan, bool *recheck)
 
 	/*
 	 * We have used tbmres to fill in all of the information needed while
-	 * yielding tuples so tbmres itself can be freed. We still have
-	 * hscan->rs_cbuf pinned, though. It will be released when we come for the
-	 * next block.
+	 * yielding tuples so tbmres itself can be appended back to the list of
+	 * available tbmres.
+	 * We still have hscan->rs_cbuf pinned, though. It will be released when we
+	 * come for the next block.
 	 */
-	// TODO: need to reappend tbmres to the free list (all_tbmres) in the node but don't have access to the node here
-	tbmres->in_use = false;
-	hscan->all_tbmres = lappend(hscan->all_tbmres, tbmres);
+	hscan->available_tbmres = lappend(hscan->available_tbmres, tbmres);
 
 	return true;
 }
@@ -2434,13 +2437,14 @@ static void
 heapam_scan_bitmap_setup(TableScanDesc scan, BitmapHeapScanState *scanstate)
 {
 	HeapScanDesc hscan = (HeapScanDesc) scan;
-	hscan->all_tbmres = NIL;
+	hscan->available_tbmres = NIL;
+	// TODO: replace this with variable for prefetch window * 2
 	for (int i = 0; i < 256; i++)
 	{
 		TBMIterateResult *tbmres_temp = palloc0(
 				sizeof(TBMIterateResult) + MAX_TUPLES_PER_PAGE * sizeof(OffsetNumber)
 				);
-		hscan->all_tbmres = lappend(hscan->all_tbmres, tbmres_temp);
+		hscan->available_tbmres = lappend(hscan->available_tbmres, tbmres_temp);
 	}
 	bitmapheap_pgsr_alloc(scanstate);
 }

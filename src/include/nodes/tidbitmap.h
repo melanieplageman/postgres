@@ -47,7 +47,6 @@ typedef struct TBMIterateResult
 	 * track that buffer along with the other information about the page needed
 	 * while it is in use.
 	 */
-	bool in_use;
 	Buffer buffer;
 	int			ntuples;		/* -1 indicates lossy result */
 	bool		recheck;		/* should the tuples be rechecked? */
