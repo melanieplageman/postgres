@@ -76,6 +76,7 @@ typedef struct HeapScanDescData
 	struct PgStreamingRead *pgsr;
 
 	/* these fields only used in page-at-a-time mode and for bitmap scans */
+	List *all_tbmres;
 	int			rs_cindex;		/* current tuple's index in vistuples */
 	int			rs_ntuples;		/* number of visible tuples on page */
 	OffsetNumber rs_vistuples[MaxHeapTuplesPerPage];	/* their offsets */

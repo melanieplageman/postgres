@@ -2136,13 +2136,13 @@ bitmapheap_pgsr_next_single(uintptr_t pgsr_private, PgAioInProgress *aio, uintpt
 	 * list by the caller of pg_streaming_read_get_next().
 	 */
 
-	if (bhs_state->all_tbmres == NIL)
+	if (hdesc->all_tbmres == NIL)
 		tbmres = palloc0(sizeof(TBMIterateResult) + MAX_TUPLES_PER_PAGE * sizeof(OffsetNumber));
 	else
 	{
-		ListCell *cell = linitial(bhs_state->all_tbmres);
+		ListCell *cell = linitial(hdesc->all_tbmres);
 		tbmres = (TBMIterateResult *) cell;
-		bhs_state->all_tbmres = list_delete(bhs_state->all_tbmres, cell);
+		hdesc->all_tbmres = list_delete(hdesc->all_tbmres, cell);
 	}
 
 	for (;;)
@@ -2197,7 +2197,7 @@ bitmapheap_pgsr_next_single(uintptr_t pgsr_private, PgAioInProgress *aio, uintpt
 	/*
 	 * Block number was set to invalid when the relation was exhausted.
 	 */
-	bhs_state->all_tbmres = lappend(bhs_state->all_tbmres, tbmres);
+	hdesc->all_tbmres = lappend(hdesc->all_tbmres, tbmres);
 	return PGSR_NEXT_END;
 }
 
@@ -2230,7 +2230,10 @@ heapam_scan_bitmap_next_block(TableScanDesc scan, bool *recheck)
 	 * free list by the streaming read helper.
 	 */
 	if (tbmres == NULL)
+	{
+		list_free_deep(hscan->all_tbmres);
 		return false;
+	}
 
 	/* elog(WARNING, "got tbmres %d from pgsr", tbmres->id); */
 	*recheck = tbmres->recheck;
@@ -2250,6 +2253,7 @@ heapam_scan_bitmap_next_block(TableScanDesc scan, bool *recheck)
 	{
 		// TODO: need to put it back on the free list all_tbmres but don't have access to the node
 		tbmres->in_use = false;
+		hscan->all_tbmres = lappend(hscan->all_tbmres, tbmres);
 		return true;
 	}
 
@@ -2342,6 +2346,7 @@ heapam_scan_bitmap_next_block(TableScanDesc scan, bool *recheck)
 	 */
 	// TODO: need to reappend tbmres to the free list (all_tbmres) in the node but don't have access to the node here
 	tbmres->in_use = false;
+	hscan->all_tbmres = lappend(hscan->all_tbmres, tbmres);
 
 	return true;
 }
@@ -2428,6 +2433,15 @@ bitmapheap_pgsr_alloc(BitmapHeapScanState *scanstate)
 static void
 heapam_scan_bitmap_setup(TableScanDesc scan, BitmapHeapScanState *scanstate)
 {
+	HeapScanDesc hscan = (HeapScanDesc) scan;
+	hscan->all_tbmres = NIL;
+	for (int i = 0; i < 256; i++)
+	{
+		TBMIterateResult *tbmres_temp = palloc0(
+				sizeof(TBMIterateResult) + MAX_TUPLES_PER_PAGE * sizeof(OffsetNumber)
+				);
+		hscan->all_tbmres = lappend(hscan->all_tbmres, tbmres_temp);
+	}
 	bitmapheap_pgsr_alloc(scanstate);
 }
 
