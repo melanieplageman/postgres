@@ -2140,10 +2140,11 @@ bitmapheap_pgsr_next_single(uintptr_t pgsr_private, PgAioInProgress *aio, uintpt
 		tbmres = palloc0(sizeof(TBMIterateResult) + MAX_TUPLES_PER_PAGE * sizeof(OffsetNumber));
 	else
 	{
-		tbmres = (TBMIterateResult *) linitial(bhs_state->all_tbmres);
+		ListCell *cell = llast(bhs_state->all_tbmres);
+		tbmres = (TBMIterateResult *) cell;
 		// TODO: list_remove_ptr doesn't exist in the list API -- it would
 		// essentially truncate the list to not include this member - without freeing any memory
-		bhs_state->all_tbmres = list_remove_ptr(bhs_state->all_tbmres, tbmres);
+		bhs_state->all_tbmres = list_delete_cell(bhs_state->all_tbmres, cell);
 	}
 
 	for (;;)
