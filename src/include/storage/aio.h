@@ -39,7 +39,7 @@ typedef enum IoMethod
 } IoMethod;
 
 /* We'll default to bgworker. */
-#define DEFAULT_IO_METHOD IOMETHOD_IO_URING
+#define DEFAULT_IO_METHOD IOMETHOD_WORKER
 
 /* GUCs */
 extern int io_method;
