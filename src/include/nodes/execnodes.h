@@ -1599,16 +1599,9 @@ typedef struct ParallelBitmapHeapState
  *
  *		bitmapqualorig	   execution state for bitmapqualorig expressions
  *		tbm				   bitmap obtained from child index scan(s)
- *		tbmiterator		   iterator for scanning pages
- *		can_skip_fetch	   can we potentially skip tuple fetches in this scan?
  *		recheck			   whether or not the tuple needs to be rechecked before returning
- *		return_empty_tuples number of empty tuples to return
- *		vmbuffer		   buffer for visibility-map lookups
- *		exact_pages		   total number of exact pages retrieved
- *		lossy_pages		   total number of lossy pages retrieved
  *		pscan_len		   size of the shared memory for parallel bitmap
  *		initialized		   is node is ready to iterate
- *		shared_tbmiterator	   shared iterator
  *		pstate			   shared state for parallel bitmap scan
  * ----------------
  */
@@ -1618,8 +1611,6 @@ typedef struct BitmapHeapScanState
 	ExprState  *bitmapqualorig;
 	TIDBitmap  *tbm;
 	bool recheck;
-	long		exact_pages;
-	long		lossy_pages;
 	Size		pscan_len;
 	bool		initialized;
 	ParallelBitmapHeapState *pstate;

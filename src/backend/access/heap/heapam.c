@@ -1482,6 +1482,8 @@ heap_beginscan(Relation relation, Snapshot snapshot,
 
 	scan->pgsr = NULL;
 	scan->vmbuffer = InvalidBuffer;
+	scan->rs_base.exact_pages = 0;
+	scan->rs_base.lossy_pages = 0;
 	scan->rs_base.tbmiterator = NULL;
 	scan->rs_base.shared_tbmiterator = NULL;
 

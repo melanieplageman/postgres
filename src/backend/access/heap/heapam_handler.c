@@ -2168,9 +2168,9 @@ bitmapheap_pgsr_next_single(uintptr_t pgsr_private, PgAioInProgress *aio, uintpt
 			continue;
 
 		if (tbmres->ntuples >= 0)
-			bhs_state->exact_pages++;
+			hdesc->rs_base.exact_pages++;
 		else
-			bhs_state->lossy_pages++;
+			hdesc->rs_base.lossy_pages++;
 
 		*read_private = (uintptr_t) tbmres;
 

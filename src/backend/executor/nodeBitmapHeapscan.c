@@ -339,8 +339,6 @@ ExecInitBitmapHeapScan(BitmapHeapScan *node, EState *estate, int eflags)
 	scanstate->ss.ps.ExecProcNode = ExecBitmapHeapScan;
 
 	scanstate->tbm = NULL;
-	scanstate->exact_pages = 0;
-	scanstate->lossy_pages = 0;
 	scanstate->pscan_len = 0;
 	scanstate->initialized = false;
 	scanstate->pstate = NULL;

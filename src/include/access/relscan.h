@@ -44,6 +44,8 @@ typedef struct TableScanDescData
 	/* Only used for Bitmap table scans */
 	TBMIterator *tbmiterator;
 	TBMSharedIterator *shared_tbmiterator;
+	long		exact_pages;
+	long		lossy_pages;
 
 	/*
 	 * Information about type and behaviour of the scan, a bitmask of members
