@@ -252,11 +252,8 @@ ExecReScanBitmapHeapScan(BitmapHeapScanState *node)
 	/* release bitmaps and buffers if any */
 	if (node->tbm)
 		tbm_free(node->tbm);
-	if (node->vmbuffer != InvalidBuffer)
-		ReleaseBuffer(node->vmbuffer);
 	node->tbm = NULL;
 	node->initialized = false;
-	node->vmbuffer = InvalidBuffer;
 
 	ExecScanReScan(&node->ss);
 
@@ -304,8 +301,6 @@ ExecEndBitmapHeapScan(BitmapHeapScanState *node)
 	 */
 	if (node->tbm)
 		tbm_free(node->tbm);
-	if (node->vmbuffer != InvalidBuffer)
-		ReleaseBuffer(node->vmbuffer);
 
 	/*
 	 * close heap scan
@@ -344,7 +339,6 @@ ExecInitBitmapHeapScan(BitmapHeapScan *node, EState *estate, int eflags)
 	scanstate->ss.ps.ExecProcNode = ExecBitmapHeapScan;
 
 	scanstate->tbm = NULL;
-	scanstate->vmbuffer = InvalidBuffer;
 	scanstate->exact_pages = 0;
 	scanstate->lossy_pages = 0;
 	scanstate->pscan_len = 0;

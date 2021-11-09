@@ -1618,7 +1618,6 @@ typedef struct BitmapHeapScanState
 	ExprState  *bitmapqualorig;
 	TIDBitmap  *tbm;
 	bool recheck;
-	Buffer		vmbuffer;
 	long		exact_pages;
 	long		lossy_pages;
 	Size		pscan_len;

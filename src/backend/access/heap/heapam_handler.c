@@ -2182,7 +2182,7 @@ bitmapheap_pgsr_next_single(uintptr_t pgsr_private, PgAioInProgress *aio, uintpt
 		 */
 		if (can_skip_fetch &&
 			!tbmres->recheck &&
-			VM_ALL_VISIBLE(rs_rd, tbmres->blockno, &bhs_state->vmbuffer))
+			VM_ALL_VISIBLE(rs_rd, tbmres->blockno, &hdesc->vmbuffer))
 		{
 			tbmres->buffer = InvalidBuffer;
 			return PGSR_NEXT_NO_IO;
@@ -2239,6 +2239,11 @@ heapam_scan_bitmap_next_block(TableScanDesc scan, bool *recheck)
 	if (tbmres == NULL)
 	{
 		list_free_deep(hscan->available_tbmres);
+		if (hscan->vmbuffer != InvalidBuffer)
+		{
+			ReleaseBuffer(hscan->vmbuffer);
+			hscan->vmbuffer = InvalidBuffer;
+		}
 		return false;
 	}
 

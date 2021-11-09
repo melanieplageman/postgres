@@ -462,6 +462,11 @@ initscan(HeapScanDesc scan, ScanKey key, bool keep_startblock)
 		pg_streaming_read_free(scan->pgsr);
 		scan->pgsr = NULL;
 	}
+	if (scan->vmbuffer != InvalidBuffer)
+	{
+		ReleaseBuffer(scan->vmbuffer);
+		scan->vmbuffer = InvalidBuffer;
+	}
 
 	/*
 	 * FIXME: This probably should be done in the !rs_inited blocks instead.
@@ -1476,6 +1481,7 @@ heap_beginscan(Relation relation, Snapshot snapshot,
 	scan->rs_strategy = NULL;	/* set in initscan */
 
 	scan->pgsr = NULL;
+	scan->vmbuffer = InvalidBuffer;
 	scan->rs_base.tbmiterator = NULL;
 	scan->rs_base.shared_tbmiterator = NULL;
 
