@@ -2117,6 +2117,7 @@ static PgStreamingReadNextStatus
 bitmapheap_pgsr_next_single(uintptr_t pgsr_private, PgAioInProgress *aio, uintptr_t *read_private)
 {
 	TBMIterateResult *tbmres;
+	bool can_skip_fetch;
 	BitmapHeapScanState *bhs_state = (BitmapHeapScanState *) pgsr_private;
 	HeapScanDesc hdesc = (HeapScanDesc ) bhs_state->ss.ss_currentScanDesc;
 	/*
@@ -2129,7 +2130,7 @@ bitmapheap_pgsr_next_single(uintptr_t pgsr_private, PgAioInProgress *aio, uintpt
 	BlockNumber rs_nblocks = hdesc->rs_nblocks;
 	Relation rs_rd = hdesc->rs_base.rs_rd;
 
-	Assert(bhs_state->initialized);
+	can_skip_fetch = hdesc->rs_base.rs_flags & SO_CAN_SKIP_FETCH;
 
 	/*
 	 * If no TBMIterateResult are available to use, allocate a new one.
@@ -2149,7 +2150,7 @@ bitmapheap_pgsr_next_single(uintptr_t pgsr_private, PgAioInProgress *aio, uintpt
 
 	for (;;)
 	{
-		if (bhs_state->pstate)
+		if (hdesc->rs_base.shared_tbmiterator)
 			tbm_shared_iterate(hdesc->rs_base.shared_tbmiterator, tbmres);
 		else
 			tbm_iterate(hdesc->rs_base.tbmiterator, tbmres);
@@ -2179,7 +2180,7 @@ bitmapheap_pgsr_next_single(uintptr_t pgsr_private, PgAioInProgress *aio, uintpt
 		 * tuples should be returned instead of reading from the buffer. We
 		 * still need ntuples in order to know how many to return, though.
 		 */
-		if (bhs_state->can_skip_fetch &&
+		if (can_skip_fetch &&
 			!tbmres->recheck &&
 			VM_ALL_VISIBLE(rs_rd, tbmres->blockno, &bhs_state->vmbuffer))
 		{

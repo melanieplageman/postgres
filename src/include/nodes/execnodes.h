@@ -1617,7 +1617,6 @@ typedef struct BitmapHeapScanState
 	ScanState	ss;				/* its first field is NodeTag */
 	ExprState  *bitmapqualorig;
 	TIDBitmap  *tbm;
-	bool		can_skip_fetch;
 	bool recheck;
 	Buffer		vmbuffer;
 	long		exact_pages;
