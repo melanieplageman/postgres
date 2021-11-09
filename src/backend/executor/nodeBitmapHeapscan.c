@@ -97,7 +97,7 @@ BitmapHeapNext(BitmapHeapScanState *node)
 				elog(ERROR, "unrecognized result from subplan");
 
 			node->tbm = tbm;
-			node->tbmiterator = tbm_begin_iterate(tbm);
+			scan->tbmiterator = tbm_begin_iterate(tbm);
 		}
 		else
 		{
@@ -126,7 +126,7 @@ BitmapHeapNext(BitmapHeapScanState *node)
 			}
 
 			/* Allocate a private iterator and attach the shared state to it */
-			node->shared_tbmiterator =
+			scan->shared_tbmiterator =
 				tbm_attach_shared_iterate(dsa, pstate->tbmiterator);
 		}
 		node->initialized = true;
@@ -137,6 +137,19 @@ BitmapHeapNext(BitmapHeapScanState *node)
 		/* Get the first block. if none, end of scan */
 		if (!table_scan_bitmap_next_block(scan, &node->recheck))
 		{
+			/*
+			 * Release iterator
+			 */
+			if (scan->tbmiterator)
+			{
+				tbm_end_iterate(scan->tbmiterator);
+				scan->tbmiterator = NULL;
+			}
+			else if (scan->shared_tbmiterator)
+			{
+				tbm_end_shared_iterate(scan->shared_tbmiterator);
+				scan->shared_tbmiterator = NULL;
+			}
 			return NULL;
 		}
 	}
@@ -160,6 +173,19 @@ BitmapHeapNext(BitmapHeapScanState *node)
 		}
 	} while (table_scan_bitmap_next_block(scan, &node->recheck));
 
+	/*
+	 * Release iterator
+	 */
+	if (scan->tbmiterator)
+	{
+		tbm_end_iterate(scan->tbmiterator);
+		scan->tbmiterator = NULL;
+	}
+	else if (scan->shared_tbmiterator)
+	{
+		tbm_end_shared_iterate(scan->shared_tbmiterator);
+		scan->shared_tbmiterator = NULL;
+	}
 	return NULL;
 }
 
@@ -224,18 +250,12 @@ ExecReScanBitmapHeapScan(BitmapHeapScanState *node)
 	table_rescan(node->ss.ss_currentScanDesc, NULL);
 
 	/* release bitmaps and buffers if any */
-	if (node->tbmiterator)
-		tbm_end_iterate(node->tbmiterator);
-	if (node->shared_tbmiterator)
-		tbm_end_shared_iterate(node->shared_tbmiterator);
 	if (node->tbm)
 		tbm_free(node->tbm);
 	if (node->vmbuffer != InvalidBuffer)
 		ReleaseBuffer(node->vmbuffer);
 	node->tbm = NULL;
-	node->tbmiterator = NULL;
 	node->initialized = false;
-	node->shared_tbmiterator = NULL;
 	node->vmbuffer = InvalidBuffer;
 
 	ExecScanReScan(&node->ss);
@@ -282,12 +302,8 @@ ExecEndBitmapHeapScan(BitmapHeapScanState *node)
 	/*
 	 * release bitmaps and buffers if any
 	 */
-	if (node->tbmiterator)
-		tbm_end_iterate(node->tbmiterator);
 	if (node->tbm)
 		tbm_free(node->tbm);
-	if (node->shared_tbmiterator)
-		tbm_end_shared_iterate(node->shared_tbmiterator);
 	if (node->vmbuffer != InvalidBuffer)
 		ReleaseBuffer(node->vmbuffer);
 
@@ -327,13 +343,11 @@ ExecInitBitmapHeapScan(BitmapHeapScan *node, EState *estate, int eflags)
 	scanstate->ss.ps.ExecProcNode = ExecBitmapHeapScan;
 
 	scanstate->tbm = NULL;
-	scanstate->tbmiterator = NULL;
 	scanstate->vmbuffer = InvalidBuffer;
 	scanstate->exact_pages = 0;
 	scanstate->lossy_pages = 0;
 	scanstate->pscan_len = 0;
 	scanstate->initialized = false;
-	scanstate->shared_tbmiterator = NULL;
 	scanstate->pstate = NULL;
 
 	/*

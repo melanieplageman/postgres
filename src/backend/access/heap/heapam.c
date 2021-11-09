@@ -1476,6 +1476,8 @@ heap_beginscan(Relation relation, Snapshot snapshot,
 	scan->rs_strategy = NULL;	/* set in initscan */
 
 	scan->pgsr = NULL;
+	scan->rs_base.tbmiterator = NULL;
+	scan->rs_base.shared_tbmiterator = NULL;
 
 	/*
 	 * Disable page-at-a-time mode if it's not a MVCC-safe snapshot.

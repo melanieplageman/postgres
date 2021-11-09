@@ -2150,9 +2150,9 @@ bitmapheap_pgsr_next_single(uintptr_t pgsr_private, PgAioInProgress *aio, uintpt
 	for (;;)
 	{
 		if (bhs_state->pstate)
-			tbm_shared_iterate(bhs_state->shared_tbmiterator, tbmres);
+			tbm_shared_iterate(hdesc->rs_base.shared_tbmiterator, tbmres);
 		else
-			tbm_iterate(bhs_state->tbmiterator, tbmres);
+			tbm_iterate(hdesc->rs_base.tbmiterator, tbmres);
 
 		if (!BlockNumberIsValid(tbmres->blockno))
 			break;

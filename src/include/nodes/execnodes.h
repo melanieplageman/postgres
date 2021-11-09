@@ -1617,7 +1617,6 @@ typedef struct BitmapHeapScanState
 	ScanState	ss;				/* its first field is NodeTag */
 	ExprState  *bitmapqualorig;
 	TIDBitmap  *tbm;
-	TBMIterator *tbmiterator;
 	bool		can_skip_fetch;
 	bool recheck;
 	Buffer		vmbuffer;
@@ -1625,7 +1624,6 @@ typedef struct BitmapHeapScanState
 	long		lossy_pages;
 	Size		pscan_len;
 	bool		initialized;
-	TBMSharedIterator *shared_tbmiterator;
 	ParallelBitmapHeapState *pstate;
 } BitmapHeapScanState;
 
