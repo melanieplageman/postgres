@@ -131,9 +131,6 @@ BitmapHeapNext(BitmapHeapScanState *node)
 		}
 		node->initialized = true;
 
-		/* do any required setup, such as setting up streaming read helper */
-		table_scan_bitmap_setup(scan, node);
-
 		/* Get the first block. if none, end of scan */
 		if (!table_scan_bitmap_next_block(scan, &node->recheck))
 		{

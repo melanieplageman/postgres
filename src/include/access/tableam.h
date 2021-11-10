@@ -788,14 +788,6 @@ typedef struct TableAmRoutine
 	 */
 	bool		(*scan_bitmap_next_tuple) (TableScanDesc scan, TupleTableSlot *slot);
 
-	// TODO: like the comment in initscan() says, the setup of pgsr should be
-	// done in !rs_inited block. I added this tableAM function to allow us to
-	// set up pgsr there for bitmap table scans. I didn't call it pgsr_alloc
-	// because I thought that we might want to add other non streaming-read
-	// related setup. Is this unlikely?
-	void (*scan_bitmap_setup) (TableScanDesc scan,
-			struct BitmapHeapScanState *scanstate);
-
 	/*
 	 * Prepare to fetch tuples from the next block in a sample scan. Return
 	 * false if the sample scan is finished, true otherwise. `scan` was
@@ -1957,12 +1949,6 @@ table_scan_bitmap_next_tuple(TableScanDesc scan, TupleTableSlot *slot)
 
 	return scan->rs_rd->rd_tableam->scan_bitmap_next_tuple(scan,
 														   slot);
-}
-
-static inline void
-table_scan_bitmap_setup(TableScanDesc scan, struct BitmapHeapScanState *scanstate)
-{
-	scan->rs_rd->rd_tableam->scan_bitmap_setup(scan, scanstate);
 }
 
 /*

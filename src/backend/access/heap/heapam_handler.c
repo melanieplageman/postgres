@@ -2111,102 +2111,6 @@ heapam_estimate_rel_size(Relation rel, int32 *attr_widths,
  * Executor related callbacks for the heap AM
  * ------------------------------------------------------------------------
  */
-#define MAX_TUPLES_PER_PAGE  MaxHeapTuplesPerPage
-
-static PgStreamingReadNextStatus
-bitmapheap_pgsr_next_single(uintptr_t pgsr_private, PgAioInProgress *aio, uintptr_t *read_private)
-{
-	TBMIterateResult *tbmres;
-	bool can_skip_fetch;
-	BitmapHeapScanState *bhs_state = (BitmapHeapScanState *) pgsr_private;
-	HeapScanDesc hdesc = (HeapScanDesc ) bhs_state->ss.ss_currentScanDesc;
-	/*
-	 * The info we are getting from the HeapScanDesc is unchanging for this
-	 * relation, so it is okay to access it here. Notice that we do not use the
-	 * current buffer or current tuple members of the HeapScanDesc at all here.
-	 * Those are used when yielding tuples, so don't use those members here.
-	 */
-	BufferAccessStrategy rs_strategy = hdesc->rs_strategy;
-	BlockNumber rs_nblocks = hdesc->rs_nblocks;
-	Relation rs_rd = hdesc->rs_base.rs_rd;
-
-	can_skip_fetch = hdesc->rs_base.rs_flags & SO_CAN_SKIP_FETCH;
-
-	/*
-	 * If no TBMIterateResult are available to use, allocate a new one.
-	 * If one is available, claim it by removing it from the list.
-	 * When the caller of pg_streaming_read_get_next() is done with the
-	 * TBMIterateResult, they will append it back to the list of available
-	 * TBMIterateResults.
-	 * The memory will be freed when the relation is exhausted.
-	 */
-	if (hdesc->available_tbmres == NIL)
-		tbmres = palloc0(sizeof(TBMIterateResult) + MAX_TUPLES_PER_PAGE * sizeof(OffsetNumber));
-	else
-	{
-		tbmres = (TBMIterateResult *) linitial(hdesc->available_tbmres);
-		hdesc->available_tbmres = list_delete(hdesc->available_tbmres, tbmres);
-	}
-
-	for (;;)
-	{
-		if (hdesc->rs_base.shared_tbmiterator)
-			tbm_shared_iterate(hdesc->rs_base.shared_tbmiterator, tbmres);
-		else
-			tbm_iterate(hdesc->rs_base.tbmiterator, tbmres);
-
-		if (!BlockNumberIsValid(tbmres->blockno))
-			break;
-
-		/*
-		 * Ignore any claimed entries past what we think is the end of the
-		 * relation. It may have been extended after the start of our scan (we
-		 * only hold an AccessShareLock, and it could be inserts from this
-		 * backend).
-		 */
-		if (tbmres->blockno >= rs_nblocks)
-			continue;
-
-		if (tbmres->ntuples >= 0)
-			hdesc->rs_base.exact_pages++;
-		else
-			hdesc->rs_base.lossy_pages++;
-
-		*read_private = (uintptr_t) tbmres;
-
-		/*
-		 * If we can skip fetching the relation, do so. In that case, ensure
-		 * the buffer is marked as invalid to indicate to the caller that NULL
-		 * tuples should be returned instead of reading from the buffer. We
-		 * still need ntuples in order to know how many to return, though.
-		 */
-		if (can_skip_fetch &&
-			!tbmres->recheck &&
-			VM_ALL_VISIBLE(rs_rd, tbmres->blockno, &hdesc->vmbuffer))
-		{
-			tbmres->buffer = InvalidBuffer;
-			return PGSR_NEXT_NO_IO;
-		}
-		else
-		{
-			bool already_valid;
-			tbmres->buffer = ReadBufferAsync(rs_rd, MAIN_FORKNUM,
-					tbmres->blockno, RBM_NORMAL, rs_strategy, &already_valid,
-					&aio);
-			return already_valid ? PGSR_NEXT_NO_IO : PGSR_NEXT_IO;
-		}
-	}
-
-	/*
-	 * Block number was set to invalid when the relation was exhausted.
-	 * Put the tbmres back on the list so that it can be accounted for by the
-	 * caller.
-	 * The caller will free the list of TBMIterateResult.
-	 */
-	hdesc->available_tbmres = lappend(hdesc->available_tbmres, tbmres);
-	return PGSR_NEXT_END;
-}
-
 static bool
 heapam_scan_bitmap_next_block(TableScanDesc scan, bool *recheck)
 {
@@ -2409,53 +2313,6 @@ heapam_scan_bitmap_next_tuple(TableScanDesc scan, TupleTableSlot *slot)
 	hscan->rs_cindex++;
 
 	return true;
-}
-
-static void
-bitmapheap_pgsr_release(uintptr_t pgsr_private, uintptr_t read_private)
-{
-	BitmapHeapScanState *bhs_state = (BitmapHeapScanState *) pgsr_private;
-	HeapScanDesc hdesc = (HeapScanDesc ) bhs_state->ss.ss_currentScanDesc;
-	TBMIterateResult *tbmres = (TBMIterateResult *) read_private;
-
-	ereport(DEBUG3, errmsg("pgsr %s: releasing buf %d",
-				NameStr(hdesc->rs_base.rs_rd->rd_rel->relname),
-				tbmres->buffer), errhidestmt(true), errhidecontext(true));
-
-	Assert(BufferIsValid(tbmres->buffer));
-	ReleaseBuffer(tbmres->buffer);
-}
-
-static void
-bitmapheap_pgsr_alloc(BitmapHeapScanState *scanstate)
-{
-	HeapScanDesc hscan = (HeapScanDesc ) scanstate->ss.ss_currentScanDesc;
-	int iodepth = Max(Min(128, NBuffers / 128), 1);
-	if (!hscan->rs_inited)
-	{
-		hscan->pgsr = pg_streaming_read_alloc(iodepth, (uintptr_t) scanstate,
-				bitmapheap_pgsr_next_single, bitmapheap_pgsr_release);
-
-		hscan->rs_inited = true;
-	}
-	hscan->rs_cindex = 0;
-}
-
-static void
-heapam_scan_bitmap_setup(TableScanDesc scan, BitmapHeapScanState *scanstate)
-{
-	HeapScanDesc hscan = (HeapScanDesc) scan;
-	hscan->available_tbmres = NIL;
-	int iodepth = Max(Min(128, NBuffers / 128), 1);
-	for (int i = 0; i < iodepth; i++)
-	{
-		TBMIterateResult *tbmres_temp = palloc0(
-				sizeof(TBMIterateResult) + MAX_TUPLES_PER_PAGE * sizeof(OffsetNumber)
-				);
-		hscan->available_tbmres = lappend(hscan->available_tbmres, tbmres_temp);
-	}
-
-	bitmapheap_pgsr_alloc(scanstate);
 }
 
 static bool
@@ -2784,7 +2641,6 @@ static const TableAmRoutine heapam_methods = {
 
 	.scan_bitmap_next_block = heapam_scan_bitmap_next_block,
 	.scan_bitmap_next_tuple = heapam_scan_bitmap_next_tuple,
-	.scan_bitmap_setup = heapam_scan_bitmap_setup,
 	.scan_sample_next_block = heapam_scan_sample_next_block,
 	.scan_sample_next_tuple = heapam_scan_sample_next_tuple
 };
