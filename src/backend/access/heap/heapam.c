@@ -398,8 +398,7 @@ heap_pgsr_next_parallel(uintptr_t pgsr_private, PgAioInProgress *aio, uintptr_t 
 static void
 bitmapheap_pgsr_release(uintptr_t pgsr_private, uintptr_t read_private)
 {
-	BitmapHeapScanState *bhs_state = (BitmapHeapScanState *) pgsr_private;
-	HeapScanDesc hdesc = (HeapScanDesc ) bhs_state->ss.ss_currentScanDesc;
+	HeapScanDesc hdesc = (HeapScanDesc ) pgsr_private;
 	TBMIterateResult *tbmres = (TBMIterateResult *) read_private;
 
 	ereport(DEBUG3, errmsg("pgsr %s: releasing buf %d",
@@ -426,31 +425,6 @@ heap_pgsr_release(uintptr_t pgsr_private, uintptr_t read_private)
 
 	Assert(BufferIsValid(buf));
 	ReleaseBuffer(buf);
-}
-
-static void
-bitmapheap_pgsr_alloc(HeapScanDesc hscan)
-{
-	int iodepth = Max(Min(128, NBuffers / 128), 1);
-
-	if (!hscan->rs_inited)
-	{
-		hscan->pgsr = pg_streaming_read_alloc(iodepth, (uintptr_t) hscan,
-				bitmapheap_pgsr_next_single, bitmapheap_pgsr_release);
-
-		hscan->rs_inited = true;
-	}
-
-	hscan->available_tbmres = NIL;
-	for (int i = 0; i < iodepth; i++)
-	{
-		TBMIterateResult *tbmres_temp = palloc0(
-				sizeof(TBMIterateResult) + MAX_TUPLES_PER_PAGE * sizeof(OffsetNumber)
-				);
-		hscan->available_tbmres = lappend(hscan->available_tbmres, tbmres_temp);
-	}
-
-	hscan->rs_cindex = 0;
 }
 
 static PgStreamingRead *
@@ -618,9 +592,22 @@ initscan(HeapScanDesc scan, ScanKey key, bool keep_startblock)
 					scan->pgsr = heap_pgsr_single_alloc(scan);
 		}
 	}
+	// TODO: put non-pgsr code back so that this is conditioned on non-local buffers
 	else if (scan->rs_base.rs_flags & SO_TYPE_BITMAPSCAN)
 	{
-		bitmapheap_pgsr_alloc(scan);
+		int iodepth = Max(Min(128, NBuffers / 128), 1);
+
+		scan->pgsr = pg_streaming_read_alloc(iodepth, (uintptr_t) scan,
+				bitmapheap_pgsr_next_single, bitmapheap_pgsr_release);
+
+		scan->available_tbmres = NIL;
+		for (int i = 0; i < iodepth; i++)
+		{
+			scan->available_tbmres = lappend(scan->available_tbmres,
+					palloc0(sizeof(TBMIterateResult) + MAX_TUPLES_PER_PAGE * sizeof(OffsetNumber))
+					);
+		}
+		scan->rs_inited = true;
 	}
 }
 
