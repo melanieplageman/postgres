@@ -252,8 +252,15 @@ bitmapheap_pgsr_next_single(uintptr_t pgsr_private, PgAioInProgress *aio, uintpt
 		tbmres = palloc0(sizeof(TBMIterateResult) + MAX_TUPLES_PER_PAGE * sizeof(OffsetNumber));
 	else
 	{
-		tbmres = (TBMIterateResult *) linitial(hdesc->available_tbmres);
-		hdesc->available_tbmres = list_delete(hdesc->available_tbmres, tbmres);
+		/*
+		 * For performance reasons, take the last item off of the list and then
+		 * truncate the list by 1. list_truncate() will not pfree the cell
+		 * (nor, of course, the data it pointed to) but list_delete_ptr() will
+		 * end up copying the whole list.
+		 */
+		tbmres = (TBMIterateResult *) llast(hdesc->available_tbmres);
+		hdesc->available_tbmres = list_truncate(
+				hdesc->available_tbmres, list_length(hdesc->available_tbmres) - 1);
 	}
 
 	for (;;)
@@ -601,7 +608,7 @@ initscan(HeapScanDesc scan, ScanKey key, bool keep_startblock)
 				bitmapheap_pgsr_next_single, bitmapheap_pgsr_release);
 
 		scan->available_tbmres = NIL;
-		for (int i = 0; i < iodepth; i++)
+		for (int i = 0; i < iodepth * 2; i++)
 		{
 			scan->available_tbmres = lappend(scan->available_tbmres,
 					palloc0(sizeof(TBMIterateResult) + MAX_TUPLES_PER_PAGE * sizeof(OffsetNumber))
