@@ -735,7 +735,8 @@ pg_prepared_statement(PG_FUNCTION_ARGS)
 	 * We put all the tuples into a tuplestore in one scan of the hashtable.
 	 * This avoids any issue of the hashtable possibly changing between calls.
 	 */
-	tupstore = MakeFuncResultTuplestore(fcinfo, NULL);
+	tupstore = MakeFuncResultTuplestore(fcinfo, NULL,
+		rsinfo->allowedModes & SFRM_Materialize_Random);
 
 	/* generate junk in short-term context */
 	MemoryContextSwitchTo(oldcontext);

@@ -938,7 +938,7 @@ pg_stat_get_subscription(PG_FUNCTION_ARGS)
 	per_query_ctx = rsinfo->econtext->ecxt_per_query_memory;
 	oldcontext = MemoryContextSwitchTo(per_query_ctx);
 
-	tupstore = MakeFuncResultTuplestore(fcinfo, &tupdesc);
+	tupstore = MakeFuncResultTuplestore(fcinfo, &tupdesc, true);
 	rsinfo->returnMode = SFRM_Materialize;
 	rsinfo->setResult = tupstore;
 	rsinfo->setDesc = tupdesc;

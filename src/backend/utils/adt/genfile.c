@@ -482,6 +482,7 @@ pg_ls_dir(PG_FUNCTION_ARGS)
 	char	   *location;
 	bool		missing_ok = false;
 	bool		include_dot_dirs = false;
+	bool		randomAccess;
 	TupleDesc	tupdesc;
 	Tuplestorestate *tupstore;
 	DIR		   *dirdesc;
@@ -505,7 +506,8 @@ pg_ls_dir(PG_FUNCTION_ARGS)
 	tupdesc = CreateTemplateTupleDesc(1);
 	TupleDescInitEntry(tupdesc, (AttrNumber) 1, "pg_ls_dir", TEXTOID, -1, 0);
 
-	tupstore = MakeFuncResultTuplestore(fcinfo, NULL);
+	randomAccess = (rsinfo->allowedModes & SFRM_Materialize_Random) != 0;
+	tupstore = MakeFuncResultTuplestore(fcinfo, NULL, randomAccess);
 	rsinfo->returnMode = SFRM_Materialize;
 	rsinfo->setResult = tupstore;
 	rsinfo->setDesc = tupdesc;
@@ -564,6 +566,7 @@ static Datum
 pg_ls_dir_files(FunctionCallInfo fcinfo, const char *dir, bool missing_ok)
 {
 	ReturnSetInfo *rsinfo = (ReturnSetInfo *) fcinfo->resultinfo;
+	bool		randomAccess;
 	TupleDesc	tupdesc;
 	Tuplestorestate *tupstore;
 	DIR		   *dirdesc;
@@ -573,7 +576,8 @@ pg_ls_dir_files(FunctionCallInfo fcinfo, const char *dir, bool missing_ok)
 	/* The tupdesc and tuplestore must be created in ecxt_per_query_memory */
 	oldcontext = MemoryContextSwitchTo(rsinfo->econtext->ecxt_per_query_memory);
 
-	tupstore = MakeFuncResultTuplestore(fcinfo, &tupdesc);
+	randomAccess = (rsinfo->allowedModes & SFRM_Materialize_Random) != 0;
+	tupstore = MakeFuncResultTuplestore(fcinfo, &tupdesc, randomAccess);
 	rsinfo->returnMode = SFRM_Materialize;
 	rsinfo->setResult = tupstore;
 	rsinfo->setDesc = tupdesc;

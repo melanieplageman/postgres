@@ -4786,6 +4786,7 @@ Datum
 pg_timezone_names(PG_FUNCTION_ARGS)
 {
 	ReturnSetInfo *rsinfo = (ReturnSetInfo *) fcinfo->resultinfo;
+	bool		randomAccess;
 	TupleDesc	tupdesc;
 	Tuplestorestate *tupstore;
 	pg_tzenum  *tzenum;
@@ -4803,7 +4804,8 @@ pg_timezone_names(PG_FUNCTION_ARGS)
 	/* The tupdesc and tuplestore must be created in ecxt_per_query_memory */
 	oldcontext = MemoryContextSwitchTo(rsinfo->econtext->ecxt_per_query_memory);
 
-	tupstore = MakeFuncResultTuplestore(fcinfo, &tupdesc);
+	randomAccess = (rsinfo->allowedModes & SFRM_Materialize_Random) != 0;
+	tupstore = MakeFuncResultTuplestore(fcinfo, &tupdesc, randomAccess);
 	rsinfo->returnMode = SFRM_Materialize;
 	rsinfo->setResult = tupstore;
 	rsinfo->setDesc = tupdesc;

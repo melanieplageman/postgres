@@ -1933,7 +1933,7 @@ pg_available_extensions(PG_FUNCTION_ARGS)
 	per_query_ctx = rsinfo->econtext->ecxt_per_query_memory;
 	oldcontext = MemoryContextSwitchTo(per_query_ctx);
 
-	tupstore = MakeFuncResultTuplestore(fcinfo, &tupdesc);
+	tupstore = MakeFuncResultTuplestore(fcinfo, &tupdesc, true);
 	rsinfo->returnMode = SFRM_Materialize;
 	rsinfo->setResult = tupstore;
 	rsinfo->setDesc = tupdesc;
@@ -2027,7 +2027,7 @@ pg_available_extension_versions(PG_FUNCTION_ARGS)
 	per_query_ctx = rsinfo->econtext->ecxt_per_query_memory;
 	oldcontext = MemoryContextSwitchTo(per_query_ctx);
 
-	tupstore = MakeFuncResultTuplestore(fcinfo, &tupdesc);
+	tupstore = MakeFuncResultTuplestore(fcinfo, &tupdesc, true);
 	rsinfo->returnMode = SFRM_Materialize;
 	rsinfo->setResult = tupstore;
 	rsinfo->setDesc = tupdesc;
@@ -2298,7 +2298,7 @@ pg_extension_update_paths(PG_FUNCTION_ARGS)
 	per_query_ctx = rsinfo->econtext->ecxt_per_query_memory;
 	oldcontext = MemoryContextSwitchTo(per_query_ctx);
 
-	tupstore = MakeFuncResultTuplestore(fcinfo, &tupdesc);
+	tupstore = MakeFuncResultTuplestore(fcinfo, &tupdesc, true);
 	rsinfo->returnMode = SFRM_Materialize;
 	rsinfo->setResult = tupstore;
 	rsinfo->setDesc = tupdesc;

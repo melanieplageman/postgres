@@ -4856,7 +4856,7 @@ text_to_table(PG_FUNCTION_ARGS)
 
 	tstate.astate = NULL;
 	tstate.tupdesc = CreateTupleDescCopy(rsi->expectedDesc);
-	tstate.tupstore = MakeFuncResultTuplestore(fcinfo, NULL);
+	tstate.tupstore = MakeFuncResultTuplestore(fcinfo, NULL, true);
 
 	MemoryContextSwitchTo(old_cxt);
 

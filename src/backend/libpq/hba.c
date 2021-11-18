@@ -2715,7 +2715,8 @@ pg_hba_file_rules(PG_FUNCTION_ARGS)
 	/* Build tuplestore to hold the result rows */
 	old_cxt = MemoryContextSwitchTo(rsi->econtext->ecxt_per_query_memory);
 
-	tuple_store = MakeFuncResultTuplestore(fcinfo, &tupdesc);
+	tuple_store = MakeFuncResultTuplestore(fcinfo, &tupdesc,
+		rsi->allowedModes & SFRM_Materialize_Random);
 	rsi->setDesc = tupdesc;
 	rsi->setResult = tuple_store;
 

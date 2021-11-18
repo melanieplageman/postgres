@@ -188,7 +188,7 @@ pg_logical_slot_get_changes_guts(FunctionCallInfo fcinfo, bool confirm, bool bin
 		}
 	}
 
-	p->tupstore = MakeFuncResultTuplestore(fcinfo, &p->tupdesc);
+	p->tupstore = MakeFuncResultTuplestore(fcinfo, &p->tupdesc, true);
 	rsinfo->returnMode = SFRM_Materialize;
 	rsinfo->setResult = p->tupstore;
 	rsinfo->setDesc = p->tupdesc;

@@ -1936,7 +1936,8 @@ each_worker_jsonb(FunctionCallInfo fcinfo, const char *funcname, bool as_text)
 
 	old_cxt = MemoryContextSwitchTo(rsi->econtext->ecxt_per_query_memory);
 
-	tuple_store = MakeFuncResultTuplestore(fcinfo, &tupdesc);
+	tuple_store = MakeFuncResultTuplestore(fcinfo, &tupdesc,
+		rsi->allowedModes & SFRM_Materialize_Random);
 
 	ret_tdesc = CreateTupleDescCopy(tupdesc);
 	BlessTupleDesc(ret_tdesc);
@@ -2039,7 +2040,8 @@ each_worker(FunctionCallInfo fcinfo, bool as_text)
 	/* make these in a sufficiently long-lived memory context */
 	old_cxt = MemoryContextSwitchTo(rsi->econtext->ecxt_per_query_memory);
 
-	state->tuple_store = MakeFuncResultTuplestore(fcinfo, &tupdesc);
+	state->tuple_store = MakeFuncResultTuplestore(fcinfo, &tupdesc,
+		rsi->allowedModes & SFRM_Materialize_Random);
 
 	state->ret_tdesc = CreateTupleDescCopy(tupdesc);
 	BlessTupleDesc(state->ret_tdesc);
@@ -2225,7 +2227,8 @@ elements_worker_jsonb(FunctionCallInfo fcinfo, const char *funcname,
 
 	ret_tdesc = CreateTupleDescCopy(tupdesc);
 	BlessTupleDesc(ret_tdesc);
-	tuple_store = MakeFuncResultTuplestore(fcinfo, NULL);
+	tuple_store = MakeFuncResultTuplestore(fcinfo, NULL,
+		rsi->allowedModes & SFRM_Materialize_Random);
 
 	MemoryContextSwitchTo(old_cxt);
 
@@ -2331,7 +2334,8 @@ elements_worker(FunctionCallInfo fcinfo, const char *funcname, bool as_text)
 
 	state->ret_tdesc = CreateTupleDescCopy(tupdesc);
 	BlessTupleDesc(state->ret_tdesc);
-	state->tuple_store = MakeFuncResultTuplestore(fcinfo, NULL);
+	state->tuple_store = MakeFuncResultTuplestore(fcinfo, NULL,
+		rsi->allowedModes & SFRM_Materialize_Random);
 
 	MemoryContextSwitchTo(old_cxt);
 
@@ -3839,7 +3843,8 @@ populate_recordset_worker(FunctionCallInfo fcinfo, const char *funcname,
 
 	/* make tuplestore in a sufficiently long-lived memory context */
 	old_cxt = MemoryContextSwitchTo(rsi->econtext->ecxt_per_query_memory);
-	state->tuple_store = MakeFuncResultTuplestore(fcinfo, NULL);
+	state->tuple_store = MakeFuncResultTuplestore(fcinfo, NULL,
+			rsi->allowedModes & SFRM_Materialize_Random);
 	MemoryContextSwitchTo(old_cxt);
 
 	state->function_name = funcname;

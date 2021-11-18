@@ -66,7 +66,7 @@ pg_config(PG_FUNCTION_ARGS)
 	rsinfo->returnMode = SFRM_Materialize;
 
 	/* initialize our tuplestore */
-	tupstore = MakeFuncResultTuplestore(fcinfo, NULL);
+	tupstore = MakeFuncResultTuplestore(fcinfo, NULL, true);
 
 	configdata = get_configdata(my_exec_path, &configdata_len);
 	for (i = 0; i < configdata_len; i++)

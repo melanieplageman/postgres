@@ -10064,7 +10064,7 @@ show_all_file_settings(PG_FUNCTION_ARGS)
 					   TEXTOID, -1, 0);
 
 	/* Build a tuplestore to return our results in */
-	tupstore = MakeFuncResultTuplestore(fcinfo, NULL);
+	tupstore = MakeFuncResultTuplestore(fcinfo, NULL, true);
 	rsinfo->returnMode = SFRM_Materialize;
 	rsinfo->setResult = tupstore;
 	rsinfo->setDesc = tupdesc;

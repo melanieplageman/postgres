@@ -536,7 +536,7 @@ pg_options_to_table(PG_FUNCTION_ARGS)
 	 * Now prepare the result set.
 	 */
 	tupdesc = CreateTupleDescCopy(rsinfo->expectedDesc);
-	tupstore = MakeFuncResultTuplestore(fcinfo, NULL);
+	tupstore = MakeFuncResultTuplestore(fcinfo, NULL, true);
 	rsinfo->returnMode = SFRM_Materialize;
 	rsinfo->setResult = tupstore;
 	rsinfo->setDesc = tupdesc;

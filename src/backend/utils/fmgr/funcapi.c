@@ -1761,7 +1761,7 @@ build_function_result_tupdesc_d(char prokind,
 /*
  * Helper function to construct tuplestore
  */
-Tuplestorestate *MakeFuncResultTuplestore(FunctionCallInfo fcinfo, TupleDesc *tupdesc)
+Tuplestorestate *MakeFuncResultTuplestore(FunctionCallInfo fcinfo, TupleDesc *tupdesc, bool randomAccess)
 {
 	Tuplestorestate *tupstore;
 	ReturnSetInfo *rsinfo = (ReturnSetInfo *) fcinfo->resultinfo;
@@ -1786,7 +1786,7 @@ Tuplestorestate *MakeFuncResultTuplestore(FunctionCallInfo fcinfo, TupleDesc *tu
 			elog(ERROR, "return type must be a row type");
 	}
 
-	tupstore = tuplestore_begin_heap(true, false, work_mem);
+	tupstore = tuplestore_begin_heap(randomAccess, false, work_mem);
 
 	return tupstore;
 }
