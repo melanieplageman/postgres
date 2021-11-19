@@ -67,7 +67,7 @@ task:
   tests_script:
     - su postgres -c 'time gmake -s -j2 ${CHECK} ${CHECKFLAGS}'
 
-  on_failure:
+  on_failure: &on_failure
     cores_script: |
       for corefile in $(find /tmp -name '*.core' 2>/dev/null) ; do
         binary=$(gdb -quiet -core $corefile -batch -ex 'info auxv' | grep AT_EXECPATH | perl -pe "s/^.*\"(.*)\"\$/\$1/g") ;
@@ -153,22 +153,13 @@ task:
       '
 
   on_failure:
+    <<: *on_failure
     cores_script: |
       for corefile in $(find /tmp -name '*.core' 2>/dev/null) ; do
         binary=$(gdb -quiet -core $corefile -batch -ex 'info auxv' | grep AT_EXECFN | perl -pe "s/^.*\"(.*)\"\$/\$1/g") ;
         echo dumping $corefile for $binary ;
         gdb --batch --quiet -ex "thread apply all bt full" -ex "quit" $binary $corefile ;
       done
-    log_artifacts:
-      path: "**/**.log"
-      type: text/plain
-    regress_diffs_artifacts:
-      path: "**/**.diffs"
-      type: text/plain
-    tap_artifacts:
-      path: "**/regress_log_*"
-      type: text/plain
-
 
 task:
   name: macOS
@@ -252,20 +243,11 @@ task:
     - gmake -s -j12 ${CHECK} ${CHECKFLAGS}
 
   on_failure:
+    <<: *on_failure
     cores_script: |
       for corefile in $(find /cores/ -name 'core.*' 2>/dev/null) ; do
         lldb -c $corefile --batch -o 'thread backtrace all' -o 'quit' ;
       done
-    log_artifacts:
-      path: "**/**.log"
-      type: text/plain
-    regress_diffs_artifacts:
-      path: "**/**.diffs"
-      type: text/plain
-    tap_artifacts:
-      path: "**/regress_log_*"
-      type: text/plain
-
 
 task:
   name: Windows
@@ -337,17 +319,7 @@ task:
     - cd src\tools\msvc
     - perl vcregress.pl ecpgcheck
 
-  on_failure:
-    log_artifacts:
-      path: "**/**.log"
-      type: text/plain
-    regress_diffs_artifacts:
-      path: "**/**.diffs"
-      type: text/plain
-    tap_artifacts:
-      path: "**/regress_log_*"
-      type: text/plain
-
+  on_failure: *on_failure
 
 task:
   name: CompilerWarnings
