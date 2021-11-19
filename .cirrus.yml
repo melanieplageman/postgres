@@ -1,3 +1,14 @@
+on_failure: &on_failure
+  log_artifacts:
+    path: "**/**.log"
+    type: text/plain
+  regress_diffs_artifacts:
+    path: "**/**.diffs"
+    type: text/plain
+  tap_artifacts:
+    path: "**/regress_log_*"
+    type: text/plain
+
 env:
   # accelerate initial clone, but a bit of depth so that concurrent tasks work
   CIRRUS_CLONE_DEPTH: 100
@@ -67,23 +78,14 @@ task:
   tests_script:
     - su postgres -c 'time gmake -s -j2 ${CHECK} ${CHECKFLAGS}'
 
-  on_failure: &on_failure
+  on_failure:
+    <<: *on_failure
     cores_script: |
       for corefile in $(find /tmp -name '*.core' 2>/dev/null) ; do
         binary=$(gdb -quiet -core $corefile -batch -ex 'info auxv' | grep AT_EXECPATH | perl -pe "s/^.*\"(.*)\"\$/\$1/g") ;
         echo dumping $corefile for $binary ;
         gdb --batch --quiet -ex "thread apply all bt full" -ex "quit" $binary $corefile;
       done
-    log_artifacts:
-      path: "**/**.log"
-      type: text/plain
-    regress_diffs_artifacts:
-      path: "**/**.diffs"
-      type: text/plain
-    tap_artifacts:
-      path: "**/regress_log_*"
-      type: text/plain
-
 
 task:
   name: Linux
