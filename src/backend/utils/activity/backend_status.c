@@ -405,6 +405,16 @@ pgstat_bestart(void)
 	lbeentry.st_progress_command_target = InvalidOid;
 	lbeentry.st_query_id = UINT64CONST(0);
 
+	for (int i = 0; i < IOPATH_NUM_TYPES; i++)
+	{
+		IOOpCounters *io_ops = &lbeentry.io_path_stats[i];
+
+		pg_atomic_init_u64(&io_ops->allocs, 0);
+		pg_atomic_init_u64(&io_ops->extends, 0);
+		pg_atomic_init_u64(&io_ops->fsyncs, 0);
+		pg_atomic_init_u64(&io_ops->writes, 0);
+	}
+
 	/*
 	 * we don't zero st_progress_param here to save cycles; nobody should
 	 * examine it until st_progress_command has been set to something other
