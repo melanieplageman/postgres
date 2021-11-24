@@ -259,11 +259,11 @@ GetIOPathDesc(IOPath io_path)
 }
 
 /*
- * Initialize pgstats backend activity state, and set up our on-proc-exit
- * hook.  Called from InitPostgres and AuxiliaryProcessMain. For auxiliary
- * process, MyBackendId is invalid. Otherwise, MyBackendId must be set, but we
- * must not have started any transaction yet (since the exit hook must run
- * after the last transaction exit).
+ * Initialize pgstats backend activity state, and set up our on-proc-exit hook.
+ *
+ * For auxiliary process, MyBackendId is invalid. Otherwise, MyBackendId must
+ * be set, but we must not have started any transaction yet (since the exit
+ * hook must run after the last transaction exit).
  *
  * NOTE: MyDatabaseId isn't set yet; so the shutdown hook has to be careful.
  */
@@ -301,7 +301,6 @@ pgstat_beinit(void)
  * pgstat_bestart() -
  *
  *	Initialize this backend's entry in the PgBackendStatus array.
- *	Called from InitPostgres.
  *
  *	Apart from auxiliary processes, MyBackendId, MyDatabaseId,
  *	session userid, and application_name must be set for a
