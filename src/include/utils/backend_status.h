@@ -316,6 +316,7 @@ extern PGDLLIMPORT int pgstat_track_activity_query_size;
  * ----------
  */
 extern PGDLLIMPORT PgBackendStatus *MyBEEntry;
+extern PGDLLIMPORT PgBackendStatus *BackendStatusArray;
 
 
 /* ----------

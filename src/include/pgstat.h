@@ -1296,6 +1296,7 @@ extern void pgstat_sum_io_path_ops(PgStatIOOpCounters *dest, IOOpCounters *src);
  * generate the pgstat* views.
  * ----------
  */
+extern PgStat_BackendIOPathOps *pgstat_fetch_exited_backend_buffers(void);
 extern PgStat_StatDBEntry *pgstat_fetch_stat_dbentry(Oid dbid);
 extern PgStat_StatTabEntry *pgstat_fetch_stat_tabentry(Oid relid);
 extern PgStat_StatFuncEntry *pgstat_fetch_stat_funcentry(Oid funcid);

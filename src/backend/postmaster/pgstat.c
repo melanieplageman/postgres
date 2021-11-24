@@ -2921,6 +2921,19 @@ pgstat_twophase_postabort(TransactionId xid, uint16 info,
 		rec->tuples_inserted + rec->tuples_updated;
 }
 
+/*
+ *	Support function for SQL-callable pgstat* functions. Returns a pointer to
+ *	the PgStat_BackendIOPathOps structure tracking IO operations statistics for
+ *	both exited backends and reset arithmetic.
+ */
+PgStat_BackendIOPathOps *
+pgstat_fetch_exited_backend_buffers(void)
+{
+	backend_read_statsfile();
+
+	return &globalStats.buffers;
+}
+
 
 /* ----------
  * pgstat_fetch_stat_dbentry() -

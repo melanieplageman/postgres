@@ -38,7 +38,7 @@ int			pgstat_track_activity_query_size = 1024;
 PgBackendStatus *MyBEEntry = NULL;
 
 
-static PgBackendStatus *BackendStatusArray = NULL;
+PgBackendStatus *BackendStatusArray = NULL;
 static char *BackendAppnameBuffer = NULL;
 static char *BackendClientHostnameBuffer = NULL;
 static char *BackendActivityBuffer = NULL;
@@ -239,6 +239,23 @@ CreateSharedBackendStatus(void)
 		}
 	}
 #endif
+}
+
+const char *
+GetIOPathDesc(IOPath io_path)
+{
+	switch (io_path)
+	{
+		case IOPATH_DIRECT:
+			return "direct";
+		case IOPATH_LOCAL:
+			return "local";
+		case IOPATH_SHARED:
+			return "shared";
+		case IOPATH_STRATEGY:
+			return "strategy";
+	}
+	return "unknown IO path";
 }
 
 /*
