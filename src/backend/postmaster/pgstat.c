@@ -126,7 +126,7 @@ char	   *pgstat_stat_filename = NULL;
 char	   *pgstat_stat_tmpname = NULL;
 
 /*
- * BgWriter and WAL global statistics counters.
+ * BgWriter, Checkpointer, and WAL global statistics counters.
  * Stored directly in a stats message structure so they can be sent
  * without needing to copy things around.  We assume these init to zeroes.
  */
@@ -369,6 +369,7 @@ static void pgstat_recv_analyze(PgStat_MsgAnalyze *msg, int len);
 static void pgstat_recv_archiver(PgStat_MsgArchiver *msg, int len);
 static void pgstat_recv_bgwriter(PgStat_MsgBgWriter *msg, int len);
 static void pgstat_recv_checkpointer(PgStat_MsgCheckpointer *msg, int len);
+static void pgstat_recv_io_path_ops(PgStat_MsgIOPathOps *msg, int len);
 static void pgstat_recv_wal(PgStat_MsgWal *msg, int len);
 static void pgstat_recv_slru(PgStat_MsgSLRU *msg, int len);
 static void pgstat_recv_funcstat(PgStat_MsgFuncstat *msg, int len);
@@ -3153,6 +3154,14 @@ pgstat_shutdown_hook(int code, Datum arg)
 	Assert(!pgstat_is_shutdown);
 
 	/*
+	 * Only need to send stats on IOOps for IOPaths when a process exits. Users
+	 * requiring IOOps for both live and exited backends can read from live
+	 * backends' PgBackendStatuses and sum this with totals from exited
+	 * backends persisted by the stats collector.
+	 */
+	pgstat_send_buffers();
+
+	/*
 	 * If we got as far as discovering our own database ID, we can report what
 	 * we did to the collector.  Otherwise, we'd be sending an invalid
 	 * database ID, so forget it.  (This means that accesses to pg_database
@@ -3300,6 +3309,46 @@ pgstat_send_bgwriter(void)
 	 */
 	MemSet(&PendingBgWriterStats, 0, sizeof(PendingBgWriterStats));
 }
+
+/*
+ * Before exiting, a backend sends its IO operations statistics to the
+ * collector so that they may be persisted.
+ */
+void
+pgstat_send_buffers(void)
+{
+	PgStatIOOpCounters *io_path_ops;
+	PgStat_MsgIOPathOps msg;
+
+	PgBackendStatus *beentry = MyBEEntry;
+	PgStat_Counter sum = 0;
+
+	if (!beentry || beentry->st_backendType == B_INVALID)
+		return;
+
+	memset(&msg, 0, sizeof(msg));
+	msg.backend_type = beentry->st_backendType;
+
+	io_path_ops = msg.iop.io_path_ops;
+	pgstat_sum_io_path_ops(io_path_ops, (IOOpCounters *)
+			&beentry->io_path_stats);
+
+	/* If no IO was done, don't bother sending anything to the stats collector. */
+	for (int i = 0; i < IOPATH_NUM_TYPES; i++)
+	{
+		sum += io_path_ops[i].allocs;
+		sum += io_path_ops[i].extends;
+		sum += io_path_ops[i].fsyncs;
+		sum += io_path_ops[i].writes;
+	}
+
+	if (sum == 0)
+		return;
+
+	pgstat_setheader(&msg.m_hdr, PGSTAT_MTYPE_IO_PATH_OPS);
+	pgstat_send(&msg, sizeof(msg));
+}
+
 
 /* ----------
  * pgstat_send_checkpointer() -
@@ -3481,6 +3530,29 @@ pgstat_send_subscription_purge(PgStat_MsgSubscriptionPurge *msg)
 
 	pgstat_setheader(&msg->m_hdr, PGSTAT_MTYPE_SUBSCRIPTIONPURGE);
 	pgstat_send(msg, len);
+}
+
+/*
+ * Helper function to sum all IO operations stats for all IOPaths (e.g. shared,
+ * local) from live backends with those in the equivalent stats structure for
+ * exited backends.
+ * Note that this adds and doesn't set, so the destination stats structure
+ * should be zeroed out by the caller initially.
+ * This would commonly be used to transfer all IOOp stats for all IOPaths for a
+ * particular backend type to the pgstats structure.
+ */
+void
+pgstat_sum_io_path_ops(PgStatIOOpCounters *dest, IOOpCounters *src)
+{
+	for (int i = 0; i < IOPATH_NUM_TYPES; i++)
+	{
+		dest->allocs += pg_atomic_read_u64(&src->allocs);
+		dest->extends += pg_atomic_read_u64(&src->extends);
+		dest->fsyncs += pg_atomic_read_u64(&src->fsyncs);
+		dest->writes += pg_atomic_read_u64(&src->writes);
+		dest++;
+		src++;
+	}
 }
 
 /* ----------
@@ -3690,6 +3762,10 @@ PgstatCollectorMain(int argc, char *argv[])
 
 				case PGSTAT_MTYPE_CHECKPOINTER:
 					pgstat_recv_checkpointer(&msg.msg_checkpointer, len);
+					break;
+
+				case PGSTAT_MTYPE_IO_PATH_OPS:
+					pgstat_recv_io_path_ops(&msg.msg_io_path_ops, len);
 					break;
 
 				case PGSTAT_MTYPE_WAL:
@@ -5811,6 +5887,28 @@ pgstat_recv_checkpointer(PgStat_MsgCheckpointer *msg, int len)
 	globalStats.checkpointer.buf_written_checkpoints += msg->m_buf_written_checkpoints;
 	globalStats.checkpointer.buf_written_backend += msg->m_buf_written_backend;
 	globalStats.checkpointer.buf_fsync_backend += msg->m_buf_fsync_backend;
+}
+
+static void
+pgstat_recv_io_path_ops(PgStat_MsgIOPathOps *msg, int len)
+{
+	PgStatIOOpCounters *src_io_path_ops;
+	PgStatIOOpCounters *dest_io_path_ops;
+
+	src_io_path_ops = msg->iop.io_path_ops;
+	dest_io_path_ops =
+		globalStats.buffers.ops[backend_type_get_idx(msg->backend_type)].io_path_ops;
+
+	for (int i = 0; i < IOPATH_NUM_TYPES; i++)
+	{
+		PgStatIOOpCounters *src = &src_io_path_ops[i];
+		PgStatIOOpCounters *dest = &dest_io_path_ops[i];
+
+		dest->allocs += src->allocs;
+		dest->extends += src->extends;
+		dest->fsyncs += src->fsyncs;
+		dest->writes += src->writes;
+	}
 }
 
 /* ----------

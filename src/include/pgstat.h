@@ -73,6 +73,7 @@ typedef enum StatMsgType
 	PGSTAT_MTYPE_ARCHIVER,
 	PGSTAT_MTYPE_BGWRITER,
 	PGSTAT_MTYPE_CHECKPOINTER,
+	PGSTAT_MTYPE_IO_PATH_OPS,
 	PGSTAT_MTYPE_WAL,
 	PGSTAT_MTYPE_SLRU,
 	PGSTAT_MTYPE_FUNCSTAT,
@@ -334,6 +335,48 @@ typedef struct PgStat_MsgDropdb
 	Oid			m_databaseid;
 } PgStat_MsgDropdb;
 
+
+/*
+ * Structure for counting all types of IOOps in the stats collector
+ */
+typedef struct PgStatIOOpCounters
+{
+	PgStat_Counter allocs;
+	PgStat_Counter extends;
+	PgStat_Counter fsyncs;
+	PgStat_Counter writes;
+} PgStatIOOpCounters;
+
+/*
+ * Structure for counting all IOOps on all types of IOPaths.
+ */
+typedef struct PgStatIOPathOps
+{
+	PgStatIOOpCounters io_path_ops[IOPATH_NUM_TYPES];
+} PgStatIOPathOps;
+
+/*
+ * Sent by a backend to the stats collector to report all IOOps for all IOPaths
+ * for a given type of a backend. This will happen when the backend exits.
+ */
+typedef struct PgStat_MsgIOPathOps
+{
+	PgStat_MsgHdr m_hdr;
+
+	BackendType backend_type;
+	PgStatIOPathOps iop;
+} PgStat_MsgIOPathOps;
+
+/*
+ * Structure used by stats collector to keep track of all types of exited
+ * backends' IOOps for all IOPaths as well as all stats from live backends at
+ * the time of stats reset. resets is populated using a reset message sent to
+ * the stats collector.
+ */
+typedef struct PgStat_BackendIOPathOps
+{
+	PgStatIOPathOps ops[BACKEND_NUM_TYPES];
+} PgStat_BackendIOPathOps;
 
 /* ----------
  * PgStat_MsgResetcounter		Sent by the backend to tell the collector
@@ -756,6 +799,7 @@ typedef union PgStat_Msg
 	PgStat_MsgArchiver msg_archiver;
 	PgStat_MsgBgWriter msg_bgwriter;
 	PgStat_MsgCheckpointer msg_checkpointer;
+	PgStat_MsgIOPathOps msg_io_path_ops;
 	PgStat_MsgWal msg_wal;
 	PgStat_MsgSLRU msg_slru;
 	PgStat_MsgFuncstat msg_funcstat;
@@ -939,6 +983,7 @@ typedef struct PgStat_GlobalStats
 
 	PgStat_CheckpointerStats checkpointer;
 	PgStat_BgWriterStats bgwriter;
+	PgStat_BackendIOPathOps buffers;
 } PgStat_GlobalStats;
 
 /*
@@ -1215,8 +1260,19 @@ extern void pgstat_twophase_postabort(TransactionId xid, uint16 info,
 
 extern void pgstat_send_archiver(const char *xlog, bool failed);
 extern void pgstat_send_bgwriter(void);
+/*
+ * While some processes send some types of statistics to the collector at
+ * regular intervals (e.g. CheckpointerMain() calling
+ * pgstat_send_checkpointer()), IO operations stats are only sent by
+ * pgstat_send_buffers() when a process exits (in pgstat_shutdown_hook()). IO
+ * operations stats from live backends can be read from their PgBackendStatuses
+ * and, if desired, summed with totals from exited backends persisted by the
+ * stats collector.
+ */
+extern void pgstat_send_buffers(void);
 extern void pgstat_send_checkpointer(void);
 extern void pgstat_send_wal(bool force);
+extern void pgstat_sum_io_path_ops(PgStatIOOpCounters *dest, IOOpCounters *src);
 
 /* ----------
  * Support functions for the SQL-callable functions to

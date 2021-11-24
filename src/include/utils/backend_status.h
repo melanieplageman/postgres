@@ -331,6 +331,43 @@ extern void CreateSharedBackendStatus(void);
  * ----------
  */
 
+/* Utility functions */
+
+/*
+ * When maintaining an array of information about all valid BackendTypes, in
+ * order to avoid wasting the 0th spot, use this helper to convert a valid
+ * BackendType to a valid location in the array (given that no spot is
+ * maintained for B_INVALID BackendType).
+ */
+static inline int backend_type_get_idx(BackendType backend_type)
+{
+	/*
+	 * backend_type must be one of the valid backend types. If caller is
+	 * maintaining backend information in an array that includes B_INVALID,
+	 * this function is unnecessary.
+	 */
+	Assert(backend_type > B_INVALID && backend_type <= BACKEND_NUM_TYPES);
+	return backend_type - 1;
+}
+
+/*
+ * When using a value from an array of information about all valid
+ * BackendTypes, add 1 to the index before using it as a BackendType to adjust
+ * for not maintaining a spot for B_INVALID BackendType.
+ */
+static inline BackendType idx_get_backend_type(int idx)
+{
+	int backend_type = idx + 1;
+	/*
+	 * If the array includes a spot for B_INVALID BackendType this function is
+	 * not required.
+	 */
+	Assert(backend_type > B_INVALID && backend_type <= BACKEND_NUM_TYPES);
+	return backend_type;
+}
+
+extern const char *GetIOPathDesc(IOPath io_path);
+
 /* Initialization functions */
 extern void pgstat_beinit(void);
 extern void pgstat_bestart(void);

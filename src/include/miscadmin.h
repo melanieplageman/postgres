@@ -338,6 +338,8 @@ typedef enum BackendType
 	B_WAL_WRITER,
 } BackendType;
 
+#define BACKEND_NUM_TYPES B_WAL_WRITER
+
 extern BackendType MyBackendType;
 
 extern const char *GetBackendTypeDesc(BackendType backendType);
