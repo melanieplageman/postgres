@@ -4473,7 +4473,6 @@ pgstat_read_statsfiles(Oid onlydb, bool permanent, bool deep)
 	 * existing statsfile).
 	 */
 	ts = GetCurrentTimestamp();
-	globalStats.bgwriter.stat_reset_timestamp = ts;
 	globalStats.buffers.stat_reset_timestamp = ts;
 	archiverStats.stat_reset_timestamp = ts;
 	walStats.stat_reset_timestamp = ts;
@@ -5672,7 +5671,6 @@ pgstat_recv_resetsharedcounter(PgStat_MsgResetsharedcounter *msg, int len)
 		memset(&globalStats.bgwriter, 0, sizeof(globalStats.bgwriter));
 		memset(&globalStats.checkpointer, 0, sizeof(globalStats.checkpointer));
 		memset(&globalStats.buffers.ops, 0, sizeof(globalStats.buffers.ops));
-		globalStats.bgwriter.stat_reset_timestamp = GetCurrentTimestamp();
 		globalStats.buffers.stat_reset_timestamp = GetCurrentTimestamp();
 		memcpy(&globalStats.buffers.resets[backend_type_get_idx(backend_type)],
 				&msg->m_backend_resets.iop.io_path_ops,
@@ -5944,9 +5942,7 @@ pgstat_recv_archiver(PgStat_MsgArchiver *msg, int len)
 static void
 pgstat_recv_bgwriter(PgStat_MsgBgWriter *msg, int len)
 {
-	globalStats.bgwriter.buf_written_clean += msg->m_buf_written_clean;
 	globalStats.bgwriter.maxwritten_clean += msg->m_maxwritten_clean;
-	globalStats.bgwriter.buf_alloc += msg->m_buf_alloc;
 }
 
 /* ----------
@@ -5962,9 +5958,6 @@ pgstat_recv_checkpointer(PgStat_MsgCheckpointer *msg, int len)
 	globalStats.checkpointer.requested_checkpoints += msg->m_requested_checkpoints;
 	globalStats.checkpointer.checkpoint_write_time += msg->m_checkpoint_write_time;
 	globalStats.checkpointer.checkpoint_sync_time += msg->m_checkpoint_sync_time;
-	globalStats.checkpointer.buf_written_checkpoints += msg->m_buf_written_checkpoints;
-	globalStats.checkpointer.buf_written_backend += msg->m_buf_written_backend;
-	globalStats.checkpointer.buf_fsync_backend += msg->m_buf_fsync_backend;
 }
 
 static void

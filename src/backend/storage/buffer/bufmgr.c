@@ -2166,7 +2166,6 @@ BufferSync(int flags)
 			if (SyncOneBuffer(buf_id, false, &wb_context) & BUF_WRITTEN)
 			{
 				TRACE_POSTGRESQL_BUFFER_SYNC_WRITTEN(buf_id);
-				PendingCheckpointerStats.m_buf_written_checkpoints++;
 				num_written++;
 			}
 		}
@@ -2274,9 +2273,6 @@ BgBufferSync(WritebackContext *wb_context)
 	 * buffer allocations have happened since our last call.
 	 */
 	strategy_buf_id = StrategySyncStart(&strategy_passes, &recent_alloc);
-
-	/* Report buffer alloc counts to pgstat */
-	PendingBgWriterStats.m_buf_alloc += recent_alloc;
 
 	/*
 	 * If we're not running the LRU scan, just stop after doing the stats
@@ -2473,8 +2469,6 @@ BgBufferSync(WritebackContext *wb_context)
 		else if (sync_state & BUF_REUSABLE)
 			reusable_buffers++;
 	}
-
-	PendingBgWriterStats.m_buf_written_clean += num_written;
 
 #ifdef BGW_DEBUG
 	elog(DEBUG1, "bgwriter: recent_alloc=%u smoothed=%.2f delta=%ld ahead=%d density=%.2f reusable_est=%d upcoming_est=%d scanned=%d wrote=%d reusable=%d",

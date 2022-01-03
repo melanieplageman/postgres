@@ -522,9 +522,7 @@ typedef struct PgStat_MsgBgWriter
 {
 	PgStat_MsgHdr m_hdr;
 
-	PgStat_Counter m_buf_written_clean;
 	PgStat_Counter m_maxwritten_clean;
-	PgStat_Counter m_buf_alloc;
 } PgStat_MsgBgWriter;
 
 /* ----------
@@ -537,9 +535,6 @@ typedef struct PgStat_MsgCheckpointer
 
 	PgStat_Counter m_timed_checkpoints;
 	PgStat_Counter m_requested_checkpoints;
-	PgStat_Counter m_buf_written_checkpoints;
-	PgStat_Counter m_buf_written_backend;
-	PgStat_Counter m_buf_fsync_backend;
 	PgStat_Counter m_checkpoint_write_time; /* times in milliseconds */
 	PgStat_Counter m_checkpoint_sync_time;
 } PgStat_MsgCheckpointer;
@@ -970,10 +965,7 @@ typedef struct PgStat_ArchiverStats
  */
 typedef struct PgStat_BgWriterStats
 {
-	PgStat_Counter buf_written_clean;
 	PgStat_Counter maxwritten_clean;
-	PgStat_Counter buf_alloc;
-	TimestampTz stat_reset_timestamp;
 } PgStat_BgWriterStats;
 
 /*
@@ -986,9 +978,6 @@ typedef struct PgStat_CheckpointerStats
 	PgStat_Counter requested_checkpoints;
 	PgStat_Counter checkpoint_write_time;	/* times in milliseconds */
 	PgStat_Counter checkpoint_sync_time;
-	PgStat_Counter buf_written_checkpoints;
-	PgStat_Counter buf_written_backend;
-	PgStat_Counter buf_fsync_backend;
 } PgStat_CheckpointerStats;
 
 /*
