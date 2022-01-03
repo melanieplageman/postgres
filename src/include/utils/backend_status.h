@@ -375,6 +375,7 @@ extern void pgstat_bestart(void);
 extern void pgstat_clear_backend_activity_snapshot(void);
 
 /* Activity reporting functions */
+typedef struct PgStatIOPathOps PgStatIOPathOps;
 
 static inline void
 pgstat_inc_ioop(IOOp io_op, IOPath io_path)
@@ -402,6 +403,7 @@ pgstat_inc_ioop(IOOp io_op, IOPath io_path)
 	}
 }
 extern void pgstat_report_activity(BackendState state, const char *cmd_str);
+extern void pgstat_report_live_backend_io_path_ops(PgStatIOPathOps *backend_io_path_ops);
 extern void pgstat_report_query_id(uint64 query_id, bool force);
 extern void pgstat_report_tempfile(size_t filesize);
 extern void pgstat_report_appname(const char *appname);

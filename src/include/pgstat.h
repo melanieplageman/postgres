@@ -141,7 +141,7 @@ typedef struct PgStat_TableCounts
 typedef enum PgStat_Shared_Reset_Target
 {
 	RESET_ARCHIVER,
-	RESET_BGWRITER,
+	RESET_BUFFERS,
 	RESET_WAL
 } PgStat_Shared_Reset_Target;
 
@@ -357,7 +357,8 @@ typedef struct PgStatIOPathOps
 
 /*
  * Sent by a backend to the stats collector to report all IOOps for all IOPaths
- * for a given type of a backend. This will happen when the backend exits.
+ * for a given type of a backend. This will happen when the backend exits or
+ * when stats are reset.
  */
 typedef struct PgStat_MsgIOPathOps
 {
@@ -375,8 +376,11 @@ typedef struct PgStat_MsgIOPathOps
  */
 typedef struct PgStat_BackendIOPathOps
 {
+	TimestampTz stat_reset_timestamp;
 	PgStatIOPathOps ops[BACKEND_NUM_TYPES];
+	PgStatIOPathOps resets[BACKEND_NUM_TYPES];
 } PgStat_BackendIOPathOps;
+
 
 /* ----------
  * PgStat_MsgResetcounter		Sent by the backend to tell the collector
@@ -389,15 +393,28 @@ typedef struct PgStat_MsgResetcounter
 	Oid			m_databaseid;
 } PgStat_MsgResetcounter;
 
-/* ----------
- * PgStat_MsgResetsharedcounter Sent by the backend to tell the collector
- *								to reset a shared counter
- * ----------
+/*
+ * Sent by the backend to tell the collector to reset a shared counter.
+ *
+ * In addition to the message header and reset target, the message also
+ * contains an array with all of the IO operations for all IO paths done by a
+ * particular backend type.
+ *
+ * This is needed because the IO operation stats for live backends cannot be
+ * safely modified by other processes. Therefore, to correctly calculate the
+ * total IO operations for a particular backend type after a reset, the balance
+ * of IO operations for live backends at the time of prior resets must be
+ * subtracted from the total IO operations.
+ *
+ * To satisfy this requirement, the process initiating the reset will read the
+ * IO operations counters from live backends and send them to the stats
+ * collector which maintains an array of reset values.
  */
 typedef struct PgStat_MsgResetsharedcounter
 {
 	PgStat_MsgHdr m_hdr;
 	PgStat_Shared_Reset_Target m_resettarget;
+	PgStat_MsgIOPathOps m_backend_resets;
 } PgStat_MsgResetsharedcounter;
 
 /* ----------

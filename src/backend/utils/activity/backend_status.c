@@ -636,6 +636,33 @@ pgstat_report_activity(BackendState state, const char *cmd_str)
 	PGSTAT_END_WRITE_ACTIVITY(beentry);
 }
 
+/*
+ * Iterate through BackendStatusArray and capture live backends' stats on IOOps
+ * for all IOPaths, adding them to that backend type's member of the
+ * backend_io_path_ops structure.
+ */
+void
+pgstat_report_live_backend_io_path_ops(PgStatIOPathOps *backend_io_path_ops)
+{
+	PgBackendStatus *beentry = BackendStatusArray;
+
+	/*
+	 * Loop through live backends and capture reset values
+	 */
+	for (int i = 0; i < GetMaxBackends() + NUM_AUXPROCTYPES; i++, beentry++)
+	{
+		int idx;
+
+		/* Don't count dead backends or those with type B_INVALID. */
+		if (beentry->st_procpid == 0 || beentry->st_backendType == B_INVALID)
+			continue;
+
+		idx = backend_type_get_idx(beentry->st_backendType);
+		pgstat_sum_io_path_ops(backend_io_path_ops[idx].io_path_ops,
+				(IOOpCounters *) beentry->io_path_stats);
+	}
+}
+
 /* --------
  * pgstat_report_query_id() -
  *

@@ -1509,6 +1509,36 @@ pgstat_reset_counters(void)
 	pgstat_send(&msg, sizeof(msg));
 }
 
+/*
+ * Helper function to collect and send live backends' current IO operations
+ * stats counters when a stats reset is initiated so that they may be deducted
+ * from future totals.
+ */
+static void
+pgstat_send_buffers_reset(PgStat_MsgResetsharedcounter *msg)
+{
+	PgStatIOPathOps ops[BACKEND_NUM_TYPES];
+
+	memset(ops, 0, sizeof(ops));
+	pgstat_report_live_backend_io_path_ops(ops);
+
+	/*
+	 * Iterate through the array of all IOOps for all IOPaths for each
+	 * BackendType.
+	 *
+	 * An individual message is sent for each backend type because sending all
+	 * IO operations in one message would exceed the PGSTAT_MAX_MSG_SIZE of
+	 * 1000.
+	 */
+	for (int i = 0; i < BACKEND_NUM_TYPES; i++)
+	{
+		msg->m_backend_resets.backend_type = idx_get_backend_type(i);
+		memcpy(&msg->m_backend_resets.iop, &ops[i],
+				sizeof(msg->m_backend_resets.iop));
+		pgstat_send(msg, sizeof(PgStat_MsgResetsharedcounter));
+	}
+}
+
 /* ----------
  * pgstat_reset_shared_counters() -
  *
@@ -1526,19 +1556,25 @@ pgstat_reset_shared_counters(const char *target)
 	if (pgStatSock == PGINVALID_SOCKET)
 		return;
 
+	pgstat_setheader(&msg.m_hdr, PGSTAT_MTYPE_RESETSHAREDCOUNTER);
+	if (strcmp(target, "buffers") == 0)
+	{
+		msg.m_resettarget = RESET_BUFFERS;
+		pgstat_send_buffers_reset(&msg);
+		return;
+	}
+
 	if (strcmp(target, "archiver") == 0)
 		msg.m_resettarget = RESET_ARCHIVER;
-	else if (strcmp(target, "bgwriter") == 0)
-		msg.m_resettarget = RESET_BGWRITER;
 	else if (strcmp(target, "wal") == 0)
 		msg.m_resettarget = RESET_WAL;
 	else
 		ereport(ERROR,
 				(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
 				 errmsg("unrecognized reset target: \"%s\"", target),
-				 errhint("Target must be \"archiver\", \"bgwriter\", or \"wal\".")));
+				 errhint(
+					 "Target must be \"archiver\", \"buffers\", or \"wal\".")));
 
-	pgstat_setheader(&msg.m_hdr, PGSTAT_MTYPE_RESETSHAREDCOUNTER);
 	pgstat_send(&msg, sizeof(msg));
 }
 
@@ -4425,6 +4461,7 @@ pgstat_read_statsfiles(Oid onlydb, bool permanent, bool deep)
 	 */
 	ts = GetCurrentTimestamp();
 	globalStats.bgwriter.stat_reset_timestamp = ts;
+	globalStats.buffers.stat_reset_timestamp = ts;
 	archiverStats.stat_reset_timestamp = ts;
 	walStats.stat_reset_timestamp = ts;
 
@@ -5588,17 +5625,45 @@ pgstat_recv_resetcounter(PgStat_MsgResetcounter *msg, int len)
 static void
 pgstat_recv_resetsharedcounter(PgStat_MsgResetsharedcounter *msg, int len)
 {
-	if (msg->m_resettarget == RESET_BGWRITER)
-	{
-		/* Reset the global, bgwriter and checkpointer statistics for the cluster. */
-		memset(&globalStats, 0, sizeof(globalStats));
-		globalStats.bgwriter.stat_reset_timestamp = GetCurrentTimestamp();
-	}
-	else if (msg->m_resettarget == RESET_ARCHIVER)
+	if (msg->m_resettarget == RESET_ARCHIVER)
 	{
 		/* Reset the archiver statistics for the cluster. */
 		memset(&archiverStats, 0, sizeof(archiverStats));
 		archiverStats.stat_reset_timestamp = GetCurrentTimestamp();
+	}
+	else if (msg->m_resettarget == RESET_BUFFERS)
+	{
+		/*
+		 * Reset global stats for bgwriter, buffers, and checkpointer.
+		 *
+		 * Because the stats collector cannot write to live backends'
+		 * PgBackendStatuses, it maintains an array of "resets". The reset
+		 * message contains the current values of these counters for live
+		 * backends. The stats collector saves these in its "resets" array,
+		 * then zeroes out the exited backends' saved IO operations counters.
+		 * This is required to calculate an accurate total for each IO
+		 * operations counter post reset.
+		 */
+		BackendType backend_type = msg->m_backend_resets.backend_type;
+
+		/*
+		 * We reset each member individually (as opposed to resetting the
+		 * entire globalStats struct) because we need to preserve the resets
+		 * array (globalStats.buffers.resets).
+		 *
+		 * Though globalStats.buffers.ops, globalStats.bgwriter, and
+		 * globalStats.checkpointer only need to be reset once, doing so for
+		 * every message is less brittle and the extra cost is irrelevant given
+		 * how often stats are reset.
+		 */
+		memset(&globalStats.bgwriter, 0, sizeof(globalStats.bgwriter));
+		memset(&globalStats.checkpointer, 0, sizeof(globalStats.checkpointer));
+		memset(&globalStats.buffers.ops, 0, sizeof(globalStats.buffers.ops));
+		globalStats.bgwriter.stat_reset_timestamp = GetCurrentTimestamp();
+		globalStats.buffers.stat_reset_timestamp = GetCurrentTimestamp();
+		memcpy(&globalStats.buffers.resets[backend_type_get_idx(backend_type)],
+				&msg->m_backend_resets.iop.io_path_ops,
+				sizeof(msg->m_backend_resets.iop.io_path_ops));
 	}
 	else if (msg->m_resettarget == RESET_WAL)
 	{
