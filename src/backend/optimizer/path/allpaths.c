@@ -3007,10 +3007,15 @@ generate_gather_paths(PlannerInfo *root, RelOptInfo *rel, bool override_rows)
 	ListCell   *lc;
 	double		rows;
 	double	   *rowsp = NULL;
+	Relids		required_outer = rel->lateral_relids;
 
 	/* If there are no partial paths, there's nothing to do here. */
 	if (rel->partial_pathlist == NIL)
 		return;
+
+	if (!bms_is_subset(required_outer, rel->relids))
+		return;
+
 
 	/* Should we override the rel's rowcount estimate? */
 	if (override_rows)
@@ -3022,12 +3027,16 @@ generate_gather_paths(PlannerInfo *root, RelOptInfo *rel, bool override_rows)
 	 * of partial_pathlist because of the way add_partial_path works.
 	 */
 	cheapest_partial_path = linitial(rel->partial_pathlist);
-	rows =
-		cheapest_partial_path->rows * cheapest_partial_path->parallel_workers;
-	simple_gather_path = (Path *)
-		create_gather_path(root, rel, cheapest_partial_path, rel->reltarget,
-						   rel->lateral_relids, rowsp);
-	add_path(rel, simple_gather_path);
+	if (cheapest_partial_path->param_info == NULL ||
+			bms_is_subset(cheapest_partial_path->param_info->ppi_req_outer, rel->relids))
+	{
+		rows =
+			cheapest_partial_path->rows * cheapest_partial_path->parallel_workers;
+		simple_gather_path = (Path *)
+			create_gather_path(root, rel, cheapest_partial_path, rel->reltarget,
+							   rel->lateral_relids, rowsp);
+		add_path(rel, simple_gather_path);
+	}
 
 	/*
 	 * For each useful ordering, we can consider an order-preserving Gather
@@ -3040,6 +3049,10 @@ generate_gather_paths(PlannerInfo *root, RelOptInfo *rel, bool override_rows)
 
 		if (subpath->pathkeys == NIL)
 			continue;
+
+		if (subpath->param_info != NULL &&
+			!bms_is_subset(subpath->param_info->ppi_req_outer, rel->relids))
+			break;
 
 		rows = subpath->rows * subpath->parallel_workers;
 		path = create_gather_merge_path(root, rel, subpath, rel->reltarget,
@@ -3213,6 +3226,10 @@ generate_useful_gather_paths(PlannerInfo *root, RelOptInfo *rel, bool override_r
 			{
 				Path	   *tmp;
 
+				if (subpath->param_info != NULL &&
+					!bms_is_subset(subpath->param_info->ppi_req_outer, rel->relids))
+					break;
+
 				tmp = (Path *) create_sort_path(root,
 												rel,
 												subpath,
@@ -3240,6 +3257,10 @@ generate_useful_gather_paths(PlannerInfo *root, RelOptInfo *rel, bool override_r
 			if (enable_incremental_sort && presorted_keys > 0)
 			{
 				Path	   *tmp;
+
+				if (subpath->param_info != NULL &&
+					!bms_is_subset(subpath->param_info->ppi_req_outer, rel->relids))
+					break;
 
 				/*
 				 * We should have already excluded pathkeys of length 1
