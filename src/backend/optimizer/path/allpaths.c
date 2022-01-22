@@ -558,7 +558,8 @@ set_rel_pathlist(PlannerInfo *root, RelOptInfo *rel,
 	 * the final scan/join targetlist is available (see grouping_planner).
 	 */
 	if (rel->reloptkind == RELOPT_BASEREL &&
-		!bms_equal(rel->relids, root->all_baserels))
+		!bms_equal(rel->relids, root->all_baserels)
+		&& (rel->subplan_params == NIL || rte->rtekind != RTE_SUBQUERY))
 		generate_useful_gather_paths(root, rel, false);
 
 	/* Now find the cheapest of the paths for this rel */
@@ -3025,7 +3026,7 @@ generate_gather_paths(PlannerInfo *root, RelOptInfo *rel, bool override_rows)
 		cheapest_partial_path->rows * cheapest_partial_path->parallel_workers;
 	simple_gather_path = (Path *)
 		create_gather_path(root, rel, cheapest_partial_path, rel->reltarget,
-						   NULL, rowsp);
+						   rel->lateral_relids, rowsp);
 	add_path(rel, simple_gather_path);
 
 	/*
@@ -3042,7 +3043,7 @@ generate_gather_paths(PlannerInfo *root, RelOptInfo *rel, bool override_rows)
 
 		rows = subpath->rows * subpath->parallel_workers;
 		path = create_gather_merge_path(root, rel, subpath, rel->reltarget,
-										subpath->pathkeys, NULL, rowsp);
+										subpath->pathkeys, rel->lateral_relids, rowsp);
 		add_path(rel, &path->path);
 	}
 }
@@ -3144,9 +3145,13 @@ generate_useful_gather_paths(PlannerInfo *root, RelOptInfo *rel, bool override_r
 	double	   *rowsp = NULL;
 	List	   *useful_pathkeys_list = NIL;
 	Path	   *cheapest_partial_path = NULL;
+	Relids		required_outer = rel->lateral_relids;
 
 	/* If there are no partial paths, there's nothing to do here. */
 	if (rel->partial_pathlist == NIL)
+		return;
+
+	if (!bms_is_subset(required_outer, rel->relids))
 		return;
 
 	/* Should we override the rel's rowcount estimate? */
@@ -3220,7 +3225,7 @@ generate_useful_gather_paths(PlannerInfo *root, RelOptInfo *rel, bool override_r
 												tmp,
 												rel->reltarget,
 												tmp->pathkeys,
-												NULL,
+												required_outer,
 												rowsp);
 
 				add_path(rel, &path->path);
@@ -3254,7 +3259,7 @@ generate_useful_gather_paths(PlannerInfo *root, RelOptInfo *rel, bool override_r
 												tmp,
 												rel->reltarget,
 												tmp->pathkeys,
-												NULL,
+												required_outer,
 												rowsp);
 
 				add_path(rel, &path->path);
@@ -3433,7 +3438,8 @@ standard_join_search(PlannerInfo *root, int levels_needed, List *initial_rels)
 			/*
 			 * Except for the topmost scan/join rel, consider gathering
 			 * partial paths.  We'll do the same for the topmost scan/join rel
-			 * once we know the final targetlist (see grouping_planner).
+			 * once we know the final targetlist (see
+			 * apply_scanjoin_target_to_paths).
 			 */
 			if (!bms_equal(rel->relids, root->all_baserels))
 				generate_useful_gather_paths(root, rel, false);
