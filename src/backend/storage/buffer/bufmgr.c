@@ -1897,7 +1897,11 @@ AsyncGetVictimBuffer(BufferAccessStrategy strategy, XLogRecPtr *lsn, PgAioIoRef 
 		{
 			LWLock *content_lock;
 
-			Assert(cur_buf_state & BM_PERMANENT);
+			/*
+			 * XXX: This seems completely wrong? Not sure what I might have
+			 * been thinking here?
+			 */
+			//Assert(cur_buf_state & BM_PERMANENT);
 
 			page_lsn = BufferGetLSN(cur_buf_hdr);
 
