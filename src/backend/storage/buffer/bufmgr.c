@@ -5158,6 +5158,7 @@ bool
 ConditionalLockBuffer(Buffer buffer)
 {
 	BufferDesc *buf;
+	bool ret;
 
 	Assert(BufferIsPinned(buffer));
 	if (BufferIsLocal(buffer))
@@ -5165,8 +5166,44 @@ ConditionalLockBuffer(Buffer buffer)
 
 	buf = GetBufferDescriptor(buffer - 1);
 
-	return LWLockConditionalAcquire(BufferDescriptorGetContentLock(buf),
-									LW_EXCLUSIVE);
+	ret = LWLockConditionalAcquire(BufferDescriptorGetContentLock(buf),
+								   LW_EXCLUSIVE);
+
+	/*
+	 * FIXME: This is a bad copy of the code in WaitIO(), except that we don't
+	 * block (but try to advance the IO). Needed because otherwise
+	 * spgistBuildCallback()->spgdoinsert() can effectively self-deadlock (in
+	 * a busy loop way), failing to get the conditional lock on this buffer,
+	 * and then just retries from scratch. This seems like a dangerous
+	 * approach in spgist, but it's made much worse by the potential of
+	 * asynchronously starting IO from this backend.
+	 */
+	if (!ret)
+	{
+		uint32		buf_state;
+		PgAioIoRef  aio_ref;
+
+		/*
+		 * It may not be necessary to acquire the spinlock to check the flag
+		 * here, but since this test is essential for correctness, we'd better
+		 * play it safe.
+		 */
+		buf_state = LockBufHdr(buf);
+		aio_ref = buf->io_in_progress;
+		UnlockBufHdr(buf, buf_state);
+
+		if (buf_state & BM_IO_IN_PROGRESS &&
+			pgaio_io_ref_valid(&aio_ref))
+		{
+			pgaio_io_check_ref(&aio_ref);
+
+			/* maybe now the lock is free */
+			ret = LWLockConditionalAcquire(BufferDescriptorGetContentLock(buf),
+										   LW_EXCLUSIVE);
+		}
+	}
+
+	return ret;
 }
 
 void
