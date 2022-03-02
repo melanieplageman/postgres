@@ -163,31 +163,17 @@ blbuild(Relation heap, Relation index, IndexInfo *indexInfo)
 void
 blbuildempty(Relation index)
 {
-	Page		metapage;
+	Buffer metabuf =
+		ReadBufferExtended(index, INIT_FORKNUM, P_NEW, RBM_NORMAL, NULL);
+	LockBuffer(metabuf, BUFFER_LOCK_EXCLUSIVE);
+	BloomFillMetapage(index, BufferGetPage(metabuf));
 
-	/* Construct metapage. */
-	metapage = (Page) palloc(BLCKSZ);
-	BloomFillMetapage(index, metapage);
+	START_CRIT_SECTION();
+	MarkBufferDirty(metabuf);
+	log_newpage_buffer(metabuf, true);
+	END_CRIT_SECTION();
 
-	/*
-	 * Write the page and log it.  It might seem that an immediate sync would
-	 * be sufficient to guarantee that the file exists on disk, but recovery
-	 * itself might remove it while replaying, for example, an
-	 * XLOG_DBASE_CREATE or XLOG_TBLSPC_CREATE record.  Therefore, we need
-	 * this even when wal_level=minimal.
-	 */
-	PageSetChecksumInplace(metapage, BLOOM_METAPAGE_BLKNO);
-	smgrwrite(RelationGetSmgr(index), INIT_FORKNUM, BLOOM_METAPAGE_BLKNO,
-			  (char *) metapage, true);
-	log_newpage(&(RelationGetSmgr(index))->smgr_rnode.node, INIT_FORKNUM,
-				BLOOM_METAPAGE_BLKNO, metapage, true);
-
-	/*
-	 * An immediate sync is required even if we xlog'd the page, because the
-	 * write did not go through shared_buffers and therefore a concurrent
-	 * checkpoint may have moved the redo pointer past our xlog record.
-	 */
-	smgrimmedsync(RelationGetSmgr(index), INIT_FORKNUM);
+	UnlockReleaseBuffer(metabuf);
 }
 
 /*

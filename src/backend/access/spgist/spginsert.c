@@ -155,49 +155,43 @@ spgbuild(Relation heap, Relation index, IndexInfo *indexInfo)
 void
 spgbuildempty(Relation index)
 {
-	Page		page;
+	Buffer metabuf, rootbuf, nullbuf;
 
-	/* Construct metapage. */
-	page = (Page) palloc(BLCKSZ);
-	SpGistInitMetapage(page);
+	metabuf =
+		ReadBufferExtended(index, INIT_FORKNUM, P_NEW, RBM_NORMAL, NULL);
+	LockBuffer(metabuf, BUFFER_LOCK_EXCLUSIVE);
 
-	/*
-	 * Write the page and log it unconditionally.  This is important
-	 * particularly for indexes created on tablespaces and databases whose
-	 * creation happened after the last redo pointer as recovery removes any
-	 * of their existing content when the corresponding create records are
-	 * replayed.
-	 */
-	PageSetChecksumInplace(page, SPGIST_METAPAGE_BLKNO);
-	smgrwrite(RelationGetSmgr(index), INIT_FORKNUM, SPGIST_METAPAGE_BLKNO,
-			  (char *) page, true);
-	log_newpage(&(RelationGetSmgr(index))->smgr_rnode.node, INIT_FORKNUM,
-				SPGIST_METAPAGE_BLKNO, page, true);
+	rootbuf =
+		ReadBufferExtended(index, INIT_FORKNUM, P_NEW, RBM_NORMAL, NULL);
+	LockBuffer(rootbuf, BUFFER_LOCK_EXCLUSIVE);
 
-	/* Likewise for the root page. */
-	SpGistInitPage(page, SPGIST_LEAF);
+	nullbuf =
+		ReadBufferExtended(index, INIT_FORKNUM, P_NEW, RBM_NORMAL, NULL);
+	LockBuffer(nullbuf, BUFFER_LOCK_EXCLUSIVE);
 
-	PageSetChecksumInplace(page, SPGIST_ROOT_BLKNO);
-	smgrwrite(RelationGetSmgr(index), INIT_FORKNUM, SPGIST_ROOT_BLKNO,
-			  (char *) page, true);
-	log_newpage(&(RelationGetSmgr(index))->smgr_rnode.node, INIT_FORKNUM,
-				SPGIST_ROOT_BLKNO, page, true);
+	Assert(BufferGetBlockNumber(metabuf) == SPGIST_METAPAGE_BLKNO);
+	Assert(BufferGetBlockNumber(rootbuf) == SPGIST_ROOT_BLKNO);
+	Assert(BufferGetBlockNumber(nullbuf) == SPGIST_NULL_BLKNO);
 
-	/* Likewise for the null-tuples root page. */
-	SpGistInitPage(page, SPGIST_LEAF | SPGIST_NULLS);
+	START_CRIT_SECTION();
 
-	PageSetChecksumInplace(page, SPGIST_NULL_BLKNO);
-	smgrwrite(RelationGetSmgr(index), INIT_FORKNUM, SPGIST_NULL_BLKNO,
-			  (char *) page, true);
-	log_newpage(&(RelationGetSmgr(index))->smgr_rnode.node, INIT_FORKNUM,
-				SPGIST_NULL_BLKNO, page, true);
+	SpGistInitMetapage(BufferGetPage(metabuf));
+	MarkBufferDirty(metabuf);
+	log_newpage_buffer(metabuf, true);
 
-	/*
-	 * An immediate sync is required even if we xlog'd the pages, because the
-	 * writes did not go through shared buffers and therefore a concurrent
-	 * checkpoint may have moved the redo pointer past our xlog record.
-	 */
-	smgrimmedsync(RelationGetSmgr(index), INIT_FORKNUM);
+	SpGistInitPage(BufferGetPage(rootbuf), SPGIST_LEAF);
+	MarkBufferDirty(rootbuf);
+	log_newpage_buffer(rootbuf, true);
+
+	SpGistInitPage(BufferGetPage(nullbuf), SPGIST_LEAF | SPGIST_NULLS);
+	MarkBufferDirty(nullbuf);
+	log_newpage_buffer(nullbuf, true);
+
+	END_CRIT_SECTION();
+
+	UnlockReleaseBuffer(metabuf);
+	UnlockReleaseBuffer(rootbuf);
+	UnlockReleaseBuffer(nullbuf);
 }
 
 /*
