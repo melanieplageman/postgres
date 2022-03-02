@@ -7,6 +7,14 @@
 create table spgist_point_tbl(id int4, p point);
 create index spgist_point_idx on spgist_point_tbl using spgist(p) with (fillfactor = 75);
 
+-- Test creating an unlogged SP-GiST index
+-- This will exercise code to create an empty SP-GiST index in the INIT fork
+CREATE UNLOGGED TABLE spgist_point_tbl_unlogged (
+	id int4,
+	p point
+);
+CREATE INDEX spgist_point_idx_unlogged ON spgist_point_tbl_unlogged USING spgist(p);
+
 -- Test vacuum-root operation. It gets invoked when the root is also a leaf,
 -- i.e. the index is very small.
 insert into spgist_point_tbl (id, p)
