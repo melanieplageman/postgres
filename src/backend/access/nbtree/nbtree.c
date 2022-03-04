@@ -30,10 +30,10 @@
 #include "pgstat.h"
 #include "postmaster/autovacuum.h"
 #include "storage/condition_variable.h"
+#include "storage/directmgr.h"
 #include "storage/indexfsm.h"
 #include "storage/ipc.h"
 #include "storage/lmgr.h"
-#include "storage/smgr.h"
 #include "utils/builtins.h"
 #include "utils/index_selfuncs.h"
 #include "utils/memutils.h"
@@ -152,6 +152,16 @@ void
 btbuildempty(Relation index)
 {
 	Page		metapage;
+	UnBufferedWriteState wstate;
+
+	/*
+	 * Though this is an unlogged relation, pass do_wal=true since the init
+	 * fork of an unlogged index must be wal-logged and fsync'd. This currently
+	 * has no effect, as unbuffered_write() does not do log_newpage()
+	 * internally. However, were this to be replaced with unbuffered_extend(),
+	 * do_wal must be true to ensure the data is logged and fsync'd.
+	 */
+	unbuffered_prep(&wstate, true);
 
 	/* Construct metapage. */
 	metapage = (Page) palloc(BLCKSZ);
@@ -164,18 +174,12 @@ btbuildempty(Relation index)
 	 * XLOG_DBASE_CREATE or XLOG_TBLSPC_CREATE record.  Therefore, we need
 	 * this even when wal_level=minimal.
 	 */
-	PageSetChecksumInplace(metapage, BTREE_METAPAGE);
-	smgrwrite(RelationGetSmgr(index), INIT_FORKNUM, BTREE_METAPAGE,
-			  (char *) metapage, true);
+	unbuffered_write(&wstate, RelationGetSmgr(index), INIT_FORKNUM,
+			BTREE_METAPAGE, metapage);
 	log_newpage(&RelationGetSmgr(index)->smgr_rnode.node, INIT_FORKNUM,
 				BTREE_METAPAGE, metapage, true);
 
-	/*
-	 * An immediate sync is required even if we xlog'd the page, because the
-	 * write did not go through shared_buffers and therefore a concurrent
-	 * checkpoint may have moved the redo pointer past our xlog record.
-	 */
-	smgrimmedsync(RelationGetSmgr(index), INIT_FORKNUM);
+	unbuffered_finish(&wstate, RelationGetSmgr(index), INIT_FORKNUM);
 }
 
 /*
@@ -959,7 +963,7 @@ btvacuumscan(IndexVacuumInfo *info, IndexBulkDeleteResult *stats,
 	 * delete some deletable tuples.  Hence, we must repeatedly check the
 	 * relation length.  We must acquire the relation-extension lock while
 	 * doing so to avoid a race condition: if someone else is extending the
-	 * relation, there is a window where bufmgr/smgr have created a new
+	 * relation, there is a window where bufmgr/directmgr have created a new
 	 * all-zero page but it hasn't yet been write-locked by _bt_getbuf(). If
 	 * we manage to scan such a page here, we'll improperly assume it can be
 	 * recycled.  Taking the lock synchronizes things enough to prevent a
