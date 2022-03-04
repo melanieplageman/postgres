@@ -152,34 +152,24 @@ void
 btbuildempty(Relation index)
 {
 	Page		metapage;
-	UnBufferedWriteState wstate;
+	Buffer metabuf;
 
 	/*
-	 * Though this is an unlogged relation, pass do_wal=true since the init
-	 * fork of an unlogged index must be wal-logged and fsync'd. This currently
-	 * has no effect, as unbuffered_write() does not do log_newpage()
-	 * internally. However, were this to be replaced with unbuffered_extend(),
-	 * do_wal must be true to ensure the data is logged and fsync'd.
+	 * Allocate a buffer for metapage and initialize metapage.
 	 */
-	unbuffered_prep(&wstate, true, true);
-
-	/* Construct metapage. */
-	metapage = (Page) palloc(BLCKSZ);
+	metabuf = ReadBufferExtended(index, INIT_FORKNUM, P_NEW, RBM_ZERO_AND_LOCK,
+			NULL);
+	metapage = BufferGetPage(metabuf);
 	_bt_initmetapage(metapage, P_NONE, 0, _bt_allequalimage(index, false));
 
 	/*
-	 * Write the page and log it.  It might seem that an immediate sync would
-	 * be sufficient to guarantee that the file exists on disk, but recovery
-	 * itself might remove it while replaying, for example, an
-	 * XLOG_DBASE_CREATE or XLOG_TBLSPC_CREATE record.  Therefore, we need
-	 * this even when wal_level=minimal.
+	 * Mark metapage buffer as dirty and XLOG it
 	 */
-	unbuffered_write(&wstate, RelationGetSmgr(index), INIT_FORKNUM,
-			BTREE_METAPAGE, metapage);
-	log_newpage(&RelationGetSmgr(index)->smgr_rnode.node, INIT_FORKNUM,
-				BTREE_METAPAGE, metapage, true);
-
-	unbuffered_finish(&wstate, RelationGetSmgr(index), INIT_FORKNUM);
+	START_CRIT_SECTION();
+	MarkBufferDirty(metabuf);
+	log_newpage_buffer(metabuf, true);
+	END_CRIT_SECTION();
+	_bt_relbuf(index, metabuf);
 }
 
 /*
