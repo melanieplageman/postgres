@@ -1189,7 +1189,7 @@ _bt_load(BTWriteState *wstate, BTSpool *btspool, BTSpool *btspool2)
 	int64		tuples_done = 0;
 	bool		deduplicate;
 
-	unbuffered_prep(&wstate->ub_wstate, wstate->btws_use_wal);
+	unbuffered_prep(&wstate->ub_wstate, wstate->btws_use_wal, false);
 
 	deduplicate = wstate->inskey->allequalimage && !btspool->isunique &&
 		BTGetDeduplicateItems(wstate->index);

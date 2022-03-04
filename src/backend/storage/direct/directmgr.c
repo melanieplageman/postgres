@@ -15,14 +15,23 @@
 #include "postgres.h"
 
 
+#include "access/xlog.h"
 #include "access/xlogdefs.h"
 #include "access/xloginsert.h"
 #include "storage/directmgr.h"
 
 void
-unbuffered_prep(UnBufferedWriteState *wstate, bool do_wal)
+unbuffered_prep(UnBufferedWriteState *wstate, bool do_wal, bool
+		do_optimization)
 {
+	/*
+	 * There is no valid fsync optimization if no WAL is being written anyway
+	 */
+	Assert(!do_optimization || (do_optimization && do_wal));
+
 	wstate->do_wal = do_wal;
+	wstate->do_optimization = do_optimization;
+	wstate->redo = do_optimization ? GetRedoRecPtr() : InvalidXLogRecPtr;
 }
 
 void
@@ -92,6 +101,9 @@ unbuffered_finish(UnBufferedWriteState *wstate, SMgrRelation smgrrel,
 		ForkNumber forknum)
 {
 	if (!wstate->do_wal)
+		return;
+
+	if (wstate->do_optimization && !RedoRecPtrChanged(wstate->redo))
 		return;
 
 	smgrimmedsync(smgrrel, forknum);

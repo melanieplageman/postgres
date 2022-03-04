@@ -412,7 +412,7 @@ gist_indexsortbuild(GISTBuildState *state)
 	state->pages_written = 0;
 	state->ready_num_pages = 0;
 
-	unbuffered_prep(&state->ub_wstate, RelationNeedsWAL(state->indexrel));
+	unbuffered_prep(&state->ub_wstate, RelationNeedsWAL(state->indexrel), false);
 
 	/*
 	 * Write an empty page as a placeholder for the root page. It will be

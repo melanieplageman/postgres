@@ -165,7 +165,7 @@ spgbuildempty(Relation index)
 	 * internally. However, were this to be replaced with unbuffered_extend(),
 	 * do_wal must be true to ensure the data is logged and fsync'd.
 	 */
-	unbuffered_prep(&wstate, true);
+	unbuffered_prep(&wstate, true, false);
 
 	/* Construct metapage. */
 	page = (Page) palloc(BLCKSZ);
