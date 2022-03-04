@@ -1189,7 +1189,11 @@ _bt_load(BTWriteState *wstate, BTSpool *btspool, BTSpool *btspool2)
 	int64		tuples_done = 0;
 	bool		deduplicate;
 
-	unbuffered_prep(&wstate->ub_wstate, wstate->btws_use_wal, false);
+	/*
+	 * The fsync optimization done by directmgr is only relevant if
+	 * WAL-logging, so pass btws_use_wal for this parameter.
+	 */
+	unbuffered_prep(&wstate->ub_wstate, wstate->btws_use_wal, wstate->btws_use_wal);
 
 	deduplicate = wstate->inskey->allequalimage && !btspool->isunique &&
 		BTGetDeduplicateItems(wstate->index);
