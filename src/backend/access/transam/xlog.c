@@ -6273,6 +6273,7 @@ CreateCheckPoint(int flags)
 	int			nvxids;
 	int			oldXLogAllowed = 0;
 
+	pgstat_report_activity(STATE_RUNNING, "checkpoint");
 	/*
 	 * An end-of-recovery checkpoint is really a shutdown checkpoint, just
 	 * issued at a different time.
