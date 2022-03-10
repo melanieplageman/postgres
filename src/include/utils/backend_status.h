@@ -172,6 +172,7 @@ typedef struct PgBackendStatus
 	/* time spent in respective states in usec */
 	int64		st_total_active_time;
 	int64		st_total_transaction_idle_time;
+	int64 active_in_state;
 } PgBackendStatus;
 
 

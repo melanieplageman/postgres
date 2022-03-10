@@ -588,6 +588,17 @@ pgstat_report_activity(BackendState state, const char *cmd_str)
 	}
 	current_timestamp = GetCurrentTimestamp();
 
+	if (PGSTAT_IS_ACTIVE(beentry))
+	{
+		beentry->st_total_active_time += beentry->active_in_state;
+		beentry->active_in_state = 0;
+	}
+	else if (PGSTAT_IS_IDLEINTRANSACTION(beentry))
+	{
+		beentry->st_total_transaction_idle_time += beentry->active_in_state;
+		beentry->active_in_state = 0;
+	}
+
 	/*
 	 * If the state has changed from "active" or "idle in transaction",
 	 * calculate the duration.
