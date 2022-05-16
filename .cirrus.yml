@@ -37,14 +37,26 @@ on_failure: &on_failure
     type: text/plain
 
 task:
-  name: FreeBSD - 13
+  matrix:
+    - name: FreeBSD - 13 - worker buf
+      env:
+        TEMP_CONFIG: ${CIRRUS_WORKING_DIR}/ci/worker_buf.conf
+    - name: FreeBSD - 13 - worker dio
+      env:
+        TEMP_CONFIG: ${CIRRUS_WORKING_DIR}/ci/worker_dio.conf
+    - name: FreeBSD - 13 - posix buf
+      env:
+        TEMP_CONFIG: ${CIRRUS_WORKING_DIR}/ci/posix_aio_buf.conf
+    - name: FreeBSD - 13 - posix dio
+      env:
+        TEMP_CONFIG: ${CIRRUS_WORKING_DIR}/ci/posix_aio_dio.conf
 
   env:
     # FreeBSD on GCP is slow when running with larger number of CPUS /
     # jobs. Using one more job than cpus seems to work best.
-    CPUS: 2
-    BUILD_JOBS: 3
-    TEST_JOBS: 3
+    CPUS: 1
+    BUILD_JOBS: 2
+    TEST_JOBS: 2
 
     CCACHE_DIR: /tmp/ccache_dir
 
@@ -102,6 +114,7 @@ task:
         --with-tcl --with-tclconfig=/usr/local/lib/tcl8.6/ \
         --with-uuid=bsd \
         --with-zstd \
+        --with-posix-aio \
         \
         --with-includes=/usr/local/include \
         --with-libs=/usr/local/lib \
@@ -147,7 +160,20 @@ LINUX_CONFIGURE_FEATURES: &LINUX_CONFIGURE_FEATURES >-
 
 
 task:
-  name: Linux - Debian Bullseye
+  matrix:
+    - name: Linux - Debian Bullseye
+      env:
+        IMAGE: family/pg-ci-bullseye
+    - name: Linux Uring Kernel
+      env:
+        IMAGE: family/pg-ci-sid-newkernel-uring
+      depends_on:
+        - Linux - Debian Bullseye
+    - name: Linux Linus Kernel
+      env:
+        IMAGE: family/pg-ci-sid-newkernel
+      depends_on:
+        - Linux - Debian Bullseye
 
   env:
     CPUS: 4
@@ -159,11 +185,13 @@ task:
 
     LINUX_CONFIGURE_FEATURES: *LINUX_CONFIGURE_FEATURES
 
+    TIMEOUT_CMD: timeout -s KILL -v 25m
+
   only_if: $CIRRUS_CHANGE_MESSAGE !=~ '.*\nci-os-only:.*' || $CIRRUS_CHANGE_MESSAGE =~ '.*\nci-os-only:[^\n]*linux.*'
 
   compute_engine_instance:
     image_project: $IMAGE_PROJECT
-    image: family/pg-ci-bullseye
+    image: $IMAGE
     platform: linux
     cpu: $CPUS
     memory: 2G
@@ -199,6 +227,8 @@ task:
         --enable-nls \
         \
         ${LINUX_CONFIGURE_FEATURES} \
+        --with-posix-aio \
+        --with-liburing \
         \
         CC="ccache gcc" \
         CXX="ccache g++" \
@@ -209,9 +239,45 @@ task:
   build_script: su postgres -c "make -s -j${BUILD_JOBS} world-bin"
   upload_caches: ccache
 
-  test_world_script: |
+  io_uring_buf_test_world_script: |
     su postgres <<-EOF
-      ulimit -c unlimited # default is 0
+      ulimit -c unlimited
+      TEMP_CONFIG=$(realpath ci/uring_buf.conf) ${TIMEOUT_CMD} \
+      make -s ${CHECK} ${CHECKFLAGS} -j${TEST_JOBS}
+    EOF
+
+  io_uring_dio_test_world_script: |
+    su postgres <<-EOF
+      ulimit -c unlimited
+      TEMP_CONFIG=$(realpath ci/uring_dio.conf) ${TIMEOUT_CMD} \
+      make -s ${CHECK} ${CHECKFLAGS} -j${TEST_JOBS}
+    EOF
+
+  worker_buf_test_world_script: |
+    su postgres <<-EOF
+      ulimit -c unlimited
+      TEMP_CONFIG=$(realpath ci/worker_buf.conf) ${TIMEOUT_CMD} \
+      make -s ${CHECK} ${CHECKFLAGS} -j${TEST_JOBS}
+    EOF
+
+  worker_dio_test_world_script: |
+    su postgres <<-EOF
+      ulimit -c unlimited
+      TEMP_CONFIG=$(realpath ci/worker_dio.conf) ${TIMEOUT_CMD} \
+      make -s ${CHECK} ${CHECKFLAGS} -j${TEST_JOBS}
+    EOF
+
+  posix_aio_buf_test_world_script: |
+    su postgres <<-EOF
+      ulimit -c unlimited
+      TEMP_CONFIG=$(realpath ci/posix_aio_buf.conf) ${TIMEOUT_CMD} \
+      make -s ${CHECK} ${CHECKFLAGS} -j${TEST_JOBS}
+    EOF
+
+  posix_aio_dio_test_world_script: |
+    su postgres <<-EOF
+      ulimit -c unlimited
+      TEMP_CONFIG=$(realpath ci/posix_aio_dio.conf) ${TIMEOUT_CMD} \
       make -s ${CHECK} ${CHECKFLAGS} -j${TEST_JOBS}
     EOF
 
@@ -264,6 +330,7 @@ task:
   setup_additional_packages_script: |
     brew install \
       ccache \
+      coreutils \
       icu4c \
       krb5 \
       llvm \
@@ -311,6 +378,7 @@ task:
       --with-tcl --with-tclconfig=${brewpath}/opt/tcl-tk/lib/ \
       --with-uuid=e2fs \
       --with-zstd \
+      --with-posix-aio \
       \
       --prefix=${HOME}/install \
       --with-includes="${INCLUDES}" \
@@ -327,11 +395,38 @@ task:
   build_script: gmake -s -j${BUILD_JOBS} world-bin
   upload_caches: ccache
 
-  test_world_script: |
+  worker_buf_test_world_script: |
     ulimit -c unlimited # default is 0
     ulimit -n 1024 # default is 256, pretty low
     # See freebsd use of script for explanation
-    script test.log gmake -s -j${TEST_JOBS} ${CHECK} ${CHECKFLAGS}
+    TEMP_CONFIG=$(pwd)/ci/worker_buf.conf \
+      script test.log \
+      gtimeout -s KILL -v 30m \
+      gmake -s -j${TEST_JOBS} ${CHECK} ${CHECKFLAGS}
+
+  worker_dio_test_world_script: |
+    ulimit -c unlimited
+    ulimit -n 1024
+    TEMP_CONFIG=$(pwd)/ci/worker_dio.conf \
+      script test.log \
+      gtimeout -s KILL -v 30m \
+      gmake -s -j${TEST_JOBS} ${CHECK} ${CHECKFLAGS}
+
+  posix_aio_buf_test_world_script: |
+    ulimit -c unlimited
+    ulimit -n 1024
+    TEMP_CONFIG=$(pwd)/ci/posix_aio_buf.conf \
+      script test.log \
+      gtimeout -s KILL -v 30m \
+      gmake -s -j${TEST_JOBS} ${CHECK} ${CHECKFLAGS}
+
+  posix_aio_aio_test_world_script: |
+    ulimit -c unlimited
+    ulimit -n 1024
+    TEMP_CONFIG=$(pwd)/ci/posix_aio_dio.conf \
+      script test.log \
+      gtimeout -s KILL -v 30m \
+      gmake -s -j${TEST_JOBS} ${CHECK} ${CHECKFLAGS}
 
   on_failure:
     <<: *on_failure
@@ -339,7 +434,13 @@ task:
 
 
 task:
-  name: Windows - Server 2019, VS 2019
+  matrix:
+    - name: Windows - Server 2019, VS 2019 - Buf
+      env:
+        TEMP_CONFIG: ${CIRRUS_WORKING_DIR}/ci/worker_buf.conf
+    - name: Windows - Server 2019, VS 2019 - DIO
+      env:
+        TEMP_CONFIG: ${CIRRUS_WORKING_DIR}/ci/worker_dio.conf
 
   env:
     # Half the allowed per-user CPU cores
@@ -398,6 +499,7 @@ task:
     systeminfo
     powershell -Command get-psdrive -psprovider filesystem
     set
+    cat /cirrus/src/tools/ci/pg_ci_base.conf || true
 
   setup_additional_packages_script: |
     REM choco install -y --no-progress ...
@@ -520,12 +622,80 @@ task:
       make -s -j${BUILD_JOBS} clean
       time make -s -j${BUILD_JOBS} world-bin
 
+  always:
+    gcc_p_warning_script: |
+      time ./configure \
+        --cache gcc.cache \
+        --enable-dtrace \
+        --with-posix-aio \
+        ${LINUX_CONFIGURE_FEATURES} \
+        CC="ccache gcc" CXX="ccache g++" CLANG="ccache clang"
+      make -s -j${BUILD_JOBS} clean
+      time make -s -j${BUILD_JOBS} world-bin
+
+  always:
+    gcc_u_warning_script: |
+      time ./configure \
+        --cache gcc.cache \
+        --enable-dtrace \
+        --with-liburing \
+        ${LINUX_CONFIGURE_FEATURES} \
+        CC="ccache gcc" CXX="ccache g++" CLANG="ccache clang"
+      make -s -j${BUILD_JOBS} clean
+      time make -s -j${BUILD_JOBS} world-bin
+
+  always:
+    gcc_pu_warning_script: |
+      time ./configure \
+        --cache gcc.cache \
+        --enable-dtrace \
+        --with-posix-aio \
+        --with-liburing \
+        ${LINUX_CONFIGURE_FEATURES} \
+        CC="ccache gcc" CXX="ccache g++" CLANG="ccache clang"
+      make -s -j${BUILD_JOBS} clean
+      time make -s -j${BUILD_JOBS} world-bin
+
   # gcc, cassert on, dtrace off
   always:
     gcc_a_warning_script: |
       time ./configure \
         --cache gcc.cache \
         --enable-cassert \
+        ${LINUX_CONFIGURE_FEATURES} \
+        CC="ccache gcc" CXX="ccache g++" CLANG="ccache clang"
+      make -s -j${BUILD_JOBS} clean
+      time make -s -j${BUILD_JOBS} world-bin
+
+  always:
+    gcc_ap_warning_script: |
+      time ./configure \
+        --cache gcc.cache \
+        --enable-cassert \
+        --with-posix-aio \
+        ${LINUX_CONFIGURE_FEATURES} \
+        CC="ccache gcc" CXX="ccache g++" CLANG="ccache clang"
+      make -s -j${BUILD_JOBS} clean
+      time make -s -j${BUILD_JOBS} world-bin
+
+  always:
+    gcc_au_warning_script: |
+      time ./configure \
+        --cache gcc.cache \
+        --enable-cassert \
+        --with-liburing \
+        ${LINUX_CONFIGURE_FEATURES} \
+        CC="ccache gcc" CXX="ccache g++" CLANG="ccache clang"
+      make -s -j${BUILD_JOBS} clean
+      time make -s -j${BUILD_JOBS} world-bin
+
+  always:
+    gcc_apu_warning_script: |
+      time ./configure \
+        --cache gcc.cache \
+        --enable-cassert \
+        --with-posix-aio \
+        --with-liburing \
         ${LINUX_CONFIGURE_FEATURES} \
         CC="ccache gcc" CXX="ccache g++" CLANG="ccache clang"
       make -s -j${BUILD_JOBS} clean
@@ -541,6 +711,37 @@ task:
       make -s -j${BUILD_JOBS} clean
       time make -s -j${BUILD_JOBS} world-bin
 
+  always:
+    clang_p_warning_script: |
+      time ./configure \
+        --cache clang.cache \
+        ${LINUX_CONFIGURE_FEATURES} \
+        --with-posix-aio \
+        CC="ccache clang" CXX="ccache clang++" CLANG="ccache clang"
+      make -s -j${BUILD_JOBS} clean
+      time make -s -j${BUILD_JOBS} world-bin
+
+  always:
+    clang_u_warning_script: |
+      time ./configure \
+        --cache clang.cache \
+        ${LINUX_CONFIGURE_FEATURES} \
+        --with-liburing \
+        CC="ccache clang" CXX="ccache clang++" CLANG="ccache clang"
+      make -s -j${BUILD_JOBS} clean
+      time make -s -j${BUILD_JOBS} world-bin
+
+  always:
+    clang_pu_warning_script: |
+      time ./configure \
+        --cache clang.cache \
+        ${LINUX_CONFIGURE_FEATURES} \
+        --with-posix-aio \
+        --with-liburing \
+        CC="ccache clang" CXX="ccache clang++" CLANG="ccache clang"
+      make -s -j${BUILD_JOBS} clean
+      time make -s -j${BUILD_JOBS} world-bin
+
   # clang, cassert on, dtrace on
   always:
     clang_a_warning_script: |
@@ -549,6 +750,43 @@ task:
         --enable-cassert \
         --enable-dtrace \
         ${LINUX_CONFIGURE_FEATURES} \
+        CC="ccache clang" CXX="ccache clang++" CLANG="ccache clang"
+      make -s -j${BUILD_JOBS} clean
+      time make -s -j${BUILD_JOBS} world-bin
+
+  always:
+    clang_ap_warning_script: |
+      time ./configure \
+        --cache clang.cache \
+        --enable-cassert \
+        --enable-dtrace \
+        ${LINUX_CONFIGURE_FEATURES} \
+        --with-posix-aio \
+        CC="ccache clang" CXX="ccache clang++" CLANG="ccache clang"
+      make -s -j${BUILD_JOBS} clean
+      time make -s -j${BUILD_JOBS} world-bin
+
+  always:
+    clang_au_warning_script: |
+      time ./configure \
+        --cache clang.cache \
+        --enable-cassert \
+        --enable-dtrace \
+        ${LINUX_CONFIGURE_FEATURES} \
+        --with-liburing \
+        CC="ccache clang" CXX="ccache clang++" CLANG="ccache clang"
+      make -s -j${BUILD_JOBS} clean
+      time make -s -j${BUILD_JOBS} world-bin
+
+  always:
+    clang_apu_warning_script: |
+      time ./configure \
+        --cache clang.cache \
+        --enable-cassert \
+        --enable-dtrace \
+        ${LINUX_CONFIGURE_FEATURES} \
+        --with-posix-aio \
+        --with-liburing \
         CC="ccache clang" CXX="ccache clang++" CLANG="ccache clang"
       make -s -j${BUILD_JOBS} clean
       time make -s -j${BUILD_JOBS} world-bin
