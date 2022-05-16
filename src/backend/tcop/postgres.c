@@ -4029,6 +4029,7 @@ PostgresSingleUserMain(int argc, char *argv[],
 
 	/* AIO is needed during InitPostgres() */
 	pgaio_postmaster_init();
+	pgaio_postmaster_child_init_local();
 
 	set_max_safe_fds();
 
