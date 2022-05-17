@@ -40,6 +40,7 @@
 #include "postmaster/interrupt.h"
 #include "postmaster/pgarch.h"
 #include "postmaster/postmaster.h"
+#include "storage/aio.h"
 #include "storage/fd.h"
 #include "storage/ipc.h"
 #include "storage/latch.h"
@@ -138,6 +139,8 @@ InitPostmasterChild(void)
 	MyLatch = &LocalLatchData;
 	InitLatch(MyLatch);
 	InitializeLatchWaitSet();
+
+	pgaio_postmaster_child_init_local();
 
 	/*
 	 * If possible, make this process a group leader, so that the postmaster
@@ -290,6 +293,9 @@ GetBackendTypeDesc(BackendType backendType)
 			break;
 		case B_LOGGER:
 			backendDesc = "logger";
+			break;
+		case B_IO_WORKER:
+			backendDesc = "io worker";
 			break;
 	}
 

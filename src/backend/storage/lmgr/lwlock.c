@@ -183,6 +183,10 @@ static const char *const BuiltinTrancheNames[] = {
 	"PgStatsHash",
 	/* LWTRANCHE_PGSTATS_DATA: */
 	"PgStatsData",
+	/* LWTRANCHE_AIO_CONTEXT_SUBMISSION: */
+	"AioContextSubmission",
+	/* LWTRANCHE_AIO_CONTEXT_COMPLETION: */
+	"AioContextCompletion"
 };
 
 StaticAssertDecl(lengthof(BuiltinTrancheNames) ==
