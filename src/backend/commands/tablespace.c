@@ -1594,6 +1594,9 @@ tblspc_redo(XLogReaderState *record)
 		{
 			ResolveRecoveryConflictWithTablespace(xlrec->ts_id);
 
+			/* Close all smgr fds in all backends. */
+			WaitForProcSignalBarrier(EmitProcSignalBarrier(PROCSIGNAL_BARRIER_SMGRRELEASE));
+
 			/*
 			 * If we did recovery processing then hopefully the backends who
 			 * wrote temp files should have cleaned up and exited by now.  So
