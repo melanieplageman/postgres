@@ -848,6 +848,7 @@ ReadBufferPrepRead(PgAioInProgress *aio, Buffer buffer)
 	Assert(buf_state & BM_IO_IN_PROGRESS);
 	Assert(BUF_STATE_GET_REFCOUNT(buf_state) >= 1);
 	buf_state += BUF_REFCOUNT_ONE;
+	pgaio_io_ref(aio, &bufHdr->io_in_progress);
 	UnlockBufHdr(bufHdr, buf_state);
 
 	/*
@@ -856,9 +857,6 @@ ReadBufferPrepRead(PgAioInProgress *aio, Buffer buffer)
 	 */
 	Assert(InProgressBuf != NULL);
 	InProgressBuf = NULL;
-
-	/* allow backends to wait for this IO */
-	pgaio_io_ref(aio, &bufHdr->io_in_progress);
 }
 
 static void
@@ -1452,6 +1450,7 @@ ReadBufferPrepWrite(PgAioInProgress *aio, Buffer buffer, bool release_lock)
 	Assert(buf_state & BM_IO_IN_PROGRESS);
 	Assert(BUF_STATE_GET_REFCOUNT(buf_state) >= 1);
 	buf_state += BUF_REFCOUNT_ONE;
+	pgaio_io_ref(aio, &bufHdr->io_in_progress);
 	UnlockBufHdr(bufHdr, buf_state);
 
 	/*
@@ -1460,9 +1459,6 @@ ReadBufferPrepWrite(PgAioInProgress *aio, Buffer buffer, bool release_lock)
 	 */
 	Assert(InProgressBuf != NULL);
 	InProgressBuf = NULL;
-
-	/* allow backends to wait for this IO */
-	pgaio_io_ref(aio, &bufHdr->io_in_progress);
 
 	if (release_lock)
 		LWLockReleaseOwnership(BufferDescriptorGetContentLock(bufHdr));
