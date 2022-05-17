@@ -1775,9 +1775,6 @@ wait_ref_again:
 		}
 		else
 		{
-			/* shouldn't be reachable without concurrency */
-			Assert(IsUnderPostmaster);
-
 			if (call_shared)
 				pgaio_complete_ios(false);
 
@@ -1787,7 +1784,18 @@ wait_ref_again:
 
 			if (!pgaio_io_recycled(io, ref_generation, &flags) &&
 				!(flags & done_flags))
+			{
+				/* shouldn't be reachable without concurrency */
+				/*
+				 * XXX: Assertion should be one level up, but right now we can
+				 * get here with posix aio, even in single user mode. Probably
+				 * need a proper branch to deal with REAPED but not yet
+				 * consumed completions?
+				 */
+				Assert(IsUnderPostmaster);
+
 				ConditionVariableSleep(&io->cv, WAIT_EVENT_AIO_IO_COMPLETE_ONE);
+			}
 
 			if (IsUnderPostmaster)
 				ConditionVariableCancelSleepEx(true);

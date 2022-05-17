@@ -141,7 +141,7 @@ pgaio_exchange_wait_one_local(PgAioInProgress * io, uint64 ref_generation, uint3
 	for (;;)
 	{
 		if (pgaio_io_recycled(io, ref_generation, &flags) ||
-			(flags & PGAIOIP_INFLIGHT))
+			!(flags & PGAIOIP_INFLIGHT))
 			break;
 		pgaio_drain(NULL,
 					/* block = */ true,
