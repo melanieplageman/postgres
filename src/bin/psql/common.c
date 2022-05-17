@@ -1266,6 +1266,8 @@ DescribeQuery(const char *query, double *elapsed_msec)
 
 	if (timing)
 		INSTR_TIME_SET_CURRENT(before);
+	else
+		INSTR_TIME_SET_ZERO(before);
 
 	/*
 	 * To parse the query but not execute it, we prepare it, using the unnamed
@@ -1396,6 +1398,8 @@ ExecQueryAndProcessResults(const char *query,
 
 	if (timing)
 		INSTR_TIME_SET_CURRENT(before);
+	else
+		INSTR_TIME_SET_ZERO(before);
 
 	success = PQsendQuery(pset.db, query);
 
@@ -1689,6 +1693,8 @@ ExecQueryUsingCursor(const char *query, double *elapsed_msec)
 
 	if (timing)
 		INSTR_TIME_SET_CURRENT(before);
+	else
+		INSTR_TIME_SET_ZERO(before);
 
 	/* if we're not in a transaction, start one */
 	if (PQtransactionStatus(pset.db) == PQTRANS_IDLE)
