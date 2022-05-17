@@ -1594,6 +1594,9 @@ tblspc_redo(XLogReaderState *record)
 		 */
 		if (!destroy_tablespace_directories(xlrec->ts_id, true))
 		{
+			/* Close all smgr fds in all backends. */
+			WaitForProcSignalBarrier(EmitProcSignalBarrier(PROCSIGNAL_BARRIER_SMGRRELEASE));
+
 			ResolveRecoveryConflictWithTablespace(xlrec->ts_id);
 
 			/*
