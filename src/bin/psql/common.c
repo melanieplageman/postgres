@@ -1489,6 +1489,8 @@ ExecQueryAndProcessResults(const char *query, double *elapsed_msec, bool *svpt_g
 
 	if (timing)
 		INSTR_TIME_SET_CURRENT(before);
+	else
+		INSTR_TIME_SET_ZERO(before);
 
 	success = PQsendQuery(pset.db, query);
 
