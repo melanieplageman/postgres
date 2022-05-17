@@ -392,6 +392,14 @@ typedef struct PgStat_WalStats
 	PgStat_Counter wal_sync;
 	PgStat_Counter wal_write_time;
 	PgStat_Counter wal_sync_time;
+	PgStat_Counter wal_already_done_unlocked;
+	PgStat_Counter wal_already_done_locked;
+	PgStat_Counter wal_just_wait;
+	PgStat_Counter wal_lock_immed;
+	PgStat_Counter wal_lock_wait;
+	PgStat_Counter wal_partial_wait;
+	PgStat_Counter wal_partial_pad;
+	PgStat_Counter wal_partial_pad_bytes;
 	TimestampTz stat_reset_timestamp;
 } PgStat_WalStats;
 
