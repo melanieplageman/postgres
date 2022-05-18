@@ -704,6 +704,7 @@ RegisterSyncRequest(const FileTag *ftag, SyncRequestType type,
 					bool retryOnError)
 {
 	bool		ret;
+	int			waitcount = 0;
 
 	if (pendingOps != NULL)
 	{
@@ -734,9 +735,16 @@ RegisterSyncRequest(const FileTag *ftag, SyncRequestType type,
 		if (ret || (!ret && !retryOnError))
 			break;
 
-		elog(LOG, "RegisterSyncRequest not registering");
+		if (waitcount >= 5)
+		{
+			elog(WARNING, "RegisterSyncRequest not registering: %d", waitcount);
+			CheckpointerBleat();
+		}
+
 		WaitLatch(NULL, WL_EXIT_ON_PM_DEATH | WL_TIMEOUT, 10,
 				  WAIT_EVENT_REGISTER_SYNC_REQUEST);
+
+		waitcount++;
 	}
 
 	return ret;

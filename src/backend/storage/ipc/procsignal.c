@@ -662,6 +662,12 @@ procsignal_sigusr1_handler(SIGNAL_ARGS)
 	if (CheckProcSignal(PROCSIG_AIO_INTERRUPT))
 		HandleAioInterrupt();
 
+	if (CheckProcSignal(PROCSIG_BACKTRACE))
+	{
+		ereport(LOG, errmsg("backtrace requested"),
+				errbacktrace());
+	}
+
 	if (CheckProcSignal(PROCSIG_RECOVERY_CONFLICT_DATABASE))
 		RecoveryConflictInterrupt(PROCSIG_RECOVERY_CONFLICT_DATABASE);
 

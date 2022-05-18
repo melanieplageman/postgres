@@ -37,6 +37,8 @@ typedef enum
 	PROCSIG_LOG_MEMORY_CONTEXT, /* ask backend to log the memory contexts */
 	PROCSIG_AIO_INTERRUPT,		/* AIO catchup interrupt */
 
+	PROCSIG_BACKTRACE,		/* dump backtrace, very unsafe */
+
 	/* Recovery conflict reasons */
 	PROCSIG_RECOVERY_CONFLICT_DATABASE,
 	PROCSIG_RECOVERY_CONFLICT_TABLESPACE,

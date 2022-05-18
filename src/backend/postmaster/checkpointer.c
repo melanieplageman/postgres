@@ -909,6 +909,17 @@ CheckpointerShmemInit(void)
 	}
 }
 
+void
+CheckpointerBleat(void)
+{
+	if (CheckpointerShmem && CheckpointerShmem->checkpointer_pid != 0)
+	{
+		SendProcSignal(CheckpointerShmem->checkpointer_pid,
+					   PROCSIG_BACKTRACE,
+					   InvalidBackendId);
+	}
+}
+
 /*
  * RequestCheckpoint
  *		Called in backend processes to request a checkpoint
