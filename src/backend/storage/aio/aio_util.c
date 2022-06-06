@@ -14,9 +14,112 @@
 
 #include "postgres.h"
 
+#include "executor/instrument.h"
 #include "storage/aio_internal.h"
 #include "miscadmin.h"
 
+#define IOS_LOOKBACK 800
+
+typedef struct IOMovement
+{
+	instr_time time;
+	int num_ios;
+} IOMovement;
+
+typedef struct rate_manager
+{
+	IOMovement ios[IOS_LOOKBACK];
+	int ios_idx;
+	int num_valid_ios;
+} rate_manager;
+
+static void rate_mgr_append_movement(rate_manager *rate_mgr, IOMovement *movement)
+{
+	IOMovement *target;
+
+	if (rate_mgr->ios_idx == 0)
+		rate_mgr->ios_idx = IOS_LOOKBACK;
+	rate_mgr->ios_idx--;
+
+	target = &rate_mgr->ios[rate_mgr->ios_idx];
+
+	memcpy(target, movement, sizeof(IOMovement));
+
+	if (rate_mgr->num_valid_ios < IOS_LOOKBACK)
+		rate_mgr->num_valid_ios++;
+}
+
+void pgsr_log_io_rate_members(io_rate *io_rate)
+{
+	elog(WARNING, "io_rate->ios: %d. io_rate->duration: microseconds: %f. milliseconds: %f. seconds: %f.",
+			io_rate->ios,
+			INSTR_TIME_GET_MICROSEC(io_rate->duration),
+			INSTR_TIME_GET_MILLISEC(io_rate->duration),
+			INSTR_TIME_GET_DOUBLE(io_rate->duration));
+}
+
+void pgsr_log_io_rate(io_rate *io_rate)
+{
+	elog(WARNING, "io_rate: %f IOs/microsec. %f IOs/millisec. %f IOs/sec.",
+			pgsr_convert_io_rate_microseconds(io_rate),
+			pgsr_convert_io_rate_milliseconds(io_rate),
+			pgsr_convert_io_rate_seconds(io_rate));
+}
+
+static void pgsr_average_rate(rate_manager *rate_mgr, io_rate *io_rate, bool log)
+{
+	instr_time time_difference;
+	int newest;
+	int oldest;
+
+	INSTR_TIME_SET_ZERO(io_rate->duration);
+	io_rate->ios = 0;
+	if (rate_mgr->num_valid_ios <= 0)
+		return;
+
+	INSTR_TIME_SET_ZERO(time_difference);
+
+	newest = rate_mgr->ios_idx;
+	oldest = (rate_mgr->ios_idx + rate_mgr->num_valid_ios - 1) % IOS_LOOKBACK;
+	INSTR_TIME_ACCUM_DIFF(time_difference, rate_mgr->ios[newest].time, rate_mgr->ios[oldest].time);
+
+	if (oldest < newest)
+	{
+		for (int i = newest; i < rate_mgr->num_valid_ios; i++)
+			io_rate->ios += rate_mgr->ios[i].num_ios;
+		for (int i = 0; i < oldest; i++)
+			io_rate->ios += rate_mgr->ios[i].num_ios;
+	}
+	else
+	{
+		for (int i = newest; i < oldest; i++)
+			io_rate->ios += rate_mgr->ios[i].num_ios;
+	}
+
+
+	if (log)
+	{
+		/* elog(WARNING, "----"); */
+
+		/* for (int k = 0; k < IOS_LOOKBACK; k++) */
+		/* { */
+		/* 	if (rate_mgr->ios[k].num_ios < 0) */
+		/* 		elog(WARNING, "index: %d. time: %f, ios: %i", */
+		/* 				k, INSTR_TIME_GET_MICROSEC(rate_mgr->ios[k].time), */
+		/* 				rate_mgr->ios[k].num_ios); */
+		/* } */
+
+		/* elog(WARNING, "newest idx: %d. oldest idx: %d. ios_idx: %d. num_valid_ios: %d. ios lookback: %d.", */
+		/* 		newest, oldest, */
+		/* 		rate_mgr->ios_idx, rate_mgr->num_valid_ios, IOS_LOOKBACK); */
+
+	}
+
+	if (INSTR_TIME_GET_MICROSEC(time_difference) <= 0)
+		return;
+
+	INSTR_TIME_ADD(io_rate->duration, time_difference);
+}
 
 /* typedef is in header */
 typedef struct PgStreamingWriteItem
@@ -392,6 +495,20 @@ struct PgStreamingRead
 
 	bool hit_end;
 
+	rate_manager demand;
+	rate_manager prefetch;
+	io_rate demand_rate;
+
+	bool log;
+
+	double _rate;
+	instr_time last_prefetch_time;
+	uint64 prefetched_last_time;
+	double maximum_volume;
+	double volume;
+
+	bool adjusted_prefetch;
+
 	/* submitted reads */
 	dlist_head issued;
 
@@ -411,13 +528,15 @@ static void pg_streaming_read_complete(PgAioOnCompletionLocalContext *ocb, PgAio
 static void pg_streaming_read_prefetch(PgStreamingRead *pgsr);
 
 PgStreamingRead *
-pg_streaming_read_alloc(uint32 iodepth, uintptr_t pgsr_private,
+pg_streaming_read_alloc(uint32 iodepth, double starting_prefetch_rate,
+						uintptr_t pgsr_private,
 						PgStreamingReadDetermineNextCB determine_next_cb,
 						PgStreamingReadRelease release_cb)
 {
 	PgStreamingRead *pgsr;
 
 	iodepth = Max(Min(iodepth, NBuffers / 128), 1);
+	/* elog(WARNING, "iodepth is %d", iodepth); */
 
 	pgsr = palloc0(offsetof(PgStreamingRead, all_items) +
 				   sizeof(PgStreamingReadItem) * iodepth * 2);
@@ -435,6 +554,28 @@ pg_streaming_read_alloc(uint32 iodepth, uintptr_t pgsr_private,
 	dlist_init(&pgsr->in_order);
 	dlist_init(&pgsr->issued);
 
+	pgsr->demand.ios_idx = 0;
+	pgsr->demand.num_valid_ios = 0;
+
+	pgsr->demand_rate.ios = 0;
+	INSTR_TIME_SET_ZERO(pgsr->demand_rate.duration);
+
+	pgsr->prefetch.ios_idx = 0;
+	pgsr->prefetch.num_valid_ios = 0;
+
+	/* assumed to be IOs/second. convert to microsecond */
+	pgsr->_rate = (double) starting_prefetch_rate / 1000000;
+	pgsr->adjusted_prefetch = false;
+	pgsr->log = false;
+
+	INSTR_TIME_SET_ZERO(pgsr->last_prefetch_time);
+	pgsr->prefetched_last_time = 0;
+	pgsr->volume = 0;
+	pgsr->prefetched_total_count = 0;
+
+	/* don't build up more than this many IOs in remnants */
+	pgsr->maximum_volume = 1000;
+
 	for (int i = 0; i < pgsr->all_items_count; i++)
 	{
 		PgStreamingReadItem *this_read = &pgsr->all_items[i];
@@ -443,6 +584,8 @@ pg_streaming_read_alloc(uint32 iodepth, uintptr_t pgsr_private,
 		this_read->pgsr = pgsr;
 		dlist_push_tail(&pgsr->available, &this_read->node);
 	}
+
+	/* elog(WARNING, "Allocated"); */
 
 	return pgsr;
 }
@@ -550,6 +693,7 @@ pg_streaming_read_prefetch_one(PgStreamingRead *pgsr)
 		pgaio_io_recycle(this_read->aio);
 		dlist_delete_from(&pgsr->in_order, &this_read->sequence_node);
 		dlist_push_tail(&pgsr->available, &this_read->node);
+
 	}
 	else if (status == PGSR_NEXT_NO_IO)
 	{
@@ -563,80 +707,202 @@ pg_streaming_read_prefetch_one(PgStreamingRead *pgsr)
 	}
 	else
 	{
+		IOMovement movement;
+
+		INSTR_TIME_SET_CURRENT(movement.time);
 		Assert(this_read->read_private != 0);
+		movement.num_ios = 1;
+		rate_mgr_append_movement(&pgsr->prefetch, &movement);
 	}
+
 }
 
 static void
 pg_streaming_read_prefetch(PgStreamingRead *pgsr)
 {
-	uint32 min_issue;
+	instr_time time_elapsed;
+	int to_move;
+	int original_to_move;
 
 	if (pgsr->hit_end)
 		return;
 
-	Assert(pgsr->inflight_count <= pgsr->current_window);
-	Assert(pgsr->completed_count <= (pgsr->iodepth_max + pgsr->distance_max));
+	/*
+	 * The prefetch rate may be driven to 0 in an attempt to slow down the
+	 * number of IOs being requested. In this case, set the volume to 0 and
+	 * return.
+	 */
+	if (pgsr->_rate == 0)
+	{
+		pgsr->volume = 0;
+		pgsr->prefetched_last_time = 0;
+		return;
+	}
+
+	INSTR_TIME_SET_ZERO(time_elapsed);
 
 	/*
-	 * XXX: Some issues:
-	 *
-	 * - We should probably do the window calculation based on the number of
-	 *   buffers the user actually requested, i.e. only recompute this
-	 *   whenever pg_streaming_read_get_next() is called. Otherwise we will
-	 *   always read the whole prefetch window.
-	 *
-	 * - The algorithm here is pretty stupid. Should take distance / iodepth
-	 *   properly into account in a distitcn way. Grow slower.
-	 *
-	 * - It'd be good to have a usage dependent iodepth management. After an
-	 *   initial increase, we should only increase further if the the user the
-	 *   window proves too small (i.e. we don't manage to keep 'completed'
-	 *   close to full).
-	 *
-	 * - If most requests don't trigger IO, we should probably reduce the
-	 *   prefetch window.
+	 * If we have prefetched before, calculate how much time has elapsed since
+	 * we last prefetched.
 	 */
-	if (pgsr->current_window < pgsr->iodepth_max)
+	if (!INSTR_TIME_IS_ZERO(pgsr->last_prefetch_time))
 	{
-		if (pgsr->current_window == 0)
-			pgsr->current_window = 4;
-		else
-			pgsr->current_window *= 2;
-
-		if (pgsr->current_window > pgsr->iodepth_max)
-			pgsr->current_window = pgsr->iodepth_max;
-
-		min_issue = 1;
+		instr_time current_time;
+		INSTR_TIME_SET_CURRENT(current_time);
+		INSTR_TIME_ACCUM_DIFF(time_elapsed, current_time, pgsr->last_prefetch_time);
 	}
+
+	pgsr->volume += INSTR_TIME_GET_MICROSEC(time_elapsed) * pgsr->_rate;
+	pgsr->volume = Min(pgsr->volume, pgsr->maximum_volume);
+
+	if (pgsr->volume < 0)
+		to_move = 0;
 	else
+		to_move = (int) pgsr->volume;
+	Assert(to_move >= 0);
+
+	if (to_move == 0 && (pgsr->inflight_count == 0 || pgsr->completed_count == 0))
+		to_move = 1;
+
+	if (pgsr->log)
 	{
-		min_issue = Min(pgsr->iodepth_max, pgsr->current_window / 4);
+		/* elog(WARNING, "%p: to_move: %u. pgsr->_rate: %f. pgsr->volume: %f. pgsr->maximum_volume: %f. time elapsed microsec: %f. prefetched last time: %ld", */
+		/* 		pgsr, to_move, pgsr->_rate, pgsr->volume, pgsr->maximum_volume, INSTR_TIME_GET_MICROSEC(time_elapsed), pgsr->prefetched_last_time); */
+
+		/* elog(WARNING, "inflight: %d. completed: %d.", pgsr->inflight_count, pgsr->completed_count); */
 	}
 
-	Assert(pgsr->inflight_count <= pgsr->current_window);
-	Assert(pgsr->completed_count <= (pgsr->iodepth_max + pgsr->distance_max));
-
-	if (pgsr->completed_count >= pgsr->current_window)
-		return;
-
-	if (pgsr->inflight_count >= pgsr->current_window)
-		return;
-
-	while (!pgsr->hit_end &&
-		   (pgsr->inflight_count < pgsr->current_window) &&
-		   (pgsr->completed_count < pgsr->current_window))
+	if (pgsr->prefetched_total_count > 20 && pgsr->adjusted_prefetch == false)
 	{
+		double demand_rate;
+		pgsr->adjusted_prefetch = true;
+		demand_rate = pg_streaming_read_demand_rate(pgsr, false, 1);
+		if (pgsr->log)
+			elog(WARNING, "setting prefetch rate to %f", demand_rate);
+		pgsr->_rate = demand_rate;
+	}
+
+	original_to_move = to_move;
+
+	/* if (to_move > 0) */
+	INSTR_TIME_SET_CURRENT(pgsr->last_prefetch_time);
+
+	pgsr->prefetched_last_time = to_move;
+
+	while (!pgsr->hit_end && to_move > 0)
+	{
+		uint32 min_issue = 1;
 		pg_streaming_read_prefetch_one(pgsr);
 		pgaio_limit_pending(false, min_issue);
+		to_move--;
 
 		CHECK_FOR_INTERRUPTS();
+
+		/* if (pgsr->hit_end) */
+		/* 	elog(WARNING, "Hit end"); */
 	}
+
+	/* If we didn't prefetch everything */
+	pgsr->prefetched_last_time = original_to_move - to_move;
+	pgsr->volume -= pgsr->prefetched_last_time;
+}
+
+double pgsr_convert_io_rate_microseconds(io_rate *io_rate)
+{
+	if (INSTR_TIME_IS_ZERO(io_rate->duration))
+		return 0;
+
+	return (double) io_rate->ios / INSTR_TIME_GET_MICROSEC(io_rate->duration);
+}
+
+double pgsr_convert_io_rate_milliseconds(io_rate *io_rate)
+{
+	if (INSTR_TIME_IS_ZERO(io_rate->duration))
+		return 0;
+
+	return (double) io_rate->ios / INSTR_TIME_GET_MILLISEC(io_rate->duration);
+}
+
+double pgsr_convert_io_rate_seconds(io_rate *io_rate)
+{
+	if (INSTR_TIME_IS_ZERO(io_rate->duration))
+		return 0;
+
+	return (double) io_rate->ios / INSTR_TIME_GET_DOUBLE(io_rate->duration);
+}
+
+double
+pg_streaming_read_demand_rate(PgStreamingRead *pgsr, bool log, int headroom)
+{
+	io_rate rate;
+	double converted_demand_rate;
+
+	pgsr_average_rate(&pgsr->demand, &rate, log);
+
+	/* if (log) */
+	/* 	pgsr_log_io_rate_members(&rate); */
+
+	rate.ios += headroom;
+
+	converted_demand_rate = pgsr_convert_io_rate_microseconds(&rate);
+
+	if (log)
+	{
+		if (converted_demand_rate <= 0)
+			elog(WARNING, "No demand");
+		else
+		{
+			/* elog(WARNING, "Old demand rate:"); */
+			/* pgsr_log_io_rate(&pgsr->demand_rate); */
+
+			elog(WARNING, "New demand rate");
+			pgsr_log_io_rate(&rate);
+		}
+	}
+
+	memcpy(&pgsr->demand_rate, &rate, sizeof(io_rate));
+
+	return converted_demand_rate;
+}
+
+double
+pg_streaming_read_prefetch_rate(PgStreamingRead *pgsr, bool log)
+{
+	io_rate rate;
+	double converted_prefetch_rate;
+
+	pgsr_average_rate(&pgsr->prefetch, &rate, log);
+
+	/* if (log) */
+	/* 	pgsr_log_io_rate_members(&rate); */
+
+	converted_prefetch_rate = pgsr_convert_io_rate_microseconds(&rate);
+
+	if (log)
+	{
+		if (converted_prefetch_rate <= 0)
+			elog(WARNING, "No prefetching done");
+		else
+		{
+			elog(WARNING, "Prefetch rate:");
+			pgsr_log_io_rate(&rate);
+		}
+	}
+
+	return converted_prefetch_rate;
+}
+
+void pgsr_set_log(PgStreamingRead *pgsr, bool log)
+{
+	pgsr->log = log;
 }
 
 uintptr_t
 pg_streaming_read_get_next(PgStreamingRead *pgsr)
 {
+	IOMovement movement;
+	INSTR_TIME_SET_CURRENT(movement.time);
+
 	if (pgsr->prefetched_total_count == 0)
 	{
 		pg_streaming_read_prefetch(pgsr);
@@ -645,7 +911,7 @@ pg_streaming_read_get_next(PgStreamingRead *pgsr)
 
 	if (dlist_is_empty(&pgsr->in_order))
 	{
-		Assert(pgsr->hit_end);
+		/* Assert(pgsr->hit_end); */
 		return 0;
 	}
 	else
@@ -675,6 +941,9 @@ pg_streaming_read_get_next(PgStreamingRead *pgsr)
 		pgsr->completed_count--;
 		dlist_push_tail(&pgsr->available, &this_read->node);
 		pg_streaming_read_prefetch(pgsr);
+
+		movement.num_ios = 1;
+		rate_mgr_append_movement(&pgsr->demand, &movement);
 
 		return ret;
 	}

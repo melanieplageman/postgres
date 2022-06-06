@@ -16,20 +16,25 @@
 #include <unistd.h>
 
 #include "access/relation.h"
+#include "executor/instrument.h"
 #include "fmgr.h"
 #include "miscadmin.h"
 #include "storage/aio.h"
 #include "storage/bufmgr.h"
 #include "storage/bufpage.h"
+#include "storage/latch.h"
 #include "storage/smgr.h"
 #include "utils/acl.h"
 #include "utils/builtins.h"
 #include "utils/lsyscache.h"
 #include "utils/rel.h"
+#include "utils/wait_event.h"
 
 PG_MODULE_MAGIC;
 
 PG_FUNCTION_INFO_V1(pg_prewarm);
+
+PG_FUNCTION_INFO_V1(slow_consumer);
 
 typedef enum
 {
@@ -143,6 +148,142 @@ prewarm_smgr_next(uintptr_t pgsr_private, PgAioInProgress *aio, uintptr_t *read_
 static void
 prewarm_smgr_release(uintptr_t pgsr_private, uintptr_t read_private)
 {
+}
+
+// slow_consumer(regclass, fork, first_block, last_block, delay, starting_prefetch_rate)
+Datum slow_consumer(PG_FUNCTION_ARGS)
+{
+	text	   *forkName;
+	int64 block;
+	int64		first_block;
+	int64		last_block;
+	int64		nblocks;
+	int64		blocks_done;
+	Relation	rel;
+	ForkNumber	forkNumber;
+	char	   *forkString;
+	Oid relOid;
+	float8		delay;
+	float8		starting_prefetch_rate;
+	AclResult	aclresult;
+	PgStreamingRead *pgsr;
+	prefetch p;
+	bool log;
+
+	log = true;
+
+	blocks_done = 0;
+	if (PG_ARGISNULL(0))
+		ereport(ERROR,
+				(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+				 errmsg("relation cannot be null")));
+
+	relOid = PG_GETARG_OID(0);
+
+	forkName = PG_GETARG_TEXT_PP(1);
+	forkString = text_to_cstring(forkName);
+	forkNumber = forkname_to_number(forkString);
+
+	/* Open relation and check privileges. */
+	rel = relation_open(relOid, AccessShareLock);
+	aclresult = pg_class_aclcheck(relOid, GetUserId(), ACL_SELECT);
+	if (aclresult != ACLCHECK_OK)
+		aclcheck_error(aclresult, get_relkind_objtype(rel->rd_rel->relkind), get_rel_name(relOid));
+
+	if (!smgrexists(RelationGetSmgr(rel), forkNumber))
+		ereport(ERROR,
+				(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+				 errmsg("fork \"%s\" does not exist for this relation",
+						forkString)));
+
+	nblocks = RelationGetNumberOfBlocksInFork(rel, forkNumber);
+	if (PG_ARGISNULL(2))
+		first_block = 0;
+	else
+	{
+		first_block = PG_GETARG_INT64(2);
+		if (first_block < 0 || first_block >= nblocks)
+			ereport(ERROR,
+					(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+					 errmsg("starting block number must be between 0 and %lld",
+							(long long) (nblocks - 1))));
+	}
+	if (PG_ARGISNULL(3))
+		last_block = nblocks - 1;
+	else
+	{
+		last_block = PG_GETARG_INT64(3);
+		if (last_block < 0 || last_block >= nblocks)
+			ereport(ERROR,
+					(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+					 errmsg("ending block number must be between 0 and %lld",
+							(long long) (nblocks - 1))));
+	}
+
+	delay = PG_GETARG_FLOAT8(4);
+
+	p.rel = rel;
+	p.forkNumber = forkNumber;
+	p.curblock = 0;
+	p.lastblock = last_block;
+	p.bbs = NIL;
+
+	starting_prefetch_rate = PG_GETARG_FLOAT8(5);
+
+	// TODO: turn delay into a consumption rate bucket
+	if (log)
+	{
+		double pr_sec = (double) starting_prefetch_rate;
+		double pr_millisec = (double) starting_prefetch_rate / 1000;
+		double pr_microsec = (double) starting_prefetch_rate / 1000000;
+
+		elog(WARNING, "Starting prefetch rate");
+		elog(WARNING, "io_rate: %f IOs/microsec. %f IOs/millisec. %f IOs/sec.",
+				pr_microsec, pr_millisec, pr_sec);
+	}
+
+	pgsr = pg_streaming_read_alloc(512, starting_prefetch_rate, (uintptr_t) &p,
+									prewarm_buffer_next,
+									prewarm_buffer_release);
+
+
+	pgsr_set_log(pgsr, true);
+
+	for (block = first_block; block <= last_block; ++block)
+	{
+		Buffer buf;
+
+		CHECK_FOR_INTERRUPTS();
+
+		buf = (Buffer) pg_streaming_read_get_next(pgsr);
+
+		if (!BufferIsValid(buf))
+		{
+			if (block == last_block)
+				break;
+			else
+				elog(ERROR, "prefetch ended early");
+		}
+
+		ReleaseBuffer(buf);
+
+		++blocks_done;
+		if (delay == 0)
+			continue;
+		(void) WaitLatch(MyLatch,
+						 WL_LATCH_SET | WL_TIMEOUT | WL_EXIT_ON_PM_DEATH,
+						 delay,/* in ms */
+						 WAIT_EVENT_PG_SLEEP);
+		ResetLatch(MyLatch);
+	}
+
+	pg_streaming_read_demand_rate(pgsr, log, 0);
+	pg_streaming_read_prefetch_rate(pgsr, log);
+
+	pg_streaming_read_free(pgsr);
+	relation_close(rel, AccessShareLock);
+
+	PG_RETURN_INT64(blocks_done);
 }
 
 /*
@@ -318,7 +459,8 @@ pg_prewarm(PG_FUNCTION_ARGS)
 		p.lastblock = last_block;
 		p.bbs = NIL;
 
-		pgsr = pg_streaming_read_alloc(512, (uintptr_t) &p,
+		elog(WARNING, "first block is %ld. last_block is %ld", first_block, last_block);
+		pgsr = pg_streaming_read_alloc(512, 200, (uintptr_t) &p,
 									   prewarm_buffer_next,
 									   prewarm_buffer_release);
 
@@ -354,7 +496,7 @@ pg_prewarm(PG_FUNCTION_ARGS)
 		p.lastblock = last_block;
 		p.bbs = NIL;
 
-		pgsr = pg_streaming_read_alloc(512, (uintptr_t) &p,
+		pgsr = pg_streaming_read_alloc(512, 200, (uintptr_t) &p,
 									   prewarm_smgr_next,
 									   prewarm_smgr_release);
 

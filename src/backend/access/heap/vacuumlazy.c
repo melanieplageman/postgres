@@ -938,7 +938,7 @@ lazy_scan_heap(LVRelState *vacrel)
 	{
 		int iodepth = Max(Min(128, NBuffers / 128), 1);
 
-		pgsr = pg_streaming_read_alloc(iodepth, (uintptr_t) vacrel,
+		pgsr = pg_streaming_read_alloc(iodepth, 200, (uintptr_t) vacrel,
 									   vacuum_scan_pgsr_next,
 									   vacuum_pgsr_release);
 	}
@@ -2582,7 +2582,7 @@ lazy_vacuum_heap_rel(LVRelState *vacrel)
 	vhs.vacrel = vacrel;
 	vhs.last_block = InvalidBlockNumber;
 	vhs.next_tupindex = 0;
-	pgsr = pg_streaming_read_alloc(512, (uintptr_t) &vhs,
+	pgsr = pg_streaming_read_alloc(512, 200, (uintptr_t) &vhs,
 								   vacuum_heap_pgsr_next,
 								   vacuum_pgsr_release);
 

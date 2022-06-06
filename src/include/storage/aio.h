@@ -15,6 +15,7 @@
 #define AIO_H
 
 #include "common/relpath.h"
+#include "executor/instrument.h"
 #include "storage/block.h"
 #include "storage/buf.h"
 #include "storage/relfilenode.h"
@@ -22,6 +23,19 @@
 
 typedef struct PgAioInProgress PgAioInProgress;
 typedef struct PgAioBounceBuffer PgAioBounceBuffer;
+
+typedef struct io_rate
+{
+	int ios;
+	instr_time duration;
+} io_rate;
+
+extern void pgsr_log_io_rate(io_rate *io_rate);
+extern void pgsr_log_io_rate_members(io_rate *io_rate);
+// TODO: macro-ize
+extern double pgsr_convert_io_rate_microseconds(io_rate *io_rate);
+extern double pgsr_convert_io_rate_milliseconds(io_rate *io_rate);
+extern double pgsr_convert_io_rate_seconds(io_rate *io_rate);
 
 typedef struct PgAioIoRef
 {
@@ -279,10 +293,19 @@ typedef enum PgStreamingReadNextStatus
 
 typedef PgStreamingReadNextStatus (*PgStreamingReadDetermineNextCB)(uintptr_t pgsr_private, PgAioInProgress *aio, uintptr_t *read_private);
 typedef void (*PgStreamingReadRelease)(uintptr_t pgsr_private, uintptr_t read_private);
-extern PgStreamingRead *pg_streaming_read_alloc(uint32 iodepth, uintptr_t pgsr_private,
+extern PgStreamingRead *pg_streaming_read_alloc(uint32 iodepth, double starting_prefetch_rate,
+												uintptr_t pgsr_private,
 												PgStreamingReadDetermineNextCB determine_next_cb,
 												PgStreamingReadRelease release_cb);
 extern void pg_streaming_read_free(PgStreamingRead *pgsr);
 extern uintptr_t pg_streaming_read_get_next(PgStreamingRead *pgsr);
+
+extern void pg_streaming_read_cleanup_demand_rate(PgStreamingRead *pgsr);
+
+extern double pg_streaming_read_demand_rate(PgStreamingRead *pgsr, bool log, int headroom);
+
+extern double pg_streaming_read_prefetch_rate(PgStreamingRead *pgsr, bool log);
+
+extern void pgsr_set_log(PgStreamingRead *pgsr, bool log);
 
 #endif							/* AIO_H */
