@@ -14,6 +14,7 @@
 #ifndef AIO_H
 #define AIO_H
 
+#include "executor/instrument.h"
 #include "common/relpath.h"
 #include "storage/block.h"
 #include "storage/buf.h"
@@ -21,6 +22,7 @@
 
 
 typedef struct PgAioInProgress PgAioInProgress;
+typedef struct PgAioPerBackend PgAioPerBackend;
 typedef struct PgAioBounceBuffer PgAioBounceBuffer;
 
 typedef struct PgAioIoRef
@@ -100,9 +102,18 @@ extern void pgaio_io_resowner_leak(struct dlist_node *aio_node);
 typedef struct PgAioOnCompletionLocalContext PgAioOnCompletionLocalContext;
 typedef void (*PgAioOnCompletionLocalCB)(PgAioOnCompletionLocalContext *ocb, PgAioInProgress *io);
 
+
 struct PgAioOnCompletionLocalContext
 {
 	PgAioOnCompletionLocalCB callback;
+};
+
+typedef struct PgAioOnConsumptionLocalContext PgAioOnConsumptionLocalContext;
+typedef void (*PgAioOnConsumptionLocalGroupCB)(PgAioOnConsumptionLocalContext *ocb, PgAioPerBackend *backend_aio, int num_ios, instr_time consume_time);
+
+struct PgAioOnConsumptionLocalContext
+{
+	PgAioOnConsumptionLocalGroupCB callback;
 };
 
 #define pgaio_ocb_container(type, membername, ptr)												\
@@ -110,7 +121,14 @@ struct PgAioOnCompletionLocalContext
 	 AssertVariableIsOfTypeMacro(((type *) NULL)->membername, PgAioOnCompletionLocalContext),	\
 	 ((type *) ((char *) (ptr) - offsetof(type, membername))))
 
+#define pgaio_group_ocb_container(type, membername, ptr)												\
+	(AssertVariableIsOfTypeMacro(ptr, PgAioOnConsumptionLocalContext *),							\
+	 AssertVariableIsOfTypeMacro(((type *) NULL)->membername, PgAioOnConsumptionLocalContext),	\
+	 ((type *) ((char *) (ptr) - offsetof(type, membername))))
+
 extern void pgaio_io_on_completion_local(PgAioInProgress *io, PgAioOnCompletionLocalContext *ocb);
+
+extern void pgaio_io_on_consumption_local(PgAioOnConsumptionLocalContext *ocb);
 
 extern void pgaio_io_wait(PgAioInProgress *io);
 extern void pgaio_io_wait_ref(PgAioIoRef *ref, bool call_local);

@@ -16,6 +16,7 @@
 #ifndef AIO_INTERNAL_H
 #define AIO_INTERNAL_H
 
+#include "executor/instrument.h"
 #include "lib/ilist.h"
 #include "port/atomics.h"
 #include "port/pg_iovec.h"
@@ -228,6 +229,8 @@ struct PgAioInProgress
 
 	uint64 generation;
 
+	instr_time submit_time;
+	instr_time consume_time;
 	/*
 	 * Data necessary for basic IO types (PgAioOp).
 	 *
@@ -486,6 +489,7 @@ typedef struct PgAioPerBackend
 	dlist_head local_completed;
 	uint32 local_completed_count;
 
+	PgAioOnConsumptionLocalContext *on_consumption_local;
 	/*
 	 * IOs where the completion was received in another backend.
 	 *

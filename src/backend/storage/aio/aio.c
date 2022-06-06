@@ -208,6 +208,7 @@ AioShmemInit(void)
 			dlist_init(&bs->issued_abandoned);
 			pg_atomic_init_u32(&bs->inflight_count, 0);
 			dlist_init(&bs->reaped);
+			bs->on_consumption_local = NULL;
 
 			dlist_init(&bs->foreign_completed);
 			SpinLockInit(&bs->foreign_completed_lock);
@@ -390,6 +391,7 @@ pgaio_postmaster_child_init(void)
 	my_aio->executed_total_count = 0;
 	my_aio->issued_total_count = 0;
 	my_aio->submissions_total_count = 0;
+	my_aio->on_consumption_local = NULL;
 	my_aio->foreign_completed_total_count = 0;
 	my_aio->retry_total_count = 0;
 
@@ -732,6 +734,8 @@ pgaio_broadcast_ios(PgAioInProgress **ios, int nios)
 static void
 pgaio_call_local_callbacks(bool in_error)
 {
+	int num_ios;
+	instr_time consume_time = 0;
 	if (my_aio->local_completed_count != 0)
 	{
 		/*
@@ -746,13 +750,18 @@ pgaio_call_local_callbacks(bool in_error)
 		if (aio_local_callback_depth > 0)
 			return;
 
+		num_ios = my_aio->local_completed_count;
 		while (!dlist_is_empty(&my_aio->local_completed))
 		{
 			dlist_node *node = dlist_pop_head_node(&my_aio->local_completed);
 			PgAioInProgress *io = dlist_container(PgAioInProgress, io_node, node);
+			consume_time = (consume_time + io->consume_time) / 2;
 
 			pgaio_io_call_local_callback(io, in_error);
 		}
+		/* consume_time = consume_time / num_ios; */
+		if (my_aio->on_consumption_local)
+			my_aio->on_consumption_local->callback(my_aio->on_consumption_local, my_aio, num_ios, consume_time);
 	}
 }
 
@@ -1512,6 +1521,7 @@ pgaio_io_prepare_submit(PgAioInProgress *io, uint32 ring)
 
 		cur->ring = ring;
 		cur->submitter_id = my_aio_id;
+		INSTR_TIME_SET_CURRENT(cur->submit_time);
 
 		pg_write_barrier();
 
@@ -1687,6 +1697,12 @@ pgaio_io_on_completion_local(PgAioInProgress *io, PgAioOnCompletionLocalContext 
 }
 
 void
+pgaio_io_on_consumption_local(PgAioOnConsumptionLocalContext *ocb)
+{
+	my_aio->on_consumption_local = ocb;
+}
+
+void
 pgaio_io_wait_ref(PgAioIoRef *ref, bool call_local)
 {
 	pgaio_io_wait_ref_int(ref, /* call_shared = */ true, call_local);
@@ -1835,12 +1851,17 @@ wait_ref_out:
 
 	if (am_owner && call_local && !(flags & PGAIOIP_LOCAL_CALLBACK_CALLED))
 	{
+		instr_time consume_time;
 		if (flags & PGAIOIP_FOREIGN_DONE)
 			pgaio_transfer_foreign_to_local();
 
 		Assert(!(io->flags & PGAIOIP_FOREIGN_DONE));
 
+		consume_time = io->consume_time;
 		pgaio_io_call_local_callback(io, false);
+		// TODO: on_consumption_local is non-NULL in cases when the callback hasn't been set or has been freed -- how is this?
+		if (my_aio->on_consumption_local && my_aio->local_completed_count > 0)
+			my_aio->on_consumption_local->callback(my_aio->on_consumption_local, my_aio, 1, consume_time);
 	}
 }
 

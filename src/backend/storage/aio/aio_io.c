@@ -294,6 +294,7 @@ pgaio_process_io_rw_completion(PgAioInProgress *myio,
 void
 pgaio_process_io_completion(PgAioInProgress *io, int result)
 {
+	int consumption_time;
 	int running_result;
 	PgAioInProgress *cur = io;
 	bool first = true;
@@ -345,6 +346,7 @@ pgaio_process_io_completion(PgAioInProgress *io, int result)
 	else
 		running_result = result;
 
+	INSTR_TIME_SET_CURRENT(consumption_time);
 	while (cur)
 	{
 		PgAioInProgress *next;
@@ -412,6 +414,7 @@ Assert(result <= 0);
 		new_flags |= PGAIOIP_REAPED;
 
 		WRITE_ONCE_F(cur->flags) = new_flags;
+		cur->consume_time = consumption_time;
 
 		dlist_push_tail(&my_aio->reaped, &cur->io_node);
 

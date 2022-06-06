@@ -16,6 +16,7 @@
 
 #include "storage/aio_internal.h"
 #include "miscadmin.h"
+#include "executor/instrument.h"
 
 
 /* typedef is in header */
@@ -80,6 +81,7 @@ pg_streaming_write_alloc(uint32 iodepth, void *private_data)
 
 	pgsw->iodepth = iodepth;
 	pgsw->private_data = private_data;
+	pgaio_io_on_consumption_local(NULL);
 
 	/*
 	 * Submit on a regular basis. Otherwise we'll always have to wait for some
@@ -349,6 +351,12 @@ pg_streaming_write_free(PgStreamingWrite *pgsw)
 	pfree(pgsw);
 }
 
+typedef struct IOMovement
+{
+	int num_ios;
+	int time;
+} IOMovement;
+
 typedef struct PgStreamingReadItem
 {
 	/* membership in PgStreamingRead->issued, PgStreamingRead->available */
@@ -366,6 +374,8 @@ typedef struct PgStreamingReadItem
 	bool valid;
 	uintptr_t read_private;
 } PgStreamingReadItem;
+
+#define DEMAND_RATE_LOOKBACK 10
 
 struct PgStreamingRead
 {
@@ -392,6 +402,13 @@ struct PgStreamingRead
 
 	bool hit_end;
 
+	PgAioOnConsumptionLocalContext on_consumption;
+	IOMovement consumptions[DEMAND_RATE_LOOKBACK];
+	IOMovement *consumption;
+	instr_time consumption_time;
+	int consumption_index;
+	int len_consumptions;
+
 	/* submitted reads */
 	dlist_head issued;
 
@@ -409,6 +426,8 @@ struct PgStreamingRead
 
 static void pg_streaming_read_complete(PgAioOnCompletionLocalContext *ocb, PgAioInProgress *io);
 static void pg_streaming_read_prefetch(PgStreamingRead *pgsr);
+
+static void pg_streaming_read_record_consume(PgAioOnConsumptionLocalContext *ocb, PgAioPerBackend *backend_aios, int num_ios, instr_time consume_time);
 
 PgStreamingRead *
 pg_streaming_read_alloc(uint32 iodepth, uintptr_t pgsr_private,
@@ -429,11 +448,18 @@ pg_streaming_read_alloc(uint32 iodepth, uintptr_t pgsr_private,
 	pgsr->determine_next_cb = determine_next_cb;
 	pgsr->release_cb = release_cb;
 
+	pgsr->consumption_index = 0;
+	pgsr->consumption = pgsr->consumptions;
+	pgsr->len_consumptions = DEMAND_RATE_LOOKBACK - 1;
+	pgsr->on_consumption.callback = pg_streaming_read_record_consume;
+
 	pgsr->current_window = 0;
 
 	dlist_init(&pgsr->available);
 	dlist_init(&pgsr->in_order);
 	dlist_init(&pgsr->issued);
+
+	pgaio_io_on_consumption_local(&pgsr->on_consumption);
 
 	for (int i = 0; i < pgsr->all_items_count; i++)
 	{
@@ -482,8 +508,23 @@ pg_streaming_read_free(PgStreamingRead *pgsr)
 }
 
 static void
+pg_streaming_read_record_consume(PgAioOnConsumptionLocalContext *ocb, PgAioPerBackend *backend_aios, int num_ios, instr_time consume_time)
+{
+	PgStreamingRead *pgsr = pgaio_group_ocb_container(PgStreamingRead, on_consumption, ocb);
+
+	pgsr->consumption->num_ios = num_ios;
+	pgsr->consumption->time = consume_time;
+	elog(WARNING, "%d IOs consumed at %ld", num_ios, consume_time);
+
+	pgsr->consumption_index = (pgsr->consumption_index + 1) % pgsr->len_consumptions;
+	pgsr->consumption = &pgsr->consumptions[pgsr->consumption_index];
+}
+
+static void
 pg_streaming_read_complete(PgAioOnCompletionLocalContext *ocb, PgAioInProgress *io)
 {
+	// the ocb passed in is the one which is set as PgAioInProgress->on_completion_local in pgaio_io_on_completion_local()
+	// from ocb that was passed in, return on_completion member, which is a PgStreamingReadItem
 	PgStreamingReadItem *this_read = pgaio_ocb_container(PgStreamingReadItem, on_completion, ocb);
 	PgStreamingRead *pgsr = this_read->pgsr;
 
@@ -494,6 +535,12 @@ pg_streaming_read_complete(PgAioOnCompletionLocalContext *ocb, PgAioInProgress *
 				errhidestmt(true),
 				errhidecontext(true));
 #endif
+
+	int latency = io->consume_time;
+	INSTR_TIME_SUBTRACT(latency, io->submit_time);
+	/* elog(WARNING, "inflight: %d. completed: %d. latency: %f microseconds", */
+	/* 		pgsr->inflight_count, pgsr->completed_count, */
+	/* 		INSTR_TIME_GET_MICROSEC(latency)); */
 
 	Assert(this_read->in_progress);
 	Assert(this_read->valid);
