@@ -1602,7 +1602,9 @@ heap_getnext(TableScanDesc sscan, ScanDirection direction)
 				   scan->rs_base.rs_nkeys, scan->rs_base.rs_key);
 
 	if (scan->rs_ctup.t_data == NULL)
+	{
 		return NULL;
+	}
 
 	/*
 	 * if we get here it means we have a new current scan tuple, so point to
@@ -1628,6 +1630,13 @@ heap_getnextslot(TableScanDesc sscan, ScanDirection direction, TupleTableSlot *s
 
 	if (scan->rs_ctup.t_data == NULL)
 	{
+		if (scan->pgsr)
+		{
+			double demand_rate = pg_streaming_read_demand_rate(scan->pgsr);
+			if (demand_rate > 0)
+				elog(WARNING, "Demand rate is %f ios/ms", demand_rate);
+			pg_streaming_read_cleanup_demand_rate(scan->pgsr);
+		}
 		ExecClearTuple(slot);
 		return false;
 	}

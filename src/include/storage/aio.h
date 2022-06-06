@@ -285,4 +285,7 @@ extern PgStreamingRead *pg_streaming_read_alloc(uint32 iodepth, uintptr_t pgsr_p
 extern void pg_streaming_read_free(PgStreamingRead *pgsr);
 extern uintptr_t pg_streaming_read_get_next(PgStreamingRead *pgsr);
 
+extern double pg_streaming_read_demand_rate(PgStreamingRead *pgsr);
+extern void pg_streaming_read_cleanup_demand_rate(PgStreamingRead *pgsr);
+
 #endif							/* AIO_H */

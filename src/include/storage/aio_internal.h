@@ -16,6 +16,7 @@
 #ifndef AIO_INTERNAL_H
 #define AIO_INTERNAL_H
 
+#include "executor/instrument.h"
 #include "lib/ilist.h"
 #include "port/atomics.h"
 #include "port/pg_iovec.h"
@@ -177,6 +178,8 @@ struct PgAioInProgress
 
 	/* submitter can differ from owner on retry */
 	uint32 submitter_id;
+
+	instr_time submit_time;
 
 	/* the IOs result, depends on operation. E.g. the length of a read */
 	int32 result;

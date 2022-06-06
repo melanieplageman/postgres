@@ -1512,6 +1512,7 @@ pgaio_io_prepare_submit(PgAioInProgress *io, uint32 ring)
 
 		cur->ring = ring;
 		cur->submitter_id = my_aio_id;
+		INSTR_TIME_SET_CURRENT(cur->submit_time);
 
 		pg_write_barrier();
 

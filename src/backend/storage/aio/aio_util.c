@@ -14,6 +14,7 @@
 
 #include "postgres.h"
 
+#include "executor/instrument.h"
 #include "storage/aio_internal.h"
 #include "miscadmin.h"
 
@@ -349,6 +350,9 @@ pg_streaming_write_free(PgStreamingWrite *pgsw)
 	pfree(pgsw);
 }
 
+#define DEMAND_RATE_LOOKBACK 20
+#define CONSUMPTION_LOOKBACK 200
+
 typedef struct PgStreamingReadItem
 {
 	/* membership in PgStreamingRead->issued, PgStreamingRead->available */
@@ -392,6 +396,15 @@ struct PgStreamingRead
 
 	bool hit_end;
 
+	instr_time consumptions[CONSUMPTION_LOOKBACK];
+	int consumption_index;
+	int len_consumptions;
+
+	double demand_rates[DEMAND_RATE_LOOKBACK];
+	int demand_rate_index;
+	int len_demand_rates;
+
+
 	/* submitted reads */
 	dlist_head issued;
 
@@ -434,6 +447,12 @@ pg_streaming_read_alloc(uint32 iodepth, uintptr_t pgsr_private,
 	dlist_init(&pgsr->available);
 	dlist_init(&pgsr->in_order);
 	dlist_init(&pgsr->issued);
+
+	pgsr->consumption_index = 0;
+	pgsr->len_consumptions = CONSUMPTION_LOOKBACK;
+
+	pgsr->demand_rate_index = 0;
+	pgsr->len_demand_rates = DEMAND_RATE_LOOKBACK;
 
 	for (int i = 0; i < pgsr->all_items_count; i++)
 	{
@@ -634,9 +653,72 @@ pg_streaming_read_prefetch(PgStreamingRead *pgsr)
 	}
 }
 
+double
+pg_streaming_read_demand_rate(PgStreamingRead *pgsr)
+{
+	double avg_demand_rate = pgsr->demand_rates[0];
+	for (int j = 1; j < pgsr->len_demand_rates; j++)
+	{
+		double current = pgsr->demand_rates[j];
+		if (current == 0)
+			break;
+		avg_demand_rate = (avg_demand_rate + current) / 2;
+	}
+	return avg_demand_rate;
+}
+
+void
+pg_streaming_read_cleanup_demand_rate(PgStreamingRead *pgsr)
+{
+	memset(pgsr->demand_rates, 0, sizeof(double) * pgsr->len_demand_rates);
+	memset(pgsr->consumptions, 0, sizeof(instr_time) * pgsr->len_consumptions);
+}
+
+static
+double pg_streaming_read_consumption_to_demand(PgStreamingRead *pgsr)
+{
+	double demand_rate;
+	instr_time time_elapsed;
+	INSTR_TIME_SET_ZERO(time_elapsed);
+	for (int i = 0; i < pgsr->len_consumptions - 1; i++)
+	{
+		instr_time newer = pgsr->consumptions[i + 1];
+		instr_time older = pgsr->consumptions[i];
+		if (newer == 0 || older == 0)
+			break;
+
+		INSTR_TIME_ACCUM_DIFF(time_elapsed, newer, older);
+	}
+
+	if (time_elapsed > 0)
+		demand_rate = (double) pgsr->len_consumptions / INSTR_TIME_GET_MILLISEC(time_elapsed);
+	else
+		demand_rate = 0;
+	/* elog(WARNING, "demand rate is %f. time_elapsed is %ld", demand_rate, time_elapsed); */
+	return demand_rate;
+}
+
 uintptr_t
 pg_streaming_read_get_next(PgStreamingRead *pgsr)
 {
+	INSTR_TIME_SET_CURRENT(pgsr->consumptions[pgsr->consumption_index]);
+
+	if (pgsr->consumption_index == pgsr->len_consumptions - 1)
+	{
+		double demand_rate = pg_streaming_read_consumption_to_demand(pgsr);
+		pgsr->demand_rates[pgsr->demand_rate_index] = demand_rate;
+		if (pgsr->demand_rate_index == pgsr->len_demand_rates - 1)
+		{
+			double avg_demand_rate = pg_streaming_read_demand_rate(pgsr);
+			memset(pgsr->demand_rates, 0, sizeof(double) * pgsr->len_demand_rates);
+			pgsr->demand_rates[0] = avg_demand_rate;
+			pgsr->demand_rate_index = 0;
+		}
+		pgsr->demand_rate_index++;
+	}
+
+	pgsr->consumption_index = (pgsr->consumption_index + 1) % (pgsr->len_consumptions);
+
 	if (pgsr->prefetched_total_count == 0)
 	{
 		pg_streaming_read_prefetch(pgsr);
