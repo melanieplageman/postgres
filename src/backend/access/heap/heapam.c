@@ -1633,9 +1633,9 @@ heap_getnextslot(TableScanDesc sscan, ScanDirection direction, TupleTableSlot *s
 		if (scan->pgsr)
 		{
 			double demand_rate = pg_streaming_read_demand_rate(scan->pgsr);
+			double prefetch_rate = pg_streaming_read_prefetch_rate(scan->pgsr);
 			if (demand_rate > 0)
-				elog(WARNING, "Demand rate is %f ios/ms", demand_rate);
-			pg_streaming_read_cleanup_demand_rate(scan->pgsr);
+				elog(WARNING, "Demand rate is %f ios/ms. Prefetch rate is %f ios/ms", demand_rate, prefetch_rate);
 		}
 		ExecClearTuple(slot);
 		return false;

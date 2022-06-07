@@ -18,6 +18,27 @@
 #include "storage/aio_internal.h"
 #include "miscadmin.h"
 
+#define IOS_LOOKBACK 200
+#define RATE_LOOKBACK 20
+
+typedef struct IOMovement
+{
+	instr_time time;
+	int num_ios;
+} IOMovement;
+
+typedef struct rate_manager
+{
+	IOMovement ios[IOS_LOOKBACK];
+	int ios_idx;
+	int len_ios;
+
+	double rates[RATE_LOOKBACK];
+	int rate_idx;
+	int len_rates;
+} rate_manager;
+
+static void rate_mgr_roll_rate(rate_manager *rate_mgr);
 
 /* typedef is in header */
 typedef struct PgStreamingWriteItem
@@ -350,9 +371,6 @@ pg_streaming_write_free(PgStreamingWrite *pgsw)
 	pfree(pgsw);
 }
 
-#define DEMAND_RATE_LOOKBACK 20
-#define CONSUMPTION_LOOKBACK 200
-
 typedef struct PgStreamingReadItem
 {
 	/* membership in PgStreamingRead->issued, PgStreamingRead->available */
@@ -396,14 +414,8 @@ struct PgStreamingRead
 
 	bool hit_end;
 
-	instr_time consumptions[CONSUMPTION_LOOKBACK];
-	int consumption_index;
-	int len_consumptions;
-
-	double demand_rates[DEMAND_RATE_LOOKBACK];
-	int demand_rate_index;
-	int len_demand_rates;
-
+	rate_manager demand;
+	rate_manager prefetch;
 
 	/* submitted reads */
 	dlist_head issued;
@@ -431,6 +443,7 @@ pg_streaming_read_alloc(uint32 iodepth, uintptr_t pgsr_private,
 	PgStreamingRead *pgsr;
 
 	iodepth = Max(Min(iodepth, NBuffers / 128), 1);
+	iodepth = 1;
 
 	pgsr = palloc0(offsetof(PgStreamingRead, all_items) +
 				   sizeof(PgStreamingReadItem) * iodepth * 2);
@@ -448,11 +461,17 @@ pg_streaming_read_alloc(uint32 iodepth, uintptr_t pgsr_private,
 	dlist_init(&pgsr->in_order);
 	dlist_init(&pgsr->issued);
 
-	pgsr->consumption_index = 0;
-	pgsr->len_consumptions = CONSUMPTION_LOOKBACK;
+	pgsr->demand.ios_idx = 0;
+	pgsr->demand.len_ios = IOS_LOOKBACK;
 
-	pgsr->demand_rate_index = 0;
-	pgsr->len_demand_rates = DEMAND_RATE_LOOKBACK;
+	pgsr->demand.rate_idx = 0;
+	pgsr->demand.len_rates = RATE_LOOKBACK;
+
+	pgsr->prefetch.ios_idx = 0;
+	pgsr->prefetch.len_ios = IOS_LOOKBACK;
+
+	pgsr->prefetch.rate_idx = 0;
+	pgsr->prefetch.len_rates = RATE_LOOKBACK;
 
 	for (int i = 0; i < pgsr->all_items_count; i++)
 	{
@@ -584,12 +603,14 @@ pg_streaming_read_prefetch_one(PgStreamingRead *pgsr)
 	{
 		Assert(this_read->read_private != 0);
 	}
+
 }
 
 static void
 pg_streaming_read_prefetch(PgStreamingRead *pgsr)
 {
 	uint32 min_issue;
+	int num_ios = 0;
 
 	if (pgsr->hit_end)
 		return;
@@ -648,76 +669,93 @@ pg_streaming_read_prefetch(PgStreamingRead *pgsr)
 	{
 		pg_streaming_read_prefetch_one(pgsr);
 		pgaio_limit_pending(false, min_issue);
+		num_ios++;
 
 		CHECK_FOR_INTERRUPTS();
 	}
+
+	INSTR_TIME_SET_CURRENT(pgsr->prefetch.ios[pgsr->prefetch.ios_idx].time);
+	pgsr->prefetch.ios[pgsr->prefetch.ios_idx].num_ios = num_ios;
+	rate_mgr_roll_rate(&pgsr->prefetch);
+}
+
+static double
+pgsr_avg_rate(double *rates, int len)
+{
+	double avg_rate = rates[0];
+	for (int j = 1; j < len; j++)
+	{
+		double current = rates[j];
+		if (current == 0)
+			break;
+		avg_rate = (avg_rate + current) / 2;
+	}
+	return avg_rate;
 }
 
 double
 pg_streaming_read_demand_rate(PgStreamingRead *pgsr)
 {
-	double avg_demand_rate = pgsr->demand_rates[0];
-	for (int j = 1; j < pgsr->len_demand_rates; j++)
-	{
-		double current = pgsr->demand_rates[j];
-		if (current == 0)
-			break;
-		avg_demand_rate = (avg_demand_rate + current) / 2;
-	}
-	return avg_demand_rate;
+	return pgsr_avg_rate(pgsr->demand.rates, pgsr->demand.len_rates);
 }
 
-void
-pg_streaming_read_cleanup_demand_rate(PgStreamingRead *pgsr)
+double
+pg_streaming_read_prefetch_rate(PgStreamingRead *pgsr)
 {
-	memset(pgsr->demand_rates, 0, sizeof(double) * pgsr->len_demand_rates);
-	memset(pgsr->consumptions, 0, sizeof(instr_time) * pgsr->len_consumptions);
+	return pgsr_avg_rate(pgsr->prefetch.rates, pgsr->prefetch.len_rates);
 }
 
 static
-double pg_streaming_read_consumption_to_demand(PgStreamingRead *pgsr)
+double pgsr_ios_to_rate(IOMovement *ios, int len)
 {
-	double demand_rate;
+	double rate;
 	instr_time time_elapsed;
+	int num_counted = 0;
 	INSTR_TIME_SET_ZERO(time_elapsed);
-	for (int i = 0; i < pgsr->len_consumptions - 1; i++)
+	for (int i = 0; i < len - 1; i++)
 	{
-		instr_time newer = pgsr->consumptions[i + 1];
-		instr_time older = pgsr->consumptions[i];
-		if (newer == 0 || older == 0)
+		instr_time newer = ios[i + 1].time;
+		instr_time older = ios[i].time;
+		if (INSTR_TIME_IS_ZERO(newer) || INSTR_TIME_IS_ZERO(older))
 			break;
+		num_counted = num_counted + ios[i + 1].num_ios;
 
 		INSTR_TIME_ACCUM_DIFF(time_elapsed, newer, older);
 	}
 
 	if (time_elapsed > 0)
-		demand_rate = (double) pgsr->len_consumptions / INSTR_TIME_GET_MILLISEC(time_elapsed);
+		rate = (double) num_counted / INSTR_TIME_GET_MILLISEC(time_elapsed);
 	else
-		demand_rate = 0;
-	/* elog(WARNING, "demand rate is %f. time_elapsed is %ld", demand_rate, time_elapsed); */
-	return demand_rate;
+		rate = 0;
+	return rate;
+}
+
+static void
+rate_mgr_roll_rate(rate_manager *rate_mgr)
+{
+	if (rate_mgr->ios_idx == rate_mgr->len_ios - 1)
+	{
+		double demand_rate = pgsr_ios_to_rate(rate_mgr->ios, rate_mgr->len_ios);
+		rate_mgr->rates[rate_mgr->rate_idx] = demand_rate;
+		if (rate_mgr->rate_idx == rate_mgr->len_rates - 1)
+		{
+			double avg_demand_rate = pgsr_avg_rate(rate_mgr->rates, rate_mgr->len_rates);
+			memset(rate_mgr->rates, 0, sizeof(double) * rate_mgr->len_rates);
+			rate_mgr->rates[0] = avg_demand_rate;
+			rate_mgr->rate_idx = 1;
+		}
+		rate_mgr->rate_idx++;
+	}
+
+	rate_mgr->ios_idx = (rate_mgr->ios_idx + 1) % (rate_mgr->len_ios);
 }
 
 uintptr_t
 pg_streaming_read_get_next(PgStreamingRead *pgsr)
 {
-	INSTR_TIME_SET_CURRENT(pgsr->consumptions[pgsr->consumption_index]);
-
-	if (pgsr->consumption_index == pgsr->len_consumptions - 1)
-	{
-		double demand_rate = pg_streaming_read_consumption_to_demand(pgsr);
-		pgsr->demand_rates[pgsr->demand_rate_index] = demand_rate;
-		if (pgsr->demand_rate_index == pgsr->len_demand_rates - 1)
-		{
-			double avg_demand_rate = pg_streaming_read_demand_rate(pgsr);
-			memset(pgsr->demand_rates, 0, sizeof(double) * pgsr->len_demand_rates);
-			pgsr->demand_rates[0] = avg_demand_rate;
-			pgsr->demand_rate_index = 0;
-		}
-		pgsr->demand_rate_index++;
-	}
-
-	pgsr->consumption_index = (pgsr->consumption_index + 1) % (pgsr->len_consumptions);
+	INSTR_TIME_SET_CURRENT(pgsr->demand.ios[pgsr->demand.ios_idx].time);
+	pgsr->demand.ios[pgsr->demand.ios_idx].num_ios = 1;
+	rate_mgr_roll_rate(&pgsr->demand);
 
 	if (pgsr->prefetched_total_count == 0)
 	{
