@@ -18,8 +18,8 @@
 #include "storage/aio_internal.h"
 #include "miscadmin.h"
 
-#define IOS_LOOKBACK 200
-#define RATE_LOOKBACK 20
+#define IOS_LOOKBACK 800
+#define WINDOW_SIZE (IOS_LOOKBACK / 2)
 
 typedef struct IOMovement
 {
@@ -31,14 +31,64 @@ typedef struct rate_manager
 {
 	IOMovement ios[IOS_LOOKBACK];
 	int ios_idx;
-	int len_ios;
-
-	double rates[RATE_LOOKBACK];
-	int rate_idx;
-	int len_rates;
+	int num_valid_ios;
 } rate_manager;
 
-static void rate_mgr_roll_rate(rate_manager *rate_mgr);
+static void rate_mgr_append_movement(rate_manager *rate_mgr, IOMovement *movement)
+{
+	IOMovement *target;
+
+	if (rate_mgr->ios_idx == 0)
+		rate_mgr->ios_idx = IOS_LOOKBACK;
+	rate_mgr->ios_idx--;
+
+	target = &rate_mgr->ios[rate_mgr->ios_idx];
+
+	memcpy(target, movement, sizeof(IOMovement));
+
+	if (rate_mgr->num_valid_ios < IOS_LOOKBACK)
+		rate_mgr->num_valid_ios++;
+}
+
+static float pgsr_average_rate(rate_manager *rate_mgr)
+{
+	instr_time time_difference;
+	int newest;
+	int oldest;
+	int ios = 0;
+
+	newest = rate_mgr->ios_idx;
+	oldest = (rate_mgr->ios_idx + rate_mgr->num_valid_ios - 1) % IOS_LOOKBACK;
+	INSTR_TIME_SET_ZERO(time_difference);
+	INSTR_TIME_ACCUM_DIFF(time_difference, rate_mgr->ios[newest].time, rate_mgr->ios[oldest].time);
+
+	if (oldest < newest)
+	{
+		for (int i = newest; i < rate_mgr->num_valid_ios; i++)
+			ios += rate_mgr->ios[i].num_ios;
+		for (int i = 0; i < oldest; i++)
+			ios += rate_mgr->ios[i].num_ios;
+	}
+	else
+	{
+		for (int i = newest; i < oldest; i++)
+			ios += rate_mgr->ios[i].num_ios;
+	}
+
+
+	/* elog(WARNING, "----"); */
+	/* for (int k = 0; k < IOS_LOOKBACK; k++) */
+	/* 	elog(WARNING, "time: %f, ios: %i", INSTR_TIME_GET_MILLISEC(rate_mgr->ios[k].time), rate_mgr->ios[k].num_ios); */
+
+	/* elog(WARNING, "newest: %d. oldest: %d. ios_idx: %d. num_valid_ios: %d. ios lookback: %d. time_difference: %ld. ios: %d", */
+	/* 		newest, oldest, rate_mgr->ios_idx, rate_mgr->num_valid_ios, */
+	/* 		IOS_LOOKBACK, time_difference, ios); */
+
+	if (time_difference <= 0)
+		return 0;
+
+	return (float) ios / INSTR_TIME_GET_MILLISEC(time_difference);
+}
 
 /* typedef is in header */
 typedef struct PgStreamingWriteItem
@@ -416,6 +466,8 @@ struct PgStreamingRead
 
 	rate_manager demand;
 	rate_manager prefetch;
+	float demand_rate;
+	float prefetch_rate;
 
 	/* submitted reads */
 	dlist_head issued;
@@ -443,11 +495,11 @@ pg_streaming_read_alloc(uint32 iodepth, uintptr_t pgsr_private,
 	PgStreamingRead *pgsr;
 
 	iodepth = Max(Min(iodepth, NBuffers / 128), 1);
-	iodepth = 1;
 
 	pgsr = palloc0(offsetof(PgStreamingRead, all_items) +
 				   sizeof(PgStreamingReadItem) * iodepth * 2);
 
+	iodepth = 100;
 	pgsr->iodepth_max = iodepth;
 	pgsr->distance_max = iodepth;
 	pgsr->all_items_count = pgsr->iodepth_max + pgsr->distance_max;
@@ -462,16 +514,14 @@ pg_streaming_read_alloc(uint32 iodepth, uintptr_t pgsr_private,
 	dlist_init(&pgsr->issued);
 
 	pgsr->demand.ios_idx = 0;
-	pgsr->demand.len_ios = IOS_LOOKBACK;
+	pgsr->demand.num_valid_ios = IOS_LOOKBACK;
 
-	pgsr->demand.rate_idx = 0;
-	pgsr->demand.len_rates = RATE_LOOKBACK;
+	pgsr->demand_rate = 0;
 
 	pgsr->prefetch.ios_idx = 0;
-	pgsr->prefetch.len_ios = IOS_LOOKBACK;
+	pgsr->prefetch.num_valid_ios = IOS_LOOKBACK;
 
-	pgsr->prefetch.rate_idx = 0;
-	pgsr->prefetch.len_rates = RATE_LOOKBACK;
+	pgsr->prefetch_rate = 0;
 
 	for (int i = 0; i < pgsr->all_items_count; i++)
 	{
@@ -610,7 +660,9 @@ static void
 pg_streaming_read_prefetch(PgStreamingRead *pgsr)
 {
 	uint32 min_issue;
-	int num_ios = 0;
+	IOMovement movement;
+
+	movement.num_ios = 0;
 
 	if (pgsr->hit_end)
 		return;
@@ -669,93 +721,44 @@ pg_streaming_read_prefetch(PgStreamingRead *pgsr)
 	{
 		pg_streaming_read_prefetch_one(pgsr);
 		pgaio_limit_pending(false, min_issue);
-		num_ios++;
+		movement.num_ios++;
 
 		CHECK_FOR_INTERRUPTS();
 	}
 
-	INSTR_TIME_SET_CURRENT(pgsr->prefetch.ios[pgsr->prefetch.ios_idx].time);
-	pgsr->prefetch.ios[pgsr->prefetch.ios_idx].num_ios = num_ios;
-	rate_mgr_roll_rate(&pgsr->prefetch);
-}
-
-static double
-pgsr_avg_rate(double *rates, int len)
-{
-	double avg_rate = rates[0];
-	for (int j = 1; j < len; j++)
-	{
-		double current = rates[j];
-		if (current == 0)
-			break;
-		avg_rate = (avg_rate + current) / 2;
-	}
-	return avg_rate;
+	INSTR_TIME_SET_CURRENT(movement.time);
+	rate_mgr_append_movement(&pgsr->prefetch, &movement);
 }
 
 double
 pg_streaming_read_demand_rate(PgStreamingRead *pgsr)
 {
-	return pgsr_avg_rate(pgsr->demand.rates, pgsr->demand.len_rates);
+	double demand_rate = pgsr_average_rate(&pgsr->demand);
+	if (pgsr->demand_rate > 0)
+		pgsr->demand_rate = (pgsr->demand_rate + demand_rate) / 2;
+	else
+		pgsr->demand_rate = demand_rate;
+	return pgsr->demand_rate;
 }
 
 double
 pg_streaming_read_prefetch_rate(PgStreamingRead *pgsr)
 {
-	return pgsr_avg_rate(pgsr->prefetch.rates, pgsr->prefetch.len_rates);
-}
-
-static
-double pgsr_ios_to_rate(IOMovement *ios, int len)
-{
-	double rate;
-	instr_time time_elapsed;
-	int num_counted = 0;
-	INSTR_TIME_SET_ZERO(time_elapsed);
-	for (int i = 0; i < len - 1; i++)
-	{
-		instr_time newer = ios[i + 1].time;
-		instr_time older = ios[i].time;
-		if (INSTR_TIME_IS_ZERO(newer) || INSTR_TIME_IS_ZERO(older))
-			break;
-		num_counted = num_counted + ios[i + 1].num_ios;
-
-		INSTR_TIME_ACCUM_DIFF(time_elapsed, newer, older);
-	}
-
-	if (time_elapsed > 0)
-		rate = (double) num_counted / INSTR_TIME_GET_MILLISEC(time_elapsed);
+	double prefetch_rate = pgsr_average_rate(&pgsr->prefetch);
+	if (pgsr->prefetch_rate > 0)
+		pgsr->prefetch_rate = (pgsr->prefetch_rate + prefetch_rate) / 2;
 	else
-		rate = 0;
-	return rate;
-}
-
-static void
-rate_mgr_roll_rate(rate_manager *rate_mgr)
-{
-	if (rate_mgr->ios_idx == rate_mgr->len_ios - 1)
-	{
-		double demand_rate = pgsr_ios_to_rate(rate_mgr->ios, rate_mgr->len_ios);
-		rate_mgr->rates[rate_mgr->rate_idx] = demand_rate;
-		if (rate_mgr->rate_idx == rate_mgr->len_rates - 1)
-		{
-			double avg_demand_rate = pgsr_avg_rate(rate_mgr->rates, rate_mgr->len_rates);
-			memset(rate_mgr->rates, 0, sizeof(double) * rate_mgr->len_rates);
-			rate_mgr->rates[0] = avg_demand_rate;
-			rate_mgr->rate_idx = 1;
-		}
-		rate_mgr->rate_idx++;
-	}
-
-	rate_mgr->ios_idx = (rate_mgr->ios_idx + 1) % (rate_mgr->len_ios);
+		pgsr->prefetch_rate = prefetch_rate;
+	return pgsr->prefetch_rate;
 }
 
 uintptr_t
 pg_streaming_read_get_next(PgStreamingRead *pgsr)
 {
-	INSTR_TIME_SET_CURRENT(pgsr->demand.ios[pgsr->demand.ios_idx].time);
-	pgsr->demand.ios[pgsr->demand.ios_idx].num_ios = 1;
-	rate_mgr_roll_rate(&pgsr->demand);
+	IOMovement movement;
+	INSTR_TIME_SET_CURRENT(movement.time);
+	movement.num_ios = 1;
+	rate_mgr_append_movement(&pgsr->demand, &movement);
 
 	if (pgsr->prefetched_total_count == 0)
 	{
