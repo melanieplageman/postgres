@@ -16,7 +16,9 @@ LANGUAGE C PARALLEL SAFE;
 CREATE FUNCTION slow_consumer(regclass,
 						   fork text default 'main',
 						   first_block int8 default null,
-						   last_block int8 default null, delay float default 0, starting_prefetch_rate float default 20)
+							 last_block int8 default null,
+							desired_consumption_rate float default null,
+							starting_prefetch_rate float default 200)
 RETURNS int8
 AS 'MODULE_PATHNAME', 'slow_consumer'
 LANGUAGE C PARALLEL SAFE;

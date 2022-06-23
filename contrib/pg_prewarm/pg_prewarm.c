@@ -150,7 +150,7 @@ prewarm_smgr_release(uintptr_t pgsr_private, uintptr_t read_private)
 {
 }
 
-// slow_consumer(regclass, fork, first_block, last_block, delay, starting_prefetch_rate)
+// slow_consumer(regclass, fork, first_block, last_block, desired_consumption_rate, starting_prefetch_rate)
 Datum slow_consumer(PG_FUNCTION_ARGS)
 {
 	text	   *forkName;
@@ -220,7 +220,34 @@ Datum slow_consumer(PG_FUNCTION_ARGS)
 							(long long) (nblocks - 1))));
 	}
 
-	delay = PG_GETARG_FLOAT8(4);
+	 /*
+		* If desired_consumption_rate is NULL, we assume that the user must want
+		* the "natural" consumption rate -- with no wait
+		*/
+	if (PG_ARGISNULL(4))
+		delay = 0;
+	else
+	{
+		/*
+		 * consumption rate is in IOs/second so / 1000 to get it in ms
+		 * delay must be expressed in ms
+		 */
+		double cr_sec = (double) PG_GETARG_FLOAT8(4);
+		double cr_millisec = cr_sec / 1000;
+		double cr_microsec = cr_sec / 1000000;
+		/*
+		 * delay is 1 / consumption rate -- this is how long to wait between
+		 * requesting IOs.
+		 * We will be able to hold this rate if the prefetcher is fast enough and
+		 * we are not bottlenecked by storage.
+		 */
+		delay = 1 / cr_millisec;
+
+		elog(WARNING, "Desired consumption rate:");
+		elog(WARNING, "io_rate: %f IOs/microsec. %f IOs/millisec. %f IOs/sec. delay: %f",
+				cr_microsec, cr_millisec, cr_sec, delay);
+	}
+
 
 	p.rel = rel;
 	p.forkNumber = forkNumber;
@@ -230,7 +257,6 @@ Datum slow_consumer(PG_FUNCTION_ARGS)
 
 	starting_prefetch_rate = PG_GETARG_FLOAT8(5);
 
-	// TODO: turn delay into a consumption rate bucket
 	if (log)
 	{
 		double pr_sec = (double) starting_prefetch_rate;
@@ -240,6 +266,7 @@ Datum slow_consumer(PG_FUNCTION_ARGS)
 		elog(WARNING, "Starting prefetch rate");
 		elog(WARNING, "io_rate: %f IOs/microsec. %f IOs/millisec. %f IOs/sec.",
 				pr_microsec, pr_millisec, pr_sec);
+
 	}
 
 	pgsr = pg_streaming_read_alloc(512, starting_prefetch_rate, (uintptr_t) &p,
