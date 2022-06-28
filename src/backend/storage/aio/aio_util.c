@@ -654,8 +654,8 @@ pg_streaming_read_complete(PgAioOnCompletionLocalContext *ocb, PgAioInProgress *
 	pg_streaming_read_prefetch(pgsr);
 }
 
-static void
-pg_streaming_read_prefetch_one(PgStreamingRead *pgsr)
+static PgStreamingReadNextStatus
+pg_streaming_read_prefetch_one(PgStreamingRead *pgsr, instr_time *time)
 {
 	PgStreamingReadItem *this_read;
 	PgStreamingReadNextStatus status;
@@ -709,12 +709,14 @@ pg_streaming_read_prefetch_one(PgStreamingRead *pgsr)
 	{
 		IOMovement movement;
 
-		INSTR_TIME_SET_CURRENT(movement.time);
+		INSTR_TIME_SET_ZERO(movement.time);
+		INSTR_TIME_ADD(movement.time, *time);
 		Assert(this_read->read_private != 0);
 		movement.num_ios = 1;
 		rate_mgr_append_movement(&pgsr->prefetch, &movement);
 	}
 
+	return status;
 }
 
 static void
@@ -722,8 +724,8 @@ pg_streaming_read_prefetch(PgStreamingRead *pgsr)
 {
 	instr_time time_elapsed;
 	int to_move;
-	int original_to_move;
 
+	pgsr->prefetched_last_time = 0;
 	if (pgsr->hit_end)
 		return;
 
@@ -735,7 +737,6 @@ pg_streaming_read_prefetch(PgStreamingRead *pgsr)
 	if (pgsr->_rate == 0)
 	{
 		pgsr->volume = 0;
-		pgsr->prefetched_last_time = 0;
 		return;
 	}
 
@@ -782,17 +783,15 @@ pg_streaming_read_prefetch(PgStreamingRead *pgsr)
 		pgsr->_rate = demand_rate;
 	}
 
-	original_to_move = to_move;
-
 	/* if (to_move > 0) */
 	INSTR_TIME_SET_CURRENT(pgsr->last_prefetch_time);
-
-	pgsr->prefetched_last_time = to_move;
 
 	while (!pgsr->hit_end && to_move > 0)
 	{
 		uint32 min_issue = 1;
-		pg_streaming_read_prefetch_one(pgsr);
+		if (pg_streaming_read_prefetch_one(pgsr, &pgsr->last_prefetch_time) == PGSR_NEXT_IO)
+			pgsr->prefetched_last_time++;
+
 		pgaio_limit_pending(false, min_issue);
 		to_move--;
 
@@ -802,8 +801,7 @@ pg_streaming_read_prefetch(PgStreamingRead *pgsr)
 		/* 	elog(WARNING, "Hit end"); */
 	}
 
-	/* If we didn't prefetch everything */
-	pgsr->prefetched_last_time = original_to_move - to_move;
+	/* Deduct how many we actually prefetched */
 	pgsr->volume -= pgsr->prefetched_last_time;
 }
 
@@ -925,6 +923,7 @@ pg_streaming_read_get_next(PgStreamingRead *pgsr)
 									dlist_pop_head_node(&pgsr->in_order));
 		Assert(this_read->valid);
 
+		// append movement if this_read was real IO
 		if (this_read->in_progress)
 		{
 			pgaio_io_wait(this_read->aio);
