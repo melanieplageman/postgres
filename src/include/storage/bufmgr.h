@@ -77,6 +77,7 @@ extern PGDLLIMPORT int backend_flush_after;
 extern PGDLLIMPORT int bgwriter_flush_after;
 
 extern bool io_data_direct;
+extern bool io_data_force_async;
 extern bool io_wal_direct;
 extern bool io_wal_init_direct;
 
@@ -105,9 +106,13 @@ extern PGDLLIMPORT int32 *LocalRefCount;
 /*
  * prototypes for functions in bufmgr.c
  */
-extern PrefetchBufferResult PrefetchSharedBuffer(struct SMgrRelationData *smgr_reln,
+extern PrefetchBufferResult PrefetchSharedBuffer(Relation reln,
 												 ForkNumber forkNum,
 												 BlockNumber blockNum);
+extern PrefetchBufferResult PrefetchSharedBufferWithoutRelcache(struct SMgrRelationData *smgr_reln,
+																ForkNumber forkNum,
+																BlockNumber blockNum,
+																char relpersistence);
 extern PrefetchBufferResult PrefetchBuffer(Relation reln, ForkNumber forkNum,
 										   BlockNumber blockNum);
 extern bool ReadRecentBuffer(RelFileLocator rlocator, ForkNumber forkNum,
@@ -120,6 +125,21 @@ extern Buffer ReadBufferWithoutRelcache(RelFileLocator rlocator,
 										ForkNumber forkNum, BlockNumber blockNum,
 										ReadBufferMode mode, BufferAccessStrategy strategy,
 										bool permanent);
+struct PgAioInProgress;
+extern Buffer ReadBufferAsync(Relation reln, ForkNumber forkNum, BlockNumber blockNum,
+							  ReadBufferMode mode, BufferAccessStrategy strategy,
+							  bool *already_valid, struct PgAioInProgress** aio);
+extern Buffer ReadBufferAsyncWithoutRelcache(struct SMgrRelationData *smgr,
+											 ForkNumber forkNum,
+											 BlockNumber blockNum,
+											 char relpersistence,
+											 ReadBufferMode mode,
+											 BufferAccessStrategy strategy,
+											 bool *already_valid,
+											 struct PgAioInProgress** aio);
+extern Buffer BulkExtendBuffered(Relation relation, ForkNumber forkNum,
+								 int *extendby,
+								 BufferAccessStrategy strategy);
 extern void ReleaseBuffer(Buffer buffer);
 extern void UnlockReleaseBuffer(Buffer buffer);
 extern void MarkBufferDirty(Buffer buffer);

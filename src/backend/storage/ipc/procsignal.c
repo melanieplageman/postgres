@@ -23,6 +23,7 @@
 #include "miscadmin.h"
 #include "pgstat.h"
 #include "replication/walsender.h"
+#include "storage/aio.h"
 #include "storage/condition_variable.h"
 #include "storage/ipc.h"
 #include "storage/latch.h"
@@ -82,11 +83,12 @@ typedef struct
 } ProcSignalHeader;
 
 /*
- * We reserve a slot for each possible BackendId, plus one for each
- * possible auxiliary process type.  (This scheme assumes there is not
- * more than one of any auxiliary process type at a time.)
+ * We reserve a slot for each possible BackendId, plus one for each possible
+ * auxiliary process type, except for AIO workers that get a plurality.  (This
+ * scheme assumes there is not more than one of any auxiliary process type at
+ * a time.)
  */
-#define NumProcSignalSlots	(MaxBackends + NUM_AUXPROCTYPES)
+#define NumProcSignalSlots	(MaxBackends + MAX_IO_WORKERS + NUM_AUXPROCTYPES)
 
 /* Check whether the relevant type bit is set in the flags. */
 #define BARRIER_SHOULD_CHECK(flags, type) \
@@ -155,7 +157,7 @@ ProcSignalShmemInit(void)
  *		Register the current process in the ProcSignal array
  *
  * The passed index should be my BackendId if the process has one,
- * or MaxBackends + aux process type if not.
+ * or a unique value above MaxBackends for auxiliary processes.
  */
 void
 ProcSignalInit(int pss_idx)
@@ -656,6 +658,9 @@ procsignal_sigusr1_handler(SIGNAL_ARGS)
 
 	if (CheckProcSignal(PROCSIG_LOG_MEMORY_CONTEXT))
 		HandleLogMemoryContextInterrupt();
+
+	if (CheckProcSignal(PROCSIG_AIO_INTERRUPT))
+		HandleAioInterrupt();
 
 	if (CheckProcSignal(PROCSIG_RECOVERY_CONFLICT_DATABASE))
 		RecoveryConflictInterrupt(PROCSIG_RECOVERY_CONFLICT_DATABASE);
