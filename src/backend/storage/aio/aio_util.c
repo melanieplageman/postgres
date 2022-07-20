@@ -387,6 +387,7 @@ struct PgStreamingRead
 	uint32 completed_count;
 	/* number of current requests in flight */
 	int32 inflight_count;
+	int32 target_prefetch_distance;
 	/* number of requests that didn't require IO (debugging only) */
 	int32 no_io_count;
 
@@ -422,6 +423,7 @@ pg_streaming_read_alloc(uint32 iodepth, uintptr_t pgsr_private,
 	pgsr = palloc0(offsetof(PgStreamingRead, all_items) +
 				   sizeof(PgStreamingReadItem) * iodepth * 2);
 
+	pgsr->target_prefetch_distance = 10;
 	pgsr->iodepth_max = iodepth;
 	pgsr->distance_max = iodepth;
 	pgsr->all_items_count = pgsr->iodepth_max + pgsr->distance_max;
@@ -571,12 +573,10 @@ static void
 pg_streaming_read_prefetch(PgStreamingRead *pgsr)
 {
 	uint32 min_issue;
+	int new_distance;
 
 	if (pgsr->hit_end)
 		return;
-
-	Assert(pgsr->inflight_count <= pgsr->current_window);
-	Assert(pgsr->completed_count <= (pgsr->iodepth_max + pgsr->distance_max));
 
 	/*
 	 * XXX: Some issues:
@@ -597,36 +597,27 @@ pg_streaming_read_prefetch(PgStreamingRead *pgsr)
 	 * - If most requests don't trigger IO, we should probably reduce the
 	 *   prefetch window.
 	 */
-	if (pgsr->current_window < pgsr->iodepth_max)
-	{
-		if (pgsr->current_window == 0)
-			pgsr->current_window = 4;
-		else
-			pgsr->current_window *= 2;
 
-		if (pgsr->current_window > pgsr->iodepth_max)
-			pgsr->current_window = pgsr->iodepth_max;
-
-		min_issue = 1;
-	}
-	else
+	new_distance = pgsr->target_prefetch_distance;
+	if (pgsr->completed_count >= 0.5 * pgsr->target_prefetch_distance)
 	{
-		min_issue = Min(pgsr->iodepth_max, pgsr->current_window / 4);
+		new_distance = (int)(pgsr->target_prefetch_distance * 0.2);
+		if (new_distance > pgsr->distance_max)
+			new_distance = pgsr->distance_max;
+		if (new_distance < 1)
+			new_distance = 1;
+		/* if (pgsr->target_prefetch_distance != new_distance) */
+		/* 	elog(WARNING, "MELANIE: Changing distance from %d to %d", pgsr->target_prefetch_distance, new_distance); */
+		pgsr->target_prefetch_distance = new_distance;
 	}
 
-	Assert(pgsr->inflight_count <= pgsr->current_window);
-	Assert(pgsr->completed_count <= (pgsr->iodepth_max + pgsr->distance_max));
 
-	if (pgsr->completed_count >= pgsr->current_window)
-		return;
-
-	if (pgsr->inflight_count >= pgsr->current_window)
-		return;
-
+	min_issue = 1;
 	while (!pgsr->hit_end &&
-		   (pgsr->inflight_count < pgsr->current_window) &&
-		   (pgsr->completed_count < pgsr->current_window))
+		   (pgsr->inflight_count + pgsr->completed_count <= pgsr->target_prefetch_distance))
 	{
+		/* elog(WARNING, "MELANIE: completed: %d. inflight: %d. target prefetch distance: %d", */
+		/* 		pgsr->completed_count, pgsr->inflight_count, pgsr->target_prefetch_distance); */
 		pg_streaming_read_prefetch_one(pgsr);
 		pgaio_limit_pending(false, min_issue);
 
@@ -640,6 +631,7 @@ pg_streaming_read_get_next(PgStreamingRead *pgsr)
 	if (pgsr->prefetched_total_count == 0)
 	{
 		pg_streaming_read_prefetch(pgsr);
+
 		Assert(pgsr->hit_end || pgsr->prefetched_total_count > 0);
 	}
 
