@@ -394,7 +394,6 @@ pgaio_process_io_completion(PgAioInProgress *io, int result)
 			case PGAIO_OP_FSYNC:
 			case PGAIO_OP_FLUSH_RANGE:
 			case PGAIO_OP_NOP:
-Assert(result <= 0);
 				cur->result = result;
 				if (result == -EAGAIN || result == -EINTR)
 					new_flags |= PGAIOIP_SOFT_FAILURE;
