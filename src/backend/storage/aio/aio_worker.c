@@ -39,6 +39,7 @@
 #include "storage/latch.h"
 #include "storage/proc.h"
 #include "storage/shmem.h"
+#include "storage/ipc.h"
 #include "tcop/tcopprot.h"
 
 
@@ -312,6 +313,9 @@ pgaio_worker_io_retry(PgAioInProgress *io)
 void
 IoWorkerMain(void)
 {
+	volatile PgAioInProgress *io = NULL;
+	sigjmp_buf	local_sigjmp_buf;
+
 	/* TODO review all signals */
 	pqsignal(SIGHUP, SignalHandlerForConfigReload);
 	pqsignal(SIGINT, die); /* to allow manually triggering worker restart */
@@ -331,6 +335,32 @@ IoWorkerMain(void)
 	io_worker_control->idle_worker_mask |= (UINT64_C(1) << MyIoWorkerId);
 	io_worker_control->workers[MyIoWorkerId].latch = MyLatch;
 	LWLockRelease(AioWorkerSubmissionQueueLock);
+
+	/* see PostgresMain() */
+	if (sigsetjmp(local_sigjmp_buf, 1) != 0)
+	{
+		error_context_stack = NULL;
+		HOLD_INTERRUPTS();
+
+		/*
+		 * We normally shouldn't get errors here. Need to do just enough error
+		 * recovery so that we can mark the IO as failed and then exit.
+		 */
+		LWLockReleaseAll();
+
+		if (io != NULL)
+		{
+			/* EINTR is treated as a retryable error */
+			pgaio_process_io_completion(unvolatize(PgAioInProgress *, io),
+										EINTR);
+		}
+
+		EmitErrorReport();
+		proc_exit(1);
+	}
+
+	/* We can now handle ereport(ERROR) */
+	PG_exception_stack = &local_sigjmp_buf;
 
 	while (!ShutdownRequestPending)
 	{
@@ -370,11 +400,12 @@ IoWorkerMain(void)
 
 		if (io_index != UINT32_MAX)
 		{
-			PgAioInProgress *io = &aio_ctl->in_progress_io[io_index];
+			io = &aio_ctl->in_progress_io[io_index];
 
-			pgaio_io_call_shared_open(io);
-			pgaio_do_synchronously(io);
+			pgaio_io_call_shared_open(unvolatize(PgAioInProgress *, io));
+			pgaio_do_synchronously(unvolatize(PgAioInProgress *, io));
 			pgaio_complete_ios(false);
+			io = NULL;
 		}
 		else
 		{
