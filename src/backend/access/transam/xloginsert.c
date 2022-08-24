@@ -1270,6 +1270,9 @@ log_newpage_range(Relation rel, ForkNumber forknum,
 			blkno++;
 		}
 
+		if (nbufs == 0)
+			continue;
+
 		/* Write WAL record for this batch. */
 		XLogBeginInsert();
 
