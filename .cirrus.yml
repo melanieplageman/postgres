@@ -488,7 +488,7 @@ task:
     TEMP_CONFIG=$(pwd)/ci/posix_aio_buf.conf \
       meson test $MTEST_ARGS --num-processes ${TEST_JOBS}
 
-  posix_aio_aio_test_world_script: |
+  posix_aio_dio_test_world_script: |
     ulimit -c unlimited
     ulimit -n 1024
     TEMP_CONFIG=$(pwd)/ci/posix_aio_dio.conf \
