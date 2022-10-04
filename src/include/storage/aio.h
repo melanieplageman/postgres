@@ -254,7 +254,7 @@ typedef struct PgStreamingWrite PgStreamingWrite;
 typedef bool (*PgStreamingWriteRetry)(PgStreamingWrite *pgsw, void *pgsw_private, PgAioInProgress *io, void *write_private);
 typedef void (*PgStreamingWriteCompleted)(PgStreamingWrite *pgsw, void *pgsw_private, int result, void *write_private);
 
-extern PgStreamingWrite *pg_streaming_write_alloc(uint32 iodepth, void *private);
+extern PgStreamingWrite *pg_streaming_write_alloc(uint32 iodepth, void *private_data);
 extern PgAioInProgress *pg_streaming_write_get_io(PgStreamingWrite *pgsw);
 extern void pg_streaming_write_release_io(PgStreamingWrite *pgsw, PgAioInProgress *io);
 extern uint32 pg_streaming_write_inflight(PgStreamingWrite *pgsw);
