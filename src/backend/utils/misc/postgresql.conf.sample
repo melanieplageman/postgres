@@ -800,6 +800,8 @@
 #io_wal_init_direct = off
 #io_worker_queue_size = 64
 #io_workers = 8
+#io_wal_concurrency = 32
+#io_wal_target_blocks = 8
 
 
 #------------------------------------------------------------------------------
