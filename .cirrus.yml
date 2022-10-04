@@ -22,7 +22,7 @@ env:
   CHECK: check-world PROVE_FLAGS=$PROVE_FLAGS
   CHECKFLAGS: -Otarget
   PROVE_FLAGS: --timer
-  MTEST_ARGS: --print-errorlogs --no-rebuild -C build
+  MTEST_ARGS: --print-errorlogs --timeout-multiplier 0.5 --no-rebuild -C build
   PGCTLTIMEOUT: 120 # avoids spurious failures during parallel tests
   TEMP_CONFIG: ${CIRRUS_WORKING_DIR}/src/tools/ci/pg_ci_base.conf
   PG_TEST_EXTRA: kerberos ldap ssl
@@ -352,12 +352,14 @@ task:
           env:
             IMAGE: family/pg-ci-sid-newkernel-uring
           depends_on:
-            - Linux - Debian Bullseye - Meson
+            #- Linux - Debian Bullseye - Meson
+            - SanityCheck
         - name: Linux Linus Kernel - Meson
           env:
             IMAGE: family/pg-ci-sid-newkernel
           depends_on:
-            - Linux - Debian Bullseye - Meson
+            #- Linux - Debian Bullseye - Meson
+            - SanityCheck
 
       env:
         CCACHE_MAXSIZE: "400M" # tests two different builds
