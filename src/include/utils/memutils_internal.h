@@ -83,6 +83,7 @@ typedef enum MemoryContextMethodID
 	MCTX_ASET_ID,
 	MCTX_GENERATION_ID,
 	MCTX_SLAB_ID,
+	MCTX_ALIGNED_REDIRECT_ID,
 } MemoryContextMethodID;
 
 /*
