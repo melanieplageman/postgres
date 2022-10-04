@@ -1,3 +1,4 @@
+subdir('aio')
 subdir('buffer')
 subdir('file')
 subdir('freespace')

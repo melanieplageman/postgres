@@ -86,6 +86,9 @@ option('ldap', type : 'feature', value: 'auto',
 option('libedit_preferred', type : 'boolean', value: false,
   description: 'Prefer BSD Libedit over GNU Readline')
 
+option('liburing', type : 'feature', value: 'auto',
+  description: 'use liburing for async io')
+
 option('libxml', type : 'feature', value: 'auto',
   description: 'XML support')
 
@@ -112,6 +115,9 @@ option('plpython', type : 'feature', value: 'auto',
 
 option('pltcl', type : 'feature', value: 'auto',
   description: 'build with TCL support')
+
+option('posix_aio', type : 'boolean', value: 'false',
+  description: 'use POSIX AIO for async io')
 
 option('tcl_version', type : 'string', value : 'tcl',
   description: 'specify TCL version')

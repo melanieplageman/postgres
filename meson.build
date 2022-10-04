@@ -713,6 +713,18 @@ endif
 
 
 ###############################################################
+# Library: liburing
+###############################################################
+
+liburingopt = get_option('liburing')
+liburing = dependency('liburing', required: liburingopt)
+if liburing.found()
+  cdata.set('USE_LIBURING', 1)
+endif
+
+
+
+###############################################################
 # Library: libxml
 ###############################################################
 
@@ -791,6 +803,17 @@ if not tclopt.disabled()
   if not cc.has_header('tcl.h', dependencies: tcl_dep, required: tclopt)
     tcl_dep = not_found_dep
   endif
+endif
+
+
+
+###############################################################
+# Library: posix_aio
+###############################################################
+
+posix_aio = get_option('posix_aio')
+if posix_aio
+  cdata.set('USE_POSIX_AIO', 1)
 endif
 
 
@@ -2312,6 +2335,8 @@ endif
 # unnecessary checks over and over, particularly on windows.
 func_checks = [
   ['_configthreadlocale', {'skip': host_system != 'windows'}],
+  ['aio_waitcomplete'],
+  ['aio_waitn'],
   ['backtrace_symbols', {'dependencies': [execinfo_dep]}],
   ['clock_gettime', {'dependencies': [rt_dep, posix4_dep], 'define': false}],
   ['copyfile'],
@@ -2658,6 +2683,7 @@ backend_both_deps += [
   icu_i18n,
   ldap,
   libintl,
+  liburing,
   libxml,
   lz4,
   pam,
@@ -3039,6 +3065,7 @@ if meson.version().version_compare('>=0.57')
       'gss': gssapi,
       'icu': icu,
       'ldap': ldap,
+      'liburing': liburing,
       'libxml': libxml,
       'libxslt': libxslt,
       'llvm': llvm,
@@ -3048,6 +3075,7 @@ if meson.version().version_compare('>=0.57')
       'plperl': perl_dep,
       'plpython': python3_dep,
       'pltcl': tcl_dep,
+      'posix_aio': posix_aio,
       'readline': readline,
       'selinux': selinux,
       'ssl': ssl,
