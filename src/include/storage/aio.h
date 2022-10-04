@@ -261,7 +261,7 @@ extern uint32 pg_streaming_write_inflight(PgStreamingWrite *pgsw);
 extern void pg_streaming_write_write(PgStreamingWrite *pgsw, PgAioInProgress *io,
 									 PgStreamingWriteCompleted on_completion,
 									 PgStreamingWriteRetry on_failure,
-									 void *private);
+									 void *private_data);
 extern void pg_streaming_write_wait_all(PgStreamingWrite *pgsw);
 extern void pg_streaming_write_free(PgStreamingWrite *pgsw);
 
