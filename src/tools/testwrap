@@ -36,6 +36,10 @@ env_dict = {**os.environ,
             'TESTDATADIR': os.path.join(testdir, 'data'),
             'TESTLOGDIR': os.path.join(testdir, 'log')}
 
+if 'TEMP_CONFIG' in os.environ and \
+    args.testname in ['regress', 'isolation', 'ecpg']:
+        args.test_command += ['--temp-config', os.environ['TEMP_CONFIG']]
+
 sp = subprocess.run(args.test_command, env=env_dict)
 
 if sp.returncode == 0:
