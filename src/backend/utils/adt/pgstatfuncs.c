@@ -29,6 +29,7 @@
 #include "storage/procarray.h"
 #include "utils/acl.h"
 #include "utils/builtins.h"
+#include "utils/guc.h"
 #include "utils/inet.h"
 #include "utils/timestamp.h"
 
@@ -1723,6 +1724,158 @@ Datum
 pg_stat_get_buf_alloc(PG_FUNCTION_ARGS)
 {
 	PG_RETURN_INT64(pgstat_fetch_stat_bgwriter()->buf_alloc);
+}
+
+/*
+* When adding a new column to the pg_stat_io view, add a new enum value
+* here above IO_NUM_COLUMNS.
+*/
+typedef enum io_stat_col
+{
+	IO_COL_BACKEND_TYPE,
+	IO_COL_IO_CONTEXT,
+	IO_COL_READS,
+	IO_COL_WRITES,
+	IO_COL_EXTENDS,
+	IO_COL_UNIT,
+	IO_COL_FREELIST_ACQUISITIONS,
+	IO_COL_EVICTIONS,
+	IO_COL_REUSES,
+	IO_COL_REJECTIONS,
+	IO_COL_REPOSSESSIONS,
+	IO_COL_FSYNCS,
+	IO_COL_RESET_TIME,
+	IO_NUM_COLUMNS,
+}			io_stat_col;
+
+/*
+ * When adding a new IOOp, add a new io_stat_col and add a case to this
+ * function returning the corresponding io_stat_col.
+ */
+static io_stat_col
+pgstat_io_op_get_index(IOOp io_op)
+{
+	switch (io_op)
+	{
+		case IOOP_EVICT:
+			return IO_COL_EVICTIONS;
+		case IOOP_FREELIST_ACQUIRE:
+			return IO_COL_FREELIST_ACQUISITIONS;
+		case IOOP_READ:
+			return IO_COL_READS;
+		case IOOP_REUSE:
+			return IO_COL_REUSES;
+		case IOOP_REJECT:
+			return IO_COL_REJECTIONS;
+		case IOOP_REPOSSESS:
+			return IO_COL_REPOSSESSIONS;
+		case IOOP_WRITE:
+			return IO_COL_WRITES;
+		case IOOP_EXTEND:
+			return IO_COL_EXTENDS;
+		case IOOP_FSYNC:
+			return IO_COL_FSYNCS;
+	}
+
+	elog(ERROR, "unrecognized IOOp value: %d", io_op);
+}
+
+Datum
+pg_stat_get_io(PG_FUNCTION_ARGS)
+{
+	PgStat_BackendIOContextOps *backends_io_stats;
+	ReturnSetInfo *rsinfo;
+	Datum		reset_time;
+
+	InitMaterializedSRF(fcinfo, 0);
+	rsinfo = (ReturnSetInfo *) fcinfo->resultinfo;
+
+	backends_io_stats = pgstat_fetch_backend_io_context_ops();
+
+	reset_time = TimestampTzGetDatum(backends_io_stats->stat_reset_timestamp);
+
+	for (int bktype = 0; bktype < BACKEND_NUM_TYPES; bktype++)
+	{
+		Datum		bktype_desc = CStringGetTextDatum(GetBackendTypeDesc((BackendType) bktype));
+		bool		expect_backend_stats = true;
+		PgStat_IOContextOps *io_context_ops = &backends_io_stats->stats[bktype];
+
+		/*
+		 * For those BackendTypes without IO Operation stats, skip
+		 * representing them in the view altogether.
+		 */
+		expect_backend_stats = pgstat_io_op_stats_collected((BackendType)
+															bktype);
+
+		for (int io_context = 0; io_context < IOCONTEXT_NUM_TYPES; io_context++)
+		{
+			PgStat_IOOpCounters *counters = &io_context_ops->data[io_context];
+			const char *io_context_str = pgstat_io_context_desc(io_context);
+
+			/*
+			 * Hard-code this to blocks until we have non-block-oriented IO
+			 * represented in the view as well
+			 */
+			int	unit = GUC_UNIT_BLOCKS;
+			const char	*unit_name = get_config_unit_name(unit);
+
+
+			Datum		values[IO_NUM_COLUMNS] = {0};
+			bool		nulls[IO_NUM_COLUMNS] = {0};
+
+			/*
+			 *  Given that unit is hard-coded to GUC_UNIT_BLOCKS, unit_name
+			 *  should not be NULL.
+			 */
+			Assert(unit_name);
+
+			/*
+			 * Some combinations of IOContext and BackendType are not valid
+			 * for any type of IOOp. In such cases, omit the entire row from
+			 * the view.
+			 */
+			if (!expect_backend_stats ||
+				!pgstat_bktype_io_context_valid((BackendType) bktype,
+												(IOContext) io_context))
+			{
+				pgstat_io_context_ops_assert_zero(counters);
+				continue;
+			}
+
+			values[IO_COL_BACKEND_TYPE] = bktype_desc;
+			values[IO_COL_IO_CONTEXT] = CStringGetTextDatum(io_context_str);
+			values[IO_COL_READS] = Int64GetDatum(counters->reads);
+			values[IO_COL_WRITES] = Int64GetDatum(counters->writes);
+			values[IO_COL_EXTENDS] = Int64GetDatum(counters->extends);
+			values[IO_COL_UNIT] = CStringGetTextDatum(unit_name);
+			values[IO_COL_FREELIST_ACQUISITIONS] = Int64GetDatum(counters->freelist_acquisitions);
+			values[IO_COL_EVICTIONS] = Int64GetDatum(counters->evictions);
+			values[IO_COL_REUSES] = Int64GetDatum(counters->reuses);
+			values[IO_COL_REJECTIONS] = Int64GetDatum(counters->rejections);
+			values[IO_COL_REPOSSESSIONS] = Int64GetDatum(counters->repossessions);
+			values[IO_COL_FSYNCS] = Int64GetDatum(counters->fsyncs);
+			values[IO_COL_RESET_TIME] = TimestampTzGetDatum(reset_time);
+
+			/*
+			 * Some combinations of BackendType and IOOp and of IOContext and
+			 * IOOp are not valid. Set these cells in the view NULL and assert
+			 * that these stats are zero as expected.
+			 */
+			for (int io_op = 0; io_op < IOOP_NUM_TYPES; io_op++)
+			{
+				if (!(pgstat_io_op_valid((BackendType) bktype, (IOContext)
+										 io_context, (IOOp) io_op)))
+				{
+					pgstat_io_op_assert_zero(counters, (IOOp) io_op);
+					nulls[pgstat_io_op_get_index((IOOp) io_op)] = true;
+				}
+			}
+
+			tuplestore_putvalues(rsinfo->setResult, rsinfo->setDesc, values, nulls);
+		}
+	}
+
+	return (Datum) 0;
 }
 
 /*
