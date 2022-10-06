@@ -15,6 +15,7 @@
  */
 #include "postgres.h"
 
+#include "pgstat.h"
 #include "port/atomics.h"
 #include "storage/buf_internals.h"
 #include "storage/bufmgr.h"
@@ -192,12 +193,14 @@ have_free_buffer(void)
  *	return the buffer with the buffer header spinlock still held.
  */
 BufferDesc *
-StrategyGetBuffer(BufferAccessStrategy strategy, uint32 *buf_state)
+StrategyGetBuffer(BufferAccessStrategy strategy, uint32 *buf_state, bool *from_ring)
 {
 	BufferDesc *buf;
 	int			bgwprocno;
 	int			trycounter;
 	uint32		local_buf_state;	/* to avoid repeated (de-)referencing */
+
+	*from_ring = false;
 
 	/*
 	 * If given a strategy object, see whether it can select a buffer. We
@@ -207,7 +210,10 @@ StrategyGetBuffer(BufferAccessStrategy strategy, uint32 *buf_state)
 	{
 		buf = GetBufferFromRing(strategy, buf_state);
 		if (buf != NULL)
+		{
+			*from_ring = true;
 			return buf;
+		}
 	}
 
 	/*
@@ -299,6 +305,15 @@ StrategyGetBuffer(BufferAccessStrategy strategy, uint32 *buf_state)
 				if (strategy != NULL)
 					AddBufferToRing(strategy, buf);
 				*buf_state = local_buf_state;
+
+				/*
+				 * When a strategy is in use, IO Operation statistics count
+				 * buffers acquired from the freelist when a strategy is in use
+				 * in their corresponding strategy IOContext even though the
+				 * buffer acquired from the freelist is a shared buffer.
+				 */
+				pgstat_count_io_op(IOOP_FREELIST_ACQUIRE,
+						IOContextForStrategy(strategy));
 				return buf;
 			}
 			UnlockBufHdr(buf, local_buf_state);
@@ -331,6 +346,19 @@ StrategyGetBuffer(BufferAccessStrategy strategy, uint32 *buf_state)
 				if (strategy != NULL)
 					AddBufferToRing(strategy, buf);
 				*buf_state = local_buf_state;
+				/*
+				* When a BufferAccessStrategy is in use, evictions adding a
+				* shared buffer to the strategy ring are counted in the
+				* corresponding strategy's context. This includes the evictions
+				* done to add buffers to the ring initially as well as those
+				* done to add a new shared buffer to the ring when current
+				* buffer is pinned or otherwise in use.
+				*
+				* We wait until this point to count evictions to avoid
+				* incorrectly counting cases in which we error out.
+				*/
+				pgstat_count_io_op(IOOP_EVICT, IOContextForStrategy(strategy));
+
 				return buf;
 			}
 		}
@@ -596,7 +624,7 @@ FreeAccessStrategy(BufferAccessStrategy strategy)
 
 /*
  * GetBufferFromRing -- returns a buffer from the ring, or NULL if the
- *		ring is empty.
+ *		ring is empty / not usable.
  *
  * The bufhdr spin lock is held on the returned buffer.
  */
@@ -643,7 +671,13 @@ GetBufferFromRing(BufferAccessStrategy strategy, uint32 *buf_state)
 	/*
 	 * Tell caller to allocate a new buffer with the normal allocation
 	 * strategy.  He'll then replace this ring element via AddBufferToRing.
+	 *
+	 * This counts as a "repossession" for the purposes of IO operation
+	 * statistic tracking, since the reason that we no longer consider the
+	 * current buffer to be part of the ring is that the block in it is in use
+	 * outside of the ring, preventing us from reusing the buffer.
 	 */
+	pgstat_count_io_op(IOOP_REPOSSESS, IOContextForStrategy(strategy));
 	return NULL;
 }
 
@@ -657,6 +691,37 @@ static void
 AddBufferToRing(BufferAccessStrategy strategy, BufferDesc *buf)
 {
 	strategy->buffers[strategy->current] = BufferDescriptorGetBuffer(buf);
+}
+
+/*
+ * Utility function returning the IOContext of a given BufferAccessStrategy's
+ * strategy ring.
+ */
+IOContext
+IOContextForStrategy(BufferAccessStrategy strategy)
+{
+	if (!strategy)
+		return IOCONTEXT_SHARED;
+
+	switch (strategy->btype)
+	{
+		case BAS_NORMAL:
+			/*
+			 * Currently, GetAccessStrategy() returns NULL for
+			 * BufferAccessStrategyType BAS_NORMAL, so this case is
+			 * unreachable.
+			 */
+			pg_unreachable();
+			return IOCONTEXT_SHARED;
+		case BAS_BULKREAD:
+			return IOCONTEXT_BULKREAD;
+		case BAS_BULKWRITE:
+			return IOCONTEXT_BULKWRITE;
+		case BAS_VACUUM:
+			return IOCONTEXT_VACUUM;
+	}
+
+	elog(ERROR, "unrecognized BufferAccessStrategyType: %d", strategy->btype);
 }
 
 /*
@@ -687,6 +752,8 @@ StrategyRejectBuffer(BufferAccessStrategy strategy, BufferDesc *buf, bool from_r
 	 * loop if all ring members are dirty.
 	 */
 	strategy->buffers[strategy->current] = InvalidBuffer;
+
+	pgstat_count_io_op(IOOP_REJECT, IOContextForStrategy(strategy));
 
 	return true;
 }
