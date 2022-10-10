@@ -170,6 +170,19 @@ task:
     LINUX_CONFIGURE_FEATURES: *LINUX_CONFIGURE_FEATURES
     LINUX_MESON_FEATURES: *LINUX_MESON_FEATURES
 
+    # Enable a reasonable set of sanitizers. Use the linux task for that, as
+    # it currently is the fastest task. Also several of the sanitizers work
+    # best on linux.
+    # The overhead of alignment sanitizer is low, undefined behaviour has
+    # moderate overhead. address sanitizer howerever is pretty expensive and
+    # thus not enabled.
+    #
+    # disable_coredump=0, abort_on_error=1: for useful backtraces in case of crashes
+    # print_stacktraces=1,verbosity=2, duh
+    # detect_leaks=0: too many uninteresting leak errors in short-lived binaries
+    UBSAN_OPTIONS: print_stacktrace=1:disable_coredump=0:abort_on_error=1:verbosity=2
+    ASAN_OPTIONS: print_stacktrace=1:disable_coredump=0:abort_on_error=1:detect_leaks=0
+
   only_if: $CIRRUS_CHANGE_MESSAGE !=~ '.*\nci-os-only:.*' || $CIRRUS_CHANGE_MESSAGE =~ '.*\nci-os-only:[^\n]*linux.*'
 
   compute_engine_instance:
@@ -234,6 +247,10 @@ task:
         CCACHE_MAXSIZE: "400M" # tests two different builds
 
       configure_script: |
+        SANITIZER_FLAGS="-fsanitize=alignment,undefined -fno-sanitize-recover=all -fno-common"
+        CFLAGS="$SANITIZER_FLAGS $CFLAGS"
+        LDFLAGS="$SANITIZER_FLAGS $LDFLAGS"
+
         su postgres <<-EOF
           meson setup \
             --buildtype=debug \
