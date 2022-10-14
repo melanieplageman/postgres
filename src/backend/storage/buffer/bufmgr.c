@@ -1273,7 +1273,13 @@ BufferAlloc(SMgrRelation smgr, char relpersistence, ForkNumber forkNum,
 					if (XLogNeedsFlush(lsn) &&
 						StrategyRejectBuffer(strategy, buf))
 					{
-						/* Drop lock/pin and loop around for another buffer */
+						/*
+						 * Drop lock/pin and loop around for another buffer
+						 *
+						 * Though this buffer is not being reused after all, it
+						 * will have been counted as a reuse at this point for
+						 * IO operation statistics tracking.
+						 */
 						LWLockRelease(BufferDescriptorGetContentLock(buf));
 						UnpinBuffer(buf);
 						continue;
@@ -1281,18 +1287,25 @@ BufferAlloc(SMgrRelation smgr, char relpersistence, ForkNumber forkNum,
 				}
 
 				/*
-				 * When a strategy is in use, if the target dirty buffer is an
-				 * existing strategy buffer being reused, count this as a
-				 * strategy write for the purposes of IO Operations statistics
-				 * tracking.
+				 * When a strategy is in use, only flushes of dirty buffers
+				 * already in the strategy ring are counted as strategy writes
+				 * (IOCONTEXT_[BULKREAD|BULKWRITE|VACUUM] IOOP_WRITE) for the
+				 * purpose of IO operation statistics tracking.
 				 *
-				 * All dirty shared buffers upon first being added to the ring
-				 * will be counted as shared buffer writes.
+				 * If a shared buffer initially added to the ring must be
+				 * flushed before being used, this is counted as an
+				 * IOCONTEXT_SHARED IOOP_WRITE.
+				 *
+				 * If a shared buffer added to the ring later because the
+				 * current strategy buffer is pinned or in use or because all
+				 * strategy buffers were dirty and rejected (for BAS_BULKREAD
+				 * operations only) requires flushing, this is counted as an
+				 * IOCONTEXT_SHARED IOOP_WRITE (from_ring will be false).
 				 *
 				 * When a strategy is not in use, the write can only be a
-				 * "regular" write of a dirty shared buffer.
+				 * "regular" write of a dirty shared buffer (IOCONTEXT_SHARED
+				 * IOOP_WRITE).
 				 */
-
 				io_context = from_ring ? IOContextForStrategy(strategy) : IOCONTEXT_SHARED;
 
 				/* OK, do the I/O */

@@ -272,8 +272,7 @@ StrategyGetBuffer(BufferAccessStrategy strategy, uint32 *buf_state, bool *from_r
 	 * buffer to the strategy ring are counted in the corresponding strategy's
 	 * context. This includes the clocksweeps done to add buffers to the ring
 	 * initially as well as those done to add a new shared buffer to the ring
-	 * when all existing buffers in the ring are pinned or have a usage count
-	 * above one.
+	 * when current buffer is pinned or otherwise in use.
 	 */
 	pgstat_count_io_op(IOOP_CLOCKSWEEP, io_context);
 
