@@ -289,7 +289,6 @@ typedef enum IOOp
 {
 	IOOP_EVICT = 0,
 	IOOP_EXTEND,
-	IOOP_FREELIST_ACQUIRE,
 	IOOP_FSYNC,
 	IOOP_READ,
 	IOOP_REJECT,
@@ -315,7 +314,6 @@ typedef struct PgStat_IOOpCounters
 {
 	PgStat_Counter evictions;
 	PgStat_Counter extends;
-	PgStat_Counter freelist_acquisitions;
 	PgStat_Counter fsyncs;
 	PgStat_Counter reads;
 	PgStat_Counter rejections;
@@ -536,10 +534,9 @@ static inline void
 pgstat_io_context_ops_assert_zero(PgStat_IOOpCounters *counters)
 {
 	Assert(counters->evictions == 0 && counters->extends == 0 &&
-			counters->freelist_acquisitions == 0 && counters->fsyncs == 0 &&
-			counters->reads == 0 && counters->rejections == 0 &&
-			counters->repossessions == 0 && counters->reuses == 0 &&
-			counters->writes == 0);
+			counters->fsyncs == 0 && counters->reads == 0 &&
+			counters->rejections == 0 && counters->repossessions == 0 &&
+			counters->reuses == 0 && counters->writes == 0);
 }
 
 static inline void
@@ -552,9 +549,6 @@ pgstat_io_op_assert_zero(PgStat_IOOpCounters *counters, IOOp io_op)
 			return;
 		case IOOP_EXTEND:
 			Assert(counters->extends == 0);
-			return;
-		case IOOP_FREELIST_ACQUIRE:
-			Assert(counters->freelist_acquisitions == 0);
 			return;
 		case IOOP_FSYNC:
 			Assert(counters->fsyncs == 0);

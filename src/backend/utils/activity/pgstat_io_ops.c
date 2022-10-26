@@ -40,9 +40,6 @@ pgstat_accum_io_op(PgStat_IOOpCounters *target, PgStat_IOOpCounters *source, IOO
 		case IOOP_EXTEND:
 			target->extends += source->extends;
 			return;
-		case IOOP_FREELIST_ACQUIRE:
-			target->freelist_acquisitions += source->freelist_acquisitions;
-			return;
 		case IOOP_FSYNC:
 			target->fsyncs += source->fsyncs;
 			return;
@@ -84,9 +81,6 @@ pgstat_count_io_op(IOOp io_op, IOContext io_context)
 			break;
 		case IOOP_EXTEND:
 			pending_counters->extends++;
-			break;
-		case IOOP_FREELIST_ACQUIRE:
-			pending_counters->freelist_acquisitions++;
 			break;
 		case IOOP_FSYNC:
 			pending_counters->fsyncs++;
@@ -211,8 +205,6 @@ pgstat_io_op_desc(IOOp io_op)
 			return "evicted";
 		case IOOP_EXTEND:
 			return "extended";
-		case IOOP_FREELIST_ACQUIRE:
-			return "freelist acquired";
 		case IOOP_FSYNC:
 			return "files synced";
 		case IOOP_READ:
@@ -364,7 +356,7 @@ pgstat_io_op_valid(BackendType bktype, IOContext io_context, IOOp io_op)
 	 * Some BackendTypes will not do certain IOOps.
 	 */
 	if ((bktype == B_BG_WRITER || bktype == B_CHECKPOINTER) &&
-		(io_op == IOOP_READ || io_op == IOOP_EVICT || io_op == IOOP_FREELIST_ACQUIRE))
+		(io_op == IOOP_READ || io_op == IOOP_EVICT))
 		return false;
 
 	if ((bktype == B_AUTOVAC_LAUNCHER || bktype == B_BG_WRITER || bktype ==

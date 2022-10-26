@@ -1125,7 +1125,6 @@ SELECT
        b.written,
        b.extended,
        b.unit,
-       b.freelist_acquired,
        b.evicted,
        b.reused,
        b.rejected,

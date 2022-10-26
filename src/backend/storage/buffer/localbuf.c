@@ -118,8 +118,6 @@ LocalBufferAlloc(SMgrRelation smgr, ForkNumber forkNum, BlockNumber blockNum,
 	bool		found;
 	uint32		buf_state;
 
-	IOOp	io_op = IOOP_EVICT;
-
 	InitBufferTag(&newTag, &smgr->smgr_rlocator.locator, forkNum, blockNum);
 
 	/* Initialize local buffers if first request in this session */
@@ -244,14 +242,6 @@ LocalBufferAlloc(SMgrRelation smgr, ForkNumber forkNum, BlockNumber blockNum,
 	 */
 	if (LocalBufHdrGetBlock(bufHdr) == NULL)
 	{
-		/*
-		 * If this is the first use of the buffer count it as a "freelist
-		 * acquire". This isn't a perfect description of this allocation, since
-		 * we do not maintain a freelist with local buffers, however it allows
-		 * us to distinguish between initial use and evictions of local
-		 * buffers.
-		 */
-		io_op = IOOP_FREELIST_ACQUIRE;
 		/* Set pointer for use by BufferGetBlock() macro */
 		LocalBufHdrGetBlock(bufHdr) = GetLocalBufferStorage();
 	}
@@ -270,6 +260,7 @@ LocalBufferAlloc(SMgrRelation smgr, ForkNumber forkNum, BlockNumber blockNum,
 		ClearBufferTag(&bufHdr->tag);
 		buf_state &= ~(BM_VALID | BM_TAG_VALID);
 		pg_atomic_unlocked_write_u32(&bufHdr->state, buf_state);
+		pgstat_count_io_op(IOOP_EVICT, IOCONTEXT_LOCAL);
 	}
 
 	hresult = (LocalBufferLookupEnt *)
@@ -290,10 +281,6 @@ LocalBufferAlloc(SMgrRelation smgr, ForkNumber forkNum, BlockNumber blockNum,
 
 	*foundPtr = false;
 
-	/*
-	 * Count the IOOp here after we've ensured we were successful.
-	 */
-	pgstat_count_io_op(io_op, IOCONTEXT_LOCAL);
 	return bufHdr;
 }
 

@@ -306,14 +306,6 @@ StrategyGetBuffer(BufferAccessStrategy strategy, uint32 *buf_state, bool *from_r
 					AddBufferToRing(strategy, buf);
 				*buf_state = local_buf_state;
 
-				/*
-				 * When a strategy is in use, IO Operation statistics count
-				 * buffers acquired from the freelist when a strategy is in use
-				 * in their corresponding strategy IOContext even though the
-				 * buffer acquired from the freelist is a shared buffer.
-				 */
-				pgstat_count_io_op(IOOP_FREELIST_ACQUIRE,
-						IOContextForStrategy(strategy));
 				return buf;
 			}
 			UnlockBufHdr(buf, local_buf_state);
@@ -346,18 +338,6 @@ StrategyGetBuffer(BufferAccessStrategy strategy, uint32 *buf_state, bool *from_r
 				if (strategy != NULL)
 					AddBufferToRing(strategy, buf);
 				*buf_state = local_buf_state;
-				/*
-				* When a BufferAccessStrategy is in use, evictions adding a
-				* shared buffer to the strategy ring are counted in the
-				* corresponding strategy's context. This includes the evictions
-				* done to add buffers to the ring initially as well as those
-				* done to add a new shared buffer to the ring when current
-				* buffer is pinned or otherwise in use.
-				*
-				* We wait until this point to count evictions to avoid
-				* incorrectly counting cases in which we error out.
-				*/
-				pgstat_count_io_op(IOOP_EVICT, IOContextForStrategy(strategy));
 
 				return buf;
 			}

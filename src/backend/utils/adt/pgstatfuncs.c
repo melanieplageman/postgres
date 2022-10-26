@@ -1738,7 +1738,6 @@ typedef enum io_stat_col
 	IO_COL_WRITES,
 	IO_COL_EXTENDS,
 	IO_COL_UNIT,
-	IO_COL_FREELIST_ACQUISITIONS,
 	IO_COL_EVICTIONS,
 	IO_COL_REUSES,
 	IO_COL_REJECTIONS,
@@ -1759,8 +1758,6 @@ pgstat_io_op_get_index(IOOp io_op)
 	{
 		case IOOP_EVICT:
 			return IO_COL_EVICTIONS;
-		case IOOP_FREELIST_ACQUIRE:
-			return IO_COL_FREELIST_ACQUISITIONS;
 		case IOOP_READ:
 			return IO_COL_READS;
 		case IOOP_REUSE:
@@ -1848,7 +1845,6 @@ pg_stat_get_io(PG_FUNCTION_ARGS)
 			values[IO_COL_WRITES] = Int64GetDatum(counters->writes);
 			values[IO_COL_EXTENDS] = Int64GetDatum(counters->extends);
 			values[IO_COL_UNIT] = CStringGetTextDatum(unit_name);
-			values[IO_COL_FREELIST_ACQUISITIONS] = Int64GetDatum(counters->freelist_acquisitions);
 			values[IO_COL_EVICTIONS] = Int64GetDatum(counters->evictions);
 			values[IO_COL_REUSES] = Int64GetDatum(counters->reuses);
 			values[IO_COL_REJECTIONS] = Int64GetDatum(counters->rejections);

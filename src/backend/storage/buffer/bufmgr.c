@@ -834,12 +834,10 @@ ReadBuffer_common(SMgrRelation smgr, char relpersistence, ForkNumber forkNum,
 
 	isExtend = (blockNum == P_NEW);
 
-	if (strategy)
-		io_context = IOContextForStrategy(strategy);
-	else if (isLocalBuf)
+	if (isLocalBuf)
 		io_context = IOCONTEXT_LOCAL;
 	else
-		io_context = IOCONTEXT_SHARED;
+		io_context = IOContextForStrategy(strategy);
 
 	TRACE_POSTGRESQL_BUFFER_READ_START(forkNum, blockNum,
 									   smgr->smgr_rlocator.locator.spcOid,
@@ -1024,12 +1022,13 @@ ReadBuffer_common(SMgrRelation smgr, char relpersistence, ForkNumber forkNum,
 			instr_time	io_start,
 						io_time;
 
+			pgstat_count_io_op(IOOP_READ, io_context);
+
+
 			if (track_io_timing)
 				INSTR_TIME_SET_CURRENT(io_start);
 
 			smgrread(smgr, forkNum, blockNum, (char *) bufBlock);
-
-			pgstat_count_io_op(IOOP_READ, io_context);
 
 			if (track_io_timing)
 			{
@@ -1132,6 +1131,7 @@ BufferAlloc(SMgrRelation smgr, char relpersistence, ForkNumber forkNum,
 			BufferAccessStrategy strategy,
 			bool *foundPtr)
 {
+	bool		from_ring;
 	BufferTag	newTag;			/* identity of requested block */
 	uint32		newHash;		/* hash value for newTag */
 	LWLock	   *newPartitionLock;	/* buffer partition lock for it */
@@ -1201,7 +1201,6 @@ BufferAlloc(SMgrRelation smgr, char relpersistence, ForkNumber forkNum,
 	/* Loop here in case we have to try another victim buffer */
 	for (;;)
 	{
-		bool		from_ring;
 
 		/*
 		 * Ensure, while the spinlock's not yet held, that there's a free
@@ -1328,19 +1327,6 @@ BufferAlloc(SMgrRelation smgr, char relpersistence, ForkNumber forkNum,
 				continue;
 			}
 		}
-
-		/*
-		* When a BufferAccessStrategy is in use, reused buffers from the
-		* strategy ring will be counted as IOCONTEXT_BULKREAD,
-		* IOCONTEXT_BULKWRITE, or IOCONTEXT_VACUUM reuses for the
-		* purposes of IO Operation statistics tracking.
-		*
-		* We wait until this point to count reuses to avoid incorrectly
-		* counting a buffer as reused when it was rejected or concurrently
-		* pinned.
-		*/
-		if (from_ring)
-			pgstat_count_io_op(IOOP_REUSE, IOContextForStrategy(strategy));
 
 		/*
 		 * To change the association of a valid buffer, we'll need to have
@@ -1491,6 +1477,31 @@ BufferAlloc(SMgrRelation smgr, char relpersistence, ForkNumber forkNum,
 		buf_state |= BM_TAG_VALID | BUF_USAGECOUNT_ONE;
 
 	UnlockBufHdr(buf, buf_state);
+
+	if (oldFlags & BM_VALID)
+	{
+		/*
+		* When a BufferAccessStrategy is in use, evictions adding a
+		* shared buffer to the strategy ring are counted in the
+		* corresponding strategy's context. This includes the evictions
+		* done to add buffers to the ring initially as well as those
+		* done to add a new shared buffer to the ring when current
+		* buffer is pinned or otherwise in use.
+		*
+		* Blocks evicted from buffers already in the strategy ring are counted
+		* as IOCONTEXT_BULKREAD, IOCONTEXT_BULKWRITE, or IOCONTEXT_VACUUM
+		* reuses.
+		*
+		* We wait until this point to count reuses and evictions in order to
+		* avoid incorrectly counting a buffer as reused or evicted when it was
+		* released because it was concurrently pinned or in use or counting it
+		* as reused when it was rejected or when we errored out.
+		*/
+		if (from_ring)
+			pgstat_count_io_op(IOOP_REUSE, IOContextForStrategy(strategy));
+		else
+			pgstat_count_io_op(IOOP_EVICT, IOCONTEXT_SHARED);
+	}
 
 	if (oldPartitionLock != NULL)
 	{
