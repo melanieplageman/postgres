@@ -3803,17 +3803,17 @@ SELECT pid, wait_event_type, wait_event FROM pg_stat_activity WHERE wait_event i
 
      <row>
       <entry role="catalog_table_entry"><para role="column_definition">
-       <structfield>unit</structfield> <type>text</type>
+       <structfield>bytes_conversion</structfield> <type>bigint</type>
       </para>
       <para>
-      The unit of IO read, written, or extended. For block-oriented IO of
-      relation data, reads, writes, and extends are done in
-      <varname>block_size</varname> units. Thus, the <varname>unit</varname>
-      column will be the value of the build-time parameter
-      <symbol>BLCKSZ</symbol> represented in kilobytes. Future values could
-      include those derived from <symbol>XLOG_BLCKSZ</symbol>, once WAL IO is
-      tracked in this view and <quote>bytes</quote>, once non-block-oriented IO
-      (e.g. temporary file IO) is tracked here.
+      The number of bytes per unit of IO read, written, or extended. For
+      block-oriented IO of relation data, reads, writes, and extends are done
+      in <varname>block_size</varname> units, derived from the build-time
+      parameter <symbol>BLCKSZ</symbol>, which is <literal>8192</literal> by
+      default. Future values could include those derived from
+      <symbol>XLOG_BLCKSZ</symbol>, once WAL IO is tracked in this view, and
+      constant multipliers once non-block-oriented IO (e.g. temporary file IO)
+      is tracked here.
       </para></entry>
      </row>
 
@@ -3929,7 +3929,7 @@ SELECT pid, wait_event_type, wait_event FROM pg_stat_activity WHERE wait_event i
        Number of files fsynced by this <varname>backend_type</varname> for the
        purpose of persisting data dirtied in this
        <varname>io_context</varname>. <literal>fsyncs</literal> are done at
-       segment boundaries so <varname>unit</varname> does not apply to the
+       segment boundaries so <varname>bytes_conversion</varname> does not apply to the
        <varname>files_synced</varname> column. <literal>fsyncs</literal> done
        by backends in order to persist data written in
        <varname>io_context</varname> <literal>vacuum</literal>,
