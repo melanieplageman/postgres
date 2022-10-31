@@ -329,6 +329,12 @@ typedef struct PgStatShared_Checkpointer
 	PgStat_CheckpointerStats reset_offset;
 } PgStatShared_Checkpointer;
 
+
+typedef struct PgStatShared_IOObjectOps
+{
+	PgStat_IOOpCounters data[IOOBJECT_NUM_TYPES];
+} PgStatShared_IOObjectOps;
+
 typedef struct PgStatShared_IOContextOps
 {
 	/*
@@ -337,7 +343,7 @@ typedef struct PgStatShared_IOContextOps
 	 * PgStatShared_BackendIOContextOps->stat_reset_timestamp.
 	 */
 	LWLock		lock;
-	PgStat_IOOpCounters data[IOCONTEXT_NUM_TYPES];
+	PgStatShared_IOObjectOps data[IOCONTEXT_NUM_TYPES];
 } PgStatShared_IOContextOps;
 
 typedef struct PgStatShared_BackendIOContextOps
@@ -578,6 +584,48 @@ extern bool pgstat_function_flush_cb(PgStat_EntryRef *entry_ref, bool nowait);
 extern void pgstat_io_ops_reset_all_cb(TimestampTz ts);
 extern void pgstat_io_ops_snapshot_cb(void);
 extern bool pgstat_flush_io_ops(bool nowait);
+
+/*
+ * Assert that stats have not been counted for any combination of IOContext,
+ * IOObject, and IOOp which is not valid for the passed-in BackendType. The
+ * passed-in array of PgStat_IOOpCounters must contain stats from the
+ * BackendType specified by the second parameter. Caller is responsible for
+ * locking of the passed-in PgStatShared_IOContextOps, if needed.
+ */
+static inline void
+pgstat_backend_io_stats_assert_well_formed(PgStatShared_IOContextOps *backend_io_context_ops,
+		BackendType bktype)
+{
+	bool		expect_backend_stats = true;
+
+	if (!pgstat_io_op_stats_collected(bktype))
+		expect_backend_stats = false;
+
+	for (int io_context = 0; io_context < IOCONTEXT_NUM_TYPES; io_context++)
+	{
+		PgStatShared_IOObjectOps *context = &backend_io_context_ops->data[io_context];
+
+		for (int io_object = 0; io_object < IOOBJECT_NUM_TYPES; io_object++)
+		{
+			PgStat_IOOpCounters *object = &context->data[io_object];
+
+			if (!expect_backend_stats ||
+				!pgstat_bktype_io_context_io_object_valid(bktype,
+					(IOContext) io_context, (IOObject) io_object))
+			{
+				pgstat_io_context_ops_assert_zero(object);
+				continue;
+			}
+
+			for (int io_op = 0; io_op < IOOP_NUM_TYPES; io_op++)
+			{
+				if (!pgstat_io_op_valid(bktype, (IOContext) io_context,
+							(IOObject) io_object, (IOOp) io_op))
+					pgstat_io_op_assert_zero(object, (IOOp) io_op);
+			}
+		}
+	}
+}
 
 
 /*

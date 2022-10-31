@@ -228,7 +228,7 @@ LocalBufferAlloc(SMgrRelation smgr, ForkNumber forkNum, BlockNumber blockNum,
 				  localpage,
 				  false);
 
-		pgstat_count_io_op(IOOP_WRITE, IOCONTEXT_LOCAL);
+		pgstat_count_io_op(IOOP_WRITE, IOOBJECT_TEMP_RELATION, IOCONTEXT_BUFFER_POOL);
 
 		/* Mark not-dirty now in case we error out below */
 		buf_state &= ~BM_DIRTY;
@@ -260,7 +260,7 @@ LocalBufferAlloc(SMgrRelation smgr, ForkNumber forkNum, BlockNumber blockNum,
 		ClearBufferTag(&bufHdr->tag);
 		buf_state &= ~(BM_VALID | BM_TAG_VALID);
 		pg_atomic_unlocked_write_u32(&bufHdr->state, buf_state);
-		pgstat_count_io_op(IOOP_EVICT, IOCONTEXT_LOCAL);
+		pgstat_count_io_op(IOOP_EVICT, IOOBJECT_TEMP_RELATION, IOCONTEXT_BUFFER_POOL);
 	}
 
 	hresult = (LocalBufferLookupEnt *)

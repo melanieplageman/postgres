@@ -58,15 +58,15 @@ pgstat_accum_io_op(PgStat_IOOpCounters *target, PgStat_IOOpCounters *source, IOO
 }
 
 void
-pgstat_count_io_op(IOOp io_op, IOContext io_context)
+pgstat_count_io_op(IOOp io_op, IOObject io_object, IOContext io_context)
 {
 	PgStat_IOOpCounters *pending_counters;
 
 	Assert(io_context < IOCONTEXT_NUM_TYPES);
 	Assert(io_op < IOOP_NUM_TYPES);
-	Assert(pgstat_expect_io_op(MyBackendType, io_context, io_op));
+	Assert(pgstat_expect_io_op(MyBackendType, io_context, io_object, io_op));
 
-	pending_counters = &pending_IOOpStats.data[io_context];
+	pending_counters = &pending_IOOpStats.data[io_context].data[io_object];
 
 	switch (io_op)
 	{
@@ -130,28 +130,35 @@ pgstat_flush_io_ops(bool nowait)
 
 	for (int io_context = 0; io_context < IOCONTEXT_NUM_TYPES; io_context++)
 	{
-		PgStat_IOOpCounters *sharedent = &type_shstats->data[io_context];
-		PgStat_IOOpCounters *pendingent = &pending_IOOpStats.data[io_context];
+		PgStatShared_IOObjectOps *shared_objs = &type_shstats->data[io_context];
+		PgStat_IOObjectOps *pending_objs = &pending_IOOpStats.data[io_context];
 
-		if (!expect_backend_stats ||
-			!pgstat_bktype_io_context_valid(MyBackendType, (IOContext) io_context))
+		for (int io_object = 0; io_object < IOOBJECT_NUM_TYPES; io_object++)
 		{
-			pgstat_io_context_ops_assert_zero(sharedent);
-			pgstat_io_context_ops_assert_zero(pendingent);
-			continue;
-		}
+			PgStat_IOOpCounters *sharedent = &shared_objs->data[io_object];
+			PgStat_IOOpCounters *pendingent = &pending_objs->data[io_object];
 
-		for (int io_op = 0; io_op < IOOP_NUM_TYPES; io_op++)
-		{
-			if (!(pgstat_io_op_valid(MyBackendType, (IOContext) io_context,
-									 (IOOp) io_op)))
+			if (!expect_backend_stats ||
+				!pgstat_bktype_io_context_io_object_valid(MyBackendType,
+					(IOContext) io_context, (IOObject) io_object))
 			{
-				pgstat_io_op_assert_zero(sharedent, (IOOp) io_op);
-				pgstat_io_op_assert_zero(pendingent, (IOOp) io_op);
+				pgstat_io_context_ops_assert_zero(sharedent);
+				pgstat_io_context_ops_assert_zero(pendingent);
 				continue;
 			}
 
-			pgstat_accum_io_op(sharedent, pendingent, (IOOp) io_op);
+			for (int io_op = 0; io_op < IOOP_NUM_TYPES; io_op++)
+			{
+				if (!(pgstat_io_op_valid(MyBackendType, (IOContext) io_context,
+								(IOObject) io_object, (IOOp) io_op)))
+				{
+					pgstat_io_op_assert_zero(sharedent, (IOOp) io_op);
+					pgstat_io_op_assert_zero(pendingent, (IOOp) io_op);
+					continue;
+				}
+
+				pgstat_accum_io_op(sharedent, pendingent, (IOOp) io_op);
+			}
 		}
 	}
 
@@ -173,8 +180,6 @@ pgstat_io_context_desc(IOContext io_context)
 			return "bulkread";
 		case IOCONTEXT_BULKWRITE:
 			return "bulkwrite";
-		case IOCONTEXT_LOCAL:
-			return "local";
 		case IOCONTEXT_BUFFER_POOL:
 			return "buffer pool";
 		case IOCONTEXT_VACUUM:
@@ -182,6 +187,20 @@ pgstat_io_context_desc(IOContext io_context)
 	}
 
 	elog(ERROR, "unrecognized IOContext value: %d", io_context);
+}
+
+const char *
+pgstat_io_object_desc(IOObject io_object)
+{
+	switch(io_object)
+	{
+		case IOOBJECT_RELATION:
+			return "relation";
+		case IOOBJECT_TEMP_RELATION:
+			return "temp relation";
+	}
+
+	elog(ERROR, "unrecognized IOObject value: %d", io_object);
 }
 
 const char *
@@ -276,27 +295,41 @@ pgstat_io_op_stats_collected(BackendType bktype)
 		bktype != B_WAL_RECEIVER && bktype != B_WAL_WRITER;
 }
 
+
 /*
- * Some BackendTypes do not perform IO operations in certain IOContexts. Check
- * that the given BackendType is expected to do IO in the given IOContext.
+ * Some BackendTypes do not perform IO operations in certain IOContexts. Some
+ * IOObjects are never operated on in some IOContexts. Check that the given
+ * BackendType is expected to do IO in the given IOContext and that the given
+ * IOObject is expected to be operated on in the given IOContext..
  */
 bool
-pgstat_bktype_io_context_valid(BackendType bktype, IOContext io_context)
+pgstat_bktype_io_context_io_object_valid(BackendType bktype,
+		IOContext io_context, IOObject io_object)
 {
-	bool		no_local;
+	bool		no_temp_rel;
+
+	/*
+	 * Currently, IO operations on temporary relations can only occur in the
+	 * IOCONTEXT_BUFFER_POOL IOContext.
+	 */
+	if (io_context != IOCONTEXT_BUFFER_POOL &&
+			io_object == IOOBJECT_TEMP_RELATION)
+		return false;
 
 	/*
 	 * In core Postgres, only regular backends and WAL Sender processes
-	 * executing queries should use local buffers. Parallel workers will not
-	 * use local buffers (see InitLocalBuffers()); however, extensions
-	 * leveraging background workers have no such limitation, so track IO
-	 * Operations in IOCONTEXT_LOCAL for BackendType B_BG_WORKER.
+	 * executing queries will use local buffers and operate on temporary
+	 * relations. Parallel workers will not use local buffers (see
+	 * InitLocalBuffers()); however, extensions leveraging background workers
+	 * have no such limitation, so track IO Operations on
+	 * IOOBJECT_TEMP_RELATION for BackendType B_BG_WORKER.
 	 */
-	no_local = bktype == B_AUTOVAC_LAUNCHER || bktype == B_BG_WRITER || bktype
+	no_temp_rel = bktype == B_AUTOVAC_LAUNCHER || bktype == B_BG_WRITER || bktype
 		== B_CHECKPOINTER || bktype == B_AUTOVAC_WORKER || bktype ==
 		B_STANDALONE_BACKEND || bktype == B_STARTUP;
 
-	if (io_context == IOCONTEXT_LOCAL && no_local)
+	if (no_temp_rel && io_context == IOCONTEXT_BUFFER_POOL && io_object ==
+			IOOBJECT_TEMP_RELATION)
 		return false;
 
 	/*
@@ -304,16 +337,16 @@ pgstat_bktype_io_context_valid(BackendType bktype, IOContext io_context)
 	 * IOContexts, and, while it may not be inherently incorrect for them to
 	 * do so, excluding those rows from the view makes the view easier to use.
 	 */
-	if ((io_context == IOCONTEXT_BULKREAD || io_context == IOCONTEXT_BULKWRITE
-		 || io_context == IOCONTEXT_VACUUM) && (bktype == B_CHECKPOINTER
-												|| bktype == B_BG_WRITER))
+	if ((bktype == B_CHECKPOINTER || bktype == B_BG_WRITER) &&
+			(io_context == IOCONTEXT_BULKREAD || io_context ==
+			 IOCONTEXT_BULKWRITE || io_context == IOCONTEXT_VACUUM))
 		return false;
 
-	if (io_context == IOCONTEXT_VACUUM && bktype == B_AUTOVAC_LAUNCHER)
+	if (bktype == B_AUTOVAC_LAUNCHER && io_context == IOCONTEXT_VACUUM)
 		return false;
 
-	if (io_context == IOCONTEXT_BULKWRITE && (bktype == B_AUTOVAC_WORKER ||
-											  bktype == B_AUTOVAC_LAUNCHER))
+	if ((bktype == B_AUTOVAC_WORKER || bktype == B_AUTOVAC_LAUNCHER) &&
+			io_context == IOCONTEXT_BULKWRITE)
 		return false;
 
 	return true;
@@ -327,7 +360,7 @@ pgstat_bktype_io_context_valid(BackendType bktype, IOContext io_context)
  * certain IOContext.
  */
 bool
-pgstat_io_op_valid(BackendType bktype, IOContext io_context, IOOp io_op)
+pgstat_io_op_valid(BackendType bktype, IOContext io_context, IOObject io_object, IOOp io_op)
 {
 	bool		strategy_io_context;
 
@@ -364,30 +397,29 @@ pgstat_io_op_valid(BackendType bktype, IOContext io_context, IOOp io_op)
 		return false;
 
 	/*
-	 * Temporary tables using local buffers are not logged and thus do not
-	 * require fsync'ing.
+	 * Temporary tables are not logged and thus do not require fsync'ing.
 	 *
 	 * IOOP_FSYNC IOOps done by a backend using a BufferAccessStrategy are
 	 * counted in the IOCONTEXT_BUFFER_POOL IOContext. See comment in
 	 * ForwardSyncRequest() for more details.
 	 */
-	if ((io_context == IOCONTEXT_LOCAL || strategy_io_context) &&
-		io_op == IOOP_FSYNC)
+	if ((strategy_io_context || io_object == IOOBJECT_TEMP_RELATION) && io_op
+			== IOOP_FSYNC)
 		return false;
 
 	return true;
 }
 
 bool
-pgstat_expect_io_op(BackendType bktype, IOContext io_context, IOOp io_op)
+pgstat_expect_io_op(BackendType bktype, IOContext io_context, IOObject io_object, IOOp io_op)
 {
 	if (!pgstat_io_op_stats_collected(bktype))
 		return false;
 
-	if (!pgstat_bktype_io_context_valid(bktype, io_context))
+	if (!pgstat_bktype_io_context_io_object_valid(bktype, io_context, io_object))
 		return false;
 
-	if (!(pgstat_io_op_valid(bktype, io_context, io_op)))
+	if (!(pgstat_io_op_valid(bktype, io_context, io_object, io_op)))
 		return false;
 
 	return true;

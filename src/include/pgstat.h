@@ -287,7 +287,7 @@ typedef struct PgStat_CheckpointerStats
 
 typedef enum IOOp
 {
-	IOOP_EVICT = 0,
+	IOOP_EVICT,
 	IOOP_EXTEND,
 	IOOP_FSYNC,
 	IOOP_READ,
@@ -297,11 +297,18 @@ typedef enum IOOp
 
 #define IOOP_NUM_TYPES (IOOP_WRITE + 1)
 
+typedef enum IOObject
+{
+	IOOBJECT_RELATION,
+	IOOBJECT_TEMP_RELATION,
+} IOObject;
+
+#define IOOBJECT_NUM_TYPES (IOOBJECT_TEMP_RELATION + 1)
+
 typedef enum IOContext
 {
-	IOCONTEXT_BULKREAD = 0,
+	IOCONTEXT_BULKREAD,
 	IOCONTEXT_BULKWRITE,
-	IOCONTEXT_LOCAL,
 	IOCONTEXT_BUFFER_POOL,
 	IOCONTEXT_VACUUM,
 } IOContext;
@@ -318,9 +325,14 @@ typedef struct PgStat_IOOpCounters
 	PgStat_Counter writes;
 } PgStat_IOOpCounters;
 
+typedef struct PgStat_IOObjectOps
+{
+	PgStat_IOOpCounters data[IOOBJECT_NUM_TYPES];
+} PgStat_IOObjectOps;
+
 typedef struct PgStat_IOContextOps
 {
-	PgStat_IOOpCounters data[IOCONTEXT_NUM_TYPES];
+	PgStat_IOObjectOps data[IOCONTEXT_NUM_TYPES];
 } PgStat_IOContextOps;
 
 typedef struct PgStat_BackendIOContextOps
@@ -510,16 +522,20 @@ extern PgStat_CheckpointerStats *pgstat_fetch_stat_checkpointer(void);
  * Functions in pgstat_io_ops.c
  */
 
-extern void pgstat_count_io_op(IOOp io_op, IOContext io_context);
+extern void pgstat_count_io_op(IOOp io_op, IOObject io_object, IOContext io_context);
 extern PgStat_BackendIOContextOps *pgstat_fetch_backend_io_context_ops(void);
 extern const char *pgstat_io_context_desc(IOContext io_context);
+extern const char * pgstat_io_object_desc(IOObject io_object);
 extern const char *pgstat_io_op_desc(IOOp io_op);
 
 /* Validation functions in pgstat_io_ops.c */
 extern bool pgstat_io_op_stats_collected(BackendType bktype);
-extern bool pgstat_bktype_io_context_valid(BackendType bktype, IOContext io_context);
-extern bool pgstat_io_op_valid(BackendType bktype, IOContext io_context, IOOp io_op);
-extern bool pgstat_expect_io_op(BackendType bktype, IOContext io_context, IOOp io_op);
+extern bool pgstat_bktype_io_context_io_object_valid(BackendType bktype,
+		IOContext io_context, IOObject io_object);
+extern bool pgstat_io_op_valid(BackendType bktype, IOContext io_context,
+		IOObject io_object, IOOp io_op);
+extern bool pgstat_expect_io_op(BackendType bktype,
+		IOContext io_context, IOObject io_object, IOOp io_op);
 
 /* IO stats translation function in freelist.c */
 extern IOContext IOContextForStrategy(BufferAccessStrategy bas);
@@ -561,40 +577,6 @@ pgstat_io_op_assert_zero(PgStat_IOOpCounters *counters, IOOp io_op)
 
 	/* Should not reach here */
 	Assert(false);
-}
-
-/*
- * Assert that stats have not been counted for any combination of IOContext and
- * IOOp which are not valid for the passed-in BackendType. The passed-in array
- * of PgStat_IOOpCounters must contain stats from the BackendType specified by
- * the second parameter. Caller is responsible for any locking if the passed-in
- * array of PgStat_IOOpCounters is a member of PgStatShared_IOContextOps.
- */
-static inline void
-pgstat_backend_io_stats_assert_well_formed(PgStat_IOOpCounters
-										   backend_io_context_ops[IOCONTEXT_NUM_TYPES], BackendType bktype)
-{
-	bool		expect_backend_stats = true;
-
-	if (!pgstat_io_op_stats_collected(bktype))
-		expect_backend_stats = false;
-
-	for (int io_context = 0; io_context < IOCONTEXT_NUM_TYPES; io_context++)
-	{
-		if (!expect_backend_stats ||
-			!pgstat_bktype_io_context_valid(bktype, (IOContext) io_context))
-		{
-			pgstat_io_context_ops_assert_zero(&backend_io_context_ops[io_context]);
-			continue;
-		}
-
-		for (int io_op = 0; io_op < IOOP_NUM_TYPES; io_op++)
-		{
-			if (!pgstat_io_op_valid(bktype, (IOContext) io_context, (IOOp) io_op))
-				pgstat_io_op_assert_zero(&backend_io_context_ops[io_context],
-						(IOOp) io_op);
-		}
-	}
 }
 
 

@@ -1108,6 +1108,7 @@ INT128
 INTERFACE_INFO
 IOContext
 IOFuncSelector
+IOObject
 IOOp
 IPCompareMethod
 ITEM
@@ -2013,6 +2014,7 @@ PgStatShared_Database
 PgStatShared_Function
 PgStatShared_HashEntry
 PgStatShared_IOContextOps
+PgStatShared_IOObjectOps
 PgStatShared_Relation
 PgStatShared_ReplSlot
 PgStatShared_SLRU
@@ -2032,6 +2034,7 @@ PgStat_FunctionCallUsage
 PgStat_FunctionCounts
 PgStat_HashKey
 PgStat_IOContextOps
+PgStat_IOObjectOps
 PgStat_IOOpCounters
 PgStat_Kind
 PgStat_KindInfo

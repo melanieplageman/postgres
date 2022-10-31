@@ -543,10 +543,14 @@ SELECT pg_stat_get_subscription_stats(NULL);
 
 -- There is no test for blocks evicted from shared buffers, because we cannot
 -- be sure of the state of shared buffers at the point the test is run.
-SELECT sum(read) AS io_sum_shared_reads_before FROM pg_stat_io WHERE io_context = 'buffer pool' \gset
-SELECT sum(written) AS io_sum_shared_writes_before FROM pg_stat_io WHERE io_context = 'buffer pool' \gset
-SELECT sum(extended) AS io_sum_shared_extends_before FROM pg_stat_io WHERE io_context = 'buffer pool' \gset
-SELECT sum(files_synced) AS io_sum_shared_fsyncs_before FROM pg_stat_io WHERE io_context = 'buffer pool' \gset
+SELECT sum(read) AS io_sum_shared_reads_before
+  FROM pg_stat_io WHERE io_context = 'buffer pool' AND io_object = 'relation' \gset
+SELECT sum(written) AS io_sum_shared_writes_before
+  FROM pg_stat_io WHERE io_context = 'buffer pool' AND io_object = 'relation' \gset
+SELECT sum(extended) AS io_sum_shared_extends_before
+  FROM pg_stat_io WHERE io_context = 'buffer pool' AND io_object = 'relation' \gset
+SELECT sum(files_synced) AS io_sum_shared_fsyncs_before
+  FROM pg_stat_io WHERE io_context = 'buffer pool' AND io_object = 'relation' \gset
 -- Create a regular table and insert some data to generate IOCONTEXT_BUFFER_POOL
 -- extends.
 CREATE TABLE test_io_shared(a int);
@@ -560,9 +564,12 @@ SELECT pg_stat_force_next_flush();
 -- checkpoint in the test.
 CHECKPOINT;
 CHECKPOINT;
-SELECT sum(written) AS io_sum_shared_writes_after FROM pg_stat_io WHERE io_context = 'buffer pool' \gset
-SELECT sum(extended) AS io_sum_shared_extends_after FROM pg_stat_io WHERE io_context = 'buffer pool' \gset
-SELECT sum(files_synced) AS io_sum_shared_fsyncs_after FROM pg_stat_io WHERE io_context = 'buffer pool' \gset
+SELECT sum(written) AS io_sum_shared_writes_after
+  FROM pg_stat_io WHERE io_context = 'buffer pool' AND io_object = 'relation'  \gset
+SELECT sum(extended) AS io_sum_shared_extends_after
+  FROM pg_stat_io WHERE io_context = 'buffer pool' AND io_object = 'relation'  \gset
+SELECT sum(files_synced) AS io_sum_shared_fsyncs_after
+  FROM pg_stat_io WHERE io_context = 'buffer pool' AND io_object = 'relation'  \gset
 SELECT :io_sum_shared_writes_after > :io_sum_shared_writes_before;
 SELECT :io_sum_shared_extends_after > :io_sum_shared_extends_before;
 SELECT current_setting('fsync') = 'off' OR :io_sum_shared_fsyncs_after > :io_sum_shared_fsyncs_before;
@@ -573,7 +580,8 @@ CREATE TABLESPACE test_io_shared_stats_tblspc LOCATION '';
 ALTER TABLE test_io_shared SET TABLESPACE test_io_shared_stats_tblspc;
 SELECT COUNT(*) FROM test_io_shared;
 SELECT pg_stat_force_next_flush();
-SELECT sum(read) AS io_sum_shared_reads_after FROM pg_stat_io WHERE io_context = 'buffer pool' \gset
+SELECT sum(read) AS io_sum_shared_reads_after
+  FROM pg_stat_io WHERE io_context = 'buffer pool' AND io_object = 'relation'  \gset
 SELECT :io_sum_shared_reads_after > :io_sum_shared_reads_before;
 DROP TABLE test_io_shared;
 DROP TABLESPACE test_io_shared_stats_tblspc;
@@ -590,20 +598,28 @@ DROP TABLESPACE test_io_shared_stats_tblspc;
 \c
 SET temp_buffers TO '1MB';
 CREATE TEMPORARY TABLE test_io_local(a int, b TEXT);
-SELECT sum(evicted) AS io_sum_local_evictions_before FROM pg_stat_io WHERE io_context = 'local' \gset
-SELECT sum(read) AS io_sum_local_reads_before FROM pg_stat_io WHERE io_context = 'local' \gset
-SELECT sum(written) AS io_sum_local_writes_before FROM pg_stat_io WHERE io_context = 'local' \gset
-SELECT sum(extended) AS io_sum_local_extends_before FROM pg_stat_io WHERE io_context = 'local' \gset
+SELECT sum(evicted) AS io_sum_local_evictions_before
+  FROM pg_stat_io WHERE io_context = 'buffer pool' AND io_object = 'temp relation' \gset
+SELECT sum(read) AS io_sum_local_reads_before
+  FROM pg_stat_io WHERE io_context = 'buffer pool' AND io_object = 'temp relation' \gset
+SELECT sum(written) AS io_sum_local_writes_before
+  FROM pg_stat_io WHERE io_context = 'buffer pool' AND io_object = 'temp relation' \gset
+SELECT sum(extended) AS io_sum_local_extends_before
+  FROM pg_stat_io WHERE io_context = 'buffer pool' AND io_object = 'temp relation' \gset
 -- Insert enough values that we need to reuse and write out dirty local
 -- buffers.
 INSERT INTO test_io_local SELECT generate_series(1, 8000) as id, repeat('a', 100);
 -- Read in evicted buffers.
 SELECT COUNT(*) FROM test_io_local;
 SELECT pg_stat_force_next_flush();
-SELECT sum(evicted) AS io_sum_local_evictions_after FROM pg_stat_io WHERE io_context = 'local' \gset
-SELECT sum(read) AS io_sum_local_reads_after FROM pg_stat_io WHERE io_context = 'local' \gset
-SELECT sum(written) AS io_sum_local_writes_after FROM pg_stat_io WHERE io_context = 'local' \gset
-SELECT sum(extended) AS io_sum_local_extends_after FROM pg_stat_io WHERE io_context = 'local' \gset
+SELECT sum(evicted) AS io_sum_local_evictions_after
+  FROM pg_stat_io WHERE io_context = 'buffer pool' AND io_object = 'temp relation'  \gset
+SELECT sum(read) AS io_sum_local_reads_after
+  FROM pg_stat_io WHERE io_context = 'buffer pool' AND io_object = 'temp relation'  \gset
+SELECT sum(written) AS io_sum_local_writes_after
+  FROM pg_stat_io WHERE io_context = 'buffer pool' AND io_object = 'temp relation'  \gset
+SELECT sum(extended) AS io_sum_local_extends_after
+  FROM pg_stat_io WHERE io_context = 'buffer pool' AND io_object = 'temp relation'  \gset
 SELECT :io_sum_local_evictions_after > :io_sum_local_evictions_before;
 SELECT :io_sum_local_reads_after > :io_sum_local_reads_before;
 SELECT :io_sum_local_writes_after > :io_sum_local_writes_before;

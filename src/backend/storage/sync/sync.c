@@ -432,7 +432,7 @@ ProcessSyncRequests(void)
 					total_elapsed += elapsed;
 					processed++;
 
-					pgstat_count_io_op(IOOP_FSYNC, IOCONTEXT_BUFFER_POOL);
+					pgstat_count_io_op(IOOP_FSYNC, IOOBJECT_RELATION, IOCONTEXT_BUFFER_POOL);
 
 					if (log_checkpoints)
 						elog(DEBUG1, "checkpoint sync: number=%d file=%s time=%.3f ms",

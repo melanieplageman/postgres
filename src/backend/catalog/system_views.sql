@@ -1121,10 +1121,11 @@ CREATE VIEW pg_stat_io AS
 SELECT
        b.backend_type,
        b.io_context,
+       b.io_object,
        b.read,
        b.written,
        b.extended,
-       b.bytes_conversion,
+       b.op_bytes,
        b.evicted,
        b.reused,
        b.files_synced,

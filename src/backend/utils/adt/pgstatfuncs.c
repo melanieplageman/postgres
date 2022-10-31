@@ -1734,6 +1734,7 @@ typedef enum io_stat_col
 {
 	IO_COL_BACKEND_TYPE,
 	IO_COL_IO_CONTEXT,
+	IO_COL_IO_OBJECT,
 	IO_COL_READS,
 	IO_COL_WRITES,
 	IO_COL_EXTENDS,
@@ -1771,6 +1772,7 @@ pgstat_io_op_get_index(IOOp io_op)
 	elog(ERROR, "unrecognized IOOp value: %d", io_op);
 }
 
+
 Datum
 pg_stat_get_io(PG_FUNCTION_ARGS)
 {
@@ -1800,56 +1802,63 @@ pg_stat_get_io(PG_FUNCTION_ARGS)
 
 		for (int io_context = 0; io_context < IOCONTEXT_NUM_TYPES; io_context++)
 		{
-			PgStat_IOOpCounters *counters = &io_context_ops->data[io_context];
-			const char *io_context_str = pgstat_io_context_desc(io_context);
+			PgStat_IOObjectOps *io_objs = &io_context_ops->data[io_context];
 
-			Datum		values[IO_NUM_COLUMNS] = {0};
-			bool		nulls[IO_NUM_COLUMNS] = {0};
-
-			/*
-			 * Some combinations of IOContext and BackendType are not valid
-			 * for any type of IOOp. In such cases, omit the entire row from
-			 * the view.
-			 */
-			if (!expect_backend_stats ||
-				!pgstat_bktype_io_context_valid((BackendType) bktype,
-												(IOContext) io_context))
+			for (int io_object = 0; io_object < IOOBJECT_NUM_TYPES; io_object++)
 			{
-				pgstat_io_context_ops_assert_zero(counters);
-				continue;
-			}
+				PgStat_IOOpCounters *counters = &io_objs->data[io_object];
+				const char *io_context_str = pgstat_io_context_desc(io_context);
+				const char *io_obj_str = pgstat_io_object_desc(io_object);
 
-			values[IO_COL_BACKEND_TYPE] = bktype_desc;
-			values[IO_COL_IO_CONTEXT] = CStringGetTextDatum(io_context_str);
-			values[IO_COL_READS] = Int64GetDatum(counters->reads);
-			values[IO_COL_WRITES] = Int64GetDatum(counters->writes);
-			values[IO_COL_EXTENDS] = Int64GetDatum(counters->extends);
-			/*
-			 * Hard-code this to blocks until we have non-block-oriented IO
-			 * represented in the view as well
-			 */
-			values[IO_COL_CONVERSION] = Int64GetDatum(BLCKSZ);
-			values[IO_COL_EVICTIONS] = Int64GetDatum(counters->evictions);
-			values[IO_COL_REUSES] = Int64GetDatum(counters->reuses);
-			values[IO_COL_FSYNCS] = Int64GetDatum(counters->fsyncs);
-			values[IO_COL_RESET_TIME] = TimestampTzGetDatum(reset_time);
+				Datum		values[IO_NUM_COLUMNS] = {0};
+				bool		nulls[IO_NUM_COLUMNS] = {0};
 
-			/*
-			 * Some combinations of BackendType and IOOp and of IOContext and
-			 * IOOp are not valid. Set these cells in the view NULL and assert
-			 * that these stats are zero as expected.
-			 */
-			for (int io_op = 0; io_op < IOOP_NUM_TYPES; io_op++)
-			{
-				if (!(pgstat_io_op_valid((BackendType) bktype, (IOContext)
-										 io_context, (IOOp) io_op)))
+				/*
+				* Some combinations of IOContext and BackendType are not valid
+				* for any type of IOOp. In such cases, omit the entire row from
+				* the view.
+				*/
+				if (!expect_backend_stats ||
+					!pgstat_bktype_io_context_io_object_valid((BackendType) bktype,
+						(IOContext) io_context, (IOObject) io_object))
 				{
-					pgstat_io_op_assert_zero(counters, (IOOp) io_op);
-					nulls[pgstat_io_op_get_index((IOOp) io_op)] = true;
+					pgstat_io_context_ops_assert_zero(counters);
+					continue;
 				}
-			}
 
-			tuplestore_putvalues(rsinfo->setResult, rsinfo->setDesc, values, nulls);
+				values[IO_COL_BACKEND_TYPE] = bktype_desc;
+				values[IO_COL_IO_CONTEXT] = CStringGetTextDatum(io_context_str);
+				values[IO_COL_IO_OBJECT] = CStringGetTextDatum(io_obj_str);
+				values[IO_COL_READS] = Int64GetDatum(counters->reads);
+				values[IO_COL_WRITES] = Int64GetDatum(counters->writes);
+				values[IO_COL_EXTENDS] = Int64GetDatum(counters->extends);
+				/*
+				* Hard-code this to blocks until we have non-block-oriented IO
+				* represented in the view as well
+				*/
+				values[IO_COL_CONVERSION] = Int64GetDatum(BLCKSZ);
+				values[IO_COL_EVICTIONS] = Int64GetDatum(counters->evictions);
+				values[IO_COL_REUSES] = Int64GetDatum(counters->reuses);
+				values[IO_COL_FSYNCS] = Int64GetDatum(counters->fsyncs);
+				values[IO_COL_RESET_TIME] = TimestampTzGetDatum(reset_time);
+
+				/*
+				* Some combinations of BackendType and IOOp and of IOContext and
+				* IOOp are not valid. Set these cells in the view NULL and assert
+				* that these stats are zero as expected.
+				*/
+				for (int io_op = 0; io_op < IOOP_NUM_TYPES; io_op++)
+				{
+					if (!(pgstat_io_op_valid((BackendType) bktype, (IOContext)
+											io_context, (IOObject) io_object, (IOOp) io_op)))
+					{
+						pgstat_io_op_assert_zero(counters, (IOOp) io_op);
+						nulls[pgstat_io_op_get_index((IOOp) io_op)] = true;
+					}
+				}
+
+				tuplestore_putvalues(rsinfo->setResult, rsinfo->setDesc, values, nulls);
+			}
 		}
 	}
 

@@ -1128,7 +1128,7 @@ ForwardSyncRequest(const FileTag *ftag, SyncRequestType type)
 		 * IOCONTEXT_BUFFER_POOL is likely clearer when investigating the number of
 		 * backend fsyncs.
 		 */
-		pgstat_count_io_op(IOOP_FSYNC, IOCONTEXT_BUFFER_POOL);
+		pgstat_count_io_op(IOOP_FSYNC, IOOBJECT_RELATION, IOCONTEXT_BUFFER_POOL);
 		return false;
 	}
 

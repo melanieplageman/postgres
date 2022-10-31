@@ -1524,7 +1524,7 @@ pgstat_read_statsfile(void)
 
 	for (int bktype = 0; bktype < BACKEND_NUM_TYPES; bktype++)
 	{
-		pgstat_backend_io_stats_assert_well_formed(shmem->io_ops.stats[bktype].data,
+		pgstat_backend_io_stats_assert_well_formed(&shmem->io_ops.stats[bktype],
 												   (BackendType) bktype);
 		if (!read_chunk_s(fpin, &shmem->io_ops.stats[bktype].data))
 			goto error;

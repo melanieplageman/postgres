@@ -482,7 +482,8 @@ static BufferDesc *BufferAlloc(SMgrRelation smgr,
 							   BlockNumber blockNum,
 							   BufferAccessStrategy strategy,
 							   bool *foundPtr);
-static void FlushBuffer(BufferDesc *buf, SMgrRelation reln, IOContext io_context);
+static void FlushBuffer(BufferDesc *buf, SMgrRelation reln,
+		IOContext io_context, IOObject io_object);
 static void FindAndDropRelationBuffers(RelFileLocator rlocator,
 									   ForkNumber forkNum,
 									   BlockNumber nForkBlock,
@@ -823,6 +824,7 @@ ReadBuffer_common(SMgrRelation smgr, char relpersistence, ForkNumber forkNum,
 	BufferDesc *bufHdr;
 	Block		bufBlock;
 	bool		found;
+	IOObject	io_object;
 	IOContext	io_context;
 	bool		isExtend;
 	bool		isLocalBuf = SmgrIsTemp(smgr);
@@ -835,9 +837,20 @@ ReadBuffer_common(SMgrRelation smgr, char relpersistence, ForkNumber forkNum,
 	isExtend = (blockNum == P_NEW);
 
 	if (isLocalBuf)
-		io_context = IOCONTEXT_LOCAL;
+	{
+		/*
+		 * Though a strategy object may be passed in, no strategy is employed
+		 * when using local buffers. This could happen when doing, for example,
+		 * CREATE TEMPORRARY TABLE AS ...
+		 */
+		io_object = IOOBJECT_TEMP_RELATION;
+		io_context = IOCONTEXT_BUFFER_POOL;
+	}
 	else
+	{
+		io_object = IOOBJECT_RELATION;
 		io_context = IOContextForStrategy(strategy);
+	}
 
 	TRACE_POSTGRESQL_BUFFER_READ_START(forkNum, blockNum,
 									   smgr->smgr_rlocator.locator.spcOid,
@@ -996,7 +1009,7 @@ ReadBuffer_common(SMgrRelation smgr, char relpersistence, ForkNumber forkNum,
 
 	if (isExtend)
 	{
-		pgstat_count_io_op(IOOP_EXTEND, io_context);
+		pgstat_count_io_op(IOOP_EXTEND, io_object, io_context);
 		/* new buffers are zero-filled */
 		MemSet((char *) bufBlock, 0, BLCKSZ);
 		/* don't set checksum for all-zero page */
@@ -1022,7 +1035,7 @@ ReadBuffer_common(SMgrRelation smgr, char relpersistence, ForkNumber forkNum,
 			instr_time	io_start,
 						io_time;
 
-			pgstat_count_io_op(IOOP_READ, io_context);
+			pgstat_count_io_op(IOOP_READ, io_object, io_context);
 
 
 			if (track_io_timing)
@@ -1305,7 +1318,7 @@ BufferAlloc(SMgrRelation smgr, char relpersistence, ForkNumber forkNum,
 														  smgr->smgr_rlocator.locator.dbOid,
 														  smgr->smgr_rlocator.locator.relNumber);
 
-				FlushBuffer(buf, NULL, io_context);
+				FlushBuffer(buf, NULL, io_context, IOOBJECT_RELATION);
 				LWLockRelease(BufferDescriptorGetContentLock(buf));
 
 				ScheduleBufferTagForWriteback(&BackendWritebackContext,
@@ -1498,7 +1511,7 @@ BufferAlloc(SMgrRelation smgr, char relpersistence, ForkNumber forkNum,
 		*/
 		IOOp io_op = from_ring ? IOOP_REUSE : IOOP_EVICT;
 
-		pgstat_count_io_op(io_op, io_context);
+		pgstat_count_io_op(io_op, IOOBJECT_RELATION, io_context);
 	}
 
 	if (oldPartitionLock != NULL)
@@ -2630,7 +2643,7 @@ SyncOneBuffer(int buf_id, bool skip_recently_used, WritebackContext *wb_context)
 	PinBuffer_Locked(bufHdr);
 	LWLockAcquire(BufferDescriptorGetContentLock(bufHdr), LW_SHARED);
 
-	FlushBuffer(bufHdr, NULL, IOCONTEXT_BUFFER_POOL);
+	FlushBuffer(bufHdr, NULL, IOCONTEXT_BUFFER_POOL, IOOBJECT_RELATION);
 
 	LWLockRelease(BufferDescriptorGetContentLock(bufHdr));
 
@@ -2880,7 +2893,7 @@ BufferGetTag(Buffer buffer, RelFileLocator *rlocator, ForkNumber *forknum,
  * as the second parameter.  If not, pass NULL.
  */
 static void
-FlushBuffer(BufferDesc *buf, SMgrRelation reln, IOContext io_context)
+FlushBuffer(BufferDesc *buf, SMgrRelation reln, IOContext io_context, IOObject io_object)
 {
 	XLogRecPtr	recptr;
 	ErrorContextCallback errcallback;
@@ -2960,7 +2973,7 @@ FlushBuffer(BufferDesc *buf, SMgrRelation reln, IOContext io_context)
 	 */
 	bufToWrite = PageSetChecksumCopy((Page) bufBlock, buf->tag.blockNum);
 
-	pgstat_count_io_op(IOOP_WRITE, io_context);
+	pgstat_count_io_op(IOOP_WRITE, IOOBJECT_RELATION, io_context);
 
 	if (track_io_timing)
 		INSTR_TIME_SET_CURRENT(io_start);
@@ -3613,7 +3626,7 @@ FlushRelationBuffers(Relation rel)
 						  localpage,
 						  false);
 
-				pgstat_count_io_op(IOOP_WRITE, IOCONTEXT_LOCAL);
+				pgstat_count_io_op(IOOP_WRITE, IOOBJECT_TEMP_RELATION, IOCONTEXT_BUFFER_POOL);
 
 				buf_state &= ~(BM_DIRTY | BM_JUST_DIRTIED);
 				pg_atomic_unlocked_write_u32(&bufHdr->state, buf_state);
@@ -3650,7 +3663,7 @@ FlushRelationBuffers(Relation rel)
 		{
 			PinBuffer_Locked(bufHdr);
 			LWLockAcquire(BufferDescriptorGetContentLock(bufHdr), LW_SHARED);
-			FlushBuffer(bufHdr, RelationGetSmgr(rel), IOCONTEXT_BUFFER_POOL);
+			FlushBuffer(bufHdr, RelationGetSmgr(rel), IOCONTEXT_BUFFER_POOL, IOOBJECT_RELATION);
 			LWLockRelease(BufferDescriptorGetContentLock(bufHdr));
 			UnpinBuffer(bufHdr);
 		}
@@ -3748,7 +3761,7 @@ FlushRelationsAllBuffers(SMgrRelation *smgrs, int nrels)
 		{
 			PinBuffer_Locked(bufHdr);
 			LWLockAcquire(BufferDescriptorGetContentLock(bufHdr), LW_SHARED);
-			FlushBuffer(bufHdr, srelent->srel, IOCONTEXT_BUFFER_POOL);
+			FlushBuffer(bufHdr, srelent->srel, IOCONTEXT_BUFFER_POOL, IOOBJECT_RELATION);
 			LWLockRelease(BufferDescriptorGetContentLock(bufHdr));
 			UnpinBuffer(bufHdr);
 		}
@@ -3958,7 +3971,7 @@ FlushDatabaseBuffers(Oid dbid)
 		{
 			PinBuffer_Locked(bufHdr);
 			LWLockAcquire(BufferDescriptorGetContentLock(bufHdr), LW_SHARED);
-			FlushBuffer(bufHdr, NULL, IOCONTEXT_BUFFER_POOL);
+			FlushBuffer(bufHdr, NULL, IOCONTEXT_BUFFER_POOL, IOOBJECT_RELATION);
 			LWLockRelease(BufferDescriptorGetContentLock(bufHdr));
 			UnpinBuffer(bufHdr);
 		}
@@ -3985,7 +3998,7 @@ FlushOneBuffer(Buffer buffer)
 
 	Assert(LWLockHeldByMe(BufferDescriptorGetContentLock(bufHdr)));
 
-	FlushBuffer(bufHdr, NULL, IOCONTEXT_BUFFER_POOL);
+	FlushBuffer(bufHdr, NULL, IOCONTEXT_BUFFER_POOL, IOOBJECT_RELATION);
 }
 
 /*
