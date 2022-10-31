@@ -1881,11 +1881,10 @@ pg_stat_io| SELECT b.backend_type,
     b.bytes_conversion,
     b.evicted,
     b.reused,
-    b.rejected,
     b.repossessed,
     b.files_synced,
     b.stats_reset
-   FROM pg_stat_get_io() b(backend_type, io_context, read, written, extended, bytes_conversion, evicted, reused, rejected, repossessed, files_synced, stats_reset);
+   FROM pg_stat_get_io() b(backend_type, io_context, read, written, extended, bytes_conversion, evicted, reused, repossessed, files_synced, stats_reset);
 pg_stat_progress_analyze| SELECT s.pid,
     s.datid,
     d.datname,

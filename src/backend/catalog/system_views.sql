@@ -1127,7 +1127,6 @@ SELECT
        b.bytes_conversion,
        b.evicted,
        b.reused,
-       b.rejected,
        b.repossessed,
        b.files_synced,
        b.stats_reset

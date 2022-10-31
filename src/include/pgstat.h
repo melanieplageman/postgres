@@ -291,7 +291,6 @@ typedef enum IOOp
 	IOOP_EXTEND,
 	IOOP_FSYNC,
 	IOOP_READ,
-	IOOP_REJECT,
 	IOOP_REPOSSESS,
 	IOOP_REUSE,
 	IOOP_WRITE,
@@ -316,7 +315,6 @@ typedef struct PgStat_IOOpCounters
 	PgStat_Counter extends;
 	PgStat_Counter fsyncs;
 	PgStat_Counter reads;
-	PgStat_Counter rejections;
 	PgStat_Counter reuses;
 	PgStat_Counter repossessions;
 	PgStat_Counter writes;
@@ -535,8 +533,8 @@ pgstat_io_context_ops_assert_zero(PgStat_IOOpCounters *counters)
 {
 	Assert(counters->evictions == 0 && counters->extends == 0 &&
 			counters->fsyncs == 0 && counters->reads == 0 &&
-			counters->rejections == 0 && counters->repossessions == 0 &&
-			counters->reuses == 0 && counters->writes == 0);
+			counters->repossessions == 0 && counters->reuses == 0 &&
+			counters->writes == 0);
 }
 
 static inline void
@@ -555,9 +553,6 @@ pgstat_io_op_assert_zero(PgStat_IOOpCounters *counters, IOOp io_op)
 			return;
 		case IOOP_READ:
 			Assert(counters->reads == 0);
-			return;
-		case IOOP_REJECT:
-			Assert(counters->rejections == 0);
 			return;
 		case IOOP_REPOSSESS:
 			Assert(counters->repossessions == 0);

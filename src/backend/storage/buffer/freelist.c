@@ -733,7 +733,5 @@ StrategyRejectBuffer(BufferAccessStrategy strategy, BufferDesc *buf, bool from_r
 	 */
 	strategy->buffers[strategy->current] = InvalidBuffer;
 
-	pgstat_count_io_op(IOOP_REJECT, IOContextForStrategy(strategy));
-
 	return true;
 }

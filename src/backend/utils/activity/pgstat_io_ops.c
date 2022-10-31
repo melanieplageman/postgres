@@ -49,9 +49,6 @@ pgstat_accum_io_op(PgStat_IOOpCounters *target, PgStat_IOOpCounters *source, IOO
 		case IOOP_REPOSSESS:
 			target->repossessions += source->repossessions;
 			return;
-		case IOOP_REJECT:
-			target->rejections += source->rejections;
-			return;
 		case IOOP_REUSE:
 			target->reuses += source->reuses;
 			return;
@@ -90,9 +87,6 @@ pgstat_count_io_op(IOOp io_op, IOContext io_context)
 			break;
 		case IOOP_REPOSSESS:
 			pending_counters->repossessions++;
-			break;
-		case IOOP_REJECT:
-			pending_counters->rejections++;
 			break;
 		case IOOP_REUSE:
 			pending_counters->reuses++;
@@ -211,8 +205,6 @@ pgstat_io_op_desc(IOOp io_op)
 			return "read";
 		case IOOP_REPOSSESS:
 			return "repossessed";
-		case IOOP_REJECT:
-			return "rejected";
 		case IOOP_REUSE:
 			return "reused";
 		case IOOP_WRITE:
@@ -370,13 +362,6 @@ pgstat_io_op_valid(BackendType bktype, IOContext io_context, IOOp io_op)
 	if (io_context == IOCONTEXT_BULKREAD && io_op == IOOP_EXTEND)
 		return false;
 
-	/*
-	 * Only BAS_BULKREAD will reject strategy buffers
-	 */
-	if (io_context != IOCONTEXT_BULKREAD && io_op == IOOP_REJECT)
-		return false;
-
-
 	strategy_io_context = io_context == IOCONTEXT_BULKREAD || io_context ==
 		IOCONTEXT_BULKWRITE || io_context == IOCONTEXT_VACUUM;
 
@@ -384,7 +369,7 @@ pgstat_io_op_valid(BackendType bktype, IOContext io_context, IOOp io_op)
 	 * IOOP_REPOSSESS and IOOP_REUSE are only relevant when a
 	 * BufferAccessStrategy is in use.
 	 */
-	if (!strategy_io_context && (io_op == IOOP_REJECT || io_op ==
+	if (!strategy_io_context && (io_op ==
 				IOOP_REPOSSESS || io_op == IOOP_REUSE))
 		return false;
 

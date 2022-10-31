@@ -3849,13 +3849,6 @@ SELECT pid, wait_event_type, wait_event FROM pg_stat_activity WHERE wait_event i
        buffer. If this shared buffer contains valid data, that block must be
        evicted and will count as <varname>evicted</varname>.
 
-       In <varname>io_context</varname> <literal>bulkread</literal>, existing
-       dirty buffers in the ring requiring flush are
-       <varname>rejected</varname>. If all of the buffers in the strategy ring
-       have been <varname>rejected</varname>, a new shared buffer will be added
-       to the ring. If the new shared buffer is occupied, its contents will
-       need to be evicted.
-
        Seeing a large number of <varname>evicted</varname> in strategy
        <varname>io_context</varname>s can provide insight into primary working
        set cache misses.
@@ -3884,23 +3877,6 @@ SELECT pid, wait_event_type, wait_event FROM pg_stat_activity WHERE wait_event i
        and this shared buffer is occupied, the <quote>Buffer Access
        Strategy</quote> must evict the contents of the shared buffer,
        incrementing <varname>evicted</varname>.
-      </para></entry>
-     </row>
-
-     <row>
-      <entry role="catalog_table_entry"><para role="column_definition">
-       <structfield>rejected</structfield> <type>bigint</type>
-      </para>
-      <para>
-      The number of times a <literal>bulkread</literal> found the current
-      buffer in the fixed-size strategy ring dirty and requiring flush.
-      <quote>Rejecting</quote> the buffer effectively removes it from the
-      strategy ring buffer allowing the slot in the ring to be replaced in the
-      future with a new shared buffer. A high number of
-      <literal>bulkread</literal> rejections can indicate a need for more
-      frequent vacuuming or more aggressive autovacuum settings, as buffers are
-      dirtied during a bulkread operation when updating the hint bit or when
-      performing on-access pruning.
       </para></entry>
      </row>
 

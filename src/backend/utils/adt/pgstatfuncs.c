@@ -1740,7 +1740,6 @@ typedef enum io_stat_col
 	IO_COL_CONVERSION,
 	IO_COL_EVICTIONS,
 	IO_COL_REUSES,
-	IO_COL_REJECTIONS,
 	IO_COL_REPOSSESSIONS,
 	IO_COL_FSYNCS,
 	IO_COL_RESET_TIME,
@@ -1762,8 +1761,6 @@ pgstat_io_op_get_index(IOOp io_op)
 			return IO_COL_READS;
 		case IOOP_REUSE:
 			return IO_COL_REUSES;
-		case IOOP_REJECT:
-			return IO_COL_REJECTIONS;
 		case IOOP_REPOSSESS:
 			return IO_COL_REPOSSESSIONS;
 		case IOOP_WRITE:
@@ -1837,7 +1834,6 @@ pg_stat_get_io(PG_FUNCTION_ARGS)
 			values[IO_COL_CONVERSION] = Int64GetDatum(BLCKSZ);
 			values[IO_COL_EVICTIONS] = Int64GetDatum(counters->evictions);
 			values[IO_COL_REUSES] = Int64GetDatum(counters->reuses);
-			values[IO_COL_REJECTIONS] = Int64GetDatum(counters->rejections);
 			values[IO_COL_REPOSSESSIONS] = Int64GetDatum(counters->repossessions);
 			values[IO_COL_FSYNCS] = Int64GetDatum(counters->fsyncs);
 			values[IO_COL_RESET_TIME] = TimestampTzGetDatum(reset_time);
