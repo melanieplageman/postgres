@@ -46,9 +46,6 @@ pgstat_accum_io_op(PgStat_IOOpCounters *target, PgStat_IOOpCounters *source, IOO
 		case IOOP_READ:
 			target->reads += source->reads;
 			return;
-		case IOOP_REPOSSESS:
-			target->repossessions += source->repossessions;
-			return;
 		case IOOP_REUSE:
 			target->reuses += source->reuses;
 			return;
@@ -84,9 +81,6 @@ pgstat_count_io_op(IOOp io_op, IOContext io_context)
 			break;
 		case IOOP_READ:
 			pending_counters->reads++;
-			break;
-		case IOOP_REPOSSESS:
-			pending_counters->repossessions++;
 			break;
 		case IOOP_REUSE:
 			pending_counters->reuses++;
@@ -203,8 +197,6 @@ pgstat_io_op_desc(IOOp io_op)
 			return "files synced";
 		case IOOP_READ:
 			return "read";
-		case IOOP_REPOSSESS:
-			return "repossessed";
 		case IOOP_REUSE:
 			return "reused";
 		case IOOP_WRITE:
@@ -366,11 +358,9 @@ pgstat_io_op_valid(BackendType bktype, IOContext io_context, IOOp io_op)
 		IOCONTEXT_BULKWRITE || io_context == IOCONTEXT_VACUUM;
 
 	/*
-	 * IOOP_REPOSSESS and IOOP_REUSE are only relevant when a
-	 * BufferAccessStrategy is in use.
+	 * IOOP_REUSE is only relevant when a BufferAccessStrategy is in use.
 	 */
-	if (!strategy_io_context && (io_op ==
-				IOOP_REPOSSESS || io_op == IOOP_REUSE))
+	if (!strategy_io_context && (io_op == IOOP_REUSE))
 		return false;
 
 	/*

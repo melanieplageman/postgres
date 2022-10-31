@@ -1127,7 +1127,6 @@ SELECT
        b.bytes_conversion,
        b.evicted,
        b.reused,
-       b.repossessed,
        b.files_synced,
        b.stats_reset
 FROM pg_stat_get_io() b;

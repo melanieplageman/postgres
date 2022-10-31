@@ -651,13 +651,7 @@ GetBufferFromRing(BufferAccessStrategy strategy, uint32 *buf_state)
 	/*
 	 * Tell caller to allocate a new buffer with the normal allocation
 	 * strategy.  He'll then replace this ring element via AddBufferToRing.
-	 *
-	 * This counts as a "repossession" for the purposes of IO operation
-	 * statistic tracking, since the reason that we no longer consider the
-	 * current buffer to be part of the ring is that the block in it is in use
-	 * outside of the ring, preventing us from reusing the buffer.
 	 */
-	pgstat_count_io_op(IOOP_REPOSSESS, IOContextForStrategy(strategy));
 	return NULL;
 }
 
