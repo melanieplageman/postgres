@@ -675,7 +675,7 @@ IOContext
 IOContextForStrategy(BufferAccessStrategy strategy)
 {
 	if (!strategy)
-		return IOCONTEXT_SHARED;
+		return IOCONTEXT_BUFFER_POOL;
 
 	switch (strategy->btype)
 	{
@@ -686,7 +686,7 @@ IOContextForStrategy(BufferAccessStrategy strategy)
 			 * unreachable.
 			 */
 			pg_unreachable();
-			return IOCONTEXT_SHARED;
+			return IOCONTEXT_BUFFER_POOL;
 		case BAS_BULKREAD:
 			return IOCONTEXT_BULKREAD;
 		case BAS_BULKWRITE:

@@ -1119,16 +1119,16 @@ ForwardSyncRequest(const FileTag *ftag, SyncRequestType type)
 
 		/*
 		 * We have no way of knowing if the current IOContext is
-		 * IOCONTEXT_SHARED or IOCONTEXT_[BULKREAD, BULKWRITE, VACUUM] at this
-		 * point, so count the fsync as being in the IOCONTEXT_SHARED
+		 * IOCONTEXT_BUFFER_POOL or IOCONTEXT_[BULKREAD, BULKWRITE, VACUUM] at this
+		 * point, so count the fsync as being in the IOCONTEXT_BUFFER_POOL
 		 * IOContext. This is probably okay, because the number of backend
 		 * fsyncs doesn't say anything about the efficacy of the
 		 * BufferAccessStrategy. And counting both fsyncs done in
-		 * IOCONTEXT_SHARED and IOCONTEXT_[BULKREAD, BULKWRITE, VACUUM] under
-		 * IOCONTEXT_SHARED is likely clearer when investigating the number of
+		 * IOCONTEXT_BUFFER_POOL and IOCONTEXT_[BULKREAD, BULKWRITE, VACUUM] under
+		 * IOCONTEXT_BUFFER_POOL is likely clearer when investigating the number of
 		 * backend fsyncs.
 		 */
-		pgstat_count_io_op(IOOP_FSYNC, IOCONTEXT_SHARED);
+		pgstat_count_io_op(IOOP_FSYNC, IOCONTEXT_BUFFER_POOL);
 		return false;
 	}
 

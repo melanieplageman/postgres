@@ -175,8 +175,8 @@ pgstat_io_context_desc(IOContext io_context)
 			return "bulkwrite";
 		case IOCONTEXT_LOCAL:
 			return "local";
-		case IOCONTEXT_SHARED:
-			return "shared";
+		case IOCONTEXT_BUFFER_POOL:
+			return "buffer pool";
 		case IOCONTEXT_VACUUM:
 			return "vacuum";
 	}
@@ -368,7 +368,7 @@ pgstat_io_op_valid(BackendType bktype, IOContext io_context, IOOp io_op)
 	 * require fsync'ing.
 	 *
 	 * IOOP_FSYNC IOOps done by a backend using a BufferAccessStrategy are
-	 * counted in the IOCONTEXT_SHARED IOContext. See comment in
+	 * counted in the IOCONTEXT_BUFFER_POOL IOContext. See comment in
 	 * ForwardSyncRequest() for more details.
 	 */
 	if ((io_context == IOCONTEXT_LOCAL || strategy_io_context) &&

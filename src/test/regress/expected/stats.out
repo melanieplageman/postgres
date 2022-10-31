@@ -1127,11 +1127,11 @@ SELECT pg_stat_get_subscription_stats(NULL);
 -- - fsyncs done to ensure the durability of data dirtying shared buffers
 -- There is no test for blocks evicted from shared buffers, because we cannot
 -- be sure of the state of shared buffers at the point the test is run.
-SELECT sum(read) AS io_sum_shared_reads_before FROM pg_stat_io WHERE io_context = 'shared' \gset
-SELECT sum(written) AS io_sum_shared_writes_before FROM pg_stat_io WHERE io_context = 'shared' \gset
-SELECT sum(extended) AS io_sum_shared_extends_before FROM pg_stat_io WHERE io_context = 'shared' \gset
-SELECT sum(files_synced) AS io_sum_shared_fsyncs_before FROM pg_stat_io WHERE io_context = 'shared' \gset
--- Create a regular table and insert some data to generate IOCONTEXT_SHARED
+SELECT sum(read) AS io_sum_shared_reads_before FROM pg_stat_io WHERE io_context = 'buffer pool' \gset
+SELECT sum(written) AS io_sum_shared_writes_before FROM pg_stat_io WHERE io_context = 'buffer pool' \gset
+SELECT sum(extended) AS io_sum_shared_extends_before FROM pg_stat_io WHERE io_context = 'buffer pool' \gset
+SELECT sum(files_synced) AS io_sum_shared_fsyncs_before FROM pg_stat_io WHERE io_context = 'buffer pool' \gset
+-- Create a regular table and insert some data to generate IOCONTEXT_BUFFER_POOL
 -- extends.
 CREATE TABLE test_io_shared(a int);
 INSERT INTO test_io_shared SELECT i FROM generate_series(1,100)i;
@@ -1141,7 +1141,7 @@ SELECT pg_stat_force_next_flush();
  
 (1 row)
 
--- After a checkpoint, there should be some additional IOCONTEXT_SHARED writes
+-- After a checkpoint, there should be some additional IOCONTEXT_BUFFER_POOL writes
 -- and fsyncs.
 -- The second checkpoint ensures that stats from the first checkpoint have been
 -- reported and protects against any potential races amongst the table
@@ -1149,9 +1149,9 @@ SELECT pg_stat_force_next_flush();
 -- checkpoint in the test.
 CHECKPOINT;
 CHECKPOINT;
-SELECT sum(written) AS io_sum_shared_writes_after FROM pg_stat_io WHERE io_context = 'shared' \gset
-SELECT sum(extended) AS io_sum_shared_extends_after FROM pg_stat_io WHERE io_context = 'shared' \gset
-SELECT sum(files_synced) AS io_sum_shared_fsyncs_after FROM pg_stat_io WHERE io_context = 'shared' \gset
+SELECT sum(written) AS io_sum_shared_writes_after FROM pg_stat_io WHERE io_context = 'buffer pool' \gset
+SELECT sum(extended) AS io_sum_shared_extends_after FROM pg_stat_io WHERE io_context = 'buffer pool' \gset
+SELECT sum(files_synced) AS io_sum_shared_fsyncs_after FROM pg_stat_io WHERE io_context = 'buffer pool' \gset
 SELECT :io_sum_shared_writes_after > :io_sum_shared_writes_before;
  ?column? 
 ----------
@@ -1187,7 +1187,7 @@ SELECT pg_stat_force_next_flush();
  
 (1 row)
 
-SELECT sum(read) AS io_sum_shared_reads_after FROM pg_stat_io WHERE io_context = 'shared' \gset
+SELECT sum(read) AS io_sum_shared_reads_after FROM pg_stat_io WHERE io_context = 'buffer pool' \gset
 SELECT :io_sum_shared_reads_after > :io_sum_shared_reads_before;
  ?column? 
 ----------

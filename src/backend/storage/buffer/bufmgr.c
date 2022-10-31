@@ -1286,16 +1286,16 @@ BufferAlloc(SMgrRelation smgr, char relpersistence, ForkNumber forkNum,
 				 *
 				 * If a shared buffer initially added to the ring must be
 				 * flushed before being used, this is counted as an
-				 * IOCONTEXT_SHARED IOOP_WRITE.
+				 * IOCONTEXT_BUFFER_POOL IOOP_WRITE.
 				 *
 				 * If a shared buffer added to the ring later because the
 				 * current strategy buffer is pinned or in use or because all
 				 * strategy buffers were dirty and rejected (for BAS_BULKREAD
 				 * operations only) requires flushing, this is counted as an
-				 * IOCONTEXT_SHARED IOOP_WRITE (from_ring will be false).
+				 * IOCONTEXT_BUFFER_POOL IOOP_WRITE (from_ring will be false).
 				 *
 				 * When a strategy is not in use, the write can only be a
-				 * "regular" write of a dirty shared buffer (IOCONTEXT_SHARED
+				 * "regular" write of a dirty shared buffer (IOCONTEXT_BUFFER_POOL
 				 * IOOP_WRITE).
 				 */
 
@@ -2630,7 +2630,7 @@ SyncOneBuffer(int buf_id, bool skip_recently_used, WritebackContext *wb_context)
 	PinBuffer_Locked(bufHdr);
 	LWLockAcquire(BufferDescriptorGetContentLock(bufHdr), LW_SHARED);
 
-	FlushBuffer(bufHdr, NULL, IOCONTEXT_SHARED);
+	FlushBuffer(bufHdr, NULL, IOCONTEXT_BUFFER_POOL);
 
 	LWLockRelease(BufferDescriptorGetContentLock(bufHdr));
 
@@ -3650,7 +3650,7 @@ FlushRelationBuffers(Relation rel)
 		{
 			PinBuffer_Locked(bufHdr);
 			LWLockAcquire(BufferDescriptorGetContentLock(bufHdr), LW_SHARED);
-			FlushBuffer(bufHdr, RelationGetSmgr(rel), IOCONTEXT_SHARED);
+			FlushBuffer(bufHdr, RelationGetSmgr(rel), IOCONTEXT_BUFFER_POOL);
 			LWLockRelease(BufferDescriptorGetContentLock(bufHdr));
 			UnpinBuffer(bufHdr);
 		}
@@ -3748,7 +3748,7 @@ FlushRelationsAllBuffers(SMgrRelation *smgrs, int nrels)
 		{
 			PinBuffer_Locked(bufHdr);
 			LWLockAcquire(BufferDescriptorGetContentLock(bufHdr), LW_SHARED);
-			FlushBuffer(bufHdr, srelent->srel, IOCONTEXT_SHARED);
+			FlushBuffer(bufHdr, srelent->srel, IOCONTEXT_BUFFER_POOL);
 			LWLockRelease(BufferDescriptorGetContentLock(bufHdr));
 			UnpinBuffer(bufHdr);
 		}
@@ -3958,7 +3958,7 @@ FlushDatabaseBuffers(Oid dbid)
 		{
 			PinBuffer_Locked(bufHdr);
 			LWLockAcquire(BufferDescriptorGetContentLock(bufHdr), LW_SHARED);
-			FlushBuffer(bufHdr, NULL, IOCONTEXT_SHARED);
+			FlushBuffer(bufHdr, NULL, IOCONTEXT_BUFFER_POOL);
 			LWLockRelease(BufferDescriptorGetContentLock(bufHdr));
 			UnpinBuffer(bufHdr);
 		}
@@ -3985,7 +3985,7 @@ FlushOneBuffer(Buffer buffer)
 
 	Assert(LWLockHeldByMe(BufferDescriptorGetContentLock(bufHdr)));
 
-	FlushBuffer(bufHdr, NULL, IOCONTEXT_SHARED);
+	FlushBuffer(bufHdr, NULL, IOCONTEXT_BUFFER_POOL);
 }
 
 /*
