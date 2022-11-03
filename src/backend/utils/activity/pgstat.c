@@ -359,6 +359,15 @@ static const PgStat_KindInfo pgstat_kind_infos[PGSTAT_NUM_KINDS] = {
 		.snapshot_cb = pgstat_checkpointer_snapshot_cb,
 	},
 
+	[PGSTAT_KIND_IOOPS] = {
+		.name = "io_ops",
+
+		.fixed_amount = true,
+
+		.reset_all_cb = pgstat_io_ops_reset_all_cb,
+		.snapshot_cb = pgstat_io_ops_snapshot_cb,
+	},
+
 	[PGSTAT_KIND_SLRU] = {
 		.name = "slru",
 
@@ -582,6 +591,7 @@ pgstat_report_stat(bool force)
 
 	/* Don't expend a clock check if nothing to do */
 	if (dlist_is_empty(&pgStatPending) &&
+		!have_ioopstats &&
 		!have_slrustats &&
 		!pgstat_have_pending_wal())
 	{
@@ -627,6 +637,9 @@ pgstat_report_stat(bool force)
 
 	/* flush database / relation / function / ... stats */
 	partial_flush |= pgstat_flush_pending_entries(nowait);
+
+	/* flush IO Operations stats */
+	partial_flush |= pgstat_flush_io_ops(nowait);
 
 	/* flush wal stats */
 	partial_flush |= pgstat_flush_wal(nowait);
@@ -1322,6 +1335,14 @@ pgstat_write_statsfile(void)
 	write_chunk_s(fpout, &pgStatLocal.snapshot.checkpointer);
 
 	/*
+	 * Write IO Operations stats struct
+	 */
+	pgstat_build_snapshot_fixed(PGSTAT_KIND_IOOPS);
+	write_chunk_s(fpout, &pgStatLocal.snapshot.io_ops.stat_reset_timestamp);
+	for (int bktype = 0; bktype < BACKEND_NUM_TYPES; bktype++)
+		write_chunk_s(fpout, &pgStatLocal.snapshot.io_ops.stats[bktype]);
+
+	/*
 	 * Write SLRU stats struct
 	 */
 	pgstat_build_snapshot_fixed(PGSTAT_KIND_SLRU);
@@ -1415,6 +1436,49 @@ pgstat_write_statsfile(void)
 	}
 }
 
+/*
+ * Assert that stats have not been counted for any combination of IOContext,
+ * IOObject, and IOOp which is not valid for the passed-in BackendType. The
+ * passed-in array of PgStat_IOOpCounters must contain stats from the
+ * BackendType specified by the second parameter. Caller is responsible for
+ * locking of the passed-in PgStatShared_IOContextOps, if needed.
+ */
+static void
+pgstat_backend_io_stats_assert_well_formed(PgStatShared_IOContextOps *backend_io_context_ops,
+		BackendType bktype)
+{
+	bool		expect_backend_stats = true;
+
+	if (!pgstat_io_op_stats_collected(bktype))
+		expect_backend_stats = false;
+
+	for (IOContext io_context = IOCONTEXT_BULKREAD;
+			io_context < IOCONTEXT_NUM_TYPES; io_context++)
+	{
+		PgStatShared_IOObjectOps *context = &backend_io_context_ops->data[io_context];
+
+		for (IOObject io_object = IOOBJECT_RELATION;
+				io_object < IOOBJECT_NUM_TYPES; io_object++)
+		{
+			PgStat_IOOpCounters *object = &context->data[io_object];
+
+			if (!expect_backend_stats ||
+				!pgstat_bktype_io_context_io_object_valid(bktype, io_context,
+					io_object))
+			{
+				pgstat_io_context_ops_assert_zero(object);
+				continue;
+			}
+
+			for (IOOp io_op = IOOP_EVICT; io_op < IOOP_NUM_TYPES; io_op++)
+			{
+				if (!pgstat_io_op_valid(bktype, io_context, io_object, io_op))
+					pgstat_io_op_assert_zero(object, io_op);
+			}
+		}
+	}
+}
+
 /* helpers for pgstat_read_statsfile() */
 static bool
 read_chunk(FILE *fpin, void *ptr, size_t len)
@@ -1494,6 +1558,20 @@ pgstat_read_statsfile(void)
 	 */
 	if (!read_chunk_s(fpin, &shmem->checkpointer.stats))
 		goto error;
+
+	/*
+	 * Read IO Operations stats struct
+	 */
+	if (!read_chunk_s(fpin, &shmem->io_ops.stat_reset_timestamp))
+		goto error;
+
+	for (int bktype = 0; bktype < BACKEND_NUM_TYPES; bktype++)
+	{
+		pgstat_backend_io_stats_assert_well_formed(&shmem->io_ops.stats[bktype],
+												   (BackendType) bktype);
+		if (!read_chunk_s(fpin, &shmem->io_ops.stats[bktype].data))
+			goto error;
+	}
 
 	/*
 	 * Read SLRU stats struct
