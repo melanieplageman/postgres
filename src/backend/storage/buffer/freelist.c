@@ -15,6 +15,7 @@
  */
 #include "postgres.h"
 
+#include "pgstat.h"
 #include "port/atomics.h"
 #include "storage/buf_internals.h"
 #include "storage/bufmgr.h"
@@ -192,12 +193,14 @@ have_free_buffer(void)
  *	return the buffer with the buffer header spinlock still held.
  */
 BufferDesc *
-StrategyGetBuffer(BufferAccessStrategy strategy, uint32 *buf_state)
+StrategyGetBuffer(BufferAccessStrategy strategy, uint32 *buf_state, bool *from_ring)
 {
 	BufferDesc *buf;
 	int			bgwprocno;
 	int			trycounter;
 	uint32		local_buf_state;	/* to avoid repeated (de-)referencing */
+
+	*from_ring = false;
 
 	/*
 	 * If given a strategy object, see whether it can select a buffer. We
@@ -207,7 +210,10 @@ StrategyGetBuffer(BufferAccessStrategy strategy, uint32 *buf_state)
 	{
 		buf = GetBufferFromRing(strategy, buf_state);
 		if (buf != NULL)
+		{
+			*from_ring = true;
 			return buf;
+		}
 	}
 
 	/*
@@ -299,6 +305,7 @@ StrategyGetBuffer(BufferAccessStrategy strategy, uint32 *buf_state)
 				if (strategy != NULL)
 					AddBufferToRing(strategy, buf);
 				*buf_state = local_buf_state;
+
 				return buf;
 			}
 			UnlockBufHdr(buf, local_buf_state);
@@ -331,6 +338,7 @@ StrategyGetBuffer(BufferAccessStrategy strategy, uint32 *buf_state)
 				if (strategy != NULL)
 					AddBufferToRing(strategy, buf);
 				*buf_state = local_buf_state;
+
 				return buf;
 			}
 		}
@@ -596,7 +604,7 @@ FreeAccessStrategy(BufferAccessStrategy strategy)
 
 /*
  * GetBufferFromRing -- returns a buffer from the ring, or NULL if the
- *		ring is empty.
+ *		ring is empty / not usable.
  *
  * The bufhdr spin lock is held on the returned buffer.
  */
@@ -657,6 +665,37 @@ static void
 AddBufferToRing(BufferAccessStrategy strategy, BufferDesc *buf)
 {
 	strategy->buffers[strategy->current] = BufferDescriptorGetBuffer(buf);
+}
+
+/*
+ * Utility function returning the IOContext of a given BufferAccessStrategy's
+ * strategy ring.
+ */
+IOContext
+IOContextForStrategy(BufferAccessStrategy strategy)
+{
+	if (!strategy)
+		return IOCONTEXT_BUFFER_POOL;
+
+	switch (strategy->btype)
+	{
+		case BAS_NORMAL:
+			/*
+			 * Currently, GetAccessStrategy() returns NULL for
+			 * BufferAccessStrategyType BAS_NORMAL, so this case is
+			 * unreachable.
+			 */
+			pg_unreachable();
+			return IOCONTEXT_BUFFER_POOL;
+		case BAS_BULKREAD:
+			return IOCONTEXT_BULKREAD;
+		case BAS_BULKWRITE:
+			return IOCONTEXT_BULKWRITE;
+		case BAS_VACUUM:
+			return IOCONTEXT_VACUUM;
+	}
+
+	elog(ERROR, "unrecognized BufferAccessStrategyType: %d", strategy->btype);
 }
 
 /*

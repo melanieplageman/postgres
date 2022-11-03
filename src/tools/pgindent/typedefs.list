@@ -1106,7 +1106,10 @@ ID
 INFIX
 INT128
 INTERFACE_INFO
+IOContext
 IOFuncSelector
+IOObject
+IOOp
 IPCompareMethod
 ITEM
 IV
@@ -2026,6 +2029,9 @@ PgStat_FetchConsistency
 PgStat_FunctionCallUsage
 PgStat_FunctionCounts
 PgStat_HashKey
+PgStat_IOContextOps
+PgStat_IOObjectOps
+PgStat_IOOpCounters
 PgStat_Kind
 PgStat_KindInfo
 PgStat_LocalState
