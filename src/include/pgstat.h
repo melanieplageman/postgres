@@ -49,6 +49,7 @@ typedef enum PgStat_Kind
 	PGSTAT_KIND_ARCHIVER,
 	PGSTAT_KIND_BGWRITER,
 	PGSTAT_KIND_CHECKPOINTER,
+	PGSTAT_KIND_IOOPS,
 	PGSTAT_KIND_SLRU,
 	PGSTAT_KIND_WAL,
 } PgStat_Kind;
@@ -334,6 +335,12 @@ typedef struct PgStat_IOContextOps
 	PgStat_IOObjectOps data[IOCONTEXT_NUM_TYPES];
 } PgStat_IOContextOps;
 
+typedef struct PgStat_BackendIOContextOps
+{
+	TimestampTz stat_reset_timestamp;
+	PgStat_IOContextOps stats[BACKEND_NUM_TYPES];
+} PgStat_BackendIOContextOps;
+
 typedef struct PgStat_StatDBEntry
 {
 	PgStat_Counter n_xact_commit;
@@ -516,6 +523,7 @@ extern PgStat_CheckpointerStats *pgstat_fetch_stat_checkpointer(void);
  */
 
 extern void pgstat_count_io_op(IOOp io_op, IOObject io_object, IOContext io_context);
+extern PgStat_BackendIOContextOps *pgstat_fetch_backend_io_context_ops(void);
 extern const char *pgstat_io_context_desc(IOContext io_context);
 extern const char * pgstat_io_object_desc(IOObject io_object);
 extern const char *pgstat_io_op_desc(IOOp io_op);
@@ -531,6 +539,45 @@ extern bool pgstat_expect_io_op(BackendType bktype,
 
 /* IO stats translation function in freelist.c */
 extern IOContext IOContextForStrategy(BufferAccessStrategy bas);
+/*
+ * Functions to assert that invalid IO Operation counters are zero.
+ */
+static inline void
+pgstat_io_context_ops_assert_zero(PgStat_IOOpCounters *counters)
+{
+	Assert(counters->evictions == 0 && counters->extends == 0 &&
+			counters->fsyncs == 0 && counters->reads == 0 && counters->reuses
+			== 0 && counters->writes == 0);
+}
+
+static inline void
+pgstat_io_op_assert_zero(PgStat_IOOpCounters *counters, IOOp io_op)
+{
+	switch (io_op)
+	{
+		case IOOP_EVICT:
+			Assert(counters->evictions == 0);
+			return;
+		case IOOP_EXTEND:
+			Assert(counters->extends == 0);
+			return;
+		case IOOP_FSYNC:
+			Assert(counters->fsyncs == 0);
+			return;
+		case IOOP_READ:
+			Assert(counters->reads == 0);
+			return;
+		case IOOP_REUSE:
+			Assert(counters->reuses == 0);
+			return;
+		case IOOP_WRITE:
+			Assert(counters->writes == 0);
+			return;
+	}
+
+	/* Should not reach here */
+	Assert(false);
+}
 
 
 /*
