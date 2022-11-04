@@ -294,8 +294,8 @@ pgstat_report_vacuum(Oid tableoid, bool shared,
 	shtabentry = (PgStatShared_Table *) entry_ref->shared_stats;
 	tabentry = &shtabentry->stats;
 
-	tabentry->n_live_tuples = livetuples;
-	tabentry->n_dead_tuples = deadtuples;
+	tabentry->live_tuples = livetuples;
+	tabentry->dead_tuples = deadtuples;
 
 	/*
 	 * It is quite possible that a non-aggressive VACUUM ended up skipping
@@ -381,8 +381,8 @@ pgstat_report_analyze(Relation rel,
 	shtabentry = (PgStatShared_Table *) entry_ref->shared_stats;
 	tabentry = &shtabentry->stats;
 
-	tabentry->n_live_tuples = livetuples;
-	tabentry->n_dead_tuples = deadtuples;
+	tabentry->live_tuples = livetuples;
+	tabentry->dead_tuples = deadtuples;
 
 	/*
 	 * If commanded, reset changes_since_analyze to zero.  This forgets any
@@ -929,22 +929,22 @@ pgstat_table_flush_cb(PgStat_EntryRef *entry_ref, bool nowait)
 	 */
 	if (lstats->t_counts.truncdropped)
 	{
-		tabentry->n_live_tuples = 0;
-		tabentry->n_dead_tuples = 0;
+		tabentry->live_tuples          = 0;
+		tabentry->dead_tuples          = 0;
 		tabentry->inserts_since_vacuum = 0;
 	}
 
-	tabentry->n_live_tuples += lstats->t_counts.delta_live_tuples;
-	tabentry->n_dead_tuples += lstats->t_counts.delta_dead_tuples;
+	tabentry->live_tuples += lstats->t_counts.delta_live_tuples;
+	tabentry->dead_tuples += lstats->t_counts.delta_dead_tuples;
 	tabentry->changes_since_analyze += lstats->t_counts.changed_tuples;
 	tabentry->inserts_since_vacuum += lstats->t_counts.tuples_inserted;
 	tabentry->blocks_fetched += lstats->t_counts.blocks_fetched;
 	tabentry->blocks_hit += lstats->t_counts.blocks_hit;
 
-	/* Clamp n_live_tuples in case of negative delta_live_tuples */
-	tabentry->n_live_tuples = Max(tabentry->n_live_tuples, 0);
-	/* Likewise for n_dead_tuples */
-	tabentry->n_dead_tuples = Max(tabentry->n_dead_tuples, 0);
+	/* Clamp live_tuples in case of negative delta_live_tuples */
+	tabentry->live_tuples = Max(tabentry->live_tuples, 0);
+	/* Likewise for dead_tuples */
+	tabentry->dead_tuples = Max(tabentry->dead_tuples, 0);
 
 	pgstat_unlock_entry(entry_ref);
 

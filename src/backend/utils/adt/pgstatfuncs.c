@@ -193,7 +193,7 @@ pg_stat_get_live_tuples(PG_FUNCTION_ARGS)
 	int64		result;
 	PgStat_StatTabEntry *tabentry = pgstat_fetch_stat_tabentry(relid);
 
-	result = PGSTAT_FETCH_STAT_ENTRY(tabentry, n_live_tuples);
+	result = PGSTAT_FETCH_STAT_ENTRY(tabentry, live_tuples);
 
 	PG_RETURN_INT64(result);
 }
@@ -206,7 +206,7 @@ pg_stat_get_dead_tuples(PG_FUNCTION_ARGS)
 	int64		result;
 	PgStat_StatTabEntry *tabentry = pgstat_fetch_stat_tabentry(relid);
 
-	result = PGSTAT_FETCH_STAT_ENTRY(tabentry, n_dead_tuples);
+	result = PGSTAT_FETCH_STAT_ENTRY(tabentry, dead_tuples);
 
 	PG_RETURN_INT64(result);
 }

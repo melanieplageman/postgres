@@ -400,8 +400,8 @@ typedef struct PgStat_StatTabEntry
 	PgStat_Counter tuples_deleted;
 	PgStat_Counter tuples_hot_updated;
 
-	PgStat_Counter n_live_tuples;
-	PgStat_Counter n_dead_tuples;
+	PgStat_Counter live_tuples;
+	PgStat_Counter dead_tuples;
 	PgStat_Counter changes_since_analyze;
 	PgStat_Counter inserts_since_vacuum;
 
