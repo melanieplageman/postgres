@@ -974,89 +974,16 @@ bool
 pgstat_index_flush_cb(PgStat_EntryRef *entry_ref, bool nowait)
 {
 	static const PgStat_IndexCounts all_zeroes;
-	Oid			dboid;
+	PgStat_StatDBEntry *dbentry;
 
-	PgStat_IndexStatus *lstats; /* pending stats entry  */
-	PgStatShared_Index *shrelcomstats;
-	PgStat_StatIndEntry *indentry;	/* index entry of shared stats */
-
-	PgStat_StatDBEntry *dbentry;	/* pending database entry */
-
-	dboid = entry_ref->shared_entry->key.dboid;
-	lstats = (PgStat_IndexStatus *) entry_ref->pending;
-	shrelcomstats = (PgStatShared_Index *) entry_ref->shared_stats;
-
-	/*
-	 * Ignore entries that didn't accumulate any actual counts, such as
-	 * indexes that were opened by the planner but not used.
-	 */
-	if (memcmp(&lstats->i_counts, &all_zeroes,
-			   sizeof(PgStat_IndexCounts)) == 0)
-		return true;
-
-	if (!pgstat_lock_entry(entry_ref, nowait))
-		return false;
-
-	/* add the values to the shared entry. */
-	indentry = &shrelcomstats->stats;
-
-	indentry->numscans += lstats->i_counts.numscans;
-
-	if (lstats->i_counts.numscans)
-	{
-		TimestampTz t = GetCurrentTransactionStopTimestamp();
-
-		if (t > indentry->lastscan)
-			indentry->lastscan = t;
-	}
-	indentry->tuples_returned += lstats->i_counts.tuples_returned;
-	indentry->tuples_fetched += lstats->i_counts.tuples_fetched;
-	indentry->blocks_fetched += lstats->i_counts.blocks_fetched;
-	indentry->blocks_hit += lstats->i_counts.blocks_hit;
-
-	pgstat_unlock_entry(entry_ref);
-
-	/* The entry was successfully flushed, add the same to database stats */
-	dbentry = pgstat_prep_database_pending(dboid);
-	dbentry->tuples_returned += lstats->i_counts.tuples_returned;
-	dbentry->tuples_fetched += lstats->i_counts.tuples_fetched;
-	dbentry->blocks_fetched += lstats->i_counts.blocks_fetched;
-	dbentry->blocks_hit += lstats->i_counts.blocks_hit;
-
-	return true;
-}
-
-bool
-pgstat_index_flush_cb1(PgStat_EntryRef *entry_ref, bool nowait)
-{
-	PgStat_IndexCounts *idx_stats = &((PgStat_IndexStatus *) entry_ref->pending)->i_counts;
-	PgStat_StatDBEntry *dbentry = pgstat_prep_database_pending(entry_ref->shared_entry->key.dboid);
-
-	/* The entry was successfully flushed, add the same to database stats */
-#define PGSTAT_ACCUM_IDX(item) \
-	(dbentry)->item += (idx_stats)->item
-	PGSTAT_ACCUM_IDX(tuples_returned);
-	PGSTAT_ACCUM_IDX(tuples_fetched);
-	PGSTAT_ACCUM_IDX(blocks_fetched);
-	PGSTAT_ACCUM_IDX(blocks_hit);
-#undef PGSTAT_ACCUM_IDX
-
-	return true;
-}
-
-bool
-pgstat_index_flush_cb2(PgStat_EntryRef *entry_ref, bool nowait)
-{
-	static const PgStat_IndexCounts all_zeroes;
-
-	PgStat_IndexStatus *stats_pending = (PgStat_IndexStatus *) entry_ref->pending;
+	PgStat_IndexCounts *stats_pending = &((PgStat_IndexStatus *) entry_ref->pending)->i_counts;
 	PgStat_StatIndEntry *stats_shmem = &((PgStatShared_Index *) entry_ref->shared_stats)->stats;
 
 	/*
 	 * Ignore entries that didn't accumulate any actual counts, such as
 	 * indexes that were opened by the planner but not used.
 	 */
-	if (memcmp(&stats_pending->i_counts, &all_zeroes,
+	if (memcmp(stats_pending, &all_zeroes,
 			   sizeof(PgStat_IndexCounts)) == 0)
 		return true;
 
@@ -1064,10 +991,9 @@ pgstat_index_flush_cb2(PgStat_EntryRef *entry_ref, bool nowait)
 		return false;
 
 	/* add the values to the shared entry. */
+	stats_shmem->numscans += stats_pending->numscans;
 
-	stats_shmem->numscans += stats_pending->i_counts.numscans;
-
-	if (stats_pending->i_counts.numscans)
+	if (stats_pending->numscans)
 	{
 		TimestampTz t = GetCurrentTransactionStopTimestamp();
 
@@ -1075,12 +1001,26 @@ pgstat_index_flush_cb2(PgStat_EntryRef *entry_ref, bool nowait)
 			stats_shmem->lastscan = t;
 	}
 
-	stats_shmem->tuples_returned += stats_pending->i_counts.tuples_returned;
-	stats_shmem->tuples_fetched += stats_pending->i_counts.tuples_fetched;
-	stats_shmem->blocks_fetched += stats_pending->i_counts.blocks_fetched;
-	stats_shmem->blocks_hit += stats_pending->i_counts.blocks_hit;
+#define PGSTAT_ACCUM_IDX(fld) \
+	(stats_shmem)->fld += (stats_pending)->fld
+	PGSTAT_ACCUM_IDX(tuples_returned);
+	PGSTAT_ACCUM_IDX(tuples_fetched);
+	PGSTAT_ACCUM_IDX(blocks_fetched);
+	PGSTAT_ACCUM_IDX(blocks_hit);
+#undef PGSTAT_ACCUM_IDX
 
 	pgstat_unlock_entry(entry_ref);
+
+	/* The entry was successfully flushed, add the same to database stats */
+	dbentry = pgstat_prep_database_pending(entry_ref->shared_entry->key.dboid);
+
+#define PGSTAT_ACCUM_IDX(fld) \
+	(dbentry)->fld += (stats_pending)->fld
+	PGSTAT_ACCUM_IDX(tuples_returned);
+	PGSTAT_ACCUM_IDX(tuples_fetched);
+	PGSTAT_ACCUM_IDX(blocks_fetched);
+	PGSTAT_ACCUM_IDX(blocks_hit);
+#undef PGSTAT_ACCUM_IDX
 
 	return true;
 }
