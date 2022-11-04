@@ -883,83 +883,90 @@ bool
 pgstat_table_flush_cb(PgStat_EntryRef *entry_ref, bool nowait)
 {
 	static const PgStat_TableCounts all_zeroes;
-	Oid			dboid;
-	PgStat_TableStatus *lstats; /* pending stats entry  */
-	PgStatShared_Table *shtabstats;
-	PgStat_StatTabEntry *tabentry;	/* table entry of shared stats */
-	PgStat_StatDBEntry *dbentry;	/* pending database entry */
 
-	dboid = entry_ref->shared_entry->key.dboid;
-	lstats = (PgStat_TableStatus *) entry_ref->pending;
-	shtabstats = (PgStatShared_Table *) entry_ref->shared_stats;
+	PgStat_StatDBEntry *dbentry;
+	PgStat_StatTabEntry *stats_shmem;
+
+	PgStat_TableCounts *stats_pending = &((PgStat_TableStatus *) entry_ref->pending)->t_counts;
 
 	/*
 	 * Ignore entries that didn't accumulate any actual counts.
 	 */
-	if (memcmp(&lstats->t_counts, &all_zeroes,
+	if (memcmp(stats_pending, &all_zeroes,
 			   sizeof(PgStat_TableCounts)) == 0)
-	{
 		return true;
-	}
 
 	if (!pgstat_lock_entry(entry_ref, nowait))
 		return false;
 
-	/* add the values to the shared entry. */
-	tabentry = &shtabstats->stats;
+	stats_shmem = &((PgStatShared_Table *) entry_ref->shared_stats)->stats;
 
-	tabentry->numscans += lstats->t_counts.numscans;
-	if (lstats->t_counts.numscans)
+	/* add the values to the shared entry. */
+	stats_shmem->numscans += stats_pending->numscans;
+
+	if (stats_pending->numscans)
 	{
 		TimestampTz t = GetCurrentTransactionStopTimestamp();
 
-		if (t > tabentry->lastscan)
-			tabentry->lastscan = t;
+		if (t > stats_shmem->lastscan)
+			stats_shmem->lastscan = t;
 	}
 
-	tabentry->tuples_returned += lstats->t_counts.tuples_returned;
-	tabentry->tuples_fetched += lstats->t_counts.tuples_fetched;
-	tabentry->tuples_inserted += lstats->t_counts.tuples_inserted;
-	tabentry->tuples_updated += lstats->t_counts.tuples_updated;
-	tabentry->tuples_deleted += lstats->t_counts.tuples_deleted;
-	tabentry->tuples_hot_updated += lstats->t_counts.tuples_hot_updated;
+#define PGSTAT_ACCUM_TAB(fld) \
+	(stats_shmem)->fld += (stats_pending)->fld
+
+	PGSTAT_ACCUM_TAB(tuples_returned);
+	PGSTAT_ACCUM_TAB(tuples_fetched);
+	PGSTAT_ACCUM_TAB(tuples_inserted);
+	PGSTAT_ACCUM_TAB(tuples_updated);
+	PGSTAT_ACCUM_TAB(tuples_deleted);
+	PGSTAT_ACCUM_TAB(tuples_hot_updated);
+	PGSTAT_ACCUM_TAB(blocks_fetched);
+	PGSTAT_ACCUM_TAB(blocks_hit);
+
+#undef PGSTAT_ACCUM_TAB
 
 	/*
 	 * If table was truncated/dropped, first reset the live/dead counters.
 	 */
-	if (lstats->t_counts.truncdropped)
+	if (stats_pending->truncdropped)
 	{
-		tabentry->live_tuples          = 0;
-		tabentry->dead_tuples          = 0;
-		tabentry->inserts_since_vacuum = 0;
+		stats_shmem->live_tuples          = 0;
+		stats_shmem->dead_tuples          = 0;
+		stats_shmem->inserts_since_vacuum = 0;
 	}
 
-	tabentry->live_tuples += lstats->t_counts.delta_live_tuples;
-	tabentry->dead_tuples += lstats->t_counts.delta_dead_tuples;
-	tabentry->changes_since_analyze += lstats->t_counts.changed_tuples;
-	tabentry->inserts_since_vacuum += lstats->t_counts.tuples_inserted;
-	tabentry->blocks_fetched += lstats->t_counts.blocks_fetched;
-	tabentry->blocks_hit += lstats->t_counts.blocks_hit;
+	stats_shmem->live_tuples += stats_pending->delta_live_tuples;
+	stats_shmem->dead_tuples += stats_pending->delta_dead_tuples;
+	stats_shmem->inserts_since_vacuum += stats_pending->tuples_inserted;
+	stats_shmem->changes_since_analyze += stats_pending->changed_tuples;
 
 	/* Clamp live_tuples in case of negative delta_live_tuples */
-	tabentry->live_tuples = Max(tabentry->live_tuples, 0);
+	stats_shmem->live_tuples = Max(stats_shmem->live_tuples, 0);
 	/* Likewise for dead_tuples */
-	tabentry->dead_tuples = Max(tabentry->dead_tuples, 0);
+	stats_shmem->dead_tuples = Max(stats_shmem->dead_tuples, 0);
 
 	pgstat_unlock_entry(entry_ref);
 
 	/* The entry was successfully flushed, add the same to database stats */
-	dbentry = pgstat_prep_database_pending(dboid);
-	dbentry->tuples_returned += lstats->t_counts.tuples_returned;
-	dbentry->tuples_fetched += lstats->t_counts.tuples_fetched;
-	dbentry->tuples_inserted += lstats->t_counts.tuples_inserted;
-	dbentry->tuples_updated += lstats->t_counts.tuples_updated;
-	dbentry->tuples_deleted += lstats->t_counts.tuples_deleted;
-	dbentry->blocks_fetched += lstats->t_counts.blocks_fetched;
-	dbentry->blocks_hit += lstats->t_counts.blocks_hit;
+	dbentry = pgstat_prep_database_pending(entry_ref->shared_entry->key.dboid);
+
+#define PGSTAT_ACCUM_TAB(fld) \
+	(dbentry)->fld += (stats_pending)->fld
+
+	PGSTAT_ACCUM_TAB(tuples_returned);
+	PGSTAT_ACCUM_TAB(tuples_fetched);
+	PGSTAT_ACCUM_TAB(tuples_inserted);
+	PGSTAT_ACCUM_TAB(tuples_updated);
+	PGSTAT_ACCUM_TAB(tuples_deleted);
+	PGSTAT_ACCUM_TAB(blocks_fetched);
+	PGSTAT_ACCUM_TAB(blocks_hit);
+
+#undef PGSTAT_ACCUM_TAB
 
 	return true;
 }
+
 
 /*
  * Flush out pending stats for the entry
@@ -975,9 +982,10 @@ pgstat_index_flush_cb(PgStat_EntryRef *entry_ref, bool nowait)
 {
 	static const PgStat_IndexCounts all_zeroes;
 	PgStat_StatDBEntry *dbentry;
+	PgStat_StatIndEntry *stats_shmem;
 
-	PgStat_IndexCounts *stats_pending = &((PgStat_IndexStatus *) entry_ref->pending)->i_counts;
-	PgStat_StatIndEntry *stats_shmem = &((PgStatShared_Index *) entry_ref->shared_stats)->stats;
+	PgStat_IndexCounts *stats_pending =
+		&((PgStat_IndexStatus *) entry_ref->pending)->i_counts;
 
 	/*
 	 * Ignore entries that didn't accumulate any actual counts, such as
@@ -989,6 +997,8 @@ pgstat_index_flush_cb(PgStat_EntryRef *entry_ref, bool nowait)
 
 	if (!pgstat_lock_entry(entry_ref, nowait))
 		return false;
+
+	stats_shmem = &((PgStatShared_Index *) entry_ref->shared_stats)->stats;
 
 	/* add the values to the shared entry. */
 	stats_shmem->numscans += stats_pending->numscans;
