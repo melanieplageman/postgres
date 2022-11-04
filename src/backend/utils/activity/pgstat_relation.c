@@ -365,7 +365,7 @@ pgstat_report_analyze(Relation rel,
 			deadtuples -= trans->tuples_updated + trans->tuples_deleted;
 		}
 		/* count stuff inserted by already-aborted subxacts, too */
-		deadtuples -= rel->pgstattab_info->t_counts.t_delta_dead_tuples;
+		deadtuples -= rel->pgstattab_info->t_counts.delta_dead_tuples;
 		/* Since ANALYZE's counts are estimates, we could have underflowed */
 		livetuples = Max(livetuples, 0);
 		deadtuples = Max(deadtuples, 0);
@@ -434,9 +434,9 @@ pgstat_count_heap_update(Relation rel, bool hot)
 		ensure_tabstat_xact_level(pgstattab_info);
 		pgstattab_info->trans->tuples_updated++;
 
-		/* t_tuples_hot_updated is nontransactional, so just advance it */
+		/* tuples_hot_updated is nontransactional, so just advance it */
 		if (hot)
-			pgstattab_info->t_counts.t_tuples_hot_updated++;
+			pgstattab_info->t_counts.tuples_hot_updated++;
 	}
 }
 
@@ -477,7 +477,7 @@ pgstat_count_truncate(Relation rel)
  * update dead-tuples count
  *
  * The semantics of this are that we are reporting the nontransactional
- * recovery of "delta" dead tuples; so t_delta_dead_tuples decreases
+ * recovery of "delta" dead tuples; so delta_dead_tuples decreases
  * rather than increasing, and the change goes straight into the per-table
  * counter, not into transactional state.
  */
@@ -488,7 +488,7 @@ pgstat_update_heap_dead_tuples(Relation rel, int delta)
 	{
 		PgStat_TableStatus *pgstattab_info = rel->pgstattab_info;
 
-		pgstattab_info->t_counts.t_delta_dead_tuples -= delta;
+		pgstattab_info->t_counts.delta_dead_tuples -= delta;
 	}
 }
 
@@ -631,33 +631,33 @@ AtEOXact_PgStat_Relations(PgStat_SubXactStatus *xact_state, bool isCommit)
 		if (!isCommit)
 			restore_truncdrop_counters(trans);
 		/* count attempted actions regardless of commit/abort */
-		tabstat->t_counts.t_tuples_inserted += trans->tuples_inserted;
-		tabstat->t_counts.t_tuples_updated += trans->tuples_updated;
-		tabstat->t_counts.t_tuples_deleted += trans->tuples_deleted;
+		tabstat->t_counts.tuples_inserted += trans->tuples_inserted;
+		tabstat->t_counts.tuples_updated += trans->tuples_updated;
+		tabstat->t_counts.tuples_deleted += trans->tuples_deleted;
 		if (isCommit)
 		{
-			tabstat->t_counts.t_truncdropped = trans->truncdropped;
+			tabstat->t_counts.truncdropped = trans->truncdropped;
 			if (trans->truncdropped)
 			{
 				/* forget live/dead stats seen by backend thus far */
-				tabstat->t_counts.t_delta_live_tuples = 0;
-				tabstat->t_counts.t_delta_dead_tuples = 0;
+				tabstat->t_counts.delta_live_tuples = 0;
+				tabstat->t_counts.delta_dead_tuples = 0;
 			}
 			/* insert adds a live tuple, delete removes one */
-			tabstat->t_counts.t_delta_live_tuples +=
+			tabstat->t_counts.delta_live_tuples +=
 				trans->tuples_inserted - trans->tuples_deleted;
 			/* update and delete each create a dead tuple */
-			tabstat->t_counts.t_delta_dead_tuples +=
+			tabstat->t_counts.delta_dead_tuples +=
 				trans->tuples_updated + trans->tuples_deleted;
 			/* insert, update, delete each count as one change event */
-			tabstat->t_counts.t_changed_tuples +=
+			tabstat->t_counts.changed_tuples +=
 				trans->tuples_inserted + trans->tuples_updated +
 				trans->tuples_deleted;
 		}
 		else
 		{
 			/* inserted tuples are dead, deleted tuples are unaffected */
-			tabstat->t_counts.t_delta_dead_tuples +=
+			tabstat->t_counts.delta_dead_tuples +=
 				trans->tuples_inserted + trans->tuples_updated;
 			/* an aborted xact generates no changed_tuple events */
 		}
@@ -737,11 +737,11 @@ AtEOSubXact_PgStat_Relations(PgStat_SubXactStatus *xact_state, bool isCommit, in
 			/* first restore values obliterated by truncate/drop */
 			restore_truncdrop_counters(trans);
 			/* count attempted actions regardless of commit/abort */
-			tabstat->t_counts.t_tuples_inserted += trans->tuples_inserted;
-			tabstat->t_counts.t_tuples_updated += trans->tuples_updated;
-			tabstat->t_counts.t_tuples_deleted += trans->tuples_deleted;
+			tabstat->t_counts.tuples_inserted += trans->tuples_inserted;
+			tabstat->t_counts.tuples_updated += trans->tuples_updated;
+			tabstat->t_counts.tuples_deleted += trans->tuples_deleted;
 			/* inserted tuples are dead, deleted tuples are unaffected */
-			tabstat->t_counts.t_delta_dead_tuples +=
+			tabstat->t_counts.delta_dead_tuples +=
 				trans->tuples_inserted + trans->tuples_updated;
 			tabstat->trans = trans->upper;
 			pfree(trans);
@@ -821,21 +821,21 @@ pgstat_twophase_postcommit(TransactionId xid, uint16 info,
 	pgstattab_info = pgstat_prep_table_pending(rec->t_id, rec->t_shared);
 
 	/* Same math as in AtEOXact_PgStat, commit case */
-	pgstattab_info->t_counts.t_tuples_inserted += rec->tuples_inserted;
-	pgstattab_info->t_counts.t_tuples_updated += rec->tuples_updated;
-	pgstattab_info->t_counts.t_tuples_deleted += rec->tuples_deleted;
-	pgstattab_info->t_counts.t_truncdropped = rec->t_truncdropped;
+	pgstattab_info->t_counts.tuples_inserted += rec->tuples_inserted;
+	pgstattab_info->t_counts.tuples_updated += rec->tuples_updated;
+	pgstattab_info->t_counts.tuples_deleted += rec->tuples_deleted;
+	pgstattab_info->t_counts.truncdropped = rec->t_truncdropped;
 	if (rec->t_truncdropped)
 	{
 		/* forget live/dead stats seen by backend thus far */
-		pgstattab_info->t_counts.t_delta_live_tuples = 0;
-		pgstattab_info->t_counts.t_delta_dead_tuples = 0;
+		pgstattab_info->t_counts.delta_live_tuples = 0;
+		pgstattab_info->t_counts.delta_dead_tuples = 0;
 	}
-	pgstattab_info->t_counts.t_delta_live_tuples +=
+	pgstattab_info->t_counts.delta_live_tuples +=
 		rec->tuples_inserted - rec->tuples_deleted;
-	pgstattab_info->t_counts.t_delta_dead_tuples +=
+	pgstattab_info->t_counts.delta_dead_tuples +=
 		rec->tuples_updated + rec->tuples_deleted;
-	pgstattab_info->t_counts.t_changed_tuples +=
+	pgstattab_info->t_counts.changed_tuples +=
 		rec->tuples_inserted + rec->tuples_updated +
 		rec->tuples_deleted;
 }
@@ -863,10 +863,10 @@ pgstat_twophase_postabort(TransactionId xid, uint16 info,
 		rec->tuples_updated = rec->updated_pre_truncdrop;
 		rec->tuples_deleted = rec->deleted_pre_truncdrop;
 	}
-	pgstattab_info->t_counts.t_tuples_inserted += rec->tuples_inserted;
-	pgstattab_info->t_counts.t_tuples_updated += rec->tuples_updated;
-	pgstattab_info->t_counts.t_tuples_deleted += rec->tuples_deleted;
-	pgstattab_info->t_counts.t_delta_dead_tuples +=
+	pgstattab_info->t_counts.tuples_inserted += rec->tuples_inserted;
+	pgstattab_info->t_counts.tuples_updated += rec->tuples_updated;
+	pgstattab_info->t_counts.tuples_deleted += rec->tuples_deleted;
+	pgstattab_info->t_counts.delta_dead_tuples +=
 		rec->tuples_inserted + rec->tuples_updated;
 }
 
@@ -908,37 +908,38 @@ pgstat_table_flush_cb(PgStat_EntryRef *entry_ref, bool nowait)
 	/* add the values to the shared entry. */
 	tabentry = &shtabstats->stats;
 
-	tabentry->numscans += lstats->t_counts.t_numscans;
-	if (lstats->t_counts.t_numscans)
+	tabentry->numscans += lstats->t_counts.numscans;
+	if (lstats->t_counts.numscans)
 	{
 		TimestampTz t = GetCurrentTransactionStopTimestamp();
 
 		if (t > tabentry->lastscan)
 			tabentry->lastscan = t;
 	}
-	tabentry->tuples_returned += lstats->t_counts.t_tuples_returned;
-	tabentry->tuples_fetched += lstats->t_counts.t_tuples_fetched;
-	tabentry->tuples_inserted += lstats->t_counts.t_tuples_inserted;
-	tabentry->tuples_updated += lstats->t_counts.t_tuples_updated;
-	tabentry->tuples_deleted += lstats->t_counts.t_tuples_deleted;
-	tabentry->tuples_hot_updated += lstats->t_counts.t_tuples_hot_updated;
+
+	tabentry->tuples_returned += lstats->t_counts.tuples_returned;
+	tabentry->tuples_fetched += lstats->t_counts.tuples_fetched;
+	tabentry->tuples_inserted += lstats->t_counts.tuples_inserted;
+	tabentry->tuples_updated += lstats->t_counts.tuples_updated;
+	tabentry->tuples_deleted += lstats->t_counts.tuples_deleted;
+	tabentry->tuples_hot_updated += lstats->t_counts.tuples_hot_updated;
 
 	/*
 	 * If table was truncated/dropped, first reset the live/dead counters.
 	 */
-	if (lstats->t_counts.t_truncdropped)
+	if (lstats->t_counts.truncdropped)
 	{
 		tabentry->n_live_tuples = 0;
 		tabentry->n_dead_tuples = 0;
 		tabentry->inserts_since_vacuum = 0;
 	}
 
-	tabentry->n_live_tuples += lstats->t_counts.t_delta_live_tuples;
-	tabentry->n_dead_tuples += lstats->t_counts.t_delta_dead_tuples;
-	tabentry->changes_since_analyze += lstats->t_counts.t_changed_tuples;
-	tabentry->inserts_since_vacuum += lstats->t_counts.t_tuples_inserted;
-	tabentry->blocks_fetched += lstats->t_counts.t_blocks_fetched;
-	tabentry->blocks_hit += lstats->t_counts.t_blocks_hit;
+	tabentry->n_live_tuples += lstats->t_counts.delta_live_tuples;
+	tabentry->n_dead_tuples += lstats->t_counts.delta_dead_tuples;
+	tabentry->changes_since_analyze += lstats->t_counts.changed_tuples;
+	tabentry->inserts_since_vacuum += lstats->t_counts.tuples_inserted;
+	tabentry->blocks_fetched += lstats->t_counts.blocks_fetched;
+	tabentry->blocks_hit += lstats->t_counts.blocks_hit;
 
 	/* Clamp n_live_tuples in case of negative delta_live_tuples */
 	tabentry->n_live_tuples = Max(tabentry->n_live_tuples, 0);
@@ -949,13 +950,13 @@ pgstat_table_flush_cb(PgStat_EntryRef *entry_ref, bool nowait)
 
 	/* The entry was successfully flushed, add the same to database stats */
 	dbentry = pgstat_prep_database_pending(dboid);
-	dbentry->n_tuples_returned += lstats->t_counts.t_tuples_returned;
-	dbentry->n_tuples_fetched += lstats->t_counts.t_tuples_fetched;
-	dbentry->n_tuples_inserted += lstats->t_counts.t_tuples_inserted;
-	dbentry->n_tuples_updated += lstats->t_counts.t_tuples_updated;
-	dbentry->n_tuples_deleted += lstats->t_counts.t_tuples_deleted;
-	dbentry->n_blocks_fetched += lstats->t_counts.t_blocks_fetched;
-	dbentry->n_blocks_hit += lstats->t_counts.t_blocks_hit;
+	dbentry->n_tuples_returned += lstats->t_counts.tuples_returned;
+	dbentry->n_tuples_fetched += lstats->t_counts.tuples_fetched;
+	dbentry->n_tuples_inserted += lstats->t_counts.tuples_inserted;
+	dbentry->n_tuples_updated += lstats->t_counts.tuples_updated;
+	dbentry->n_tuples_deleted += lstats->t_counts.tuples_deleted;
+	dbentry->n_blocks_fetched += lstats->t_counts.blocks_fetched;
+	dbentry->n_blocks_hit += lstats->t_counts.blocks_hit;
 
 	return true;
 }
@@ -978,6 +979,7 @@ pgstat_index_flush_cb(PgStat_EntryRef *entry_ref, bool nowait)
 	PgStat_IndexStatus *lstats; /* pending stats entry  */
 	PgStatShared_Index *shrelcomstats;
 	PgStat_StatIndEntry *indentry;	/* index entry of shared stats */
+
 	PgStat_StatDBEntry *dbentry;	/* pending database entry */
 
 	dboid = entry_ref->shared_entry->key.dboid;
@@ -990,9 +992,7 @@ pgstat_index_flush_cb(PgStat_EntryRef *entry_ref, bool nowait)
 	 */
 	if (memcmp(&lstats->i_counts, &all_zeroes,
 			   sizeof(PgStat_IndexCounts)) == 0)
-	{
 		return true;
-	}
 
 	if (!pgstat_lock_entry(entry_ref, nowait))
 		return false;
@@ -1000,31 +1000,93 @@ pgstat_index_flush_cb(PgStat_EntryRef *entry_ref, bool nowait)
 	/* add the values to the shared entry. */
 	indentry = &shrelcomstats->stats;
 
-	indentry->numscans += lstats->i_counts.i_numscans;
+	indentry->numscans += lstats->i_counts.numscans;
 
-	if (lstats->i_counts.i_numscans)
+	if (lstats->i_counts.numscans)
 	{
 		TimestampTz t = GetCurrentTransactionStopTimestamp();
 
 		if (t > indentry->lastscan)
 			indentry->lastscan = t;
 	}
-	indentry->tuples_returned += lstats->i_counts.i_tuples_returned;
-	indentry->tuples_fetched += lstats->i_counts.i_tuples_fetched;
-	indentry->blocks_fetched += lstats->i_counts.i_blocks_fetched;
-	indentry->blocks_hit += lstats->i_counts.i_blocks_hit;
+	indentry->tuples_returned += lstats->i_counts.tuples_returned;
+	indentry->tuples_fetched += lstats->i_counts.tuples_fetched;
+	indentry->blocks_fetched += lstats->i_counts.blocks_fetched;
+	indentry->blocks_hit += lstats->i_counts.blocks_hit;
 
 	pgstat_unlock_entry(entry_ref);
 
 	/* The entry was successfully flushed, add the same to database stats */
 	dbentry = pgstat_prep_database_pending(dboid);
-	dbentry->n_tuples_returned += lstats->i_counts.i_tuples_returned;
-	dbentry->n_tuples_fetched += lstats->i_counts.i_tuples_fetched;
-	dbentry->n_blocks_fetched += lstats->i_counts.i_blocks_fetched;
-	dbentry->n_blocks_hit += lstats->i_counts.i_blocks_hit;
+	dbentry->n_tuples_returned += lstats->i_counts.tuples_returned;
+	dbentry->n_tuples_fetched += lstats->i_counts.tuples_fetched;
+	dbentry->n_blocks_fetched += lstats->i_counts.blocks_fetched;
+	dbentry->n_blocks_hit += lstats->i_counts.blocks_hit;
 
 	return true;
 }
+
+bool
+pgstat_index_flush_cb1(PgStat_EntryRef *entry_ref, bool nowait)
+{
+	PgStat_IndexCounts *idx_stats = &((PgStat_IndexStatus *) entry_ref->pending)->i_counts;
+	PgStat_StatDBEntry *dbentry = pgstat_prep_database_pending(entry_ref->shared_entry->key.dboid);
+
+	/* The entry was successfully flushed, add the same to database stats */
+#define PGSTAT_ACCUM_IDX(item) \
+	(dbentry)->item += (idx_stats)->item
+
+	/* PGSTAT_ACCUM_IDX(tuples_returned); */
+	dbentry->n_tuples_returned += idx_stats->tuples_returned;
+	dbentry->n_tuples_fetched += idx_stats->tuples_fetched;
+	dbentry->n_blocks_fetched += idx_stats->blocks_fetched;
+	dbentry->n_blocks_hit += idx_stats->blocks_hit;
+#undef PGSTAT_ACCUM_IDX
+
+	return true;
+}
+
+bool
+pgstat_index_flush_cb2(PgStat_EntryRef *entry_ref, bool nowait)
+{
+	static const PgStat_IndexCounts all_zeroes;
+
+	PgStat_IndexStatus *stats_pending = (PgStat_IndexStatus *) entry_ref->pending;
+	PgStat_StatIndEntry *stats_shmem = &((PgStatShared_Index *) entry_ref->shared_stats)->stats;
+
+	/*
+	 * Ignore entries that didn't accumulate any actual counts, such as
+	 * indexes that were opened by the planner but not used.
+	 */
+	if (memcmp(&stats_pending->i_counts, &all_zeroes,
+			   sizeof(PgStat_IndexCounts)) == 0)
+		return true;
+
+	if (!pgstat_lock_entry(entry_ref, nowait))
+		return false;
+
+	/* add the values to the shared entry. */
+
+	stats_shmem->numscans += stats_pending->i_counts.numscans;
+
+	if (stats_pending->i_counts.numscans)
+	{
+		TimestampTz t = GetCurrentTransactionStopTimestamp();
+
+		if (t > stats_shmem->lastscan)
+			stats_shmem->lastscan = t;
+	}
+
+	stats_shmem->tuples_returned += stats_pending->i_counts.tuples_returned;
+	stats_shmem->tuples_fetched += stats_pending->i_counts.tuples_fetched;
+	stats_shmem->blocks_fetched += stats_pending->i_counts.blocks_fetched;
+	stats_shmem->blocks_hit += stats_pending->i_counts.blocks_hit;
+
+	pgstat_unlock_entry(entry_ref);
+
+	return true;
+}
+
 
 void
 pgstat_table_delete_pending_cb(PgStat_EntryRef *entry_ref)

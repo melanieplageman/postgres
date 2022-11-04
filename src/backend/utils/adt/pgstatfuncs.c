@@ -1864,7 +1864,7 @@ pg_stat_get_table_xact_numscans(PG_FUNCTION_ARGS)
 	if ((tabentry = find_tabstat_entry(relid)) == NULL)
 		result = 0;
 	else
-		result = (int64) (tabentry->t_counts.t_numscans);
+		result = (int64) (tabentry->t_counts.numscans);
 
 	PG_RETURN_INT64(result);
 }
@@ -1879,7 +1879,7 @@ pg_stat_get_index_xact_numscans(PG_FUNCTION_ARGS)
 	if ((indentry = find_indstat_entry(relid)) == NULL)
 		result = 0;
 	else
-		result = (int64) (indentry->i_counts.i_numscans);
+		result = (int64) (indentry->i_counts.numscans);
 
 	PG_RETURN_INT64(result);
 }
@@ -1894,7 +1894,7 @@ pg_stat_get_xact_tuples_returned(PG_FUNCTION_ARGS)
 	if ((indentry = find_indstat_entry(relid)) == NULL)
 		result = 0;
 	else
-		result = (int64) (indentry->i_counts.i_tuples_returned);
+		result = (int64) (indentry->i_counts.tuples_returned);
 
 	PG_RETURN_INT64(result);
 }
@@ -1909,7 +1909,7 @@ pg_stat_get_xact_tuples_fetched(PG_FUNCTION_ARGS)
 	if ((indentry = find_indstat_entry(relid)) == NULL)
 		result = 0;
 	else
-		result = (int64) (indentry->i_counts.i_tuples_fetched);
+		result = (int64) (indentry->i_counts.tuples_fetched);
 
 	PG_RETURN_INT64(result);
 }
@@ -1926,8 +1926,8 @@ pg_stat_get_xact_tuples_inserted(PG_FUNCTION_ARGS)
 		result = 0;
 	else
 	{
-		result = tabentry->t_counts.t_tuples_inserted;
-		/* live subtransactions' counts aren't in t_tuples_inserted yet */
+		result = tabentry->t_counts.tuples_inserted;
+		/* live subtransactions' counts aren't in tuples_inserted yet */
 		for (trans = tabentry->trans; trans != NULL; trans = trans->upper)
 			result += trans->tuples_inserted;
 	}
@@ -1947,8 +1947,8 @@ pg_stat_get_xact_tuples_updated(PG_FUNCTION_ARGS)
 		result = 0;
 	else
 	{
-		result = tabentry->t_counts.t_tuples_updated;
-		/* live subtransactions' counts aren't in t_tuples_updated yet */
+		result = tabentry->t_counts.tuples_updated;
+		/* live subtransactions' counts aren't in tuples_updated yet */
 		for (trans = tabentry->trans; trans != NULL; trans = trans->upper)
 			result += trans->tuples_updated;
 	}
@@ -1968,7 +1968,7 @@ pg_stat_get_xact_tuples_deleted(PG_FUNCTION_ARGS)
 		result = 0;
 	else
 	{
-		result = tabentry->t_counts.t_tuples_deleted;
+		result = tabentry->t_counts.tuples_deleted;
 		/* live subtransactions' counts aren't in t_tuples_deleted yet */
 		for (trans = tabentry->trans; trans != NULL; trans = trans->upper)
 			result += trans->tuples_deleted;
@@ -1987,7 +1987,7 @@ pg_stat_get_xact_tuples_hot_updated(PG_FUNCTION_ARGS)
 	if ((tabentry = find_tabstat_entry(relid)) == NULL)
 		result = 0;
 	else
-		result = (int64) (tabentry->t_counts.t_tuples_hot_updated);
+		result = (int64) (tabentry->t_counts.tuples_hot_updated);
 
 	PG_RETURN_INT64(result);
 }
@@ -2002,7 +2002,7 @@ pg_stat_get_xact_blocks_fetched(PG_FUNCTION_ARGS)
 	if ((indentry = find_indstat_entry(relid)) == NULL)
 		result = 0;
 	else
-		result = (int64) (indentry->i_counts.i_blocks_fetched);
+		result = (int64) (indentry->i_counts.blocks_fetched);
 
 	PG_RETURN_INT64(result);
 }
@@ -2017,7 +2017,7 @@ pg_stat_get_xact_blocks_hit(PG_FUNCTION_ARGS)
 	if ((indentry = find_indstat_entry(relid)) == NULL)
 		result = 0;
 	else
-		result = (int64) (indentry->i_counts.i_blocks_hit);
+		result = (int64) (indentry->i_counts.blocks_hit);
 
 	PG_RETURN_INT64(result);
 }

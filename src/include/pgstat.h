@@ -160,12 +160,12 @@ typedef struct PgStat_BackendSubEntry
  */
 typedef struct PgStat_IndexCounts
 {
-	PgStat_Counter i_numscans;
+	PgStat_Counter numscans;
 
-	PgStat_Counter i_tuples_returned;
-	PgStat_Counter i_tuples_fetched;
-	PgStat_Counter i_blocks_fetched;
-	PgStat_Counter i_blocks_hit;
+	PgStat_Counter tuples_returned;
+	PgStat_Counter tuples_fetched;
+	PgStat_Counter blocks_fetched;
+	PgStat_Counter blocks_hit;
 } PgStat_IndexCounts;
 
 /* ----------
@@ -187,23 +187,23 @@ typedef struct PgStat_IndexCounts
  */
 typedef struct PgStat_TableCounts
 {
-	PgStat_Counter t_numscans;
+	PgStat_Counter numscans;
 
-	PgStat_Counter t_tuples_returned;
-	PgStat_Counter t_tuples_fetched;
+	PgStat_Counter tuples_returned;
+	PgStat_Counter tuples_fetched;
 
-	PgStat_Counter t_tuples_inserted;
-	PgStat_Counter t_tuples_updated;
-	PgStat_Counter t_tuples_deleted;
-	PgStat_Counter t_tuples_hot_updated;
-	bool		t_truncdropped;
+	PgStat_Counter tuples_inserted;
+	PgStat_Counter tuples_updated;
+	PgStat_Counter tuples_deleted;
+	PgStat_Counter tuples_hot_updated;
+	bool		truncdropped;
 
-	PgStat_Counter t_delta_live_tuples;
-	PgStat_Counter t_delta_dead_tuples;
-	PgStat_Counter t_changed_tuples;
+	PgStat_Counter delta_live_tuples;
+	PgStat_Counter delta_dead_tuples;
+	PgStat_Counter changed_tuples;
 
-	PgStat_Counter t_blocks_fetched;
-	PgStat_Counter t_blocks_hit;
+	PgStat_Counter blocks_fetched;
+	PgStat_Counter blocks_hit;
 } PgStat_TableCounts;
 
 /* ----------
@@ -580,52 +580,52 @@ extern void pgstat_report_analyze(Relation rel,
 #define pgstat_count_heap_scan(rel)									\
 	do {															\
 		if (pgstat_should_count_table(rel))						\
-			(rel)->pgstattab_info->t_counts.t_numscans++;				\
+			(rel)->pgstattab_info->t_counts.numscans++;				\
 	} while (0)
 #define pgstat_count_heap_getnext(rel)								\
 	do {															\
 		if (pgstat_should_count_table(rel))						\
-			(rel)->pgstattab_info->t_counts.t_tuples_returned++;		\
+			(rel)->pgstattab_info->t_counts.tuples_returned++;		\
 	} while (0)
 #define pgstat_count_heap_fetch(rel)								\
 	do {															\
 		if (pgstat_should_count_table(rel))						\
-			(rel)->pgstattab_info->t_counts.t_tuples_fetched++;		\
+			(rel)->pgstattab_info->t_counts.tuples_fetched++;		\
 	} while (0)
 #define pgstat_count_index_fetch(rel)								\
 	do {															\
 		if (pgstat_should_count_index(rel))						\
-			(rel)->pgstatind_info->i_counts.i_tuples_fetched++;		\
+			(rel)->pgstatind_info->i_counts.tuples_fetched++;		\
 	} while (0)
 #define pgstat_count_index_scan(rel)								\
 	do {															\
 		if (pgstat_should_count_index(rel))						\
-			(rel)->pgstatind_info->i_counts.i_numscans++;			\
+			(rel)->pgstatind_info->i_counts.numscans++;			\
 	} while (0)
 #define pgstat_count_index_tuples(rel, n)							\
 	do {															\
 		if (pgstat_should_count_index(rel))						\
-			(rel)->pgstatind_info->i_counts.i_tuples_returned += (n);	\
+			(rel)->pgstatind_info->i_counts.tuples_returned += (n);	\
 	} while (0)
 #define pgstat_count_table_buffer_read(rel)								\
 	do {															\
 		if (pgstat_should_count_table(rel))	\
-			(rel)->pgstattab_info->t_counts.t_blocks_fetched++;		\
+			(rel)->pgstattab_info->t_counts.blocks_fetched++;		\
 	} while (0)
 #define pgstat_count_index_buffer_read(rel)								\
 	do {															\
 		if (pgstat_should_count_index(rel))	\
-			(rel)->pgstatind_info->i_counts.i_blocks_fetched++;		\
+			(rel)->pgstatind_info->i_counts.blocks_fetched++;		\
 	} while (0)
 #define pgstat_count_table_buffer_hit(rel)								\
 	do {															\
 		if (pgstat_should_count_table(rel))	\
-			(rel)->pgstattab_info->t_counts.t_blocks_hit++; \
+			(rel)->pgstattab_info->t_counts.blocks_hit++; \
 	} while (0)
 #define pgstat_count_index_buffer_hit(rel)								\
 	do {															\
 		if (pgstat_should_count_index(rel))	\
-			(rel)->pgstatind_info->i_counts.i_blocks_hit++; \
+			(rel)->pgstatind_info->i_counts.blocks_hit++; \
 	} while (0)
 extern void pgstat_count_heap_insert(Relation rel, PgStat_Counter n);
 extern void pgstat_count_heap_update(Relation rel, bool hot);
