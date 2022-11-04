@@ -950,13 +950,13 @@ pgstat_table_flush_cb(PgStat_EntryRef *entry_ref, bool nowait)
 
 	/* The entry was successfully flushed, add the same to database stats */
 	dbentry = pgstat_prep_database_pending(dboid);
-	dbentry->n_tuples_returned += lstats->t_counts.tuples_returned;
-	dbentry->n_tuples_fetched += lstats->t_counts.tuples_fetched;
-	dbentry->n_tuples_inserted += lstats->t_counts.tuples_inserted;
-	dbentry->n_tuples_updated += lstats->t_counts.tuples_updated;
-	dbentry->n_tuples_deleted += lstats->t_counts.tuples_deleted;
-	dbentry->n_blocks_fetched += lstats->t_counts.blocks_fetched;
-	dbentry->n_blocks_hit += lstats->t_counts.blocks_hit;
+	dbentry->tuples_returned += lstats->t_counts.tuples_returned;
+	dbentry->tuples_fetched += lstats->t_counts.tuples_fetched;
+	dbentry->tuples_inserted += lstats->t_counts.tuples_inserted;
+	dbentry->tuples_updated += lstats->t_counts.tuples_updated;
+	dbentry->tuples_deleted += lstats->t_counts.tuples_deleted;
+	dbentry->blocks_fetched += lstats->t_counts.blocks_fetched;
+	dbentry->blocks_hit += lstats->t_counts.blocks_hit;
 
 	return true;
 }
@@ -1018,10 +1018,10 @@ pgstat_index_flush_cb(PgStat_EntryRef *entry_ref, bool nowait)
 
 	/* The entry was successfully flushed, add the same to database stats */
 	dbentry = pgstat_prep_database_pending(dboid);
-	dbentry->n_tuples_returned += lstats->i_counts.tuples_returned;
-	dbentry->n_tuples_fetched += lstats->i_counts.tuples_fetched;
-	dbentry->n_blocks_fetched += lstats->i_counts.blocks_fetched;
-	dbentry->n_blocks_hit += lstats->i_counts.blocks_hit;
+	dbentry->tuples_returned += lstats->i_counts.tuples_returned;
+	dbentry->tuples_fetched += lstats->i_counts.tuples_fetched;
+	dbentry->blocks_fetched += lstats->i_counts.blocks_fetched;
+	dbentry->blocks_hit += lstats->i_counts.blocks_hit;
 
 	return true;
 }
@@ -1035,12 +1035,10 @@ pgstat_index_flush_cb1(PgStat_EntryRef *entry_ref, bool nowait)
 	/* The entry was successfully flushed, add the same to database stats */
 #define PGSTAT_ACCUM_IDX(item) \
 	(dbentry)->item += (idx_stats)->item
-
-	/* PGSTAT_ACCUM_IDX(tuples_returned); */
-	dbentry->n_tuples_returned += idx_stats->tuples_returned;
-	dbentry->n_tuples_fetched += idx_stats->tuples_fetched;
-	dbentry->n_blocks_fetched += idx_stats->blocks_fetched;
-	dbentry->n_blocks_hit += idx_stats->blocks_hit;
+	PGSTAT_ACCUM_IDX(tuples_returned);
+	PGSTAT_ACCUM_IDX(tuples_fetched);
+	PGSTAT_ACCUM_IDX(blocks_fetched);
+	PGSTAT_ACCUM_IDX(blocks_hit);
 #undef PGSTAT_ACCUM_IDX
 
 	return true;

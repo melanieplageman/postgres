@@ -372,14 +372,14 @@ pgstat_database_flush_cb(PgStat_EntryRef *entry_ref, bool nowait)
 
 	PGSTAT_ACCUM_DBCOUNT(n_xact_commit);
 	PGSTAT_ACCUM_DBCOUNT(n_xact_rollback);
-	PGSTAT_ACCUM_DBCOUNT(n_blocks_fetched);
-	PGSTAT_ACCUM_DBCOUNT(n_blocks_hit);
+	PGSTAT_ACCUM_DBCOUNT(blocks_fetched);
+	PGSTAT_ACCUM_DBCOUNT(blocks_hit);
 
-	PGSTAT_ACCUM_DBCOUNT(n_tuples_returned);
-	PGSTAT_ACCUM_DBCOUNT(n_tuples_fetched);
-	PGSTAT_ACCUM_DBCOUNT(n_tuples_inserted);
-	PGSTAT_ACCUM_DBCOUNT(n_tuples_updated);
-	PGSTAT_ACCUM_DBCOUNT(n_tuples_deleted);
+	PGSTAT_ACCUM_DBCOUNT(tuples_returned);
+	PGSTAT_ACCUM_DBCOUNT(tuples_fetched);
+	PGSTAT_ACCUM_DBCOUNT(tuples_inserted);
+	PGSTAT_ACCUM_DBCOUNT(tuples_updated);
+	PGSTAT_ACCUM_DBCOUNT(tuples_deleted);
 
 	/* last_autovac_time is reported immediately */
 	Assert(pendingent->last_autovac_time == 0);

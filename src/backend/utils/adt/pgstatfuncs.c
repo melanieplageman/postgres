@@ -1249,7 +1249,7 @@ pg_stat_get_db_blocks_fetched(PG_FUNCTION_ARGS)
 	if ((dbentry = pgstat_fetch_stat_dbentry(dbid)) == NULL)
 		result = 0;
 	else
-		result = (int64) (dbentry->n_blocks_fetched);
+		result = (int64) (dbentry->blocks_fetched);
 
 	PG_RETURN_INT64(result);
 }
@@ -1265,7 +1265,7 @@ pg_stat_get_db_blocks_hit(PG_FUNCTION_ARGS)
 	if ((dbentry = pgstat_fetch_stat_dbentry(dbid)) == NULL)
 		result = 0;
 	else
-		result = (int64) (dbentry->n_blocks_hit);
+		result = (int64) (dbentry->blocks_hit);
 
 	PG_RETURN_INT64(result);
 }
@@ -1281,7 +1281,7 @@ pg_stat_get_db_tuples_returned(PG_FUNCTION_ARGS)
 	if ((dbentry = pgstat_fetch_stat_dbentry(dbid)) == NULL)
 		result = 0;
 	else
-		result = (int64) (dbentry->n_tuples_returned);
+		result = (int64) (dbentry->tuples_returned);
 
 	PG_RETURN_INT64(result);
 }
@@ -1297,7 +1297,7 @@ pg_stat_get_db_tuples_fetched(PG_FUNCTION_ARGS)
 	if ((dbentry = pgstat_fetch_stat_dbentry(dbid)) == NULL)
 		result = 0;
 	else
-		result = (int64) (dbentry->n_tuples_fetched);
+		result = (int64) (dbentry->tuples_fetched);
 
 	PG_RETURN_INT64(result);
 }
@@ -1313,7 +1313,7 @@ pg_stat_get_db_tuples_inserted(PG_FUNCTION_ARGS)
 	if ((dbentry = pgstat_fetch_stat_dbentry(dbid)) == NULL)
 		result = 0;
 	else
-		result = (int64) (dbentry->n_tuples_inserted);
+		result = (int64) (dbentry->tuples_inserted);
 
 	PG_RETURN_INT64(result);
 }
@@ -1329,7 +1329,7 @@ pg_stat_get_db_tuples_updated(PG_FUNCTION_ARGS)
 	if ((dbentry = pgstat_fetch_stat_dbentry(dbid)) == NULL)
 		result = 0;
 	else
-		result = (int64) (dbentry->n_tuples_updated);
+		result = (int64) (dbentry->tuples_updated);
 
 	PG_RETURN_INT64(result);
 }
@@ -1345,7 +1345,7 @@ pg_stat_get_db_tuples_deleted(PG_FUNCTION_ARGS)
 	if ((dbentry = pgstat_fetch_stat_dbentry(dbid)) == NULL)
 		result = 0;
 	else
-		result = (int64) (dbentry->n_tuples_deleted);
+		result = (int64) (dbentry->tuples_deleted);
 
 	PG_RETURN_INT64(result);
 }
