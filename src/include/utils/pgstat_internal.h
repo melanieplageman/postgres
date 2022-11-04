@@ -359,11 +359,17 @@ typedef struct PgStatShared_Database
 	PgStat_StatDBEntry stats;
 } PgStatShared_Database;
 
-typedef struct PgStatShared_Relation
+typedef struct PgStatShared_Table
 {
 	PgStatShared_Common header;
 	PgStat_StatTabEntry stats;
-} PgStatShared_Relation;
+} PgStatShared_Table;
+
+typedef struct PgStatShared_Index
+{
+	PgStatShared_Common header;
+	PgStat_StatIndEntry stats;
+} PgStatShared_Index;
 
 typedef struct PgStatShared_Function
 {
@@ -558,8 +564,10 @@ extern void AtEOSubXact_PgStat_Relations(PgStat_SubXactStatus *xact_state, bool 
 extern void AtPrepare_PgStat_Relations(PgStat_SubXactStatus *xact_state);
 extern void PostPrepare_PgStat_Relations(PgStat_SubXactStatus *xact_state);
 
-extern bool pgstat_relation_flush_cb(PgStat_EntryRef *entry_ref, bool nowait);
-extern void pgstat_relation_delete_pending_cb(PgStat_EntryRef *entry_ref);
+extern bool pgstat_table_flush_cb(PgStat_EntryRef *entry_ref, bool nowait);
+extern bool pgstat_index_flush_cb(PgStat_EntryRef *entry_ref, bool nowait);
+extern void pgstat_table_delete_pending_cb(PgStat_EntryRef *entry_ref);
+extern void pgstat_index_delete_pending_cb(PgStat_EntryRef *entry_ref);
 
 
 /*
