@@ -15,6 +15,7 @@
  */
 #include "postgres.h"
 
+#include "pgstat.h"
 #include "port/atomics.h"
 #include "storage/buf_internals.h"
 #include "storage/bufmgr.h"
@@ -601,7 +602,7 @@ FreeAccessStrategy(BufferAccessStrategy strategy)
 
 /*
  * GetBufferFromRing -- returns a buffer from the ring, or NULL if the
- *		ring is empty.
+ *		ring is empty / not usable.
  *
  * The bufhdr spin lock is held on the returned buffer.
  */
@@ -662,6 +663,39 @@ static void
 AddBufferToRing(BufferAccessStrategy strategy, BufferDesc *buf)
 {
 	strategy->buffers[strategy->current] = BufferDescriptorGetBuffer(buf);
+}
+
+/*
+ * Utility function returning the IOContext of a given BufferAccessStrategy's
+ * strategy ring.
+ */
+IOContext
+IOContextForStrategy(BufferAccessStrategy strategy)
+{
+	if (!strategy)
+		return IOCONTEXT_BUFFER_POOL;
+
+	switch (strategy->btype)
+	{
+		case BAS_NORMAL:
+			/*
+			 * Currently, GetAccessStrategy() returns NULL for
+			 * BufferAccessStrategyType BAS_NORMAL, so this case is
+			 * unreachable.
+			 */
+			pg_unreachable();
+			return IOCONTEXT_BUFFER_POOL;
+		case BAS_BULKREAD:
+			return IOCONTEXT_BULKREAD;
+		case BAS_BULKWRITE:
+			return IOCONTEXT_BULKWRITE;
+		case BAS_VACUUM:
+			return IOCONTEXT_VACUUM;
+	}
+
+	elog(ERROR, "unrecognized BufferAccessStrategyType: %d", strategy->btype);
+
+	pg_unreachable();
 }
 
 /*
