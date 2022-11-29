@@ -128,36 +128,38 @@ pgstat_flush_io_ops(bool nowait)
 
 	expect_backend_stats = pgstat_io_op_stats_collected(MyBackendType);
 
-	for (int io_context = 0; io_context < IOCONTEXT_NUM_TYPES; io_context++)
+	for (IOContext io_context = IOCONTEXT_BULKREAD;
+			io_context < IOCONTEXT_NUM_TYPES; io_context++)
 	{
 		PgStatShared_IOObjectOps *shared_objs = &type_shstats->data[io_context];
 		PgStat_IOObjectOps *pending_objs = &pending_IOOpStats.data[io_context];
 
-		for (int io_object = 0; io_object < IOOBJECT_NUM_TYPES; io_object++)
+		for (IOObject io_object = IOOBJECT_RELATION;
+				io_object < IOOBJECT_NUM_TYPES; io_object++)
 		{
 			PgStat_IOOpCounters *sharedent = &shared_objs->data[io_object];
 			PgStat_IOOpCounters *pendingent = &pending_objs->data[io_object];
 
 			if (!expect_backend_stats ||
 				!pgstat_bktype_io_context_io_object_valid(MyBackendType,
-					(IOContext) io_context, (IOObject) io_object))
+					io_context, io_object))
 			{
 				pgstat_io_context_ops_assert_zero(sharedent);
 				pgstat_io_context_ops_assert_zero(pendingent);
 				continue;
 			}
 
-			for (int io_op = 0; io_op < IOOP_NUM_TYPES; io_op++)
+			for (IOOp io_op = IOOP_EVICT; io_op < IOOP_NUM_TYPES; io_op++)
 			{
-				if (!(pgstat_io_op_valid(MyBackendType, (IOContext) io_context,
-								(IOObject) io_object, (IOOp) io_op)))
+				if (!pgstat_io_op_valid(MyBackendType, io_context, io_object,
+							io_op))
 				{
-					pgstat_io_op_assert_zero(sharedent, (IOOp) io_op);
-					pgstat_io_op_assert_zero(pendingent, (IOOp) io_op);
+					pgstat_io_op_assert_zero(sharedent, io_op);
+					pgstat_io_op_assert_zero(pendingent, io_op);
 					continue;
 				}
 
-				pgstat_accum_io_op(sharedent, pendingent, (IOOp) io_op);
+				pgstat_accum_io_op(sharedent, pendingent, io_op);
 			}
 		}
 	}
