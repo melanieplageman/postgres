@@ -1793,25 +1793,27 @@ pg_stat_get_io(PG_FUNCTION_ARGS)
 
 	reset_time = TimestampTzGetDatum(backends_io_stats->stat_reset_timestamp);
 
-	for (int bktype = 0; bktype < BACKEND_NUM_TYPES; bktype++)
+	for (BackendType bktype = B_INVALID; bktype < BACKEND_NUM_TYPES; bktype++)
 	{
-		Datum		bktype_desc = CStringGetTextDatum(GetBackendTypeDesc((BackendType) bktype));
+		Datum		bktype_desc = CStringGetTextDatum(GetBackendTypeDesc(bktype));
 		bool		expect_backend_stats = true;
 		PgStat_IOContextOps *io_context_ops = &backends_io_stats->stats[bktype];
 
 		/*
-		 * For those BackendTypes without IO Operation stats, skip
-		 * representing them in the view altogether.
+		 * For those BackendTypes without IO Operation stats, skip representing
+		 * them in the view altogether. We still loop through their counters so
+		 * that we can assert that all values are zero.
 		 */
-		expect_backend_stats = pgstat_io_op_stats_collected((BackendType)
-															bktype);
+		expect_backend_stats = pgstat_io_op_stats_collected(bktype);
 
-		for (int io_context = 0; io_context < IOCONTEXT_NUM_TYPES; io_context++)
+		for (IOContext io_context = IOCONTEXT_BULKREAD;
+				io_context < IOCONTEXT_NUM_TYPES; io_context++)
 		{
 			const char *io_context_str = pgstat_io_context_desc(io_context);
 			PgStat_IOObjectOps *io_objs = &io_context_ops->data[io_context];
 
-			for (int io_object = 0; io_object < IOOBJECT_NUM_TYPES; io_object++)
+			for (IOObject io_object = IOOBJECT_RELATION;
+					io_object < IOOBJECT_NUM_TYPES; io_object++)
 			{
 				PgStat_IOOpCounters *counters = &io_objs->data[io_object];
 				const char *io_obj_str = pgstat_io_object_desc(io_object);
@@ -1825,8 +1827,8 @@ pg_stat_get_io(PG_FUNCTION_ARGS)
 				* entire row from the view.
 				*/
 				if (!expect_backend_stats ||
-					!pgstat_bktype_io_context_io_object_valid((BackendType) bktype,
-						(IOContext) io_context, (IOObject) io_object))
+					!pgstat_bktype_io_context_io_object_valid(bktype,
+						io_context, io_object))
 				{
 					pgstat_io_context_ops_assert_zero(counters);
 					continue;
@@ -1854,13 +1856,13 @@ pg_stat_get_io(PG_FUNCTION_ARGS)
 				* in the view NULL and assert that these stats are zero as
 				* expected.
 				*/
-				for (int io_op = 0; io_op < IOOP_NUM_TYPES; io_op++)
+				for (IOOp io_op = IOOP_EVICT; io_op < IOOP_NUM_TYPES; io_op++)
 				{
-					if (!(pgstat_io_op_valid((BackendType) bktype, (IOContext)
-											io_context, (IOObject) io_object, (IOOp) io_op)))
+					if (!pgstat_io_op_valid(bktype, io_context, io_object,
+								io_op))
 					{
-						pgstat_io_op_assert_zero(counters, (IOOp) io_op);
-						nulls[pgstat_io_op_get_index((IOOp) io_op)] = true;
+						pgstat_io_op_assert_zero(counters, io_op);
+						nulls[pgstat_io_op_get_index(io_op)] = true;
 					}
 				}
 
