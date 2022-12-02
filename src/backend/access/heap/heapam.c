@@ -322,11 +322,29 @@ heap_pgsr_release(uintptr_t pgsr_private, uintptr_t read_private)
 static PgStreamingRead *
 heap_pgsr_single_alloc(HeapScanDesc scan)
 {
+	PgStreamingRead *pgsr;
+	PgStreamingReadDevLog *dev_log;
+
 	int iodepth = Max(Min(128, NBuffers / 128), 1);
 
-	return pg_streaming_read_alloc(iodepth, (uintptr_t) scan,
+	pgsr = pg_streaming_read_alloc(iodepth, (uintptr_t) scan,
 								   heap_pgsr_next_single,
 								   heap_pgsr_release);
+	/*
+	 * pgsr_do_log should only be used to determine whether or not to set up
+	 * the AIO dev log. During execution, we should check if pgsr->dev_log is
+	 * NULL.
+	 */
+	if (pgsr_do_log)
+	{
+		dev_log = palloc(sizeof(PgStreamingReadDevLog));
+		dev_log->completion_log = aio_dev_make_completion_log(scan->rs_nblocks);
+		dev_log->wait_log = aio_dev_make_wait_log(scan->rs_nblocks);
+		dev_log->consumption_log = aio_dev_make_consumption_log(scan->rs_nblocks);
+		pg_streaming_read_set_dev_log(pgsr, dev_log);
+	}
+
+	return pgsr;
 }
 
 static PgStreamingRead *
