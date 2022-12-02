@@ -1,5 +1,6 @@
 backend_sources += files(
  'aio.c',
+ 'aio_dev_log.c',
  'aio_exchange.c',
  'aio_funcs.c',
  'aio_io.c',

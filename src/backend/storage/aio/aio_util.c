@@ -16,7 +16,10 @@
 
 #include "storage/aio_internal.h"
 #include "miscadmin.h"
+#include "executor/instrument.h"
 
+
+bool pgsr_do_log = false;
 
 /* typedef is in header */
 typedef struct PgStreamingWriteItem
@@ -366,6 +369,9 @@ typedef struct PgStreamingReadItem
 	bool valid;
 	uintptr_t read_private;
 
+	/* prefetch distance at the time this IO was prefetched */
+	uint32 prefetch_distance;
+
 	/* Whether or not this block was fetched from disk */
 	bool real_io;
 
@@ -382,6 +388,7 @@ struct PgStreamingRead
 	uintptr_t pgsr_private;
 	PgStreamingReadDetermineNextCB determine_next_cb;
 	PgStreamingReadRelease release_cb;
+	PgStreamingReadDevLog *dev_log;
 
 	uint32 current_window;
 
@@ -450,7 +457,25 @@ pg_streaming_read_alloc(uint32 iodepth, uintptr_t pgsr_private,
 		dlist_push_tail(&pgsr->available, &this_read->node);
 	}
 
+	pgsr->dev_log = NULL;
+
 	return pgsr;
+}
+
+void
+pg_streaming_read_set_dev_log(PgStreamingRead *pgsr, PgStreamingReadDevLog *log)
+{
+	pgsr->dev_log = log;
+}
+
+void
+pg_streaming_read_free_dev_log(PgStreamingRead *pgsr)
+{
+	Assert(pgsr->dev_log);
+	pfree(pgsr->dev_log->completion_log);
+	pfree(pgsr->dev_log->consumption_log);
+	pfree(pgsr->dev_log->wait_log);
+	pfree(pgsr->dev_log);
 }
 
 void
@@ -501,6 +526,10 @@ pg_streaming_read_complete(PgAioOnCompletionLocalContext *ocb, PgAioInProgress *
 	if (INSTR_TIME_IS_ZERO(io->completed))
 		INSTR_TIME_SET_CURRENT(io->completed);
 
+	if (pgsr->dev_log)
+		aio_dev_log_completion(pgsr->dev_log->completion_log, io->submitted, io->completed,
+				this_read->prefetch_distance, pgsr->completed_count, pgsr->inflight_count);
+
 #if 0
 	if ((pgsr->prefetched_total_count % 10000) == 0)
 		ereport(LOG, errmsg("pgsr read completed: qd %d completed: %d",
@@ -537,6 +566,7 @@ pg_streaming_read_prefetch_one(PgStreamingRead *pgsr)
 	Assert(!this_read->valid);
 	Assert(!this_read->in_progress);
 	Assert(this_read->read_private == 0);
+	this_read->prefetch_distance = pgsr->current_window;
 
 	if (this_read->aio == NULL)
 	{
@@ -666,6 +696,10 @@ pg_streaming_read_get_next(PgStreamingRead *pgsr)
 	if (dlist_is_empty(&pgsr->in_order))
 	{
 		Assert(pgsr->hit_end);
+
+		if (pgsr->dev_log)
+			aio_dev_write_log(pgsr->dev_log, pgsr->iodepth_max, pgsr->distance_max);
+
 		return 0;
 	}
 	else
@@ -682,13 +716,22 @@ pg_streaming_read_get_next(PgStreamingRead *pgsr)
 		if (this_read->in_progress)
 		{
 			pgaio_io_wait(this_read->aio);
+
+			if (pgsr->dev_log)
+				aio_dev_log_wait(pgsr->dev_log->wait_log, this_read->aio->desired, this_read->aio->completed);
+
 			/* callback should have updated */
 			Assert(!this_read->in_progress);
 			Assert(this_read->valid);
 		}
 
 		if (this_read->real_io)
+		{
 			INSTR_TIME_SET_CURRENT(this_read->consumed);
+
+			if (pgsr->dev_log)
+				aio_dev_log_consumption(pgsr->dev_log->consumption_log, this_read->consumed);
+		}
 
 		Assert(this_read->read_private != 0);
 		ret = this_read->read_private;
