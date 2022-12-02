@@ -382,6 +382,7 @@ typedef struct PgStreamingReadItem
 struct PgStreamingRead
 {
 	uint32 iodepth_max;
+	// TODO: reconcile this and hi and lo for cnc
 	uint32 distance_max;
 	uint32 all_items_count;
 
@@ -391,6 +392,12 @@ struct PgStreamingRead
 	PgStreamingReadDevLog *dev_log;
 
 	PgStreamingReadConsumptionRing *consumptions;
+	int cnc_lo;
+	int cnc_hi;
+	int pfd_at_flip;
+	int consecutive_ups;
+	int consecutive_downs;
+	int maximum_pfd;
 
 	uint32 current_window;
 
@@ -422,6 +429,108 @@ struct PgStreamingRead
 	PgStreamingReadItem all_items[FLEXIBLE_ARRAY_MEMBER];
 };
 
+static void pg_streaming_read_adjust_pfd(PgStreamingReadItem *this_read)
+{
+	float io_tput;
+	float tput_ratio;
+	float avg_tput;
+	float avg_pfd;
+	int io_pfd;
+	int max_pfd;
+	instr_time latency = this_read->aio->completed;
+	PgStreamingRead *pgsr = this_read->pgsr;
+
+	INSTR_TIME_SUBTRACT(latency, this_read->aio->submitted);
+
+	/* FOR FAST STORAGE */
+	if (pgsr->completed_count <= pgsr->cnc_lo)
+		pgsr->current_window += 1;
+
+	if (pgsr->completed_count >= pgsr->cnc_hi)
+		pgsr->current_window = Max(1, pgsr->current_window - 1);
+
+	if (!this_read->real_io)
+		return;
+
+	if (!pgsr->consumptions)
+		return;
+
+	/* FOR SLOW STORAGE */
+	io_pfd = this_read->prefetch_distance;
+	avg_pfd = pgsr_avg_pfd(pgsr->consumptions);
+	max_pfd = pgsr_max_pfd(pgsr->consumptions);
+
+	io_tput = io_pfd / INSTR_TIME_GET_MILLISEC(latency);
+	avg_tput = pgsr_avg_tput(pgsr->consumptions);
+
+	tput_ratio = io_tput / avg_tput;
+
+	/*
+	 * if pfd is going up and tput is going up this is a possible value to
+	 * roll back to
+	 */
+	if (io_pfd > avg_pfd && tput_ratio >= 1.1)
+	{
+		pgsr->pfd_at_flip = io_pfd;
+		pgsr->consecutive_ups++;
+		pgsr->consecutive_downs = 0;
+
+		/*
+		 *  If we have had enough ups in a row, invalidate our maximum for
+		 *  now
+		 */
+		if (pgsr->consecutive_ups >= avg_pfd)
+			pgsr->maximum_pfd = -1;
+
+		/*
+		 *  if we have previously set a maximum and we haven't had enough ups
+		 *  in a row, anyway increase the max so that we are able to continue
+		 *  increasing the prefetch distance
+		 */
+		if (pgsr->maximum_pfd >= 0)
+			pgsr->maximum_pfd += 1;
+	}
+
+	/*
+	 * if pfd is going up and tput is not going up
+	 */
+	else if (io_pfd > avg_pfd && tput_ratio < 1.1)
+	{
+		pgsr->consecutive_downs++;
+		pgsr->consecutive_ups = 0;
+
+		/*
+		 * If we have had enough downs in a row, set a maximum and set pfd
+		 * to a bit less than what it was last time we had an increase in
+		 * tput
+		 */
+		if (pgsr->consecutive_downs >= avg_pfd)
+		{
+			/*
+			 * Set maximum to recent max pfd out of consumed IOs. At this
+			 * point, self.prefetch_distance could be higher but we know
+			 * that just out of consumed IOs, a pfd that high wasn't
+			 * helping us. It may be necessary to actually set this to
+			 * self.prefetch_distance to avoid getting stuck at too low of
+			 * a value, though
+			 */
+			pgsr->maximum_pfd = max_pfd;
+			pgsr->current_window = pgsr->pfd_at_flip * 0.7;
+		}
+
+		/*
+		 * counteract the increase from algo 1 even if we haven't had
+		 * enuogh consecutive downs
+		 */
+		pgsr->current_window -= 1;
+	}
+
+	pgsr->current_window = Max(pgsr->current_window, 1);
+
+	if (pgsr->maximum_pfd >= 0)
+		pgsr->current_window = Min(pgsr->maximum_pfd, pgsr->current_window);
+}
+
 static void pg_streaming_read_complete(PgAioOnCompletionLocalContext *ocb, PgAioInProgress *io);
 static void pg_streaming_read_prefetch(PgStreamingRead *pgsr);
 
@@ -445,7 +554,14 @@ pg_streaming_read_alloc(uint32 iodepth, uintptr_t pgsr_private,
 	pgsr->determine_next_cb = determine_next_cb;
 	pgsr->release_cb = release_cb;
 
-	pgsr->current_window = 0;
+	pgsr->cnc_lo = Min(iodepth, 2);
+	pgsr->cnc_hi = Min(iodepth, 4);
+	pgsr->consecutive_ups = 0;
+	pgsr->consecutive_downs = 0;
+	pgsr->pfd_at_flip = 0;
+	pgsr->maximum_pfd = -1;
+
+	pgsr->current_window = pgsr->cnc_lo;
 
 	dlist_init(&pgsr->available);
 	dlist_init(&pgsr->in_order);
@@ -579,6 +695,8 @@ pg_streaming_read_complete(PgAioOnCompletionLocalContext *ocb, PgAioInProgress *
 	this_read->in_progress = false;
 	pgaio_io_recycle(this_read->aio);
 
+	pg_streaming_read_adjust_pfd(this_read);
+
 	pg_streaming_read_prefetch(pgsr);
 }
 
@@ -687,62 +805,17 @@ pg_streaming_read_prefetch_one(PgStreamingRead *pgsr)
 static void
 pg_streaming_read_prefetch(PgStreamingRead *pgsr)
 {
-	uint32 min_issue;
+	uint32 min_issue = 1;
 
 	if (pgsr->hit_end)
 		return;
 
-	Assert(pgsr->inflight_count <= pgsr->current_window);
-	Assert(pgsr->completed_count <= (pgsr->iodepth_max + pgsr->distance_max));
-
-	/*
-	 * XXX: Some issues:
-	 *
-	 * - We should probably do the window calculation based on the number of
-	 *   buffers the user actually requested, i.e. only recompute this
-	 *   whenever pg_streaming_read_get_next() is called. Otherwise we will
-	 *   always read the whole prefetch window.
-	 *
-	 * - The algorithm here is pretty stupid. Should take distance / iodepth
-	 *   properly into account in a distitcn way. Grow slower.
-	 *
-	 * - It'd be good to have a usage dependent iodepth management. After an
-	 *   initial increase, we should only increase further if the the user the
-	 *   window proves too small (i.e. we don't manage to keep 'completed'
-	 *   close to full).
-	 *
-	 * - If most requests don't trigger IO, we should probably reduce the
-	 *   prefetch window.
-	 */
-	if (pgsr->current_window < pgsr->iodepth_max)
-	{
-		if (pgsr->current_window == 0)
-			pgsr->current_window = 4;
-		else
-			pgsr->current_window *= 2;
-
-		if (pgsr->current_window > pgsr->iodepth_max)
-			pgsr->current_window = pgsr->iodepth_max;
-
-		min_issue = 1;
-	}
-	else
-	{
-		min_issue = Min(pgsr->iodepth_max, pgsr->current_window / 4);
-	}
-
-	Assert(pgsr->inflight_count <= pgsr->current_window);
-	Assert(pgsr->completed_count <= (pgsr->iodepth_max + pgsr->distance_max));
-
-	if (pgsr->completed_count >= pgsr->current_window)
-		return;
-
-	if (pgsr->inflight_count >= pgsr->current_window)
+	if (pgsr->completed_count + pgsr->inflight_count >= pgsr->current_window)
 		return;
 
 	while (!pgsr->hit_end &&
-		   (pgsr->inflight_count < pgsr->current_window) &&
-		   (pgsr->completed_count < pgsr->current_window))
+		   (pgsr->inflight_count + pgsr->completed_count < pgsr->current_window) &&
+		   (pgsr->inflight_count + pgsr->completed_count < pgsr->all_items_count))
 	{
 		pg_streaming_read_prefetch_one(pgsr);
 		pgaio_limit_pending(false, min_issue);
@@ -821,6 +894,9 @@ pg_streaming_read_get_next(PgStreamingRead *pgsr)
 		INSTR_TIME_SET_ZERO(this_read->aio->desired);
 		INSTR_TIME_SET_ZERO(this_read->aio->completed);
 		dlist_push_tail(&pgsr->available, &this_read->node);
+
+		// TODO: not sure if I should do this just during completion
+		pg_streaming_read_adjust_pfd(this_read);
 		pg_streaming_read_prefetch(pgsr);
 
 		return ret;
