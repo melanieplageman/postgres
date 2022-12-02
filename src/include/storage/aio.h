@@ -15,6 +15,7 @@
 #define AIO_H
 
 #include "common/relpath.h"
+#include "storage/aio_dev_log.h"
 #include "storage/block.h"
 #include "storage/buf.h"
 #include "storage/relfilelocator.h"
@@ -45,6 +46,7 @@ typedef enum IoMethod
 extern int io_method;
 extern int io_workers;
 extern int io_worker_queue_size;
+extern bool pgsr_do_log;
 
 /* (future) GUC controlling global MAX number of in-progress IO entries */
 /* FIXME: this is per context right now */
@@ -284,5 +286,7 @@ extern PgStreamingRead *pg_streaming_read_alloc(uint32 iodepth, uintptr_t pgsr_p
 												PgStreamingReadRelease release_cb);
 extern void pg_streaming_read_free(PgStreamingRead *pgsr);
 extern uintptr_t pg_streaming_read_get_next(PgStreamingRead *pgsr);
+extern void pg_streaming_read_set_dev_log(PgStreamingRead *pgsr, PgStreamingReadDevLog *log);
+extern void pg_streaming_read_free_dev_log(PgStreamingRead *pgsr);
 
 #endif							/* AIO_H */
