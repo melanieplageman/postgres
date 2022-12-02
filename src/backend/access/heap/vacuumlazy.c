@@ -949,7 +949,7 @@ lazy_scan_heap(LVRelState *vacrel)
 
 		pgsr = pg_streaming_read_alloc(iodepth, (uintptr_t) vacrel,
 									   vacuum_scan_pgsr_next,
-									   vacuum_pgsr_release);
+									   vacuum_pgsr_release, NULL);
 	}
 
 	/* Report that we're scanning the heap, advertising total # of blocks */
@@ -2597,7 +2597,7 @@ lazy_vacuum_heap_rel(LVRelState *vacrel)
 	vhs.next_tupindex = 0;
 	pgsr = pg_streaming_read_alloc(512, (uintptr_t) &vhs,
 								   vacuum_heap_pgsr_next,
-								   vacuum_pgsr_release);
+								   vacuum_pgsr_release, NULL);
 
 	vacuumed_pages = 0;
 
