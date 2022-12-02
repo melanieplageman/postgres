@@ -294,6 +294,7 @@ pgaio_process_io_rw_completion(PgAioInProgress *myio,
 void
 pgaio_process_io_completion(PgAioInProgress *io, int result)
 {
+	instr_time completion_time;
 	int running_result;
 	PgAioInProgress *cur = io;
 	bool first = true;
@@ -344,6 +345,8 @@ pgaio_process_io_completion(PgAioInProgress *io, int result)
 		running_result = result = -ENOSPC;
 	else
 		running_result = result;
+
+	INSTR_TIME_SET_CURRENT(completion_time);
 
 	while (cur)
 	{
@@ -414,6 +417,7 @@ pgaio_process_io_completion(PgAioInProgress *io, int result)
 
 		dlist_push_tail(&my_aio->reaped, &cur->io_node);
 
+		cur->completed = completion_time;
 		cur = next;
 		first = false;
 	}

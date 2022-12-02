@@ -16,6 +16,7 @@
 #ifndef AIO_INTERNAL_H
 #define AIO_INTERNAL_H
 
+#include "executor/instrument.h"
 #include "lib/ilist.h"
 #include "port/atomics.h"
 #include "port/pg_iovec.h"
@@ -180,6 +181,15 @@ struct PgAioInProgress
 
 	/* the IOs result, depends on operation. E.g. the length of a read */
 	int32 result;
+
+	/* when this IO was prepared to be submitted */
+	instr_time submitted;
+
+	/* when it was completed by a postgres worker */
+	instr_time completed;
+
+	/* when was this IO demanded by a postgres worker */
+	instr_time desired;
 
 	/*
 	 * Single callback that can be registered on an IO to be called upon

@@ -186,6 +186,9 @@ AioShmemInit(void)
 			ConditionVariableInit(&io->cv);
 			dlist_push_tail(&aio_ctl->unused_ios, &io->owner_node);
 			io->flags = PGAIOIP_UNUSED;
+			INSTR_TIME_SET_ZERO(io->submitted);
+			INSTR_TIME_SET_ZERO(io->desired);
+			INSTR_TIME_SET_ZERO(io->completed);
 			io->system_referenced = true;
 			io->generation = 1;
 			io->bb_idx = PGAIO_BB_INVALID;
@@ -674,6 +677,7 @@ pgaio_complete_ios(bool in_error)
 				cur->scb = PGAIO_SCB_INVALID;
 				cur->owner_id = INVALID_PGPROCNO;
 				cur->result = 0;
+				// TODO: does submitted and/or completed need to be reset here?
 				cur->system_referenced = true;
 				cur->on_completion_local = NULL;
 
@@ -1313,6 +1317,7 @@ pgaio_io_release(PgAioInProgress *io)
 		io->scb = PGAIO_SCB_INVALID;
 		io->owner_id = INVALID_PGPROCNO;
 		io->result = 0;
+		// TODO: should submitted, completed, and desired be reset here?
 		io->system_referenced = true;
 		io->on_completion_local = NULL;
 
@@ -1398,6 +1403,11 @@ pgaio_io_recycle(PgAioInProgress *io)
 	Assert(io->flags == PGAIOIP_IDLE);
 	io->result = 0;
 	io->on_completion_local = NULL;
+
+	/*
+	 * Do not reset io->submitted or io->completed here, as they will be used
+	 * later.
+	 */
 }
 
 /*
@@ -1561,6 +1571,8 @@ pgaio_io_prepare_submit(PgAioInProgress *io, uint32 ring)
 			break;
 		cur = &aio_ctl->in_progress_io[cur->merge_with_idx];
 	}
+
+	INSTR_TIME_SET_CURRENT(cur->submitted);
 }
 
 bool
@@ -1768,10 +1780,14 @@ wait_ref_again:
 		}
 		else if (pgaio_impl->wait_one && (flags & PGAIOIP_INFLIGHT))
 		{
-			instr_time io_wait_time, desired;
+			instr_time io_wait_time;
 
-			if (track_io_timing)
-				INSTR_TIME_SET_CURRENT(desired);
+			/*
+			 * Set this even if track_io_timing is off. Otherwise, we can't
+			 * guarantee it will be set when we calculate wait time while
+			 * logging, or if we end up using it in the prefetch algorithm.
+			 */
+			INSTR_TIME_SET_CURRENT(io->desired);
 
 			/* note that this is allowed to spuriously return */
 			pgaio_impl->wait_one(&aio_ctl->contexts[io->ring],
@@ -1779,16 +1795,30 @@ wait_ref_again:
 								 ref_generation,
 								 WAIT_EVENT_AIO_IO_COMPLETE_ANY);
 
+			/*
+			 * Even if track_io_timing is off, io->completed is needed for
+			 * calculating latency for prefetching.
+			 *
+			 * TODO: we should be able to set io->completed at some point
+			 * before here and guarantee it will have been set. Currently, it
+			 * is set in pgaio_process_io_completion() and
+			 * pg_streaming_read_complete(), but this isn't called in all
+			 * cases. For now, check if io->completed has been set and, if not,
+			 * set it here.
+			 */
+			if(INSTR_TIME_IS_ZERO(io->completed))
+				INSTR_TIME_SET_CURRENT(io->completed);
+
 			if (track_io_timing)
 			{
-				INSTR_TIME_SET_CURRENT(io_wait_time);
+				io_wait_time = io->completed;
 				INSTR_TIME_SUBTRACT(io_wait_time, io->desired);
 				INSTR_TIME_ADD(pgBufferUsage.io_wait_time, io_wait_time);
 			}
 		}
 		else
 		{
-			instr_time io_wait_time, desired;
+			instr_time io_wait_time;
 
 			if (call_shared)
 				pgaio_complete_ios(false);
@@ -1809,14 +1839,32 @@ wait_ref_again:
 				 */
 				Assert(IsUnderPostmaster);
 
-				if (track_io_timing)
-					INSTR_TIME_SET_CURRENT(desired);
+				/*
+				 * Set this even if track_io_timing is off. Otherwise, we can't
+				 * guarantee it will be set when we calculate wait time while
+				 * logging, or if we end up using it in the prefetch algorithm.
+				 */
+				INSTR_TIME_SET_CURRENT(io->desired);
 
 				ConditionVariableSleep(&io->cv, WAIT_EVENT_AIO_IO_COMPLETE_ONE);
 
+				/*
+				* Even if track_io_timing is off, io->completed is needed for
+				* calculating latency for prefetching.
+				*
+				* TODO: we should be able to set io->completed at some point
+				* before here and guarantee it will have been set. Currently, it
+				* is set in pgaio_process_io_completion() and
+				* pg_streaming_read_complete(), but this isn't called in all
+				* cases. For now, check if io->completed has been set and, if not,
+				* set it here.
+				*/
+				if(INSTR_TIME_IS_ZERO(io->completed))
+					INSTR_TIME_SET_CURRENT(io->completed);
+
 				if (track_io_timing)
 				{
-					INSTR_TIME_SET_CURRENT(io_wait_time);
+					io_wait_time = io->completed;
 					INSTR_TIME_SUBTRACT(io_wait_time, io->desired);
 					INSTR_TIME_ADD(pgBufferUsage.io_wait_time, io_wait_time);
 				}
