@@ -390,6 +390,8 @@ struct PgStreamingRead
 	PgStreamingReadRelease release_cb;
 	PgStreamingReadDevLog *dev_log;
 
+	PgStreamingReadConsumptionRing *consumptions;
+
 	uint32 current_window;
 
 	/* number of requests issued */
@@ -426,7 +428,8 @@ static void pg_streaming_read_prefetch(PgStreamingRead *pgsr);
 PgStreamingRead *
 pg_streaming_read_alloc(uint32 iodepth, uintptr_t pgsr_private,
 						PgStreamingReadDetermineNextCB determine_next_cb,
-						PgStreamingReadRelease release_cb)
+						PgStreamingReadRelease release_cb,
+						PgStreamingReadConsumptionRing *consumption_ring)
 {
 	PgStreamingRead *pgsr;
 
@@ -458,6 +461,8 @@ pg_streaming_read_alloc(uint32 iodepth, uintptr_t pgsr_private,
 	}
 
 	pgsr->dev_log = NULL;
+
+	pgsr->consumptions = consumption_ring;
 
 	return pgsr;
 }
@@ -509,7 +514,30 @@ pg_streaming_read_free(PgStreamingRead *pgsr)
 		}
 	}
 
+	if (pgsr->consumptions != NULL)
+		pfree(pgsr->consumptions);
+
 	pfree(pgsr);
+}
+
+void
+pgsr_add_consumption(PgStreamingReadConsumptionRing *ring, instr_time latency,
+		int prefetch_distance)
+{
+	PgStreamingReadConsumption *target;
+
+	if (ring->idx == 0)
+		ring->idx = PGSR_RING_SIZE;
+
+	ring->idx--;
+
+	target = &ring->data[ring->idx];
+
+	target->latency = latency;
+	target->prefetch_distance = prefetch_distance;
+
+	if (ring->num_valid < PGSR_RING_SIZE)
+		ring->num_valid++;
 }
 
 static void
@@ -731,7 +759,17 @@ pg_streaming_read_get_next(PgStreamingRead *pgsr)
 
 			if (pgsr->dev_log)
 				aio_dev_log_consumption(pgsr->dev_log->consumption_log, this_read->consumed);
+
+			if (pgsr->consumptions)
+			{
+				instr_time latency = this_read->aio->completed;
+				INSTR_TIME_SUBTRACT(latency, this_read->aio->submitted);
+				// TODO: don't know what belongs here and what belongs in
+				// pg_streaming_read_complete()
+				pgsr_add_consumption(pgsr->consumptions, latency, this_read->prefetch_distance);
+			}
 		}
+
 
 		Assert(this_read->read_private != 0);
 		ret = this_read->read_private;
