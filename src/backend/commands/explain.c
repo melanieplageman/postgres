@@ -3541,7 +3541,8 @@ show_buffer_usage(ExplainState *es, const BufferUsage *usage, bool planning)
 		bool		has_temp = (usage->temp_blks_read > 0 ||
 								usage->temp_blks_written > 0);
 		bool		has_timing = (!INSTR_TIME_IS_ZERO(usage->blk_read_time) ||
-								  !INSTR_TIME_IS_ZERO(usage->blk_write_time));
+								  !INSTR_TIME_IS_ZERO(usage->blk_write_time ||
+								  !INSTR_TIME_IS_ZERO(usage->io_wait_time)));
 		bool		has_temp_timing = (!INSTR_TIME_IS_ZERO(usage->temp_blk_read_time) ||
 									   !INSTR_TIME_IS_ZERO(usage->temp_blk_write_time));
 		bool		show_planning = (planning && (has_shared ||
@@ -3625,6 +3626,11 @@ show_buffer_usage(ExplainState *es, const BufferUsage *usage, bool planning)
 				if (!INSTR_TIME_IS_ZERO(usage->blk_write_time))
 					appendStringInfo(es->str, " write=%0.3f",
 									 INSTR_TIME_GET_MILLISEC(usage->blk_write_time));
+
+				if (!INSTR_TIME_IS_ZERO(usage->io_wait_time))
+					appendStringInfo(es->str, " wait=%0.3f",
+									INSTR_TIME_GET_MILLISEC(usage->io_wait_time));
+
 				if (has_temp_timing)
 					appendStringInfoChar(es->str, ',');
 			}
@@ -3674,6 +3680,11 @@ show_buffer_usage(ExplainState *es, const BufferUsage *usage, bool planning)
 			ExplainPropertyFloat("I/O Write Time", "ms",
 								 INSTR_TIME_GET_MILLISEC(usage->blk_write_time),
 								 3, es);
+
+			ExplainPropertyFloat("I/O Wait Time", "ms",
+								 INSTR_TIME_GET_MILLISEC(usage->io_wait_time),
+								 5, es);
+
 			ExplainPropertyFloat("Temp I/O Read Time", "ms",
 								 INSTR_TIME_GET_MILLISEC(usage->temp_blk_read_time),
 								 3, es);

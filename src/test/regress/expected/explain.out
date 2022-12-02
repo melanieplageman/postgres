@@ -260,6 +260,7 @@ select explain_filter('explain (analyze, buffers, format json) select * from int
        "Temp Written Blocks": N,   +
        "I/O Read Time": N.N,       +
        "I/O Write Time": N.N,      +
+       "I/O Wait Time": N.N,       +
        "Temp I/O Read Time": N.N,  +
        "Temp I/O Write Time": N.N  +
      },                            +
@@ -276,6 +277,7 @@ select explain_filter('explain (analyze, buffers, format json) select * from int
        "Temp Written Blocks": N,   +
        "I/O Read Time": N.N,       +
        "I/O Write Time": N.N,      +
+       "I/O Wait Time": N.N,       +
        "Temp I/O Read Time": N.N,  +
        "Temp I/O Write Time": N.N  +
      },                            +
