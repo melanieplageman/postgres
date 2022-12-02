@@ -2937,6 +2937,39 @@ struct config_int ConfigureNamesInt[] =
 	},
 
 	{
+		{"prefetch_dev_initial_iodepth",
+			PGC_USERSET,
+			RESOURCES_ASYNCHRONOUS,
+			gettext_noop("initial value of prefetch distance for developing prefetcher"),
+			NULL,
+			GUC_EXPLAIN
+		},
+		&prefetch_dev_initial_iodepth,
+		128, 1, 1000,
+		NULL, NULL, NULL
+	},
+
+	{
+		{"prefetch_algo", PGC_USERSET, RESOURCES_ASYNCHRONOUS,
+			gettext_noop("prefetch algorithm to use"),
+			NULL,
+		},
+		&prefetch_algo,
+		PFA_OG, PFA_OG, PFA_CLAMP,
+		NULL, NULL, NULL
+	},
+
+	{
+		{"prefetch_max", PGC_USERSET, RESOURCES_ASYNCHRONOUS,
+			gettext_noop("max prefetch distance"),
+			NULL,
+		},
+		&prefetch_max,
+		128, 1, 2048,
+		NULL, NULL, NULL
+	},
+
+	{
 		{"effective_io_concurrency",
 			PGC_USERSET,
 			RESOURCES_ASYNCHRONOUS,

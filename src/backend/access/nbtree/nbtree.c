@@ -1038,7 +1038,7 @@ btvacuumscan(IndexVacuumInfo *info, IndexBulkDeleteResult *stats,
 
 		pgsr = pg_streaming_read_alloc(512, (uintptr_t) &vstate,
 									   btvacuumscan_pgsr_next,
-									   btvacuumscan_pgsr_release);
+									   btvacuumscan_pgsr_release, NULL);
 
 		/* Iterate over pages, then loop back to recheck length */
 		for (; scanblkno < num_pages; scanblkno++)

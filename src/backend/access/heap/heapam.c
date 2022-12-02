@@ -324,12 +324,20 @@ heap_pgsr_single_alloc(HeapScanDesc scan)
 {
 	PgStreamingRead *pgsr;
 	PgStreamingReadDevLog *dev_log;
+	PgStreamingReadConsumptionRing *consumptions;
 
 	int iodepth = Max(Min(128, NBuffers / 128), 1);
 
+	// TODO: move this into read_alloc protected by guc
+	consumptions = palloc0(offsetof(PgStreamingReadConsumptionRing, data) +
+			sizeof(PgStreamingReadConsumption) * PGSR_RING_SIZE);
+	consumptions->num_valid = 0;
+	consumptions->idx       = 0;
+
 	pgsr = pg_streaming_read_alloc(iodepth, (uintptr_t) scan,
 								   heap_pgsr_next_single,
-								   heap_pgsr_release);
+								   heap_pgsr_release,
+								   consumptions);
 	/*
 	 * pgsr_do_log should only be used to determine whether or not to set up
 	 * the AIO dev log. During execution, we should check if pgsr->dev_log is
@@ -354,7 +362,7 @@ heap_pgsr_parallel_alloc(HeapScanDesc scan)
 
 	return pg_streaming_read_alloc(iodepth, (uintptr_t) scan,
 								   heap_pgsr_next_parallel,
-								   heap_pgsr_release);
+								   heap_pgsr_release, NULL);
 }
 
 

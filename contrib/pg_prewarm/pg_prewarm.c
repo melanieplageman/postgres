@@ -320,7 +320,7 @@ pg_prewarm(PG_FUNCTION_ARGS)
 
 		pgsr = pg_streaming_read_alloc(512, (uintptr_t) &p,
 									   prewarm_buffer_next,
-									   prewarm_buffer_release);
+									   prewarm_buffer_release, NULL);
 
 		for (block = first_block; block <= last_block; ++block)
 		{
@@ -356,7 +356,7 @@ pg_prewarm(PG_FUNCTION_ARGS)
 
 		pgsr = pg_streaming_read_alloc(512, (uintptr_t) &p,
 									   prewarm_smgr_next,
-									   prewarm_smgr_release);
+									   prewarm_smgr_release, NULL);
 
 		for (block = first_block; block <= last_block; ++block)
 		{
