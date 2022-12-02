@@ -26,6 +26,7 @@
 #include "miscadmin.h"
 #include "nodes/memnodes.h"
 #include "pgstat.h"
+#include "executor/instrument.h"
 #include "storage/aio_internal.h"
 #include "storage/bufmgr.h"			/* XXX for io_data_direct */
 #include "storage/condition_variable.h"
@@ -1767,14 +1768,28 @@ wait_ref_again:
 		}
 		else if (pgaio_impl->wait_one && (flags & PGAIOIP_INFLIGHT))
 		{
+			instr_time io_wait_time, desired;
+
+			if (track_io_timing)
+				INSTR_TIME_SET_CURRENT(desired);
+
 			/* note that this is allowed to spuriously return */
 			pgaio_impl->wait_one(&aio_ctl->contexts[io->ring],
 								 io,
 								 ref_generation,
 								 WAIT_EVENT_AIO_IO_COMPLETE_ANY);
+
+			if (track_io_timing)
+			{
+				INSTR_TIME_SET_CURRENT(io_wait_time);
+				INSTR_TIME_SUBTRACT(io_wait_time, io->desired);
+				INSTR_TIME_ADD(pgBufferUsage.io_wait_time, io_wait_time);
+			}
 		}
 		else
 		{
+			instr_time io_wait_time, desired;
+
 			if (call_shared)
 				pgaio_complete_ios(false);
 
@@ -1794,7 +1809,17 @@ wait_ref_again:
 				 */
 				Assert(IsUnderPostmaster);
 
+				if (track_io_timing)
+					INSTR_TIME_SET_CURRENT(desired);
+
 				ConditionVariableSleep(&io->cv, WAIT_EVENT_AIO_IO_COMPLETE_ONE);
+
+				if (track_io_timing)
+				{
+					INSTR_TIME_SET_CURRENT(io_wait_time);
+					INSTR_TIME_SUBTRACT(io_wait_time, io->desired);
+					INSTR_TIME_ADD(pgBufferUsage.io_wait_time, io_wait_time);
+				}
 			}
 
 			if (IsUnderPostmaster)
