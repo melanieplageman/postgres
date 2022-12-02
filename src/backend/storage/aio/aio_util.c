@@ -582,6 +582,45 @@ pg_streaming_read_complete(PgAioOnCompletionLocalContext *ocb, PgAioInProgress *
 	pg_streaming_read_prefetch(pgsr);
 }
 
+float pgsr_avg_tput(PgStreamingReadConsumptionRing *ring)
+{
+	float avg_tput = 0;
+
+	for (int i = 0; i < PGSR_RING_SIZE && i < ring->num_valid; i++)
+	{
+		PgStreamingReadConsumption *cur = &ring->data[i];
+
+		avg_tput += (cur->prefetch_distance / INSTR_TIME_GET_MILLISEC(cur->latency));
+	}
+
+	return avg_tput / ring->num_valid;
+}
+
+int pgsr_max_pfd(PgStreamingReadConsumptionRing *ring)
+{
+	int max_pfd = 0;
+
+	for (int i = 0; i < PGSR_RING_SIZE && i < ring->num_valid; i++)
+	{
+		int pfd = ring->data[i].prefetch_distance;
+		if (pfd > max_pfd)
+			max_pfd = pfd;
+	}
+
+	return max_pfd;
+}
+
+float pgsr_avg_pfd(PgStreamingReadConsumptionRing *ring)
+{
+	float avg_pfd = 0;
+
+	for (int i = 0; i < PGSR_RING_SIZE && i < ring->num_valid; i++)
+		avg_pfd += ring->data[i].prefetch_distance;
+
+	return avg_pfd / ring->num_valid;
+}
+
+
 static void
 pg_streaming_read_prefetch_one(PgStreamingRead *pgsr)
 {
