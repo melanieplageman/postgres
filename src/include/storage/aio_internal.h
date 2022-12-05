@@ -188,9 +188,6 @@ struct PgAioInProgress
 	/* when it was completed by a postgres worker */
 	instr_time completed;
 
-	/* when was this IO demanded by a postgres worker */
-	instr_time desired;
-
 	/*
 	 * Single callback that can be registered on an IO to be called upon
 	 * completion. Note that this is reset whenever an IO is recycled..

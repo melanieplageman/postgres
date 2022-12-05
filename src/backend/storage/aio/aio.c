@@ -187,7 +187,6 @@ AioShmemInit(void)
 			dlist_push_tail(&aio_ctl->unused_ios, &io->owner_node);
 			io->flags = PGAIOIP_UNUSED;
 			INSTR_TIME_SET_ZERO(io->submitted);
-			INSTR_TIME_SET_ZERO(io->desired);
 			INSTR_TIME_SET_ZERO(io->completed);
 			io->system_referenced = true;
 			io->generation = 1;

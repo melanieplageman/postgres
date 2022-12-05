@@ -781,7 +781,6 @@ pg_streaming_read_prefetch_one(PgStreamingRead *pgsr)
 		dlist_delete_from(&pgsr->in_order, &this_read->sequence_node);
 		INSTR_TIME_SET_ZERO(this_read->consumed);
 		INSTR_TIME_SET_ZERO(this_read->aio->submitted);
-		INSTR_TIME_SET_ZERO(this_read->aio->desired);
 		INSTR_TIME_SET_ZERO(this_read->aio->completed);
 		dlist_push_tail(&pgsr->available, &this_read->node);
 	}
@@ -855,16 +854,16 @@ pg_streaming_read_get_next(PgStreamingRead *pgsr)
 
 		if (this_read->in_progress)
 		{
-			instr_time wait_end;
+			instr_time wait_start, wait_end;
 
-			INSTR_TIME_SET_CURRENT(this_read->aio->desired);
+			INSTR_TIME_SET_CURRENT(wait_start);
 
 			pgaio_io_wait(this_read->aio);
 
 			INSTR_TIME_SET_CURRENT(wait_end);
 
 			if (pgsr->dev_log)
-				aio_dev_log_wait(pgsr->dev_log->wait_log, this_read->aio->desired, wait_end);
+				aio_dev_log_wait(pgsr->dev_log->wait_log, wait_start, wait_end);
 
 			/* callback should have updated */
 			Assert(!this_read->in_progress);
@@ -897,7 +896,6 @@ pg_streaming_read_get_next(PgStreamingRead *pgsr)
 		pgsr->completed_count--;
 		INSTR_TIME_SET_ZERO(this_read->consumed);
 		INSTR_TIME_SET_ZERO(this_read->aio->submitted);
-		INSTR_TIME_SET_ZERO(this_read->aio->desired);
 		INSTR_TIME_SET_ZERO(this_read->aio->completed);
 		dlist_push_tail(&pgsr->available, &this_read->node);
 
