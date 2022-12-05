@@ -375,7 +375,7 @@ typedef struct PgStreamingReadItem
 	/* Whether or not this block was fetched from disk */
 	bool real_io;
 
-	/* completed - submitted for this IO */
+	/* completed - submitted for this IO. not valid for cached IOs */
 	instr_time latency;
 
 	/* time at which this IO was consumed by a worker */
@@ -754,6 +754,7 @@ pg_streaming_read_prefetch_one(PgStreamingRead *pgsr)
 	Assert(!this_read->in_progress);
 	Assert(this_read->read_private == 0);
 	this_read->prefetch_distance = pgsr->current_window;
+	INSTR_TIME_SET_ZERO(this_read->latency);
 
 	if (this_read->aio == NULL)
 	{
