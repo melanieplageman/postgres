@@ -151,14 +151,17 @@ aio_dev_write_wait_log(PgStreamingReadWaitLog *log, FILE *logfile)
 void
 aio_dev_write_completion_log(PgStreamingReadCompletionLog *log, FILE *logfile, int max_inflight, int max_pfd)
 {
-	fprintf(logfile, "submission_time,completion_time,prefetch_distance,cnc,inflight,max_inflight,max_pfd,\n");
+	fprintf(logfile, "latency,submission_time,completion_time,prefetch_distance,cnc,inflight,max_inflight,max_pfd,\n");
 
 	for (int i = 0; i < log->length; i++)
 	{
 		PgStreamingReadCompletionLogItem *entry = &log->data[i];
+		instr_time latency = entry->completion_time;
+		INSTR_TIME_SUBTRACT(latency, entry->submission_time);
 
 		fprintf(logfile,
-					"%lf,%lf,%d,%d,%d,%d,%d,\n",
+					"%lf,%lf,%lf,%d,%d,%d,%d,%d,\n",
+					INSTR_TIME_GET_MILLISEC(latency),
 					INSTR_TIME_GET_MILLISEC(entry->submission_time),
 					INSTR_TIME_GET_MILLISEC(entry->completion_time),
 					entry->prefetch_distance,
