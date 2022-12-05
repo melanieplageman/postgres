@@ -855,10 +855,16 @@ pg_streaming_read_get_next(PgStreamingRead *pgsr)
 
 		if (this_read->in_progress)
 		{
+			instr_time wait_end;
+
+			INSTR_TIME_SET_CURRENT(this_read->aio->desired);
+
 			pgaio_io_wait(this_read->aio);
 
+			INSTR_TIME_SET_CURRENT(wait_end);
+
 			if (pgsr->dev_log)
-				aio_dev_log_wait(pgsr->dev_log->wait_log, this_read->aio->desired, this_read->aio->completed);
+				aio_dev_log_wait(pgsr->dev_log->wait_log, this_read->aio->desired, wait_end);
 
 			/* callback should have updated */
 			Assert(!this_read->in_progress);
