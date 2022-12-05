@@ -375,6 +375,9 @@ typedef struct PgStreamingReadItem
 	/* Whether or not this block was fetched from disk */
 	bool real_io;
 
+	/* completed - submitted for this IO */
+	instr_time latency;
+
 	/* time at which this IO was consumed by a worker */
 	instr_time consumed;
 } PgStreamingReadItem;
@@ -437,10 +440,7 @@ static void pg_streaming_read_adjust_pfd(PgStreamingReadItem *this_read)
 	float avg_pfd;
 	int io_pfd;
 	int max_pfd;
-	instr_time latency = this_read->aio->completed;
 	PgStreamingRead *pgsr = this_read->pgsr;
-
-	INSTR_TIME_SUBTRACT(latency, this_read->aio->submitted);
 
 	/* FOR FAST STORAGE */
 	if (pgsr->completed_count <= pgsr->cnc_lo)
@@ -460,7 +460,7 @@ static void pg_streaming_read_adjust_pfd(PgStreamingReadItem *this_read)
 	avg_pfd = pgsr_avg_pfd(pgsr->consumptions);
 	max_pfd = pgsr_max_pfd(pgsr->consumptions);
 
-	io_tput = io_pfd / INSTR_TIME_GET_MILLISEC(latency);
+	io_tput = io_pfd / INSTR_TIME_GET_MILLISEC(this_read->latency);
 	avg_tput = pgsr_avg_tput(pgsr->consumptions);
 
 	tput_ratio = io_tput / avg_tput;
@@ -693,6 +693,8 @@ pg_streaming_read_complete(PgAioOnCompletionLocalContext *ocb, PgAioInProgress *
 	pgsr->inflight_count--;
 	pgsr->completed_count++;
 	this_read->in_progress = false;
+	this_read->latency = this_read->aio->completed;
+	INSTR_TIME_SUBTRACT(this_read->latency, this_read->aio->submitted);
 	pgaio_io_recycle(this_read->aio);
 
 	pg_streaming_read_adjust_pfd(this_read);
@@ -780,8 +782,6 @@ pg_streaming_read_prefetch_one(PgStreamingRead *pgsr)
 		pgaio_io_recycle(this_read->aio);
 		dlist_delete_from(&pgsr->in_order, &this_read->sequence_node);
 		INSTR_TIME_SET_ZERO(this_read->consumed);
-		INSTR_TIME_SET_ZERO(this_read->aio->submitted);
-		INSTR_TIME_SET_ZERO(this_read->aio->completed);
 		dlist_push_tail(&pgsr->available, &this_read->node);
 	}
 	else if (status == PGSR_NEXT_NO_IO)
@@ -879,14 +879,11 @@ pg_streaming_read_get_next(PgStreamingRead *pgsr)
 
 			if (pgsr->consumptions)
 			{
-				instr_time latency = this_read->aio->completed;
-				INSTR_TIME_SUBTRACT(latency, this_read->aio->submitted);
 				// TODO: don't know what belongs here and what belongs in
 				// pg_streaming_read_complete()
-				pgsr_add_consumption(pgsr->consumptions, latency, this_read->prefetch_distance);
+				pgsr_add_consumption(pgsr->consumptions, this_read->latency, this_read->prefetch_distance);
 			}
 		}
-
 
 		Assert(this_read->read_private != 0);
 		ret = this_read->read_private;
@@ -895,8 +892,6 @@ pg_streaming_read_get_next(PgStreamingRead *pgsr)
 
 		pgsr->completed_count--;
 		INSTR_TIME_SET_ZERO(this_read->consumed);
-		INSTR_TIME_SET_ZERO(this_read->aio->submitted);
-		INSTR_TIME_SET_ZERO(this_read->aio->completed);
 		dlist_push_tail(&pgsr->available, &this_read->node);
 
 		// TODO: not sure if I should do this just during completion

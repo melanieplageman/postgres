@@ -1316,7 +1316,8 @@ pgaio_io_release(PgAioInProgress *io)
 		io->scb = PGAIO_SCB_INVALID;
 		io->owner_id = INVALID_PGPROCNO;
 		io->result = 0;
-		// TODO: should submitted, completed, and desired be reset here?
+		INSTR_TIME_SET_ZERO(io->completed);
+		INSTR_TIME_SET_ZERO(io->submitted);
 		io->system_referenced = true;
 		io->on_completion_local = NULL;
 
@@ -1403,10 +1404,8 @@ pgaio_io_recycle(PgAioInProgress *io)
 	io->result = 0;
 	io->on_completion_local = NULL;
 
-	/*
-	 * Do not reset io->submitted or io->completed here, as they will be used
-	 * later.
-	 */
+	INSTR_TIME_SET_ZERO(io->completed);
+	INSTR_TIME_SET_ZERO(io->submitted);
 }
 
 /*
