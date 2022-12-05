@@ -149,9 +149,9 @@ aio_dev_write_wait_log(PgStreamingReadWaitLog *log, FILE *logfile)
 }
 
 void
-aio_dev_write_completion_log(PgStreamingReadCompletionLog *log, FILE *logfile, int max_inflight, int max_pfd)
+aio_dev_write_completion_log(PgStreamingReadCompletionLog *log, FILE *logfile, int max_prefetch_distance)
 {
-	fprintf(logfile, "latency,submission_time,completion_time,prefetch_distance,cnc,inflight,max_inflight,max_pfd,\n");
+	fprintf(logfile, "latency,submission_time,completion_time,prefetch_distance,cnc,inflight,max_prefetch_distance,\n");
 
 	for (int i = 0; i < log->length; i++)
 	{
@@ -160,15 +160,14 @@ aio_dev_write_completion_log(PgStreamingReadCompletionLog *log, FILE *logfile, i
 		INSTR_TIME_SUBTRACT(latency, entry->submission_time);
 
 		fprintf(logfile,
-					"%lf,%lf,%lf,%d,%d,%d,%d,%d,\n",
+					"%lf,%lf,%lf,%d,%d,%d,%d,\n",
 					INSTR_TIME_GET_MILLISEC(latency),
 					INSTR_TIME_GET_MILLISEC(entry->submission_time),
 					INSTR_TIME_GET_MILLISEC(entry->completion_time),
 					entry->prefetch_distance,
 					entry->cnc,
 					entry->inflight,
-					max_inflight,
-					max_pfd);
+					max_prefetch_distance);
 	}
 
 	fputc('E', logfile);
@@ -186,7 +185,7 @@ aio_dev_write_consumption_log(PgStreamingReadConsumptionLog *log, FILE *logfile)
 }
 
 void
-aio_dev_write_log(PgStreamingReadDevLog *dev_log, int max_inflight, int max_pfd)
+aio_dev_write_log(PgStreamingReadDevLog *dev_log, int max_prefetch_distance)
 {
 	FILE * wait_logfile, * consumption_logfile, * completion_logfile;
 
@@ -198,7 +197,7 @@ aio_dev_write_log(PgStreamingReadDevLog *dev_log, int max_inflight, int max_pfd)
 	
 	if (aio_dev_allocate_logfile(PGSR_PFD_COMPLETION_LOGFILE, &completion_logfile))
 	{
-		aio_dev_write_completion_log(dev_log->completion_log, completion_logfile, max_inflight, max_pfd);
+		aio_dev_write_completion_log(dev_log->completion_log, completion_logfile, max_prefetch_distance);
 		aio_dev_cleanup_logfile(PGSR_PFD_COMPLETION_LOGFILE, completion_logfile);
 	}
 

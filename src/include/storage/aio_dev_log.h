@@ -76,10 +76,10 @@ extern void
 aio_dev_write_wait_log(PgStreamingReadWaitLog *log, FILE *logfile);
 
 extern void
-aio_dev_write_completion_log(PgStreamingReadCompletionLog *log, FILE *logfile, int max_inflight, int max_pfd);
+aio_dev_write_completion_log(PgStreamingReadCompletionLog *log, FILE *logfile, int max_prefetch_distance);
 
 extern void
 aio_dev_write_consumption_log(PgStreamingReadConsumptionLog *log, FILE *logfile);
 
 extern void
-aio_dev_write_log(PgStreamingReadDevLog *dev_log, int max_inflight, int max_pfd);
+aio_dev_write_log(PgStreamingReadDevLog *dev_log, int max_prefetch_distance);
