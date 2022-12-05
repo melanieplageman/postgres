@@ -90,7 +90,7 @@ aio_dev_log_completion(PgStreamingReadCompletionLog *log, instr_time
 bool
 aio_dev_allocate_logfile(const char* logfile, FILE **fpout)
 {
-	*fpout = AllocateFile(logfile, "a");
+	*fpout = AllocateFile(logfile, "w");
 
 	if ((*fpout) == NULL)
 	{
@@ -140,9 +140,9 @@ aio_dev_write_wait_log(PgStreamingReadWaitLog *log, FILE *logfile)
 
 			fprintf(logfile,
 							"%lf,%lf,%lf\n",
-							INSTR_TIME_GET_MILLISEC(current_log_entry->wait_start),
-							INSTR_TIME_GET_MILLISEC(current_log_entry->wait_end),
-							INSTR_TIME_GET_MILLISEC(wait_length));
+							INSTR_TIME_GET_MICROSEC(current_log_entry->wait_start),
+							INSTR_TIME_GET_MICROSEC(current_log_entry->wait_end),
+							INSTR_TIME_GET_MICROSEC(wait_length));
 		}
 
 		fputc('E', logfile);
