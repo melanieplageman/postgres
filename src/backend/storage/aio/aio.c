@@ -1780,14 +1780,10 @@ wait_ref_again:
 		}
 		else if (pgaio_impl->wait_one && (flags & PGAIOIP_INFLIGHT))
 		{
-			instr_time io_wait_time;
+			instr_time io_wait_start, io_wait_time;
 
-			/*
-			 * Set this even if track_io_timing is off. Otherwise, we can't
-			 * guarantee it will be set when we calculate wait time while
-			 * logging, or if we end up using it in the prefetch algorithm.
-			 */
-			INSTR_TIME_SET_CURRENT(io->desired);
+			if (track_io_timing)
+				INSTR_TIME_SET_CURRENT(io_wait_start);
 
 			/* note that this is allowed to spuriously return */
 			pgaio_impl->wait_one(&aio_ctl->contexts[io->ring],
@@ -1795,30 +1791,16 @@ wait_ref_again:
 								 ref_generation,
 								 WAIT_EVENT_AIO_IO_COMPLETE_ANY);
 
-			/*
-			 * Even if track_io_timing is off, io->completed is needed for
-			 * calculating latency for prefetching.
-			 *
-			 * TODO: we should be able to set io->completed at some point
-			 * before here and guarantee it will have been set. Currently, it
-			 * is set in pgaio_process_io_completion() and
-			 * pg_streaming_read_complete(), but this isn't called in all
-			 * cases. For now, check if io->completed has been set and, if not,
-			 * set it here.
-			 */
-			if(INSTR_TIME_IS_ZERO(io->completed))
-				INSTR_TIME_SET_CURRENT(io->completed);
-
 			if (track_io_timing)
 			{
-				io_wait_time = io->completed;
-				INSTR_TIME_SUBTRACT(io_wait_time, io->desired);
+				INSTR_TIME_SET_CURRENT(io_wait_time);
+				INSTR_TIME_SUBTRACT(io_wait_time, io_wait_start);
 				INSTR_TIME_ADD(pgBufferUsage.io_wait_time, io_wait_time);
 			}
 		}
 		else
 		{
-			instr_time io_wait_time;
+			instr_time io_wait_start, io_wait_time;
 
 			if (call_shared)
 				pgaio_complete_ios(false);
@@ -1839,33 +1821,15 @@ wait_ref_again:
 				 */
 				Assert(IsUnderPostmaster);
 
-				/*
-				 * Set this even if track_io_timing is off. Otherwise, we can't
-				 * guarantee it will be set when we calculate wait time while
-				 * logging, or if we end up using it in the prefetch algorithm.
-				 */
-				INSTR_TIME_SET_CURRENT(io->desired);
+				if (track_io_timing)
+					INSTR_TIME_SET_CURRENT(io_wait_start);
 
 				ConditionVariableSleep(&io->cv, WAIT_EVENT_AIO_IO_COMPLETE_ONE);
 
-				/*
-				* Even if track_io_timing is off, io->completed is needed for
-				* calculating latency for prefetching.
-				*
-				* TODO: we should be able to set io->completed at some point
-				* before here and guarantee it will have been set. Currently, it
-				* is set in pgaio_process_io_completion() and
-				* pg_streaming_read_complete(), but this isn't called in all
-				* cases. For now, check if io->completed has been set and, if not,
-				* set it here.
-				*/
-				if(INSTR_TIME_IS_ZERO(io->completed))
-					INSTR_TIME_SET_CURRENT(io->completed);
-
 				if (track_io_timing)
 				{
-					io_wait_time = io->completed;
-					INSTR_TIME_SUBTRACT(io_wait_time, io->desired);
+					INSTR_TIME_SET_CURRENT(io_wait_time);
+					INSTR_TIME_SUBTRACT(io_wait_time, io_wait_start);
 					INSTR_TIME_ADD(pgBufferUsage.io_wait_time, io_wait_time);
 				}
 			}
