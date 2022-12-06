@@ -129,7 +129,7 @@ aio_dev_cleanup_logfile(const char* logfile, FILE *fpout)
 void
 aio_dev_write_wait_log(PgStreamingReadWaitLog *log, FILE *logfile)
 {
-		fprintf(logfile, "wait_start,wait_end,wait_length,\n");
+		fprintf(logfile, "wait_start,wait_end,wait_length\n");
 
 		for (int i = 0; i < log->length; i++)
 		{
@@ -140,18 +140,16 @@ aio_dev_write_wait_log(PgStreamingReadWaitLog *log, FILE *logfile)
 
 			fprintf(logfile,
 							"%lf,%lf,%lf\n",
-							INSTR_TIME_GET_MILLISEC(current_log_entry->wait_start),
-							INSTR_TIME_GET_MILLISEC(current_log_entry->wait_end),
-							INSTR_TIME_GET_MILLISEC(wait_length));
+							INSTR_TIME_GET_MICROSEC(current_log_entry->wait_start),
+							INSTR_TIME_GET_MICROSEC(current_log_entry->wait_end),
+							INSTR_TIME_GET_MICROSEC(wait_length));
 		}
-
-		fputc('E', logfile);
 }
 
 void
 aio_dev_write_completion_log(PgStreamingReadCompletionLog *log, FILE *logfile, int max_prefetch_distance)
 {
-	fprintf(logfile, "latency,submission_time,completion_time,prefetch_distance,cnc,inflight,max_prefetch_distance,\n");
+	fprintf(logfile, "latency,submission_time,completion_time,prefetch_distance,cnc,inflight,max_prefetch_distance\n");
 
 	for (int i = 0; i < log->length; i++)
 	{
@@ -160,28 +158,24 @@ aio_dev_write_completion_log(PgStreamingReadCompletionLog *log, FILE *logfile, i
 		INSTR_TIME_SUBTRACT(latency, entry->submission_time);
 
 		fprintf(logfile,
-					"%lf,%lf,%lf,%d,%d,%d,%d,\n",
-					INSTR_TIME_GET_MILLISEC(latency),
-					INSTR_TIME_GET_MILLISEC(entry->submission_time),
-					INSTR_TIME_GET_MILLISEC(entry->completion_time),
+					"%lf,%lf,%lf,%d,%d,%d,%d\n",
+					INSTR_TIME_GET_MICROSEC(latency),
+					INSTR_TIME_GET_MICROSEC(entry->submission_time),
+					INSTR_TIME_GET_MICROSEC(entry->completion_time),
 					entry->prefetch_distance,
 					entry->cnc,
 					entry->inflight,
 					max_prefetch_distance);
 	}
-
-	fputc('E', logfile);
 }
 
 void
 aio_dev_write_consumption_log(PgStreamingReadConsumptionLog *log, FILE *logfile)
 {
-	fprintf(logfile, "consumption_time,\n");
+	fprintf(logfile, "consumption_time\n");
 
 	for (int i = 0; i < log->length; i++)
-		fprintf(logfile, "%lf,\n", INSTR_TIME_GET_MILLISEC(log->data[i]));
-
-	fputc('E', logfile);
+		fprintf(logfile, "%lf\n", INSTR_TIME_GET_MICROSEC(log->data[i]));
 }
 
 void
