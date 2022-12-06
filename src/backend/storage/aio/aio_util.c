@@ -396,6 +396,22 @@ struct PgStreamingRead
 	PgStreamingReadConsumptionRing *consumptions;
 
 	uint32 current_window;
+	int cnc_lo;
+	int cnc_hi;
+	int pfd_at_flip;
+	int consecutive_ups;
+	int consecutive_downs;
+	int local_pfd_max;
+
+	/*
+	 * this is the number of IOs we are planning to keep inflight at a given
+	 * time -- we count those we are about to submit plus those already
+	 * inflight when deciding how much to prefetch
+	 */
+	uint32 prefetch_distance;
+
+	/* this is the highest we should ever set prefetch_distance */
+	uint32 max_ios;
 
 	/* number of requests issued */
 	uint64 prefetched_total_count;
@@ -425,6 +441,125 @@ struct PgStreamingRead
 	PgStreamingReadItem all_items[FLEXIBLE_ARRAY_MEMBER];
 };
 
+/*
+ * returns true if it changed pfd and false if not
+ * sets did_calculation to true if it did the more intense calculations and
+ * false if not
+ */
+static bool pg_streaming_read_adjust_pfd(PgStreamingReadItem *this_read, bool *did_calculation)
+{
+	float io_tput;
+	float tput_ratio;
+	float avg_tput;
+	float avg_pfd;
+	int io_pfd;
+	int max_pfd;
+	bool changed_pfd = false;
+	PgStreamingRead *pgsr = this_read->pgsr;
+	int initial_pfd = pgsr->prefetch_distance;
+
+	*did_calculation = false;
+
+	if (!pgsr->consumptions)
+		return changed_pfd;
+
+	/* FOR FAST STORAGE */
+	if (pgsr->completed_count <= pgsr->cnc_lo)
+		pgsr->prefetch_distance += 1;
+
+	if (pgsr->completed_count >= pgsr->cnc_hi)
+		pgsr->prefetch_distance = Max(1, pgsr->prefetch_distance - 1);
+
+	if (pgsr->prefetch_distance != initial_pfd)
+		changed_pfd = true;
+
+	if (!this_read->real_io)
+		return changed_pfd;
+
+	/* FOR SLOW STORAGE */
+	io_pfd = this_read->prefetch_distance;
+	avg_pfd = pgsr_avg_pfd(pgsr->consumptions);
+	max_pfd = pgsr_max_pfd(pgsr->consumptions);
+
+	io_tput = io_pfd / INSTR_TIME_GET_MILLISEC(this_read->latency);
+	avg_tput = pgsr_avg_tput(pgsr->consumptions);
+
+	tput_ratio = io_tput / avg_tput;
+
+	*did_calculation = true;
+	/*
+	 * if pfd is going up and tput is going up this is a possible value to
+	 * roll back to
+	 */
+	if (io_pfd > avg_pfd && tput_ratio >= 1.1)
+	{
+		pgsr->pfd_at_flip = io_pfd;
+		pgsr->consecutive_ups++;
+		pgsr->consecutive_downs = 0;
+
+		/*
+		 *  If we have had enough ups in a row, invalidate our maximum for
+		 *  now
+		 */
+		if (pgsr->consecutive_ups >= avg_pfd)
+			pgsr->local_pfd_max = -1;
+
+		/*
+		 *  if we have previously set a maximum and we haven't had enough ups
+		 *  in a row, anyway increase the max so that we are able to continue
+		 *  increasing the prefetch distance
+		 */
+		if (pgsr->local_pfd_max >= 0)
+			pgsr->local_pfd_max = Min(pgsr->max_ios, pgsr->local_pfd_max + 1);
+	}
+
+	/*
+	 * if pfd is going up and tput is not going up
+	 */
+	else if (io_pfd > avg_pfd && tput_ratio < 1.1)
+	{
+		pgsr->consecutive_downs++;
+		pgsr->consecutive_ups = 0;
+
+		/*
+		 * If we have had enough downs in a row, set a maximum and set pfd
+		 * to a bit less than what it was last time we had an increase in
+		 * tput
+		 */
+		if (pgsr->consecutive_downs >= avg_pfd)
+		{
+			/*
+			 * Set maximum to recent max pfd out of consumed IOs. At this
+			 * point, self.prefetch_distance could be higher but we know
+			 * that just out of consumed IOs, a pfd that high wasn't
+			 * helping us. It may be necessary to actually set this to
+			 * self.prefetch_distance to avoid getting stuck at too low of
+			 * a value, though
+			 */
+			pgsr->local_pfd_max     = Max(Min(max_pfd, pgsr->max_ios), 0);
+			pgsr->prefetch_distance = pgsr->pfd_at_flip * 0.7;
+		}
+
+		/*
+		 * counteract the increase from algo 1 even if we haven't had
+		 * enuogh consecutive downs
+		 */
+		pgsr->prefetch_distance -= 1;
+	}
+
+	pgsr->prefetch_distance = Max(pgsr->prefetch_distance, 1);
+
+	if (pgsr->local_pfd_max >= 0)
+		pgsr->prefetch_distance = Min(pgsr->local_pfd_max, pgsr->prefetch_distance);
+
+	pgsr->prefetch_distance = Min(pgsr->prefetch_distance, pgsr->max_ios);
+
+	if (pgsr->prefetch_distance != initial_pfd)
+		changed_pfd = true;
+
+	return changed_pfd;
+}
+
 static void pg_streaming_read_complete(PgAioOnCompletionLocalContext *ocb, PgAioInProgress *io);
 static void pg_streaming_read_prefetch(PgStreamingRead *pgsr);
 
@@ -444,11 +579,20 @@ pg_streaming_read_alloc(uint32 iodepth, uintptr_t pgsr_private,
 	pgsr->iodepth_max = iodepth;
 	pgsr->distance_max = iodepth;
 	pgsr->all_items_count = pgsr->iodepth_max + pgsr->distance_max;
+	pgsr->max_ios = iodepth;
 	pgsr->pgsr_private = pgsr_private;
 	pgsr->determine_next_cb = determine_next_cb;
 	pgsr->release_cb = release_cb;
 
 	pgsr->current_window = 0;
+	pgsr->cnc_lo = Min(iodepth, 2);
+	pgsr->cnc_hi = Min(iodepth, 15);
+	pgsr->consecutive_ups = 0;
+	pgsr->consecutive_downs = 0;
+	pgsr->pfd_at_flip   = 0;
+	pgsr->local_pfd_max = -1;
+
+	pgsr->prefetch_distance = pgsr->cnc_lo;
 
 	dlist_init(&pgsr->available);
 	dlist_init(&pgsr->in_order);
@@ -640,7 +784,7 @@ pg_streaming_read_prefetch_one(PgStreamingRead *pgsr)
 	Assert(!this_read->in_progress);
 	Assert(this_read->read_private == 0);
 	INSTR_TIME_SET_ZERO(this_read->latency);
-	this_read->prefetch_distance = pgsr->current_window;
+	this_read->prefetch_distance = pgsr->prefetch_distance;
 
 	if (this_read->aio == NULL)
 	{
