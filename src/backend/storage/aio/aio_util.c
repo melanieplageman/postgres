@@ -365,6 +365,15 @@ typedef struct PgStreamingReadItem
 	/* is this item currently valid / used */
 	bool valid;
 	uintptr_t read_private;
+
+	/* Whether or not this block was fetched from disk */
+	bool real_io;
+
+	/* completed - submitted for this IO. not valid for cached IOs */
+	instr_time latency;
+
+	/* time at which this IO was consumed by a worker */
+	instr_time consumed;
 } PgStreamingReadItem;
 
 struct PgStreamingRead
@@ -487,6 +496,15 @@ pg_streaming_read_complete(PgAioOnCompletionLocalContext *ocb, PgAioInProgress *
 	PgStreamingReadItem *this_read = pgaio_ocb_container(PgStreamingReadItem, on_completion, ocb);
 	PgStreamingRead *pgsr = this_read->pgsr;
 
+	/*
+	 * io->completed should ideally be set by this point.
+	 * pgaio_process_io_completion() sets it. TODO: eventually, ensure it is
+	 * set as close to completion as possible and stop checking here.
+	 * what about pgaio_complete_ios()?
+	 */
+	if (INSTR_TIME_IS_ZERO(io->completed))
+		INSTR_TIME_SET_CURRENT(io->completed);
+
 #if 0
 	if ((pgsr->prefetched_total_count % 10000) == 0)
 		ereport(LOG, errmsg("pgsr read completed: qd %d completed: %d",
@@ -506,6 +524,8 @@ pg_streaming_read_complete(PgAioOnCompletionLocalContext *ocb, PgAioInProgress *
 	pgsr->inflight_count--;
 	pgsr->completed_count++;
 	this_read->in_progress = false;
+	this_read->latency = this_read->aio->completed;
+	INSTR_TIME_SUBTRACT(this_read->latency, this_read->aio->submitted);
 	pgaio_io_recycle(this_read->aio);
 
 	pg_streaming_read_prefetch(pgsr);
@@ -523,6 +543,7 @@ pg_streaming_read_prefetch_one(PgStreamingRead *pgsr)
 	Assert(!this_read->valid);
 	Assert(!this_read->in_progress);
 	Assert(this_read->read_private == 0);
+	INSTR_TIME_SET_ZERO(this_read->latency);
 
 	if (this_read->aio == NULL)
 	{
@@ -532,6 +553,7 @@ pg_streaming_read_prefetch_one(PgStreamingRead *pgsr)
 	pgaio_io_on_completion_local(this_read->aio, &this_read->on_completion);
 	this_read->in_progress = true;
 	this_read->valid = true;
+	this_read->real_io = false;
 	dlist_push_tail(&pgsr->issued, &this_read->node);
 	dlist_push_tail(&pgsr->in_order, &this_read->sequence_node);
 	pgsr->inflight_count++;
@@ -549,6 +571,7 @@ pg_streaming_read_prefetch_one(PgStreamingRead *pgsr)
 		this_read->in_progress = false;
 		pgaio_io_recycle(this_read->aio);
 		dlist_delete_from(&pgsr->in_order, &this_read->sequence_node);
+		INSTR_TIME_SET_ZERO(this_read->consumed);
 		dlist_push_tail(&pgsr->available, &this_read->node);
 	}
 	else if (status == PGSR_NEXT_NO_IO)
@@ -564,6 +587,7 @@ pg_streaming_read_prefetch_one(PgStreamingRead *pgsr)
 	else
 	{
 		Assert(this_read->read_private != 0);
+		this_read->real_io = true;
 	}
 }
 
@@ -667,12 +691,16 @@ pg_streaming_read_get_next(PgStreamingRead *pgsr)
 			Assert(this_read->valid);
 		}
 
+		if (this_read->real_io)
+			INSTR_TIME_SET_CURRENT(this_read->consumed);
+
 		Assert(this_read->read_private != 0);
 		ret = this_read->read_private;
 		this_read->read_private = 0;
 		this_read->valid = false;
 
 		pgsr->completed_count--;
+		INSTR_TIME_SET_ZERO(this_read->consumed);
 		dlist_push_tail(&pgsr->available, &this_read->node);
 		pg_streaming_read_prefetch(pgsr);
 

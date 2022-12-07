@@ -186,6 +186,8 @@ AioShmemInit(void)
 			ConditionVariableInit(&io->cv);
 			dlist_push_tail(&aio_ctl->unused_ios, &io->owner_node);
 			io->flags = PGAIOIP_UNUSED;
+			INSTR_TIME_SET_ZERO(io->submitted);
+			INSTR_TIME_SET_ZERO(io->completed);
 			io->system_referenced = true;
 			io->generation = 1;
 			io->bb_idx = PGAIO_BB_INVALID;
@@ -1313,6 +1315,8 @@ pgaio_io_release(PgAioInProgress *io)
 		io->scb = PGAIO_SCB_INVALID;
 		io->owner_id = INVALID_PGPROCNO;
 		io->result = 0;
+		INSTR_TIME_SET_ZERO(io->completed);
+		INSTR_TIME_SET_ZERO(io->submitted);
 		io->system_referenced = true;
 		io->on_completion_local = NULL;
 
@@ -1398,6 +1402,9 @@ pgaio_io_recycle(PgAioInProgress *io)
 	Assert(io->flags == PGAIOIP_IDLE);
 	io->result = 0;
 	io->on_completion_local = NULL;
+
+	INSTR_TIME_SET_ZERO(io->completed);
+	INSTR_TIME_SET_ZERO(io->submitted);
 }
 
 /*
@@ -1561,6 +1568,8 @@ pgaio_io_prepare_submit(PgAioInProgress *io, uint32 ring)
 			break;
 		cur = &aio_ctl->in_progress_io[cur->merge_with_idx];
 	}
+
+	INSTR_TIME_SET_CURRENT(cur->submitted);
 }
 
 bool
