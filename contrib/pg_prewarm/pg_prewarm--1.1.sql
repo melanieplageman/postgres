@@ -12,3 +12,11 @@ CREATE FUNCTION pg_prewarm(regclass,
 RETURNS int8
 AS 'MODULE_PATHNAME', 'pg_prewarm'
 LANGUAGE C PARALLEL SAFE;
+
+CREATE FUNCTION slow_consumer(regclass,
+						   fork text default 'main',
+						   first_block int8 default null,
+						   last_block int8 default null, delay float default 0)
+RETURNS int8
+AS 'MODULE_PATHNAME', 'slow_consumer'
+LANGUAGE C PARALLEL SAFE;
