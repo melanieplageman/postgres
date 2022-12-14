@@ -946,6 +946,16 @@ pg_streaming_read_prefetch(PgStreamingRead *pgsr)
 		pg_streaming_read_prefetch_og(pgsr);
 }
 
+/*
+ * For use by callers who may not hit the end of the relation
+ */
+void
+pg_streaming_read_write_log(PgStreamingRead *pgsr)
+{
+	if (pgsr->dev_log)
+		aio_dev_write_log(pgsr->dev_log, pgsr->max_ios);
+}
+
 uintptr_t
 pg_streaming_read_get_next(PgStreamingRead *pgsr)
 {

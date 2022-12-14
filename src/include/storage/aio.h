@@ -322,6 +322,8 @@ extern uintptr_t pg_streaming_read_get_next(PgStreamingRead *pgsr);
 extern void pg_streaming_read_set_dev_log(PgStreamingRead *pgsr, PgStreamingReadDevLog *log);
 extern void pg_streaming_read_free_dev_log(PgStreamingRead *pgsr);
 
+extern void pg_streaming_read_write_log(PgStreamingRead *pgsr);
+
 extern float pgsr_avg_tput(PgStreamingReadConsumptionRing *ring);
 extern int pgsr_max_pfd(PgStreamingReadConsumptionRing *ring);
 extern float pgsr_avg_pfd(PgStreamingReadConsumptionRing *ring);
