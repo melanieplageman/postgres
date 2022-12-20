@@ -16,7 +16,13 @@
 
 #include "storage/aio_internal.h"
 #include "miscadmin.h"
+#include "executor/instrument.h"
 
+
+bool pgsr_do_log = false;
+int prefetch_dev_initial_iodepth = 128;
+int prefetch_max = 128;
+int prefetch_algo = PFA_OG;
 
 /* typedef is in header */
 typedef struct PgStreamingWriteItem
@@ -351,6 +357,7 @@ pg_streaming_write_free(PgStreamingWrite *pgsw)
 
 typedef struct PgStreamingReadItem
 {
+	int16 id;
 	/* membership in PgStreamingRead->issued, PgStreamingRead->available */
 	dlist_node node;
 	/* membership in PgStreamingRead->in_order */
@@ -365,6 +372,18 @@ typedef struct PgStreamingReadItem
 	/* is this item currently valid / used */
 	bool valid;
 	uintptr_t read_private;
+
+	/* prefetch distance at the time this IO was prefetched */
+	uint32 prefetch_distance;
+
+	/* Whether or not this block was fetched from disk */
+	bool real_io;
+
+	/* completed - submitted for this IO. not valid for cached IOs */
+	instr_time latency;
+
+	/* time at which this IO was consumed by a worker */
+	instr_time consumed;
 } PgStreamingReadItem;
 
 struct PgStreamingRead
@@ -377,8 +396,33 @@ struct PgStreamingRead
 	PgStreamingReadDetermineNextCB determine_next_cb;
 	PgStreamingReadRelease release_cb;
 
-	uint32 current_window;
+	PgStreamingReadConsumptionRing *consumptions;
 
+	uint32 current_window;
+	int cnc_lo;
+	int cnc_hi;
+	int pfd_at_flip;
+	int consecutive_ups;
+	int consecutive_downs;
+	int local_pfd_max;
+
+	PgsrLog *log;
+	/*
+	 * this is the number of IOs we are planning to keep inflight at a given
+	 * time -- we count those we are about to submit plus those already
+	 * inflight when deciding how much to prefetch
+	 */
+	uint32 prefetch_distance;
+
+	/* this is the highest we should ever set prefetch_distance */
+	uint32 max_ios;
+
+	/* total number of IOs consumed */
+	uint64 consumed_total_count;
+	/* total number of real IOs from disk consumed */
+	uint64 real_io_consumed_total_count;
+	/* total number of real IOs from disk completed by pgsr */
+	uint64 completed_total_count;
 	/* number of requests issued */
 	uint64 prefetched_total_count;
 	/* number of requests submitted to kernel */
@@ -407,29 +451,167 @@ struct PgStreamingRead
 	PgStreamingReadItem all_items[FLEXIBLE_ARRAY_MEMBER];
 };
 
+/*
+ * returns true if it changed pfd and false if not
+ * sets did_calculation to true if it did the more intense calculations and
+ * false if not
+ */
+static bool pg_streaming_read_adjust_pfd(PgStreamingReadItem *this_read, bool *did_calculation)
+{
+	float io_tput;
+	float tput_ratio;
+	float avg_tput;
+	float avg_pfd;
+	int io_pfd;
+	int max_pfd;
+	bool changed_pfd = false;
+	PgStreamingRead *pgsr = this_read->pgsr;
+	int initial_pfd = pgsr->prefetch_distance;
+
+	*did_calculation = false;
+
+	Assert(prefetch_algo == PFA_CLAMP);
+	Assert(pgsr->consumptions);
+
+	if (pgsr->prefetch_distance >= pgsr->max_ios)
+		return changed_pfd;
+
+	/* FOR FAST STORAGE */
+	if (pgsr->completed_count <= pgsr->cnc_lo)
+		pgsr->prefetch_distance += 1;
+
+	if (pgsr->completed_count >= pgsr->cnc_hi)
+		pgsr->prefetch_distance = Max(1, pgsr->prefetch_distance - 1);
+
+	if (pgsr->prefetch_distance != initial_pfd)
+		changed_pfd = true;
+
+	if (!this_read->real_io)
+		return changed_pfd;
+
+	/* FOR SLOW STORAGE */
+	io_pfd = this_read->prefetch_distance;
+	avg_pfd = pgsr_avg_pfd(pgsr->consumptions);
+	max_pfd = pgsr_max_pfd(pgsr->consumptions);
+
+	io_tput = io_pfd / INSTR_TIME_GET_MICROSEC(this_read->latency);
+	avg_tput = pgsr_avg_tput(pgsr->consumptions);
+
+	tput_ratio = io_tput / avg_tput;
+
+	*did_calculation = true;
+	/*
+	 * if pfd is going up and tput is going up this is a possible value to
+	 * roll back to
+	 */
+	if (io_pfd > avg_pfd && tput_ratio >= 1.1)
+	{
+		pgsr->pfd_at_flip = io_pfd;
+		pgsr->consecutive_ups++;
+		pgsr->consecutive_downs = 0;
+
+		/*
+		 *  If we have had enough ups in a row, invalidate our maximum for
+		 *  now
+		 */
+		if (pgsr->consecutive_ups >= avg_pfd)
+			pgsr->local_pfd_max = -1;
+
+		/*
+		 *  if we have previously set a maximum and we haven't had enough ups
+		 *  in a row, anyway increase the max so that we are able to continue
+		 *  increasing the prefetch distance
+		 */
+		if (pgsr->local_pfd_max >= 0)
+			pgsr->local_pfd_max = Min(pgsr->max_ios, pgsr->local_pfd_max + 1);
+	}
+
+	/*
+	 * if pfd is going up and tput is not going up
+	 */
+	else if (io_pfd > avg_pfd && tput_ratio < 1.1)
+	{
+		pgsr->consecutive_downs++;
+		pgsr->consecutive_ups = 0;
+
+		/*
+		 * If we have had enough downs in a row, set a maximum and set pfd
+		 * to a bit less than what it was last time we had an increase in
+		 * tput
+		 */
+		if (pgsr->consecutive_downs >= avg_pfd)
+		{
+			/*
+			 * Set maximum to recent max pfd out of consumed IOs. At this
+			 * point, self.prefetch_distance could be higher but we know
+			 * that just out of consumed IOs, a pfd that high wasn't
+			 * helping us. It may be necessary to actually set this to
+			 * self.prefetch_distance to avoid getting stuck at too low of
+			 * a value, though
+			 */
+			pgsr->local_pfd_max     = Max(Min(max_pfd, pgsr->max_ios), 0);
+			pgsr->prefetch_distance = pgsr->pfd_at_flip * 0.7;
+		}
+
+		/*
+		 * counteract the increase from algo 1 even if we haven't had
+		 * enuogh consecutive downs
+		 */
+		pgsr->prefetch_distance -= 1;
+	}
+
+	pgsr->prefetch_distance = Max(pgsr->prefetch_distance, 1);
+
+	if (pgsr->local_pfd_max >= 0)
+		pgsr->prefetch_distance = Min(pgsr->local_pfd_max, pgsr->prefetch_distance);
+
+	pgsr->prefetch_distance = Min(pgsr->prefetch_distance, pgsr->max_ios);
+
+	if (pgsr->prefetch_distance != initial_pfd)
+		changed_pfd = true;
+	else
+		changed_pfd = false;
+
+	return changed_pfd;
+}
+
 static void pg_streaming_read_complete(PgAioOnCompletionLocalContext *ocb, PgAioInProgress *io);
 static void pg_streaming_read_prefetch(PgStreamingRead *pgsr);
 
 PgStreamingRead *
-pg_streaming_read_alloc(uint32 iodepth, uintptr_t pgsr_private,
+pg_streaming_read_alloc(uint32 iodepth, int nblocks, uintptr_t pgsr_private,
 						PgStreamingReadDetermineNextCB determine_next_cb,
 						PgStreamingReadRelease release_cb)
 {
 	PgStreamingRead *pgsr;
+	int max_ios;
 
 	iodepth = Max(Min(iodepth, NBuffers / 128), 1);
 
-	pgsr = palloc0(offsetof(PgStreamingRead, all_items) +
-				   sizeof(PgStreamingReadItem) * iodepth * 2);
+	if (prefetch_algo == PFA_CLAMP)
+		max_ios = Max(Min(prefetch_max, NBuffers / 128), 1);
+	else
+		max_ios = iodepth * 2;
 
+	pgsr = palloc0(offsetof(PgStreamingRead, all_items) +
+				   sizeof(PgStreamingReadItem) * max_ios);
+
+	pgsr->all_items_count = max_ios;
 	pgsr->iodepth_max = iodepth;
 	pgsr->distance_max = iodepth;
-	pgsr->all_items_count = pgsr->iodepth_max + pgsr->distance_max;
 	pgsr->pgsr_private = pgsr_private;
 	pgsr->determine_next_cb = determine_next_cb;
 	pgsr->release_cb = release_cb;
-
 	pgsr->current_window = 0;
+
+	pgsr->max_ios = max_ios;
+	pgsr->cnc_lo = Min(max_ios, 2);
+	pgsr->cnc_hi = Max(max_ios / 2, pgsr->cnc_lo + 1);
+	pgsr->consecutive_ups = 0;
+	pgsr->consecutive_downs = 0;
+	pgsr->pfd_at_flip   = 0;
+	pgsr->local_pfd_max = -1;
+	pgsr->prefetch_distance = Max(pgsr->cnc_lo, prefetch_dev_initial_iodepth);
 
 	dlist_init(&pgsr->available);
 	dlist_init(&pgsr->in_order);
@@ -439,10 +621,33 @@ pg_streaming_read_alloc(uint32 iodepth, uintptr_t pgsr_private,
 	{
 		PgStreamingReadItem *this_read = &pgsr->all_items[i];
 
+		this_read->id = i;
 		this_read->on_completion.callback = pg_streaming_read_complete;
 		this_read->pgsr = pgsr;
 		dlist_push_tail(&pgsr->available, &this_read->node);
 	}
+
+	/*
+	 * pgsr_do_log should only be used to determine whether or not to set up
+	 * the AIO dev log. During execution, we should check if pgsr->log is
+	 * NULL when deciding whether or not to use it.
+	 */
+	pgsr->log = NULL;
+	if (pgsr_do_log)
+		pgsr->log = aio_dev_make_metric_log(nblocks * PGSR_IO_EVENT_NUM_TYPES * PGSR_METRIC_NUM_TYPES);
+
+	pgsr->consumptions = NULL;
+	/*
+	 * Set up the consumption ring even if we aren't using it for the algorithm
+	 * so that the overhead is the same. During execution check if
+	 * pgsr->consumptions is NULL before using it. Eventually we will want to
+	 * do it only when the algo will use it
+	 */
+	pgsr->consumptions =
+		palloc0(offsetof(PgStreamingReadConsumptionRing, data) +
+			sizeof(PgStreamingReadConsumption) * PGSR_RING_SIZE);
+	pgsr->consumptions->num_valid = 0;
+	pgsr->consumptions->idx       = 0;
 
 	return pgsr;
 }
@@ -456,6 +661,9 @@ pg_streaming_read_free(PgStreamingRead *pgsr)
 	 * their completion callbacks point to already freed memory.
 	 */
 	pgsr->hit_end = true;
+
+	if (pgsr->log)
+		aio_dev_write_log(pgsr->log, pgsr->max_ios);
 
 	for (int i = 0; i < pgsr->all_items_count; i++)
 	{
@@ -478,7 +686,33 @@ pg_streaming_read_free(PgStreamingRead *pgsr)
 		}
 	}
 
+	if (pgsr->log)
+		pfree(pgsr->log);
+
+	if (pgsr->consumptions)
+		pfree(pgsr->consumptions);
+
 	pfree(pgsr);
+}
+
+void
+pgsr_add_consumption(PgStreamingReadConsumptionRing *ring, instr_time latency,
+		int prefetch_distance)
+{
+	PgStreamingReadConsumption *target;
+
+	if (ring->idx == 0)
+		ring->idx = PGSR_RING_SIZE;
+
+	ring->idx--;
+
+	target = &ring->data[ring->idx];
+
+	target->latency = latency;
+	target->prefetch_distance = prefetch_distance;
+
+	if (ring->num_valid < PGSR_RING_SIZE)
+		ring->num_valid++;
 }
 
 static void
@@ -486,6 +720,16 @@ pg_streaming_read_complete(PgAioOnCompletionLocalContext *ocb, PgAioInProgress *
 {
 	PgStreamingReadItem *this_read = pgaio_ocb_container(PgStreamingReadItem, on_completion, ocb);
 	PgStreamingRead *pgsr = this_read->pgsr;
+	bool did_calculation;
+
+	/*
+	 * io->completed should ideally be set by this point.
+	 * pgaio_process_io_completion() sets it. TODO: eventually, ensure it is
+	 * set as close to completion as possible and stop checking here.
+	 * what about pgaio_complete_ios()?
+	 */
+	if (INSTR_TIME_IS_ZERO(io->completed))
+		INSTR_TIME_SET_CURRENT(io->completed);
 
 #if 0
 	if ((pgsr->prefetched_total_count % 10000) == 0)
@@ -502,14 +746,89 @@ pg_streaming_read_complete(PgAioOnCompletionLocalContext *ocb, PgAioInProgress *
 	Assert(pgaio_io_done(io));
 	Assert(pgaio_io_success(io));
 
+	this_read->latency = io->completed;
+	INSTR_TIME_SUBTRACT(this_read->latency, io->submitted);
+
 	dlist_delete_from(&pgsr->issued, &this_read->node);
 	pgsr->inflight_count--;
 	pgsr->completed_count++;
+	pgsr->completed_total_count++;
+
+	if (pgsr->log)
+	{
+		Assert(!INSTR_TIME_IS_ZERO(io->submitted));
+
+		// log what the prefetch distance was at the time this IO was submitted
+		aio_dev_log_metric(pgsr->log, io->submitted, PGSR_IO_EVENT_SUBMISSION, this_read->id,
+				PGSR_METRIC_PFD, this_read->prefetch_distance);
+
+		aio_dev_log_metric(pgsr->log, io->completed, PGSR_IO_EVENT_COMPLETION, this_read->id,
+				PGSR_METRIC_LATENCY, this_read->latency);
+
+		aio_dev_log_metric(pgsr->log, io->completed, PGSR_IO_EVENT_COMPLETION, this_read->id,
+				PGSR_METRIC_TOTAL_COMPLETED, pgsr->completed_total_count);
+
+		aio_dev_log_metric(pgsr->log, io->submitted, PGSR_IO_EVENT_SUBMISSION, this_read->id,
+				PGSR_METRIC_TOTAL_SUBMITTED, pgsr->submitted_total_count);
+	}
+
 	this_read->in_progress = false;
 	pgaio_io_recycle(this_read->aio);
 
+	/*
+	 * Only the PFA_CLAMP algorithm currently adjusts the prefetch distance
+	 * when completing IOs
+	 */
+	if (prefetch_algo == PFA_CLAMP)
+		pg_streaming_read_adjust_pfd(this_read, &did_calculation);
+
 	pg_streaming_read_prefetch(pgsr);
 }
+
+float pgsr_avg_tput(PgStreamingReadConsumptionRing *ring)
+{
+	float avg_tput = 0;
+
+	if (ring->num_valid == 0)
+		return 0;
+
+	for (int i = 0; i < PGSR_RING_SIZE && i < ring->num_valid; i++)
+	{
+		PgStreamingReadConsumption *cur = &ring->data[i];
+
+		avg_tput += (cur->prefetch_distance / INSTR_TIME_GET_MICROSEC(cur->latency));
+	}
+
+	return avg_tput / ring->num_valid;
+}
+
+int pgsr_max_pfd(PgStreamingReadConsumptionRing *ring)
+{
+	int max_pfd = 0;
+
+	for (int i = 0; i < PGSR_RING_SIZE && i < ring->num_valid; i++)
+	{
+		int pfd = ring->data[i].prefetch_distance;
+		if (pfd > max_pfd)
+			max_pfd = pfd;
+	}
+
+	return max_pfd;
+}
+
+float pgsr_avg_pfd(PgStreamingReadConsumptionRing *ring)
+{
+	float avg_pfd = 0;
+
+	if (ring->num_valid == 0)
+		return 0;
+
+	for (int i = 0; i < PGSR_RING_SIZE && i < ring->num_valid; i++)
+		avg_pfd += ring->data[i].prefetch_distance;
+
+	return avg_pfd / ring->num_valid;
+}
+
 
 static void
 pg_streaming_read_prefetch_one(PgStreamingRead *pgsr)
@@ -523,6 +842,9 @@ pg_streaming_read_prefetch_one(PgStreamingRead *pgsr)
 	Assert(!this_read->valid);
 	Assert(!this_read->in_progress);
 	Assert(this_read->read_private == 0);
+	INSTR_TIME_SET_ZERO(this_read->latency);
+
+	this_read->prefetch_distance = prefetch_algo == PFA_OG ? pgsr->current_window : pgsr->prefetch_distance;
 
 	if (this_read->aio == NULL)
 	{
@@ -532,6 +854,7 @@ pg_streaming_read_prefetch_one(PgStreamingRead *pgsr)
 	pgaio_io_on_completion_local(this_read->aio, &this_read->on_completion);
 	this_read->in_progress = true;
 	this_read->valid = true;
+	this_read->real_io = false;
 	dlist_push_tail(&pgsr->issued, &this_read->node);
 	dlist_push_tail(&pgsr->in_order, &this_read->sequence_node);
 	pgsr->inflight_count++;
@@ -549,6 +872,7 @@ pg_streaming_read_prefetch_one(PgStreamingRead *pgsr)
 		this_read->in_progress = false;
 		pgaio_io_recycle(this_read->aio);
 		dlist_delete_from(&pgsr->in_order, &this_read->sequence_node);
+		INSTR_TIME_SET_ZERO(this_read->consumed);
 		dlist_push_tail(&pgsr->available, &this_read->node);
 	}
 	else if (status == PGSR_NEXT_NO_IO)
@@ -563,12 +887,22 @@ pg_streaming_read_prefetch_one(PgStreamingRead *pgsr)
 	}
 	else
 	{
+		pgsr->submitted_total_count++;
 		Assert(this_read->read_private != 0);
+		this_read->real_io = true;
+		/*
+		 * TODO: I can log the submission time here because the IO will have
+		 * the submission time from when we did prepare submit. But logging
+		 * that with any of the completed, inflight, or prefetch_distance
+		 * metrics here will probably be inaccurate and make the data worse.
+		 * We can't log submissions closer to when they happen because we don't
+		 * have pgsr.
+		 */
 	}
 }
 
 static void
-pg_streaming_read_prefetch(PgStreamingRead *pgsr)
+pg_streaming_read_prefetch_og(PgStreamingRead *pgsr)
 {
 	uint32 min_issue;
 
@@ -634,9 +968,46 @@ pg_streaming_read_prefetch(PgStreamingRead *pgsr)
 	}
 }
 
+static void
+pg_streaming_read_prefetch_clamp(PgStreamingRead *pgsr)
+{
+	uint32 min_issue;
+
+	if (pgsr->hit_end)
+		return;
+
+	if (pgsr->completed_count + pgsr->inflight_count >= pgsr->prefetch_distance)
+		return;
+
+	if (pgsr->prefetch_distance < pgsr->max_ios)
+		min_issue = 1;
+	else
+		min_issue = Min(pgsr->max_ios, pgsr->prefetch_distance / 4);
+
+	while (!pgsr->hit_end &&
+			(pgsr->inflight_count + pgsr->completed_count < pgsr->prefetch_distance))
+	{
+		pg_streaming_read_prefetch_one(pgsr);
+		pgaio_limit_pending(false, min_issue);
+
+		CHECK_FOR_INTERRUPTS();
+	}
+}
+
+static void
+pg_streaming_read_prefetch(PgStreamingRead *pgsr)
+{
+	if (prefetch_algo == PFA_CLAMP)
+		pg_streaming_read_prefetch_clamp(pgsr);
+	else
+		pg_streaming_read_prefetch_og(pgsr);
+}
+
 uintptr_t
 pg_streaming_read_get_next(PgStreamingRead *pgsr)
 {
+	bool did_calculation;
+
 	if (pgsr->prefetched_total_count == 0)
 	{
 		pg_streaming_read_prefetch(pgsr);
@@ -646,6 +1017,7 @@ pg_streaming_read_get_next(PgStreamingRead *pgsr)
 	if (dlist_is_empty(&pgsr->in_order))
 	{
 		Assert(pgsr->hit_end);
+
 		return 0;
 	}
 	else
@@ -661,10 +1033,73 @@ pg_streaming_read_get_next(PgStreamingRead *pgsr)
 
 		if (this_read->in_progress)
 		{
+			instr_time wait_start, wait_end, wait_length;
+
+			INSTR_TIME_SET_CURRENT(wait_start);
+
 			pgaio_io_wait(this_read->aio);
+
+			INSTR_TIME_SET_CURRENT(wait_end);
+
+			if (pgsr->log)
+			{
+				wait_length = wait_end;
+				INSTR_TIME_SUBTRACT(wait_length, wait_start);
+
+				aio_dev_log_metric(pgsr->log, wait_end, PGSR_IO_EVENT_WAIT, this_read->id,
+						PGSR_METRIC_WAIT, wait_length);
+			}
+
 			/* callback should have updated */
 			Assert(!this_read->in_progress);
 			Assert(this_read->valid);
+		}
+
+		pgsr->consumed_total_count++;
+
+		if (this_read->real_io)
+		{
+			INSTR_TIME_SET_CURRENT(this_read->consumed);
+			pgsr->real_io_consumed_total_count++;
+
+			if (pgsr->log)
+			{
+				uint32 pfd = prefetch_algo == PFA_OG ? pgsr->current_window : pgsr->prefetch_distance;
+
+
+				/*
+				 * Log prefetch distance here since we have access to both the
+				 * log and a very recent timestamp.
+				 */
+				aio_dev_log_metric(pgsr->log, this_read->consumed, PGSR_IO_EVENT_CONSUMPTION, this_read->id,
+						PGSR_METRIC_PFD, pfd);
+
+				aio_dev_log_metric(pgsr->log, this_read->consumed, PGSR_IO_EVENT_CONSUMPTION, this_read->id,
+						PGSR_METRIC_INFLIGHT, pgsr->inflight_count);
+
+				aio_dev_log_metric(pgsr->log, this_read->consumed, PGSR_IO_EVENT_CONSUMPTION, this_read->id,
+						PGSR_METRIC_CNC, pgsr->completed_count);
+
+				aio_dev_log_metric(pgsr->log, this_read->consumed, PGSR_IO_EVENT_CONSUMPTION, this_read->id,
+						PGSR_METRIC_TOTAL_CONSUMED, pgsr->consumed_total_count);
+
+				aio_dev_log_metric(pgsr->log, this_read->consumed, PGSR_IO_EVENT_CONSUMPTION, this_read->id,
+						PGSR_METRIC_TOTAL_REAL_CONSUMED, pgsr->real_io_consumed_total_count);
+
+				/*
+				 * We only have access to avg_tput if we are using the consumption ring
+				 */
+				if (pgsr->consumptions)
+					aio_dev_log_metric(pgsr->log, this_read->consumed, PGSR_IO_EVENT_CONSUMPTION, this_read->id,
+							PGSR_METRIC_AVG_TPUT, pgsr_avg_tput(pgsr->consumptions));
+			}
+
+			if (pgsr->consumptions)
+			{
+				// TODO: don't know what belongs here and what belongs in
+				// pg_streaming_read_complete()
+				pgsr_add_consumption(pgsr->consumptions, this_read->latency, this_read->prefetch_distance);
+			}
 		}
 
 		Assert(this_read->read_private != 0);
@@ -673,7 +1108,15 @@ pg_streaming_read_get_next(PgStreamingRead *pgsr)
 		this_read->valid = false;
 
 		pgsr->completed_count--;
+		INSTR_TIME_SET_ZERO(this_read->consumed);
 		dlist_push_tail(&pgsr->available, &this_read->node);
+
+		/*
+		 * Only adjust the prefetch distance here if using the PFA_CLAMP
+		 * algorithm
+		 */
+		if (prefetch_algo == PFA_CLAMP)
+			pg_streaming_read_adjust_pfd(this_read, &did_calculation);
 		pg_streaming_read_prefetch(pgsr);
 
 		return ret;

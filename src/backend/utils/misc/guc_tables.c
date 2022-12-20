@@ -768,6 +768,16 @@ StaticAssertDecl(lengthof(config_type_names) == (PGC_ENUM + 1),
 struct config_bool ConfigureNamesBool[] =
 {
 	{
+		{"pgsr_do_log", PGC_USERSET, RESOURCES_ASYNCHRONOUS,
+			gettext_noop("Enables writing out of log file for pgsr logging."),
+			NULL,
+			GUC_EXPLAIN
+		},
+		&pgsr_do_log,
+		false,
+		NULL, NULL, NULL
+	},
+	{
 		{"enable_seqscan", PGC_USERSET, QUERY_TUNING_METHOD,
 			gettext_noop("Enables the planner's use of sequential-scan plans."),
 			NULL,
@@ -2923,6 +2933,39 @@ struct config_int ConfigureNamesInt[] =
 		},
 		&bgwriter_flush_after,
 		DEFAULT_BGWRITER_FLUSH_AFTER, 0, WRITEBACK_MAX_PENDING_FLUSHES,
+		NULL, NULL, NULL
+	},
+
+	{
+		{"prefetch_dev_initial_iodepth",
+			PGC_USERSET,
+			RESOURCES_ASYNCHRONOUS,
+			gettext_noop("initial value of prefetch distance for developing prefetcher"),
+			NULL,
+			GUC_EXPLAIN
+		},
+		&prefetch_dev_initial_iodepth,
+		128, 1, 1000,
+		NULL, NULL, NULL
+	},
+
+	{
+		{"prefetch_algo", PGC_USERSET, RESOURCES_ASYNCHRONOUS,
+			gettext_noop("prefetch algorithm to use"),
+			NULL,
+		},
+		&prefetch_algo,
+		PFA_OG, PFA_OG, PFA_CLAMP,
+		NULL, NULL, NULL
+	},
+
+	{
+		{"prefetch_max", PGC_USERSET, RESOURCES_ASYNCHRONOUS,
+			gettext_noop("max prefetch distance"),
+			NULL,
+		},
+		&prefetch_max,
+		128, 1, 2048,
 		NULL, NULL, NULL
 	},
 

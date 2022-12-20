@@ -1036,7 +1036,7 @@ btvacuumscan(IndexVacuumInfo *info, IndexBulkDeleteResult *stats,
 		vstate.nextblock = scanblkno;
 		vstate.num_pages = num_pages;
 
-		pgsr = pg_streaming_read_alloc(512, (uintptr_t) &vstate,
+		pgsr = pg_streaming_read_alloc(512, num_pages, (uintptr_t) &vstate,
 									   btvacuumscan_pgsr_next,
 									   btvacuumscan_pgsr_release);
 

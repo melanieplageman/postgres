@@ -15,6 +15,7 @@
 #define AIO_H
 
 #include "common/relpath.h"
+#include "storage/aio_dev_log.h"
 #include "storage/block.h"
 #include "storage/buf.h"
 #include "storage/relfilelocator.h"
@@ -38,6 +39,12 @@ typedef enum IoMethod
 	IOMETHOD_POSIX_AIO,
 } IoMethod;
 
+typedef enum PrefetchAlgo
+{
+	PFA_OG,
+	PFA_CLAMP,
+} PrefetchAlgo;
+
 /* We'll default to bgworker. */
 #define DEFAULT_IO_METHOD IOMETHOD_WORKER
 
@@ -45,6 +52,10 @@ typedef enum IoMethod
 extern int io_method;
 extern int io_workers;
 extern int io_worker_queue_size;
+extern bool pgsr_do_log;
+extern int prefetch_dev_initial_iodepth;
+extern int prefetch_algo;
+extern int prefetch_max;
 
 /* (future) GUC controlling global MAX number of in-progress IO entries */
 /* FIXME: this is per context right now */
@@ -265,9 +276,12 @@ extern void pg_streaming_write_write(PgStreamingWrite *pgsw, PgAioInProgress *io
 extern void pg_streaming_write_wait_all(PgStreamingWrite *pgsw);
 extern void pg_streaming_write_free(PgStreamingWrite *pgsw);
 
+
 /*
  * Helper for efficient reads (using readahead).
  */
+
+#define PGSR_RING_SIZE 100
 
 typedef struct PgStreamingRead PgStreamingRead;
 typedef enum PgStreamingReadNextStatus
@@ -277,12 +291,36 @@ typedef enum PgStreamingReadNextStatus
 	PGSR_NEXT_IO
 } PgStreamingReadNextStatus;
 
+/* Used to adjust prefetch distance */
+typedef struct PgStreamingReadConsumption
+{
+	/* latency of consumed IO */
+	instr_time latency;
+	/* prefetch distance at time IO was submitted */
+	int prefetch_distance;
+} PgStreamingReadConsumption;
+
+typedef struct PgStreamingReadConsumptionRing
+{
+	int num_valid;
+	int idx;
+	PgStreamingReadConsumption data[PGSR_RING_SIZE];
+} PgStreamingReadConsumptionRing;
+
+extern void pgsr_add_consumption(PgStreamingReadConsumptionRing *ring,
+		instr_time latency, int prefetch_distance);
+
 typedef PgStreamingReadNextStatus (*PgStreamingReadDetermineNextCB)(uintptr_t pgsr_private, PgAioInProgress *aio, uintptr_t *read_private);
 typedef void (*PgStreamingReadRelease)(uintptr_t pgsr_private, uintptr_t read_private);
-extern PgStreamingRead *pg_streaming_read_alloc(uint32 iodepth, uintptr_t pgsr_private,
+extern PgStreamingRead *pg_streaming_read_alloc(uint32 iodepth, int nblocks, uintptr_t pgsr_private,
 												PgStreamingReadDetermineNextCB determine_next_cb,
 												PgStreamingReadRelease release_cb);
+
 extern void pg_streaming_read_free(PgStreamingRead *pgsr);
 extern uintptr_t pg_streaming_read_get_next(PgStreamingRead *pgsr);
+
+extern float pgsr_avg_tput(PgStreamingReadConsumptionRing *ring);
+extern int pgsr_max_pfd(PgStreamingReadConsumptionRing *ring);
+extern float pgsr_avg_pfd(PgStreamingReadConsumptionRing *ring);
 
 #endif							/* AIO_H */
