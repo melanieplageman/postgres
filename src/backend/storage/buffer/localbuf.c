@@ -18,6 +18,7 @@
 #include "access/parallel.h"
 #include "catalog/catalog.h"
 #include "executor/instrument.h"
+#include "pgstat.h"
 #include "storage/buf_internals.h"
 #include "storage/bufmgr.h"
 #include "utils/guc_hooks.h"
@@ -100,14 +101,22 @@ PrefetchLocalBuffer(SMgrRelation smgr, ForkNumber forkNum,
  * LocalBufferAlloc -
  *	  Find or create a local buffer for the given page of the given relation.
  *
- * API is similar to bufmgr.c's BufferAlloc, except that we do not need
- * to do any locking since this is all local.   Also, IO_IN_PROGRESS
- * does not get set.  Lastly, we support only default access strategy
- * (hence, usage_count is always advanced).
+ * API is similar to bufmgr.c's BufferAlloc(). Note that, unlike BufferAlloc(),
+ * no locking is required and IO_IN_PROGRESS does not get set.
+ *
+ * Only the default access strategy is supported with local buffers, so no
+ * BufferAccessStrategy is passed to LocalBufferAlloc(). The selected buffer's
+ * usage_count is, therefore, unconditionally advanced. Also, the passed-in
+ * io_context is always set to IOCONTEXT_NORMAL. This indicates to the caller
+ * not to use the BufferAccessStrategy to set the io_context itself.
+ *
+ * This is important in cases like CREATE TEMPORARY TABLE AS ..., in which a
+ * BufferAccessStrategy object may have been created for the CTAS operation but
+ * it will not be used because it will operate on local buffers.
  */
 BufferDesc *
 LocalBufferAlloc(SMgrRelation smgr, ForkNumber forkNum, BlockNumber blockNum,
-				 bool *foundPtr)
+				 bool *foundPtr, IOContext *io_context)
 {
 	BufferTag	newTag;			/* identity of requested block */
 	LocalBufferLookupEnt *hresult;
@@ -126,6 +135,14 @@ LocalBufferAlloc(SMgrRelation smgr, ForkNumber forkNum, BlockNumber blockNum,
 	/* See if the desired buffer already exists */
 	hresult = (LocalBufferLookupEnt *)
 		hash_search(LocalBufHash, (void *) &newTag, HASH_FIND, NULL);
+
+	/*
+	 * IO Operations on local buffers are only done in IOCONTEXT_NORMAL. Set
+	 * io_context here for convenience since there is no function call
+	 * overhead to avoid in the case of a local buffer hit (like that of
+	 * IOCOntextForStrategy()).
+	 */
+	*io_context = IOCONTEXT_NORMAL;
 
 	if (hresult)
 	{
@@ -230,6 +247,7 @@ LocalBufferAlloc(SMgrRelation smgr, ForkNumber forkNum, BlockNumber blockNum,
 		buf_state &= ~BM_DIRTY;
 		pg_atomic_unlocked_write_u32(&bufHdr->state, buf_state);
 
+		pgstat_count_io_op(IOOP_WRITE, IOOBJECT_TEMP_RELATION, IOCONTEXT_NORMAL);
 		pgBufferUsage.local_blks_written++;
 	}
 
@@ -256,6 +274,7 @@ LocalBufferAlloc(SMgrRelation smgr, ForkNumber forkNum, BlockNumber blockNum,
 		ClearBufferTag(&bufHdr->tag);
 		buf_state &= ~(BM_VALID | BM_TAG_VALID);
 		pg_atomic_unlocked_write_u32(&bufHdr->state, buf_state);
+		pgstat_count_io_op(IOOP_EVICT, IOOBJECT_TEMP_RELATION, IOCONTEXT_NORMAL);
 	}
 
 	hresult = (LocalBufferLookupEnt *)
