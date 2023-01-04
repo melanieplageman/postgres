@@ -496,10 +496,13 @@ pgaio_at_subcommit(void)
 void
 pgaio_complete_ios(bool in_error)
 {
+	instr_time completion_time;
 	int pending_count_before = my_aio->pending_count;
+	int completions = 0;
 
 	Assert(!LWLockHeldByMe(SharedAIOCtlLock));
 
+	INSTR_TIME_SET_CURRENT(completion_time);
 	/*
 	 * Don't want to recurse into proc_exit() or such while calling callbacks
 	 * - we need to process the shared (but not local) callbacks.
@@ -529,6 +532,8 @@ pgaio_complete_ios(bool in_error)
 			finished = pgaio_io_call_shared_complete(io);
 
 			dlist_delete_from(&my_aio->reaped, node);
+			io->completed = completion_time;
+			completions++;
 
 			if (finished)
 			{
@@ -563,6 +568,9 @@ pgaio_complete_ios(bool in_error)
 			Assert(in_error);
 
 			dlist_delete_from(&my_aio->reaped, node);
+			// TODO: probably shouldn't set completion_time here
+			io->completed = completion_time;
+			completions++;
 
 			LWLockAcquire(SharedAIOCtlLock, LW_EXCLUSIVE);
 			WRITE_ONCE_F(io->flags) =
@@ -575,6 +583,8 @@ pgaio_complete_ios(bool in_error)
 	}
 
 	RESUME_INTERRUPTS();
+	if (completions > 0)
+		elog(WARNING, "pgaio_complete_ios(): backend: %d completed %d IOs", MyBackendId, completions);
 
 	/* if any IOs weren't fully done, re-submit them */
 	if (pending_count_before != my_aio->pending_count)

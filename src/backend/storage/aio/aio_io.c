@@ -200,6 +200,9 @@ pgaio_combine_pending(void)
 		else
 			last = cur;
 	}
+
+	if (combined > 1)
+		elog(WARNING, "%d IOs combined into 1 IO", combined);
 }
 
 /* helper pgaio_process_io_completion combining the read/write cases */
@@ -298,6 +301,7 @@ pgaio_process_io_completion(PgAioInProgress *io, int result)
 	int running_result;
 	PgAioInProgress *cur = io;
 	bool first = true;
+	int completions = 0;
 
 	Assert(io->flags & PGAIOIP_INFLIGHT);
 	Assert(io->system_referenced);
@@ -416,11 +420,16 @@ pgaio_process_io_completion(PgAioInProgress *io, int result)
 		WRITE_ONCE_F(cur->flags) = new_flags;
 
 		dlist_push_tail(&my_aio->reaped, &cur->io_node);
+		if (cur->owner_id == my_aio_id)
+			my_aio->cnc++;
 
+		completions++;
 		cur->completed = completion_time;
 		cur = next;
 		first = false;
 	}
+	if (completions > 0)
+		elog(WARNING, "pgaio_process_io_completion(): backend %d just did %d completions", MyBackendId, completions);
 
 }
 

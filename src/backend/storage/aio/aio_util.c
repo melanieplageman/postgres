@@ -434,6 +434,8 @@ struct PgStreamingRead
 	/* number of requests that didn't require IO (debugging only) */
 	int32 no_io_count;
 
+	int32 completed_since_last_consumption;
+
 	bool hit_end;
 
 	/* submitted reads */
@@ -604,6 +606,7 @@ pg_streaming_read_alloc(uint32 iodepth, int nblocks, uintptr_t pgsr_private,
 	pgsr->release_cb = release_cb;
 	pgsr->current_window = 0;
 
+	pgsr->completed_since_last_consumption = 0;
 	pgsr->max_ios = max_ios;
 	pgsr->cnc_lo = Min(max_ios, 2);
 	pgsr->cnc_hi = Max(max_ios / 2, pgsr->cnc_lo + 1);
@@ -648,6 +651,8 @@ pg_streaming_read_alloc(uint32 iodepth, int nblocks, uintptr_t pgsr_private,
 			sizeof(PgStreamingReadConsumption) * PGSR_RING_SIZE);
 	pgsr->consumptions->num_valid = 0;
 	pgsr->consumptions->idx       = 0;
+
+	my_aio->cnc = 0;
 
 	return pgsr;
 }
@@ -905,6 +910,7 @@ static void
 pg_streaming_read_prefetch_og(PgStreamingRead *pgsr)
 {
 	uint32 min_issue;
+	int prefetched_this_time = 0;
 
 	if (pgsr->hit_end)
 		return;
@@ -962,16 +968,20 @@ pg_streaming_read_prefetch_og(PgStreamingRead *pgsr)
 		   (pgsr->completed_count < pgsr->current_window))
 	{
 		pg_streaming_read_prefetch_one(pgsr);
+		prefetched_this_time++;
 		pgaio_limit_pending(false, min_issue);
 
 		CHECK_FOR_INTERRUPTS();
 	}
+
+	elog(WARNING, "prefetched_this_time is %d", prefetched_this_time);
 }
 
 static void
 pg_streaming_read_prefetch_clamp(PgStreamingRead *pgsr)
 {
 	uint32 min_issue;
+	int prefetched_this_time = 0;
 
 	if (pgsr->hit_end)
 		return;
@@ -988,10 +998,13 @@ pg_streaming_read_prefetch_clamp(PgStreamingRead *pgsr)
 			(pgsr->inflight_count + pgsr->completed_count < pgsr->prefetch_distance))
 	{
 		pg_streaming_read_prefetch_one(pgsr);
+		prefetched_this_time++;
 		pgaio_limit_pending(false, min_issue);
 
 		CHECK_FOR_INTERRUPTS();
 	}
+
+	elog(WARNING, "prefetched_this_time is %d", prefetched_this_time);
 }
 
 static void
@@ -1059,7 +1072,10 @@ pg_streaming_read_get_next(PgStreamingRead *pgsr)
 
 		if (this_read->real_io)
 		{
+			uint32 cnc;
 			INSTR_TIME_SET_CURRENT(this_read->consumed);
+			my_aio->cnc--;
+			cnc = my_aio->cnc;
 			pgsr->real_io_consumed_total_count++;
 
 			if (pgsr->log)
@@ -1078,7 +1094,7 @@ pg_streaming_read_get_next(PgStreamingRead *pgsr)
 						PGSR_METRIC_INFLIGHT, pgsr->inflight_count);
 
 				aio_dev_log_metric(pgsr->log, this_read->consumed, PGSR_IO_EVENT_CONSUMPTION, this_read->id,
-						PGSR_METRIC_CNC, pgsr->completed_count);
+						PGSR_METRIC_CNC, cnc);
 
 				aio_dev_log_metric(pgsr->log, this_read->consumed, PGSR_IO_EVENT_CONSUMPTION, this_read->id,
 						PGSR_METRIC_TOTAL_CONSUMED, pgsr->consumed_total_count);

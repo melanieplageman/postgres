@@ -484,6 +484,7 @@ typedef struct PgAioPerBackend
 	 * PgAioInProgress->io_node
 	 */
 	dlist_head reaped;
+	uint32 cnc;
 
 	/*
 	 * IOs that were completed, but not yet recycled.
