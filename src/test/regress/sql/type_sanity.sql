@@ -358,31 +358,33 @@ ORDER BY 1;
 
 -- Look for illegal values in pg_class fields
 
-SELECT c1.oid, c1.relname
-FROM pg_class as c1
-WHERE relkind NOT IN ('r', 'i', 'S', 't', 'v', 'm', 'c', 'f', 'p') OR
+SELECT oid, relname, relkind, relpersistence, relreplident
+FROM pg_class
+WHERE relkind NOT IN ('r', 'i', 'S', 't', 'v', 'm', 'c', 'f', 'p', 'I') OR
     relpersistence NOT IN ('p', 'u', 't') OR
     relreplident NOT IN ('d', 'n', 'f', 'i');
 
--- All tables and indexes should have an access method.
-SELECT c1.oid, c1.relname
-FROM pg_class as c1
-WHERE c1.relkind NOT IN ('S', 'v', 'f', 'c') and
-    c1.relam = 0;
+-- All tables and indexes except partitioned tables should have an access
+-- method.
+SELECT oid, relname, relkind, relam
+FROM pg_class
+WHERE relkind NOT IN ('S', 'v', 'f', 'c', 'p') and
+    relam = 0;
 
--- Conversely, sequences, views, types shouldn't have them
-SELECT c1.oid, c1.relname
-FROM pg_class as c1
-WHERE c1.relkind IN ('S', 'v', 'f', 'c') and
-    c1.relam != 0;
+-- Conversely, sequences, views, types, and partitioned tables shouldn't have
+-- them
+SELECT oid, relname, relkind, relam
+FROM pg_class
+WHERE relkind IN ('S', 'v', 'f', 'c', 'p') and
+    relam != 0;
 
--- Indexes should have AMs of type 'i'
+-- Indexes and partitioned indexes should have AMs of type 'i'
 SELECT pc.oid, pc.relname, pa.amname, pa.amtype
 FROM pg_class as pc JOIN pg_am AS pa ON (pc.relam = pa.oid)
 WHERE pc.relkind IN ('i') and
     pa.amtype != 'i';
 
--- Tables, matviews etc should have AMs of type 't'
+-- Tables, matviews etc should have AMs of type 't' (except partitioned tables)
 SELECT pc.oid, pc.relname, pa.amname, pa.amtype
 FROM pg_class as pc JOIN pg_am AS pa ON (pc.relam = pa.oid)
 WHERE pc.relkind IN ('r', 't', 'm') and
