@@ -420,8 +420,8 @@ pgaio_process_io_completion(PgAioInProgress *io, int result)
 		WRITE_ONCE_F(cur->flags) = new_flags;
 
 		dlist_push_tail(&my_aio->reaped, &cur->io_node);
-		if (cur->owner_id == my_aio_id)
-			my_aio->cnc++;
+		/* if (cur->owner_id == my_aio_id) */
+		my_aio->cnc++;
 
 		completions++;
 		cur->completed = completion_time;

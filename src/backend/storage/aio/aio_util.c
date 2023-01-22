@@ -775,6 +775,9 @@ pg_streaming_read_complete(PgAioOnCompletionLocalContext *ocb, PgAioInProgress *
 
 		aio_dev_log_metric(pgsr->log, io->submitted, PGSR_IO_EVENT_SUBMISSION, this_read->id,
 				PGSR_METRIC_TOTAL_SUBMITTED, pgsr->submitted_total_count);
+
+		/* aio_dev_log_metric(pgsr->log, io->completed, PGSR_IO_EVENT_COMPLETION, this_read->id, */
+		/* 		PGSR_METRIC_CNC, pgsr->completed_count); */
 	}
 
 	this_read->in_progress = false;
@@ -1074,7 +1077,11 @@ pg_streaming_read_get_next(PgStreamingRead *pgsr)
 		{
 			uint32 cnc;
 			INSTR_TIME_SET_CURRENT(this_read->consumed);
-			my_aio->cnc--;
+
+			if (my_aio->cnc > 0)
+				my_aio->cnc--;
+			else
+				elog(WARNING, "trying to decrement cnc more than we have incremented it");
 			cnc = my_aio->cnc;
 			pgsr->real_io_consumed_total_count++;
 
@@ -1095,6 +1102,7 @@ pg_streaming_read_get_next(PgStreamingRead *pgsr)
 
 				aio_dev_log_metric(pgsr->log, this_read->consumed, PGSR_IO_EVENT_CONSUMPTION, this_read->id,
 						PGSR_METRIC_CNC, cnc);
+
 
 				aio_dev_log_metric(pgsr->log, this_read->consumed, PGSR_IO_EVENT_CONSUMPTION, this_read->id,
 						PGSR_METRIC_TOTAL_CONSUMED, pgsr->consumed_total_count);

@@ -533,6 +533,8 @@ pgaio_complete_ios(bool in_error)
 
 			dlist_delete_from(&my_aio->reaped, node);
 			io->completed = completion_time;
+			if (io->owner_id == my_aio_id)
+				my_aio->cnc++;
 			completions++;
 
 			if (finished)
@@ -571,6 +573,8 @@ pgaio_complete_ios(bool in_error)
 			// TODO: probably shouldn't set completion_time here
 			io->completed = completion_time;
 			completions++;
+			/* if (io->owner_id == my_aio_id) */
+			my_aio->cnc++;
 
 			LWLockAcquire(SharedAIOCtlLock, LW_EXCLUSIVE);
 			WRITE_ONCE_F(io->flags) =
