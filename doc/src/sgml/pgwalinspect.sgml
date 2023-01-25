@@ -110,18 +110,18 @@ block_ref        | blkref #0: rel 1663/5/60221 fork main blk 2
       Returns one row per WAL record.  For example:
 <screen>
 postgres=# SELECT * FROM pg_get_wal_records_info('0/1E913618', '0/1E913740') LIMIT 1;
--[ RECORD 1 ]----+--------------------------------------------------------------
+-[ RECORD 1 ]----+------------------------------------------------------------------------------------------------------------------------
 start_lsn        | 0/1E913618
 end_lsn          | 0/1E913650
 prev_lsn         | 0/1E9135A0
 xid              | 0
-resource_manager | Standby
-record_type      | RUNNING_XACTS
-record_length    | 50
-main_data_length | 24
+resource_manager | Heap2
+record_type      | PRUNE
+record_length    | 61
+main_data_length | 9
 fpi_length       | 0
-description      | nextXid 33775 latestCompletedXid 33774 oldestRunningXid 33775
-block_ref        |
+description      | snapshotConflictHorizon: 754, nredirected: 1, ndead: 1, nunused: 0, redirected: [ 1->5, 6->5 ], dead: [ 6 ], unused: []
+block_ref        | blkref #0: rel 1663/5/1259 fork main blk 1
 </screen>
      </para>
      <para>
