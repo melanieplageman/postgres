@@ -265,6 +265,7 @@ typedef struct xl_heap_vacuum
 #define SizeOfHeapVacuum (offsetof(xl_heap_vacuum, nunused) + sizeof(uint16))
 
 /* flags for infobits_set */
+// add a comment about this
 #define XLHL_XMAX_IS_MULTI		0x01
 #define XLHL_XMAX_LOCK_ONLY		0x02
 #define XLHL_XMAX_EXCL_LOCK		0x04
