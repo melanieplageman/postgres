@@ -65,6 +65,7 @@ extern void AutoVacWorkerFailed(void);
 
 /* autovacuum cost-delay balancer */
 extern void AutoVacuumUpdateDelay(void);
+extern void AutoVacuumUpdateCostLimit(void);
 
 #ifdef EXEC_BACKEND
 extern void AutoVacLauncherMain(int argc, char *argv[]) pg_attribute_noreturn();

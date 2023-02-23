@@ -144,6 +144,7 @@ int			VacuumCostPageMiss = 2;
 int			VacuumCostPageDirty = 20;
 int			VacuumCostLimit = 200;
 double		VacuumCostDelay = 0;
+double		AutovacuumSavedCostDelay = 0;
 
 int64		VacuumPageHit = 0;
 int64		VacuumPageMiss = 0;
