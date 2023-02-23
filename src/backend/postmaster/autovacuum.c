@@ -272,6 +272,8 @@ typedef struct AutoVacuumWorkItem
  * av_runningWorkers the WorkerInfo non-free queue
  * av_startingWorker pointer to WorkerInfo currently being started (cleared by
  *					the worker itself as soon as it's up and running)
+ * av_delay_disabled used to exit early from autovac_balance_cost() if
+ * 					cost-based delays were already disabled.
  * av_workItems		work item array
  *
  * This struct is protected by AutovacuumLock, except for av_signal and parts
@@ -285,6 +287,7 @@ typedef struct
 	dlist_head	av_freeWorkers;
 	dlist_head	av_runningWorkers;
 	WorkerInfo	av_startingWorker;
+	bool		av_delay_disabled;
 	AutoVacuumWorkItem av_workItems[NUM_WORKITEMS];
 } AutoVacuumShmemStruct;
 
@@ -1784,12 +1787,14 @@ AutoVacuumUpdateDelay(void)
 	{
 		VacuumCostDelay = MyWorkerInfo->wi_cost_delay;
 		VacuumCostLimit = MyWorkerInfo->wi_cost_limit;
+		VacuumCostActive = (VacuumCostDelay > 0);
 	}
 }
 
 /*
  * autovac_balance_cost
- *		Recalculate the cost limit setting for each active worker.
+ *		Recalculate the cost limit setting for each active worker and update
+ *		each active worker's cost delay.
  *
  * Caller must hold the AutovacuumLock in exclusive mode.
  */
@@ -1812,9 +1817,38 @@ autovac_balance_cost(void)
 	double		cost_avail;
 	dlist_iter	iter;
 
-	/* not set? nothing to do */
-	if (vac_cost_limit <= 0 || vac_cost_delay <= 0)
+	Assert(vac_cost_limit > 0);
+	Assert(vac_cost_delay >= 0);
+
+	if (vac_cost_delay == 0)
+	{
+		/*
+		 * Autovacuum delays were already disabled, so we can expect all
+		 * workers' cost_delays to be 0.
+		 */
+		if (AutoVacuumShmem->av_delay_disabled)
+			return;
+
+		/*
+		 * Either this is the first time we are calling autovac_balance_cost()
+		 * since initializing the autovacuum shared memory or
+		 * autovacuum_vacuum_cost_delay has newly been set to 0 or newly set
+		 * to -1 and vacuum_cost_delay is 0.
+		 */
+		AutoVacuumShmem->av_delay_disabled = true;
+
+		dlist_foreach(iter, &AutoVacuumShmem->av_runningWorkers)
+		{
+			WorkerInfo	worker = dlist_container(WorkerInfoData, wi_links, iter.cur);
+
+			if (worker->wi_proc != NULL && worker->wi_dobalance)
+				worker->wi_cost_delay = 0;
+		}
+
 		return;
+	}
+	else
+		AutoVacuumShmem->av_delay_disabled = false;
 
 	/* calculate the total base cost limit of participating active workers */
 	cost_total = 0.0;
@@ -1822,11 +1856,26 @@ autovac_balance_cost(void)
 	{
 		WorkerInfo	worker = dlist_container(WorkerInfoData, wi_links, iter.cur);
 
-		if (worker->wi_proc != NULL &&
-			worker->wi_dobalance &&
-			worker->wi_cost_limit_base > 0 && worker->wi_cost_delay > 0)
-			cost_total +=
-				(double) worker->wi_cost_limit_base / worker->wi_cost_delay;
+		if (worker->wi_proc != NULL && worker->wi_dobalance)
+		{
+			/*
+			 * Update the worker's wi_cost_delay value now so that new values
+			 * can take effect while calculating new cost limits.
+			 */
+			if (worker->wi_cost_delay != vac_cost_delay)
+			{
+				elog(DEBUG2, "autovac_balance_cost(pid=%d db=%u, rel=%u, updating cost_delay from: %g to: %g)",
+					 worker->wi_proc->pid, worker->wi_dboid, worker->wi_tableoid,
+					 worker->wi_cost_delay, vac_cost_delay);
+
+				worker->wi_cost_delay = vac_cost_delay;
+			}
+
+			if (worker->wi_cost_limit_base > 0 && worker->wi_cost_delay > 0)
+				cost_total +=
+					(double) worker->wi_cost_limit_base / worker->wi_cost_delay;
+		}
+
 	}
 
 	/* there are no cost limits -- nothing to do */
@@ -3366,6 +3415,13 @@ AutoVacuumShmemInit(void)
 		dlist_init(&AutoVacuumShmem->av_freeWorkers);
 		dlist_init(&AutoVacuumShmem->av_runningWorkers);
 		AutoVacuumShmem->av_startingWorker = NULL;
+
+		/*
+		 * Initialize av_delay_disabled to false so that
+		 * autovac_balance_cost() will update worker delays to 0 if delay is
+		 * in fact 0.
+		 */
+		AutoVacuumShmem->av_delay_disabled = false;
 		memset(AutoVacuumShmem->av_workItems, 0,
 			   sizeof(AutoVacuumWorkItem) * NUM_WORKITEMS);
 
