@@ -1030,6 +1030,14 @@ register_dirty_segment(SMgrRelation reln, ForkNumber forknum, MdfdVec *seg)
 
 	if (!RegisterSyncRequest(&tag, SYNC_REQUEST, false /* retryOnError */ ))
 	{
+		instr_time	io_start,
+					io_time;
+
+		if (track_io_timing)
+			INSTR_TIME_SET_CURRENT(io_start);
+		else
+			INSTR_TIME_SET_ZERO(io_start);
+
 		/*
 		 * We have no way of knowing if the current IOContext is
 		 * IOCONTEXT_NORMAL or IOCONTEXT_[BULKREAD, BULKWRITE, VACUUM] at this
@@ -1051,6 +1059,14 @@ register_dirty_segment(SMgrRelation reln, ForkNumber forknum, MdfdVec *seg)
 					(errcode_for_file_access(),
 					 errmsg("could not fsync file \"%s\": %m",
 							FilePathName(seg->mdfd_vfd))));
+
+		if (track_io_timing)
+		{
+			INSTR_TIME_SET_CURRENT(io_time);
+			INSTR_TIME_SUBTRACT(io_time, io_start);
+			pgstat_count_io_time(IOOBJECT_RELATION, IOCONTEXT_NORMAL, IOOP_FSYNC, io_time);
+		}
+
 	}
 }
 
@@ -1399,6 +1415,8 @@ int
 mdsyncfiletag(const FileTag *ftag, char *path)
 {
 	SMgrRelation reln = smgropen(ftag->rlocator, InvalidBackendId);
+	instr_time	io_start,
+				io_time;
 	File		file;
 	bool		need_to_close;
 	int			result,
@@ -1425,9 +1443,21 @@ mdsyncfiletag(const FileTag *ftag, char *path)
 		need_to_close = true;
 	}
 
+	if (track_io_timing)
+		INSTR_TIME_SET_CURRENT(io_start);
+	else
+		INSTR_TIME_SET_ZERO(io_start);
+
 	/* Sync the file. */
 	result = FileSync(file, WAIT_EVENT_DATA_FILE_SYNC);
 	save_errno = errno;
+
+	if (track_io_timing)
+	{
+		INSTR_TIME_SET_CURRENT(io_time);
+		INSTR_TIME_SUBTRACT(io_time, io_start);
+		pgstat_count_io_time(IOOBJECT_RELATION, IOCONTEXT_NORMAL, IOOP_FSYNC, io_time);
+	}
 
 	if (need_to_close)
 		FileClose(file);

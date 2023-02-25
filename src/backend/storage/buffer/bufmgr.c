@@ -1000,10 +1000,27 @@ ReadBuffer_common(SMgrRelation smgr, char relpersistence, ForkNumber forkNum,
 
 	if (isExtend)
 	{
+		instr_time	io_start,
+					io_time;
+
 		/* new buffers are zero-filled */
 		MemSet((char *) bufBlock, 0, BLCKSZ);
+
+		if (track_io_timing)
+			INSTR_TIME_SET_CURRENT(io_start);
+		else
+			INSTR_TIME_SET_ZERO(io_start);
+
 		/* don't set checksum for all-zero page */
 		smgrextend(smgr, forkNum, blockNum, (char *) bufBlock, false);
+
+		if (track_io_timing)
+		{
+			INSTR_TIME_SET_CURRENT(io_time);
+			INSTR_TIME_SUBTRACT(io_time, io_start);
+			pgstat_count_io_time(io_object, io_context, IOOP_EXTEND, io_time);
+		}
+
 
 		pgstat_count_io_op(io_object, io_context, IOOP_EXTEND);
 
@@ -1042,6 +1059,7 @@ ReadBuffer_common(SMgrRelation smgr, char relpersistence, ForkNumber forkNum,
 				INSTR_TIME_SUBTRACT(io_time, io_start);
 				pgstat_count_buffer_read_time(INSTR_TIME_GET_MICROSEC(io_time));
 				INSTR_TIME_ADD(pgBufferUsage.blk_read_time, io_time);
+				pgstat_count_io_time(io_object, io_context, IOOP_READ, io_time);
 			}
 
 			/* check for garbage data */
@@ -2989,6 +3007,7 @@ FlushBuffer(BufferDesc *buf, SMgrRelation reln, IOObject io_object,
 		INSTR_TIME_SUBTRACT(io_time, io_start);
 		pgstat_count_buffer_write_time(INSTR_TIME_GET_MICROSEC(io_time));
 		INSTR_TIME_ADD(pgBufferUsage.blk_write_time, io_time);
+		pgstat_count_io_time(IOOBJECT_RELATION, io_context, IOOP_WRITE, io_time);
 	}
 
 	pgBufferUsage.shared_blks_written++;
@@ -3594,6 +3613,9 @@ FlushRelationBuffers(Relation rel)
 
 	if (RelationUsesLocalBuffers(rel))
 	{
+		instr_time	io_start,
+					io_time;
+
 		for (i = 0; i < NLocBuffer; i++)
 		{
 			uint32		buf_state;
@@ -3616,6 +3638,11 @@ FlushRelationBuffers(Relation rel)
 
 				PageSetChecksumInplace(localpage, bufHdr->tag.blockNum);
 
+				if (track_io_timing)
+					INSTR_TIME_SET_CURRENT(io_start);
+				else
+					INSTR_TIME_SET_ZERO(io_start);
+
 				smgrwrite(RelationGetSmgr(rel),
 						  BufTagGetForkNum(&bufHdr->tag),
 						  bufHdr->tag.blockNum,
@@ -3626,6 +3653,13 @@ FlushRelationBuffers(Relation rel)
 				pg_atomic_unlocked_write_u32(&bufHdr->state, buf_state);
 
 				pgstat_count_io_op(IOOBJECT_TEMP_RELATION, IOCONTEXT_NORMAL, IOOP_WRITE);
+
+				if (track_io_timing)
+				{
+					INSTR_TIME_SET_CURRENT(io_time);
+					INSTR_TIME_SUBTRACT(io_time, io_start);
+					pgstat_count_io_time(IOOBJECT_TEMP_RELATION, IOCONTEXT_NORMAL, IOOP_WRITE, io_time);
+				}
 
 				/* Pop the error context stack */
 				error_context_stack = errcallback.previous;

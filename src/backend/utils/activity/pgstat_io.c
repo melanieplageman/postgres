@@ -25,17 +25,20 @@ bool		have_iostats = false;
 
 /*
  * Check that stats have not been counted for any combination of IOObject,
- * IOContext, and IOOp which are not tracked for the passed-in BackendType. The
- * passed-in PgStat_BktypeIO must contain stats from the BackendType specified
- * by the second parameter. Caller is responsible for locking the passed-in
- * PgStat_BktypeIO, if needed.
+ * IOContext, and IOOp which are not tracked for the passed-in BackendType. If
+ * the IOOp is not counted for this combination but IO time is otherwise
+ * tracked for this IOOp, check that IO time has not been counted for this
+ * combination.
+ * TODO: should we check that IO counts are not 0 if IO time is not zero?
+ *
+ * The passed-in PgStat_BktypeIO must contain stats from the BackendType
+ * specified by the second parameter. Caller is responsible for locking the
+ * passed-in PgStat_BktypeIO, if needed.
  */
 bool
 pgstat_bktype_io_stats_valid(PgStat_BktypeIO *backend_io,
 							 BackendType bktype)
 {
-	bool		bktype_tracked = pgstat_tracks_io_bktype(bktype);
-
 	for (IOObject io_object = IOOBJECT_FIRST;
 		 io_object < IOOBJECT_NUM_TYPES; io_object++)
 	{
@@ -49,14 +52,20 @@ pgstat_bktype_io_stats_valid(PgStat_BktypeIO *backend_io,
 			 */
 			for (IOOp io_op = IOOP_FIRST; io_op < IOOP_NUM_TYPES; io_op++)
 			{
-				/* No stats, so nothing to validate */
-				if (backend_io->data[io_object][io_context][io_op] == 0)
+				/* we do track it */
+				if (pgstat_tracks_io_op(bktype, io_object, io_context, io_op))
 					continue;
 
-				/* There are stats and there shouldn't be */
-				if (!bktype_tracked ||
-					!pgstat_tracks_io_op(bktype, io_object, io_context, io_op))
+				/* we don't track it, and it is not 0 */
+				if (backend_io->counts[io_object][io_context][io_op] != 0)
 					return false;
+
+				/* we don't track this IOOp, so make sure its IO time is zero */
+				if (pgstat_tracks_io_time(io_op) > -1)
+				{
+					if (!INSTR_TIME_IS_ZERO(backend_io->times[io_object][io_context][io_op]))
+						return false;
+				}
 			}
 		}
 	}
@@ -72,7 +81,21 @@ pgstat_count_io_op(IOObject io_object, IOContext io_context, IOOp io_op)
 	Assert(io_op < IOOP_NUM_TYPES);
 	Assert(pgstat_tracks_io_op(MyBackendType, io_object, io_context, io_op));
 
-	PendingIOStats.data[io_object][io_context][io_op]++;
+	PendingIOStats.counts[io_object][io_context][io_op]++;
+
+	have_iostats = true;
+}
+
+void
+pgstat_count_io_time(IOObject io_object, IOContext io_context, IOOp io_op, instr_time time)
+{
+	Assert(io_object < IOOBJECT_NUM_TYPES);
+	Assert(io_context < IOCONTEXT_NUM_TYPES);
+	Assert(io_op < IOOP_NUM_TYPES);
+	Assert(pgstat_tracks_io_op(MyBackendType, io_object, io_context, io_op));
+	Assert(pgstat_tracks_io_time(io_op) != -1);
+
+	INSTR_TIME_ADD(PendingIOStats.times[io_object][io_context][io_op], time);
 
 	have_iostats = true;
 }
@@ -119,8 +142,13 @@ pgstat_flush_io(bool nowait)
 		{
 			for (IOOp io_op = IOOP_FIRST;
 				 io_op < IOOP_NUM_TYPES; io_op++)
-				bktype_shstats->data[io_object][io_context][io_op] +=
-					PendingIOStats.data[io_object][io_context][io_op];
+			{
+				bktype_shstats->counts[io_object][io_context][io_op] +=
+					PendingIOStats.counts[io_object][io_context][io_op];
+
+				INSTR_TIME_ADD(bktype_shstats->times[io_object][io_context][io_op],
+							   PendingIOStats.times[io_object][io_context][io_op]);
+			}
 		}
 	}
 
@@ -388,4 +416,31 @@ pgstat_tracks_io_op(BackendType bktype, IOObject io_object,
 		return false;
 
 	return true;
+}
+
+/*
+ * PgStat_BktypeIO->times contains IO times for IOOps. For simplicity this
+ * array has a spot for every IOOp. pgstat_tracks_io_time() is the source of
+ * truth for which IOOps have corresponding IO times.
+ */
+IOOp
+pgstat_tracks_io_time(IOOp io_op)
+{
+	switch (io_op)
+	{
+		case IOOP_READ:
+			return IOOP_READ;
+		case IOOP_WRITE:
+			return IOOP_WRITE;
+		case IOOP_EXTEND:
+			return IOOP_EXTEND;
+		case IOOP_FSYNC:
+			return IOOP_FSYNC;
+		case IOOP_EVICT:
+		case IOOP_REUSE:
+			return -1;
+	}
+
+	elog(ERROR, "unrecognized IOOp value: %d", io_op);
+	pg_unreachable();
 }

@@ -220,6 +220,8 @@ LocalBufferAlloc(SMgrRelation smgr, ForkNumber forkNum, BlockNumber blockNum,
 	 */
 	if (buf_state & BM_DIRTY)
 	{
+		instr_time	io_start,
+					io_time;
 		SMgrRelation oreln;
 		Page		localpage = (char *) LocalBufHdrGetBlock(bufHdr);
 
@@ -227,6 +229,11 @@ LocalBufferAlloc(SMgrRelation smgr, ForkNumber forkNum, BlockNumber blockNum,
 		oreln = smgropen(BufTagGetRelFileLocator(&bufHdr->tag), MyBackendId);
 
 		PageSetChecksumInplace(localpage, bufHdr->tag.blockNum);
+
+		if (track_io_timing)
+			INSTR_TIME_SET_CURRENT(io_start);
+		else
+			INSTR_TIME_SET_ZERO(io_start);
 
 		/* And write... */
 		smgrwrite(oreln,
@@ -238,6 +245,13 @@ LocalBufferAlloc(SMgrRelation smgr, ForkNumber forkNum, BlockNumber blockNum,
 		/* Mark not-dirty now in case we error out below */
 		buf_state &= ~BM_DIRTY;
 		pg_atomic_unlocked_write_u32(&bufHdr->state, buf_state);
+
+		if (track_io_timing)
+		{
+			INSTR_TIME_SET_CURRENT(io_time);
+			INSTR_TIME_SUBTRACT(io_time, io_start);
+			pgstat_count_io_time(IOOBJECT_TEMP_RELATION, IOCONTEXT_NORMAL, IOOP_WRITE, io_time);
+		}
 
 		pgstat_count_io_op(IOOBJECT_TEMP_RELATION, IOCONTEXT_NORMAL, IOOP_WRITE);
 		pgBufferUsage.local_blks_written++;
