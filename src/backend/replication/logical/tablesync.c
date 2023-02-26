@@ -105,6 +105,7 @@
 #include "pgstat.h"
 #include "replication/logicallauncher.h"
 #include "replication/logicalrelation.h"
+#include "replication/logicalworker.h"
 #include "replication/walreceiver.h"
 #include "replication/worker_internal.h"
 #include "replication/slot.h"
@@ -114,6 +115,7 @@
 #include "utils/acl.h"
 #include "utils/array.h"
 #include "utils/builtins.h"
+#include "utils/inval.h"
 #include "utils/lsyscache.h"
 #include "utils/memutils.h"
 #include "utils/rls.h"
@@ -210,6 +212,52 @@ wait_for_relation_state_change(Oid relid, char expected_state)
 	return false;
 }
 
+static bool
+wait_for_new_rel_assignment()
+{
+	int			rc;
+
+	for (;;)
+	{
+		LogicalRepWorker *worker;
+
+		CHECK_FOR_INTERRUPTS();
+
+		/*
+		 * Done if already in correct state.  (We assume this fetch is atomic
+		 * enough to not give a misleading answer if we do it with no lock.)
+		 */
+		if (MyLogicalRepWorker->relid != InvalidOid)
+			return true;
+
+		/*
+		 * Bail out if the apply worker has died, else signal it we're
+		 * waiting.
+		 */
+		LWLockAcquire(LogicalRepWorkerLock, LW_SHARED);
+		worker = logicalrep_worker_find(MyLogicalRepWorker->subid,
+										InvalidOid, false);
+		if (worker && worker->proc)
+			logicalrep_worker_wakeup_ptr(worker);
+		LWLockRelease(LogicalRepWorkerLock);
+		if (!worker)
+			break;
+
+		/*
+		 * Wait.  We expect to get a latch signal back from the apply worker,
+		 * but use a timeout in case it dies without sending one.
+		 */
+		rc = WaitLatch(MyLatch,
+					   WL_LATCH_SET | WL_TIMEOUT | WL_EXIT_ON_PM_DEATH,
+					   1000L, WAIT_EVENT_LOGICAL_WORKER_ASSIGNMENT);
+
+		if (rc & WL_LATCH_SET)
+			ResetLatch(MyLatch);
+	}
+
+	return false;
+}
+
 /*
  * Wait until the apply worker changes the state of our synchronization
  * worker to the expected one.
@@ -273,115 +321,22 @@ invalidate_syncing_table_states(Datum arg, int cacheid, uint32 hashvalue)
 	table_states_valid = false;
 }
 
-/*
- * Handle table synchronization cooperation from the synchronization
- * worker.
- *
- * If the sync worker is in CATCHUP state and reached (or passed) the
- * predetermined synchronization point in the WAL stream, mark the table as
- * SYNCDONE and finish.
- */
-static void
-process_syncing_tables_for_sync(XLogRecPtr current_lsn)
+bool
+done_apply_current_table(XLogRecPtr current_lsn)
 {
+	bool result;
 	SpinLockAcquire(&MyLogicalRepWorker->relmutex);
-
-	if (MyLogicalRepWorker->relstate == SUBREL_STATE_CATCHUP &&
-		current_lsn >= MyLogicalRepWorker->relstate_lsn)
+	result = MyLogicalRepWorker->relstate == SUBREL_STATE_CATCHUP &&
+		current_lsn >= MyLogicalRepWorker->relstate_lsn;
+	if (result)
 	{
-		TimeLineID	tli;
-		char		syncslotname[NAMEDATALEN] = {0};
-		char		originname[NAMEDATALEN] = {0};
-
 		MyLogicalRepWorker->relstate = SUBREL_STATE_SYNCDONE;
 		MyLogicalRepWorker->relstate_lsn = current_lsn;
-
-		SpinLockRelease(&MyLogicalRepWorker->relmutex);
-
-		/*
-		 * UpdateSubscriptionRelState must be called within a transaction.
-		 */
-		if (!IsTransactionState())
-			StartTransactionCommand();
-
-		UpdateSubscriptionRelState(MyLogicalRepWorker->subid,
-								   MyLogicalRepWorker->relid,
-								   MyLogicalRepWorker->relstate,
-								   MyLogicalRepWorker->relstate_lsn);
-
-		/*
-		 * End streaming so that LogRepWorkerWalRcvConn can be used to drop
-		 * the slot.
-		 */
-		walrcv_endstreaming(LogRepWorkerWalRcvConn, &tli);
-
-		/*
-		 * Cleanup the tablesync slot.
-		 *
-		 * This has to be done after updating the state because otherwise if
-		 * there is an error while doing the database operations we won't be
-		 * able to rollback dropped slot.
-		 */
-		ReplicationSlotNameForTablesync(MyLogicalRepWorker->subid,
-										MyLogicalRepWorker->relid,
-										syncslotname,
-										sizeof(syncslotname));
-
-		/*
-		 * It is important to give an error if we are unable to drop the slot,
-		 * otherwise, it won't be dropped till the corresponding subscription
-		 * is dropped. So passing missing_ok = false.
-		 */
-		ReplicationSlotDropAtPubNode(LogRepWorkerWalRcvConn, syncslotname, false);
-
-		CommitTransactionCommand();
-		pgstat_report_stat(false);
-
-		/*
-		 * Start a new transaction to clean up the tablesync origin tracking.
-		 * This transaction will be ended within the finish_sync_worker().
-		 * Now, even, if we fail to remove this here, the apply worker will
-		 * ensure to clean it up afterward.
-		 *
-		 * We need to do this after the table state is set to SYNCDONE.
-		 * Otherwise, if an error occurs while performing the database
-		 * operation, the worker will be restarted and the in-memory state of
-		 * replication progress (remote_lsn) won't be rolled-back which would
-		 * have been cleared before restart. So, the restarted worker will use
-		 * invalid replication progress state resulting in replay of
-		 * transactions that have already been applied.
-		 */
-		StartTransactionCommand();
-
-		ReplicationOriginNameForLogicalRep(MyLogicalRepWorker->subid,
-										   MyLogicalRepWorker->relid,
-										   originname,
-										   sizeof(originname));
-
-		/*
-		 * Resetting the origin session removes the ownership of the slot.
-		 * This is needed to allow the origin to be dropped.
-		 */
-		replorigin_session_reset();
-		replorigin_session_origin = InvalidRepOriginId;
-		replorigin_session_origin_lsn = InvalidXLogRecPtr;
-		replorigin_session_origin_timestamp = 0;
-
-		/*
-		 * Drop the tablesync's origin tracking if exists.
-		 *
-		 * There is a chance that the user is concurrently performing refresh
-		 * for the subscription where we remove the table state and its origin
-		 * or the apply worker would have removed this origin. So passing
-		 * missing_ok = true.
-		 */
-		replorigin_drop_by_name(originname, true, false);
-
-		finish_sync_worker();
 	}
-	else
-		SpinLockRelease(&MyLogicalRepWorker->relmutex);
+	SpinLockRelease(&MyLogicalRepWorker->relmutex);
+	return result;
 }
+
 
 /*
  * Handle table synchronization cooperation from the apply worker.
@@ -507,8 +462,18 @@ process_syncing_tables_for_apply(XLogRecPtr current_lsn)
 			 */
 			LWLockAcquire(LogicalRepWorkerLock, LW_SHARED);
 
+			/*
+			 * First check if there is one already working on this rel
+			 */
 			syncworker = logicalrep_worker_find(MyLogicalRepWorker->subid,
 												rstate->relid, false);
+
+			/*
+			 * Then check if there is one free already launched
+			 */
+			if (!syncworker)
+				syncworker = logicalrep_worker_find_for_sync(MyLogicalRepWorker->subid,
+													false);
 
 			if (syncworker)
 			{
@@ -589,7 +554,7 @@ process_syncing_tables_for_apply(XLogRecPtr current_lsn)
 												 MySubscription->name,
 												 MyLogicalRepWorker->userid,
 												 rstate->relid,
-												 DSM_HANDLE_INVALID);
+												 DSM_HANDLE_INVALID, true);
 						hentry->last_start_time = now;
 					}
 				}
@@ -640,9 +605,156 @@ process_syncing_tables_for_apply(XLogRecPtr current_lsn)
 }
 
 /*
+ * Execute the initial sync with error handling. Disable the subscription,
+ * if it's required.
+ *
+ * Allocate the slot name in long-lived context on return. Note that we don't
+ * handle FATAL errors which are probably because of system resource error and
+ * are not repeatable.
+ */
+static void
+start_table_sync(XLogRecPtr *origin_startpos, char **myslotname)
+{
+	char	   *syncslotname = NULL;
+
+	Assert(am_tablesync_worker());
+
+	PG_TRY();
+	{
+		/* Call initial sync. */
+		syncslotname = LogicalRepSyncTableStart(origin_startpos);
+	}
+	PG_CATCH();
+	{
+		if (MySubscription->disableonerr)
+			DisableSubscriptionAndExit();
+		else
+		{
+			/*
+			 * Report the worker failed during table synchronization. Abort
+			 * the current transaction so that the stats message is sent in an
+			 * idle state.
+			 */
+			AbortOutOfAnyTransaction();
+			pgstat_report_subscription_error(MySubscription->oid, false);
+
+			PG_RE_THROW();
+		}
+	}
+	PG_END_TRY();
+
+	/* allocate slot name in long-lived context */
+	*myslotname = MemoryContextStrdup(ApplyContext, syncslotname);
+	pfree(syncslotname);
+}
+
+
+void
+TableSyncWorkerLoop(void)
+{
+	pgstat_report_activity(STATE_IDLE, NULL);
+
+	for (;;)
+	{
+		TimeLineID	tli;
+		char		syncslotname[NAMEDATALEN] = {0};
+		char		originname[NAMEDATALEN] = {0};
+		ErrorContextCallback errcallback;
+		char	   *myslotname = NULL;
+		WalRcvStreamOptions options;
+		XLogRecPtr	origin_startpos = InvalidXLogRecPtr;
+
+		start_table_sync(&origin_startpos, &myslotname);
+
+		ReplicationOriginNameForLogicalRep(MySubscription->oid,
+											MyLogicalRepWorker->relid,
+											originname,
+											sizeof(originname));
+
+		set_apply_error_context_origin(originname);
+
+		CacheRegisterSyscacheCallback(SUBSCRIPTIONRELMAP,
+									invalidate_syncing_table_states,
+									(Datum) 0);
+
+		logicalrep_worker_options_setup(&options, myslotname, origin_startpos);
+
+		walrcv_startstreaming(LogRepWorkerWalRcvConn, &options);
+
+
+		errcallback.callback = apply_error_callback;
+		errcallback.previous = error_context_stack;
+		error_context_stack = &errcallback;
+		apply_error_context_stack = error_context_stack;
+
+		// TODO: what is the scope of code here that we want to catch and report errors on?
+
+		LogicalRepApplyLoop(origin_startpos);
+
+		if (!IsTransactionState())
+			StartTransactionCommand();
+
+		UpdateSubscriptionRelState(MyLogicalRepWorker->subid,
+									MyLogicalRepWorker->relid,
+									MyLogicalRepWorker->relstate,
+									MyLogicalRepWorker->relstate_lsn);
+
+		walrcv_endstreaming(LogRepWorkerWalRcvConn, &tli);
+
+		ReplicationSlotNameForTablesync(MyLogicalRepWorker->subid,
+										MyLogicalRepWorker->relid,
+										syncslotname,
+										sizeof(syncslotname));
+
+		ReplicationSlotDropAtPubNode(LogRepWorkerWalRcvConn, syncslotname, false);
+
+		CommitTransactionCommand();
+		pgstat_report_stat(false);
+
+		StartTransactionCommand();
+
+		ReplicationOriginNameForLogicalRep(MyLogicalRepWorker->subid,
+											MyLogicalRepWorker->relid,
+											originname,
+											sizeof(originname));
+
+		replorigin_session_reset();
+		replorigin_session_origin = InvalidRepOriginId;
+		replorigin_session_origin_lsn = InvalidXLogRecPtr;
+		replorigin_session_origin_timestamp = 0;
+
+		replorigin_drop_by_name(originname, true, false);
+
+		if (IsTransactionState())
+		{
+			CommitTransactionCommand();
+			pgstat_report_stat(true);
+		}
+
+		XLogFlush(GetXLogWriteRecPtr());
+
+		StartTransactionCommand();
+		ereport(LOG,
+				(errmsg("logical replication table synchronization worker for subscription \"%s\", table \"%s\" has finished",
+						MySubscription->name,
+						get_rel_name(MyLogicalRepWorker->relid))));
+		CommitTransactionCommand();
+
+
+		error_context_stack = errcallback.previous;
+		apply_error_context_stack = error_context_stack;
+
+		// TODO: does this break because it makes me an apply worker?
+		MyLogicalRepWorker->relid = InvalidOid;
+		if (!wait_for_new_rel_assignment() && MyLogicalRepWorker->time_to_die)
+			break;
+	}
+}
+
+/*
  * Process possible state change(s) of tables that are being synchronized.
  */
-void
+bool
 process_syncing_tables(XLogRecPtr current_lsn)
 {
 	/*
@@ -651,12 +763,17 @@ process_syncing_tables(XLogRecPtr current_lsn)
 	 * should_apply_changes_for_rel().
 	 */
 	if (am_parallel_apply_worker())
-		return;
+		return false;
 
 	if (am_tablesync_worker())
-		process_syncing_tables_for_sync(current_lsn);
+	{
+		if (done_apply_current_table(current_lsn))
+			return true;
+	}
 	else
 		process_syncing_tables_for_apply(current_lsn);
+
+	return false;
 }
 
 /*

@@ -18,7 +18,9 @@ extern PGDLLIMPORT volatile sig_atomic_t ParallelApplyMessagePending;
 
 extern void ApplyWorkerMain(Datum main_arg);
 extern void ParallelApplyWorkerMain(Datum main_arg);
+extern void TableSyncWorkerMain(Datum main_arg);
 
+extern void DisableSubscriptionAndExit(void);
 extern bool IsLogicalWorker(void);
 extern bool IsLogicalParallelApplyWorker(void);
 

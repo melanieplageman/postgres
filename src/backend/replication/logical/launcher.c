@@ -239,6 +239,30 @@ WaitForReplicationWorkerAttach(LogicalRepWorker *worker,
 	}
 }
 
+void
+logicalrep_order_sync_worker_death(Oid subid)
+{
+	int			i;
+
+	Assert(LWLockHeldByMe(LogicalRepWorkerLock));
+
+	/* Search for attached workers for a given subscription id and tell them to die. */
+	for (i = 0; i < max_logical_replication_workers; i++)
+	{
+		LogicalRepWorker *w = &LogicalRepCtx->workers[i];
+
+		/* Skip parallel apply workers. */
+		if (isParallelApplyWorker(w))
+			continue;
+
+		if (!w->am_sync_worker)
+			continue;
+
+		if (w->in_use && w->subid == subid && w->proc)
+			w->time_to_die = true;
+	}
+}
+
 /*
  * Walks the workers array and searches for one that matches given
  * subscription id and relid.
@@ -273,6 +297,41 @@ logicalrep_worker_find(Oid subid, Oid relid, bool only_running)
 	return res;
 }
 
+LogicalRepWorker *
+logicalrep_worker_find_for_sync(Oid subid, bool only_running)
+{
+	int			i;
+	LogicalRepWorker *res = NULL;
+
+	Assert(LWLockHeldByMe(LogicalRepWorkerLock));
+
+	/* Search for attached worker for a given subscription id. */
+	for (i = 0; i < max_logical_replication_workers; i++)
+	{
+		LogicalRepWorker *w = &LogicalRepCtx->workers[i];
+
+		/* Skip parallel apply workers. */
+		if (isParallelApplyWorker(w))
+			continue;
+
+		if (!w->am_sync_worker)
+			continue;
+
+		/* must be a sleeping tablesync worker */
+		if (w->relid != InvalidOid)
+			continue;
+
+		if (w->in_use && w->subid == subid && (!only_running || w->proc))
+		{
+			res = w;
+			break;
+		}
+	}
+
+	return res;
+}
+
+
 /*
  * Similar to logicalrep_worker_find(), but returns a list of all workers for
  * the subscription, instead of just one.
@@ -304,7 +363,7 @@ logicalrep_workers_find(Oid subid, bool only_running)
  */
 bool
 logicalrep_worker_launch(Oid dbid, Oid subid, const char *subname, Oid userid,
-						 Oid relid, dsm_handle subworker_dsm)
+						 Oid relid, dsm_handle subworker_dsm, bool sync_worker)
 {
 	BackgroundWorker bgw;
 	BackgroundWorkerHandle *bgw_handle;
@@ -445,6 +504,7 @@ retry:
 	TIMESTAMP_NOBEGIN(worker->last_recv_time);
 	worker->reply_lsn = InvalidXLogRecPtr;
 	TIMESTAMP_NOBEGIN(worker->reply_time);
+	worker->am_sync_worker = sync_worker;
 
 	/* Before releasing lock, remember generation for future identification. */
 	generation = worker->generation;
@@ -460,6 +520,8 @@ retry:
 
 	if (is_parallel_apply_worker)
 		snprintf(bgw.bgw_function_name, BGW_MAXLEN, "ParallelApplyWorkerMain");
+	else if (sync_worker)
+		snprintf(bgw.bgw_function_name, BGW_MAXLEN, "TableSyncWorkerMain");
 	else
 		snprintf(bgw.bgw_function_name, BGW_MAXLEN, "ApplyWorkerMain");
 
@@ -1155,7 +1217,7 @@ ApplyLauncherMain(Datum main_arg)
 				ApplyLauncherSetWorkerStartTime(sub->oid, now);
 				logicalrep_worker_launch(sub->dbid, sub->oid, sub->name,
 										 sub->owner, InvalidOid,
-										 DSM_HANDLE_INVALID);
+										 DSM_HANDLE_INVALID, false);
 			}
 			else
 			{

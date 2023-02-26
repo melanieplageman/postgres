@@ -208,6 +208,7 @@
 #include "utils/syscache.h"
 #include "utils/timeout.h"
 
+
 #define NAPTIME_PER_CYCLE 1000	/* max sleep time between cycles (1s) */
 
 typedef struct FlushPosition
@@ -390,8 +391,6 @@ static void stream_open_and_write_change(TransactionId xid, char action, StringI
 static void stream_close_file(void);
 
 static void send_feedback(XLogRecPtr recvpos, bool force, bool requestReply);
-
-static void DisableSubscriptionAndExit(void);
 
 static void apply_handle_commit_internal(LogicalRepCommitData *commit_data);
 static void apply_handle_insert_internal(ApplyExecutionData *edata,
@@ -3446,41 +3445,11 @@ UpdateWorkerStats(XLogRecPtr last_lsn, TimestampTz send_time, bool reply)
 /*
  * Apply main loop.
  */
-static void
+void
 LogicalRepApplyLoop(XLogRecPtr last_received)
 {
 	TimestampTz last_recv_timestamp = GetCurrentTimestamp();
 	bool		ping_sent = false;
-	TimeLineID	tli;
-	ErrorContextCallback errcallback;
-
-	/*
-	 * Init the ApplyMessageContext which we clean up after each replication
-	 * protocol message.
-	 */
-	ApplyMessageContext = AllocSetContextCreate(ApplyContext,
-												"ApplyMessageContext",
-												ALLOCSET_DEFAULT_SIZES);
-
-	/*
-	 * This memory context is used for per-stream data when the streaming mode
-	 * is enabled. This context is reset on each stream stop.
-	 */
-	LogicalStreamingContext = AllocSetContextCreate(ApplyContext,
-													"LogicalStreamingContext",
-													ALLOCSET_DEFAULT_SIZES);
-
-	/* mark as idle, before starting to loop */
-	pgstat_report_activity(STATE_IDLE, NULL);
-
-	/*
-	 * Push apply error context callback. Fields will be filled while applying
-	 * a change.
-	 */
-	errcallback.callback = apply_error_callback;
-	errcallback.previous = error_context_stack;
-	error_context_stack = &errcallback;
-	apply_error_context_stack = error_context_stack;
 
 	/* This outer loop iterates once per wait. */
 	for (;;)
@@ -3593,8 +3562,8 @@ LogicalRepApplyLoop(XLogRecPtr last_received)
 			AcceptInvalidationMessages();
 			maybe_reread_subscription();
 
-			/* Process any table synchronization changes. */
-			process_syncing_tables(last_received);
+			if (process_syncing_tables(last_received))
+				return;
 		}
 
 		/* Cleanup the memory. */
@@ -3691,14 +3660,8 @@ LogicalRepApplyLoop(XLogRecPtr last_received)
 			if (!IsTransactionState())
 				pgstat_report_stat(true);
 		}
+		// tell workers to go die
 	}
-
-	/* Pop the error context stack */
-	error_context_stack = errcallback.previous;
-	apply_error_context_stack = error_context_stack;
-
-	/* All done */
-	walrcv_endstreaming(LogRepWorkerWalRcvConn, &tli);
 }
 
 /*
@@ -4315,82 +4278,52 @@ TwoPhaseTransactionGid(Oid subid, TransactionId xid, char *gid, int szgid)
 	snprintf(gid, szgid, "pg_gid_%u_%u", subid, xid);
 }
 
-/*
- * Execute the initial sync with error handling. Disable the subscription,
- * if it's required.
- *
- * Allocate the slot name in long-lived context on return. Note that we don't
- * handle FATAL errors which are probably because of system resource error and
- * are not repeatable.
- */
-static void
-start_table_sync(XLogRecPtr *origin_startpos, char **myslotname)
+
+/* Build logical replication streaming options. */
+void
+logicalrep_worker_options_setup(WalRcvStreamOptions *options, char *slotname,
+		XLogRecPtr origin_startpos)
 {
-	char	   *syncslotname = NULL;
+	int server_version;
 
-	Assert(am_tablesync_worker());
+	options->logical = true;
+	options->startpoint = origin_startpos;
+	options->slotname = slotname;
 
-	PG_TRY();
+	server_version = walrcv_server_version(LogRepWorkerWalRcvConn);
+	options->proto.logical.proto_version =
+		server_version >= 160000 ? LOGICALREP_PROTO_STREAM_PARALLEL_VERSION_NUM :
+		server_version >= 150000 ? LOGICALREP_PROTO_TWOPHASE_VERSION_NUM :
+		server_version >= 140000 ? LOGICALREP_PROTO_STREAM_VERSION_NUM :
+		LOGICALREP_PROTO_VERSION_NUM;
+
+	options->proto.logical.publication_names = MySubscription->publications;
+	options->proto.logical.binary = MySubscription->binary;
+
+	/*
+	* Assign the appropriate option value for streaming option according to
+	* the 'streaming' mode and the publisher's ability to support that mode.
+	*/
+	if (server_version >= 160000 &&
+		MySubscription->stream == LOGICALREP_STREAM_PARALLEL)
 	{
-		/* Call initial sync. */
-		syncslotname = LogicalRepSyncTableStart(origin_startpos);
+		options->proto.logical.streaming_str = "parallel";
+		MyLogicalRepWorker->parallel_apply = true;
 	}
-	PG_CATCH();
+	else if (server_version >= 140000 &&
+			MySubscription->stream != LOGICALREP_STREAM_OFF)
 	{
-		if (MySubscription->disableonerr)
-			DisableSubscriptionAndExit();
-		else
-		{
-			/*
-			 * Report the worker failed during table synchronization. Abort
-			 * the current transaction so that the stats message is sent in an
-			 * idle state.
-			 */
-			AbortOutOfAnyTransaction();
-			pgstat_report_subscription_error(MySubscription->oid, false);
-
-			PG_RE_THROW();
-		}
+		options->proto.logical.streaming_str = "on";
+		MyLogicalRepWorker->parallel_apply = false;
 	}
-	PG_END_TRY();
-
-	/* allocate slot name in long-lived context */
-	*myslotname = MemoryContextStrdup(ApplyContext, syncslotname);
-	pfree(syncslotname);
-}
-
-/*
- * Run the apply loop with error handling. Disable the subscription,
- * if necessary.
- *
- * Note that we don't handle FATAL errors which are probably because
- * of system resource error and are not repeatable.
- */
-static void
-start_apply(XLogRecPtr origin_startpos)
-{
-	PG_TRY();
+	else
 	{
-		LogicalRepApplyLoop(origin_startpos);
+		options->proto.logical.streaming_str = NULL;
+		MyLogicalRepWorker->parallel_apply = false;
 	}
-	PG_CATCH();
-	{
-		if (MySubscription->disableonerr)
-			DisableSubscriptionAndExit();
-		else
-		{
-			/*
-			 * Report the worker failed while applying changes. Abort the
-			 * current transaction so that the stats message is sent in an
-			 * idle state.
-			 */
-			AbortOutOfAnyTransaction();
-			pgstat_report_subscription_error(MySubscription->oid, !am_tablesync_worker());
 
-			PG_RE_THROW();
-		}
-	}
-	PG_END_TRY();
+	options->proto.logical.twophase = false;
+	options->proto.logical.origin = pstrdup(MySubscription->origin);
 }
 
 /*
@@ -4476,16 +4409,68 @@ InitializeApplyWorker(void)
 	CommitTransactionCommand();
 }
 
+
+
+void
+TableSyncWorkerMain(Datum main_arg)
+{
+	int			worker_slot = DatumGetInt32(main_arg);
+	/* Attach to slot */
+	logicalrep_worker_attach(worker_slot);
+
+	/* Setup signal handling */
+	pqsignal(SIGHUP, SignalHandlerForConfigReload);
+	pqsignal(SIGTERM, die);
+	BackgroundWorkerUnblockSignals();
+
+	/* Initialise stats to a sanish value */
+	MyLogicalRepWorker->last_send_time = MyLogicalRepWorker->last_recv_time =
+		MyLogicalRepWorker->reply_time = GetCurrentTimestamp();
+
+	/* Load the libpq-specific functions */
+	load_file("libpqwalreceiver", false);
+
+	InitializeApplyWorker();
+
+	/* Connect to the origin and start the replication. */
+	elog(DEBUG1, "connecting to publisher using connection string \"%s\"",
+		 MySubscription->conninfo);
+
+	/*
+	 * Init the ApplyMessageContext which we clean up after each replication
+	 * protocol message.
+	 */
+	ApplyMessageContext = AllocSetContextCreate(ApplyContext,
+												"ApplyMessageContext",
+												ALLOCSET_DEFAULT_SIZES);
+
+	/*
+	 * This memory context is used for per-stream data when the streaming mode
+	 * is enabled. This context is reset on each stream stop.
+	 */
+	LogicalStreamingContext = AllocSetContextCreate(ApplyContext,
+													"LogicalStreamingContext",
+													ALLOCSET_DEFAULT_SIZES);
+
+	TableSyncWorkerLoop();
+	proc_exit(0);
+}
+
+
+
 /* Logical Replication Apply worker entry point */
 void
 ApplyWorkerMain(Datum main_arg)
 {
-	int			worker_slot = DatumGetInt32(main_arg);
 	char		originname[NAMEDATALEN];
-	XLogRecPtr	origin_startpos = InvalidXLogRecPtr;
-	char	   *myslotname = NULL;
+	RepOriginId originid;
+	char	   *myslotname =  MySubscription->slotname;
 	WalRcvStreamOptions options;
-	int			server_version;
+	TimeLineID	startpointTLI;
+	char	   *err;
+	XLogRecPtr	origin_startpos = InvalidXLogRecPtr;
+
+	int			worker_slot = DatumGetInt32(main_arg);
 
 	/* Attach to slot */
 	logicalrep_worker_attach(worker_slot);
@@ -4513,155 +4498,153 @@ ApplyWorkerMain(Datum main_arg)
 	elog(DEBUG1, "connecting to publisher using connection string \"%s\"",
 		 MySubscription->conninfo);
 
-	if (am_tablesync_worker())
-	{
-		start_table_sync(&origin_startpos, &myslotname);
-
-		ReplicationOriginNameForLogicalRep(MySubscription->oid,
-										   MyLogicalRepWorker->relid,
-										   originname,
-										   sizeof(originname));
-		set_apply_error_context_origin(originname);
-	}
-	else
-	{
-		/* This is the leader apply worker */
-		RepOriginId originid;
-		TimeLineID	startpointTLI;
-		char	   *err;
-
-		myslotname = MySubscription->slotname;
-
-		/*
-		 * This shouldn't happen if the subscription is enabled, but guard
-		 * against DDL bugs or manual catalog changes.  (libpqwalreceiver will
-		 * crash if slot is NULL.)
-		 */
-		if (!myslotname)
-			ereport(ERROR,
-					(errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
-					 errmsg("subscription has no replication slot set")));
-
-		/* Setup replication origin tracking. */
-		StartTransactionCommand();
-		ReplicationOriginNameForLogicalRep(MySubscription->oid, InvalidOid,
-										   originname, sizeof(originname));
-		originid = replorigin_by_name(originname, true);
-		if (!OidIsValid(originid))
-			originid = replorigin_create(originname);
-		replorigin_session_setup(originid, 0);
-		replorigin_session_origin = originid;
-		origin_startpos = replorigin_session_get_progress(false);
-		CommitTransactionCommand();
-
-		LogRepWorkerWalRcvConn = walrcv_connect(MySubscription->conninfo, true,
-												MySubscription->name, &err);
-		if (LogRepWorkerWalRcvConn == NULL)
-			ereport(ERROR,
-					(errcode(ERRCODE_CONNECTION_FAILURE),
-					 errmsg("could not connect to the publisher: %s", err)));
-
-		/*
-		 * We don't really use the output identify_system for anything but it
-		 * does some initializations on the upstream so let's still call it.
-		 */
-		(void) walrcv_identify_system(LogRepWorkerWalRcvConn, &startpointTLI);
-
-		set_apply_error_context_origin(originname);
-	}
+	/*
+	 * Init the ApplyMessageContext which we clean up after each replication
+	 * protocol message.
+	 */
+	ApplyMessageContext = AllocSetContextCreate(ApplyContext,
+												"ApplyMessageContext",
+												ALLOCSET_DEFAULT_SIZES);
 
 	/*
-	 * Setup callback for syscache so that we know when something changes in
-	 * the subscription relation state.
+	 * This memory context is used for per-stream data when the streaming mode
+	 * is enabled. This context is reset on each stream stop.
 	 */
+	LogicalStreamingContext = AllocSetContextCreate(ApplyContext,
+													"LogicalStreamingContext",
+													ALLOCSET_DEFAULT_SIZES);
+
+
+	/*
+		* This shouldn't happen if the subscription is enabled, but guard
+		* against DDL bugs or manual catalog changes.  (libpqwalreceiver will
+		* crash if slot is NULL.)
+		*/
+	if (!myslotname)
+		ereport(ERROR,
+				(errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
+					errmsg("subscription has no replication slot set")));
+
+	/* Setup replication origin tracking. */
+	StartTransactionCommand();
+	ReplicationOriginNameForLogicalRep(MySubscription->oid, InvalidOid,
+										originname, sizeof(originname));
+	originid = replorigin_by_name(originname, true);
+	if (!OidIsValid(originid))
+		originid = replorigin_create(originname);
+	replorigin_session_setup(originid, 0);
+	replorigin_session_origin = originid;
+	origin_startpos = replorigin_session_get_progress(false);
+	CommitTransactionCommand();
+
+	LogRepWorkerWalRcvConn = walrcv_connect(MySubscription->conninfo, true,
+											MySubscription->name, &err);
+	if (LogRepWorkerWalRcvConn == NULL)
+		ereport(ERROR,
+				(errcode(ERRCODE_CONNECTION_FAILURE),
+					errmsg("could not connect to the publisher: %s", err)));
+
+	/*
+		* We don't really use the output identify_system for anything but it
+		* does some initializations on the upstream so let's still call it.
+		*/
+	(void) walrcv_identify_system(LogRepWorkerWalRcvConn, &startpointTLI);
+
+	set_apply_error_context_origin(originname);
+	/*
+	* Setup callback for syscache so that we know when something changes in
+	* the subscription relation state.
+	*/
 	CacheRegisterSyscacheCallback(SUBSCRIPTIONRELMAP,
-								  invalidate_syncing_table_states,
-								  (Datum) 0);
+								invalidate_syncing_table_states,
+								(Datum) 0);
 
-	/* Build logical replication streaming options. */
-	options.logical = true;
-	options.startpoint = origin_startpos;
-	options.slotname = myslotname;
-
-	server_version = walrcv_server_version(LogRepWorkerWalRcvConn);
-	options.proto.logical.proto_version =
-		server_version >= 160000 ? LOGICALREP_PROTO_STREAM_PARALLEL_VERSION_NUM :
-		server_version >= 150000 ? LOGICALREP_PROTO_TWOPHASE_VERSION_NUM :
-		server_version >= 140000 ? LOGICALREP_PROTO_STREAM_VERSION_NUM :
-		LOGICALREP_PROTO_VERSION_NUM;
-
-	options.proto.logical.publication_names = MySubscription->publications;
-	options.proto.logical.binary = MySubscription->binary;
+	logicalrep_worker_options_setup(&options, myslotname, origin_startpos);
 
 	/*
-	 * Assign the appropriate option value for streaming option according to
-	 * the 'streaming' mode and the publisher's ability to support that mode.
-	 */
-	if (server_version >= 160000 &&
-		MySubscription->stream == LOGICALREP_STREAM_PARALLEL)
+		* Even when the two_phase mode is requested by the user, it remains
+		* as the tri-state PENDING until all tablesyncs have reached READY
+		* state. Only then, can it become ENABLED.
+		*
+		* Note: If the subscription has no tables then leave the state as
+		* PENDING, which allows ALTER SUBSCRIPTION ... REFRESH PUBLICATION to
+		* work.
+		*/
+	if (MySubscription->twophasestate == LOGICALREP_TWOPHASE_STATE_PENDING &&
+		AllTablesyncsReady())
 	{
-		options.proto.logical.streaming_str = "parallel";
-		MyLogicalRepWorker->parallel_apply = true;
-	}
-	else if (server_version >= 140000 &&
-			 MySubscription->stream != LOGICALREP_STREAM_OFF)
-	{
-		options.proto.logical.streaming_str = "on";
-		MyLogicalRepWorker->parallel_apply = false;
-	}
-	else
-	{
-		options.proto.logical.streaming_str = NULL;
-		MyLogicalRepWorker->parallel_apply = false;
-	}
+		/* Start streaming with two_phase enabled */
+		options.proto.logical.twophase = true;
+		walrcv_startstreaming(LogRepWorkerWalRcvConn, &options);
 
-	options.proto.logical.twophase = false;
-	options.proto.logical.origin = pstrdup(MySubscription->origin);
-
-	if (!am_tablesync_worker())
-	{
-		/*
-		 * Even when the two_phase mode is requested by the user, it remains
-		 * as the tri-state PENDING until all tablesyncs have reached READY
-		 * state. Only then, can it become ENABLED.
-		 *
-		 * Note: If the subscription has no tables then leave the state as
-		 * PENDING, which allows ALTER SUBSCRIPTION ... REFRESH PUBLICATION to
-		 * work.
-		 */
-		if (MySubscription->twophasestate == LOGICALREP_TWOPHASE_STATE_PENDING &&
-			AllTablesyncsReady())
-		{
-			/* Start streaming with two_phase enabled */
-			options.proto.logical.twophase = true;
-			walrcv_startstreaming(LogRepWorkerWalRcvConn, &options);
-
-			StartTransactionCommand();
-			UpdateTwoPhaseState(MySubscription->oid, LOGICALREP_TWOPHASE_STATE_ENABLED);
-			MySubscription->twophasestate = LOGICALREP_TWOPHASE_STATE_ENABLED;
-			CommitTransactionCommand();
-		}
-		else
-		{
-			walrcv_startstreaming(LogRepWorkerWalRcvConn, &options);
-		}
-
-		ereport(DEBUG1,
-				(errmsg_internal("logical replication apply worker for subscription \"%s\" two_phase is %s",
-						MySubscription->name,
-						MySubscription->twophasestate == LOGICALREP_TWOPHASE_STATE_DISABLED ? "DISABLED" :
-						MySubscription->twophasestate == LOGICALREP_TWOPHASE_STATE_PENDING ? "PENDING" :
-						MySubscription->twophasestate == LOGICALREP_TWOPHASE_STATE_ENABLED ? "ENABLED" :
-						"?")));
+		StartTransactionCommand();
+		UpdateTwoPhaseState(MySubscription->oid, LOGICALREP_TWOPHASE_STATE_ENABLED);
+		MySubscription->twophasestate = LOGICALREP_TWOPHASE_STATE_ENABLED;
+		CommitTransactionCommand();
 	}
 	else
 	{
-		/* Start normal logical streaming replication. */
 		walrcv_startstreaming(LogRepWorkerWalRcvConn, &options);
 	}
 
+	ereport(DEBUG1,
+			(errmsg_internal("logical replication apply worker for subscription \"%s\" two_phase is %s",
+					MySubscription->name,
+					MySubscription->twophasestate == LOGICALREP_TWOPHASE_STATE_DISABLED ? "DISABLED" :
+					MySubscription->twophasestate == LOGICALREP_TWOPHASE_STATE_PENDING ? "PENDING" :
+					MySubscription->twophasestate == LOGICALREP_TWOPHASE_STATE_ENABLED ? "ENABLED" :
+					"?")));
+
 	/* Run the main loop. */
-	start_apply(origin_startpos);
+	PG_TRY();
+	{
+		ErrorContextCallback errcallback;
+		TimeLineID	tli;
+
+		/* mark as idle, before starting to loop */
+		pgstat_report_activity(STATE_IDLE, NULL);
+
+
+		/*
+		* Push apply error context callback. Fields will be filled while applying
+		* a change.
+		*/
+		errcallback.callback = apply_error_callback;
+		errcallback.previous = error_context_stack;
+		error_context_stack = &errcallback;
+		apply_error_context_stack = error_context_stack;
+
+		LogicalRepApplyLoop(origin_startpos);
+
+		/* Pop the error context stack */
+		error_context_stack = errcallback.previous;
+		apply_error_context_stack = error_context_stack;
+
+		/* All done */
+		walrcv_endstreaming(LogRepWorkerWalRcvConn, &tli);
+
+		LWLockAcquire(LogicalRepWorkerLock, LW_EXCLUSIVE);
+		logicalrep_order_sync_worker_death(MySubscription->oid);
+		LWLockRelease(LogicalRepWorkerLock);
+	}
+	PG_CATCH();
+	{
+		if (MySubscription->disableonerr)
+			DisableSubscriptionAndExit();
+		else
+		{
+			/*
+			* Report the worker failed while applying changes. Abort the
+			* current transaction so that the stats message is sent in an
+			* idle state.
+			*/
+			AbortOutOfAnyTransaction();
+			pgstat_report_subscription_error(MySubscription->oid, !am_tablesync_worker());
+
+			PG_RE_THROW();
+		}
+	}
+	PG_END_TRY();
 
 	proc_exit(0);
 }
@@ -4670,7 +4653,7 @@ ApplyWorkerMain(Datum main_arg)
  * After error recovery, disable the subscription in a new transaction
  * and exit cleanly.
  */
-static void
+void
 DisableSubscriptionAndExit(void)
 {
 	/*

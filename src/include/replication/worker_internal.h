@@ -19,6 +19,7 @@
 #include "datatype/timestamp.h"
 #include "miscadmin.h"
 #include "replication/logicalrelation.h"
+#include "replication/walreceiver.h"
 #include "storage/buffile.h"
 #include "storage/fileset.h"
 #include "storage/lock.h"
@@ -82,6 +83,10 @@ typedef struct LogicalRepWorker
 	TimestampTz last_recv_time;
 	XLogRecPtr	reply_lsn;
 	TimestampTz reply_time;
+	// TODO: can probably be replaced with like suscription id being set null or something
+	bool time_to_die;
+	// TODO: is probably redundant with relid + subid or something like this but add it now for simplicity
+	bool am_sync_worker;
 } LogicalRepWorker;
 
 /*
@@ -228,10 +233,14 @@ extern PGDLLIMPORT bool in_remote_transaction;
 extern void logicalrep_worker_attach(int slot);
 extern LogicalRepWorker *logicalrep_worker_find(Oid subid, Oid relid,
 												bool only_running);
+extern void logicalrep_order_sync_worker_death(Oid subid);
+
+extern LogicalRepWorker *logicalrep_worker_find_for_sync(Oid subid, bool only_running);
+
 extern List *logicalrep_workers_find(Oid subid, bool only_running);
 extern bool logicalrep_worker_launch(Oid dbid, Oid subid, const char *subname,
 									 Oid userid, Oid relid,
-									 dsm_handle subworker_dsm);
+									 dsm_handle subworker_dsm, bool sync_worker);
 extern void logicalrep_worker_stop(Oid subid, Oid relid);
 extern void logicalrep_pa_worker_stop(int slot_no, uint16 generation);
 extern void logicalrep_worker_wakeup(Oid subid, Oid relid);
@@ -246,7 +255,18 @@ extern char *LogicalRepSyncTableStart(XLogRecPtr *origin_startpos);
 extern bool AllTablesyncsReady(void);
 extern void UpdateTwoPhaseState(Oid suboid, char new_state);
 
-extern void process_syncing_tables(XLogRecPtr current_lsn);
+
+extern bool
+done_apply_current_table(XLogRecPtr current_lsn);
+
+extern void
+logicalrep_worker_options_setup(WalRcvStreamOptions *options, char *slotname,
+		XLogRecPtr origin_startpos);
+
+extern void
+LogicalRepApplyLoop(XLogRecPtr last_received);
+extern void TableSyncWorkerLoop(void);
+extern bool process_syncing_tables(XLogRecPtr current_lsn);
 extern void invalidate_syncing_table_states(Datum arg, int cacheid,
 											uint32 hashvalue);
 
@@ -308,7 +328,7 @@ extern void pa_xact_finish(ParallelApplyWorkerInfo *winfo,
 static inline bool
 am_tablesync_worker(void)
 {
-	return OidIsValid(MyLogicalRepWorker->relid);
+	return MyLogicalRepWorker->am_sync_worker && OidIsValid(MyLogicalRepWorker->relid);
 }
 
 static inline bool
