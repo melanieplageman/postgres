@@ -33,6 +33,7 @@ PG_MODULE_MAGIC;
 PG_FUNCTION_INFO_V1(pg_get_wal_fpi_info);
 PG_FUNCTION_INFO_V1(pg_get_wal_record_info);
 PG_FUNCTION_INFO_V1(pg_get_wal_records_info);
+PG_FUNCTION_INFO_V1(pg_get_wal_records_extended_info);
 PG_FUNCTION_INFO_V1(pg_get_wal_records_info_till_end_of_wal);
 PG_FUNCTION_INFO_V1(pg_get_wal_stats);
 PG_FUNCTION_INFO_V1(pg_get_wal_stats_till_end_of_wal);
@@ -220,6 +221,7 @@ GetWALRecordInfo(XLogReaderState *record, Datum *values,
 }
 
 
+
 /*
  * Store a set of full page images from a single record.
  */
@@ -341,6 +343,115 @@ pg_get_wal_fpi_info(PG_FUNCTION_ARGS)
 
 	PG_RETURN_VOID();
 }
+
+/*
+ * Store a set of block ref infos from a single record.
+ */
+static void
+GetWALBlockRefInfo(FunctionCallInfo fcinfo, XLogReaderState *record)
+{
+#define PG_GET_WAL_BLOCK_REF_INFO_COLS 15
+	StringInfoData rec_desc;
+	ReturnSetInfo *rsinfo = (ReturnSetInfo *) fcinfo->resultinfo;
+	uint32		main_data_len = XLogRecGetDataLen(record);
+	RmgrData	desc = GetRmgr(XLogRecGetRmid(record));
+	const char *id = desc.rm_identify(XLogRecGetInfo(record));
+
+	if (id == NULL)
+		id = psprintf("UNKNOWN (%x)", XLogRecGetInfo(record) & ~XLR_INFO_MASK);
+
+	initStringInfo(&rec_desc);
+	desc.rm_desc(&rec_desc, record);
+
+
+	for (int block_id = 0; block_id <= XLogRecMaxBlockId(record); block_id++)
+	{
+		DecodedBkpBlock *block;
+		Datum		values[PG_GET_WAL_BLOCK_REF_INFO_COLS] = {0};
+		bool		nulls[PG_GET_WAL_BLOCK_REF_INFO_COLS] = {0};
+		int			i = 0;
+
+		if (!XLogRecHasBlockRef(record, block_id))
+			continue;
+
+		block = XLogRecGetBlock(record, block_id);
+
+		values[i++] = LSNGetDatum(record->ReadRecPtr);
+		values[i++] = LSNGetDatum(record->EndRecPtr);
+		values[i++] = LSNGetDatum(XLogRecGetPrev(record));
+		values[i++] = TransactionIdGetDatum(XLogRecGetXid(record));
+		values[i++] = CStringGetTextDatum(desc.rm_name);
+		values[i++] = CStringGetTextDatum(id);
+		values[i++] = UInt32GetDatum(XLogRecGetTotalLen(record));
+		values[i++] = UInt32GetDatum(main_data_len);
+		values[i++] = CStringGetTextDatum(rec_desc.data);
+		values[i++] = Int64GetDatum(block_id);
+		values[i++] = Int64GetDatum((int64) block->blkno);
+		values[i++] = ObjectIdGetDatum(block->rlocator.spcOid);
+		values[i++] = ObjectIdGetDatum(block->rlocator.dbOid);
+		values[i++] = ObjectIdGetDatum(block->rlocator.relNumber);
+
+		if (block->forknum >= 0 && block->forknum <= MAX_FORKNUM)
+			values[i++] = CStringGetTextDatum(forkNames[block->forknum]);
+		else
+			ereport(ERROR,
+					(errcode(ERRCODE_INTERNAL_ERROR),
+					 errmsg_internal("invalid fork number: %u", block->forknum)));
+
+		Assert(i == PG_GET_WAL_BLOCK_REF_INFO_COLS);
+
+		tuplestore_putvalues(rsinfo->setResult, rsinfo->setDesc,
+							 values, nulls);
+	}
+
+#undef PG_GET_WAL_BLOCK_REF_INFO_COLS
+}
+
+Datum
+pg_get_wal_records_extended_info(PG_FUNCTION_ARGS)
+{
+	XLogRecPtr	start_lsn;
+	XLogRecPtr	end_lsn;
+	XLogReaderState *xlogreader;
+	MemoryContext old_cxt;
+	MemoryContext tmp_cxt;
+
+	start_lsn = PG_GETARG_LSN(0);
+	end_lsn = PG_GETARG_LSN(1);
+
+	end_lsn = ValidateInputLSNs(false, start_lsn, end_lsn);
+
+	InitMaterializedSRF(fcinfo, 0);
+
+	xlogreader = InitXLogReaderState(start_lsn);
+
+	tmp_cxt = AllocSetContextCreate(CurrentMemoryContext,
+									"pg_get_wal_records_extended_info temporary cxt",
+									ALLOCSET_DEFAULT_SIZES);
+
+	while (ReadNextXLogRecord(xlogreader) &&
+		   xlogreader->EndRecPtr <= end_lsn)
+	{
+		/* Use the tmp context so we can clean up after each tuple is done */
+		old_cxt = MemoryContextSwitchTo(tmp_cxt);
+
+
+		GetWALBlockRefInfo(fcinfo, xlogreader);
+
+		/* clean up and switch back */
+		MemoryContextSwitchTo(old_cxt);
+		MemoryContextReset(tmp_cxt);
+
+		CHECK_FOR_INTERRUPTS();
+	}
+
+	MemoryContextDelete(tmp_cxt);
+	pfree(xlogreader->private_data);
+	XLogReaderFree(xlogreader);
+
+	PG_RETURN_VOID();
+}
+
 
 /*
  * Get WAL record info.
