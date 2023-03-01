@@ -22,6 +22,7 @@
 #include "miscadmin.h"
 #include "utils/builtins.h"
 #include "utils/pg_lsn.h"
+#include "utils/array.h"
 
 /*
  * NOTE: For any code change or issue fix here, it is highly recommended to
@@ -57,6 +58,8 @@ static void FillXLogStatsRow(const char *name, uint64 n, uint64 total_count,
 static void GetWalStats(FunctionCallInfo fcinfo, XLogRecPtr start_lsn,
 						XLogRecPtr end_lsn, bool stats_per_record);
 static void GetWALFPIInfo(FunctionCallInfo fcinfo, XLogReaderState *record);
+static Datum
+walinspect_get_blkrefs(XLogReaderState *record, uint32 *fpi_data_size);
 
 /*
  * Check if the given LSN is in future. Also, return the LSN up to which the
@@ -174,6 +177,95 @@ ReadNextXLogRecord(XLogReaderState *xlogreader)
 	return record;
 }
 
+/* number of block ref items to display for every block (cols for our array) */
+#define WAL_BLOCK_INFO_TYPES 9
+
+static Datum
+walinspect_get_blkrefs(XLogReaderState *record, uint32 *fpi_data_size)
+{
+	DecodedBkpBlock *block;
+	ArrayType *aout;
+	Datum *cur_result;
+	Datum *result_datums;
+	bool *result_nulls;
+	int dims[2];
+	int lbs[2] = {0,0};
+	int nblocks = 0; /* nblocks is the number of rows of blocks */
+
+	int max_block_id  = XLogRecMaxBlockId(record);
+
+	/* determine how many blocks we have */
+	for (int block_id = 0; block_id <= max_block_id; block_id++)
+	{
+		if (XLogRecHasBlockRef(record, block_id))
+			nblocks++;
+	}
+
+	dims[0] = nblocks;
+	dims[1] = WAL_BLOCK_INFO_TYPES;
+
+	result_datums = palloc0(sizeof(Datum) * WAL_BLOCK_INFO_TYPES * nblocks);
+	result_nulls = palloc0(sizeof(bool) * WAL_BLOCK_INFO_TYPES * nblocks);
+
+	cur_result = result_datums;
+
+	for (int block_id = 0; block_id <= max_block_id; block_id++)
+	{
+		if (!XLogRecHasBlockRef(record, block_id))
+			continue;
+
+		block = XLogRecGetBlock(record, block_id);
+
+		*cur_result++ = Int32GetDatum(block_id);
+		*cur_result++ = Int32GetDatum(block->rlocator.spcOid);
+		*cur_result++ = Int32GetDatum(block->rlocator.dbOid);
+		*cur_result++ = Int32GetDatum(block->rlocator.relNumber);
+		*cur_result++ = Int32GetDatum(block->forknum);
+		*cur_result++ = Int32GetDatum(block->blkno);
+
+		if (!block->has_image)
+		{
+			cur_result += 3;
+			continue;
+		}
+
+		(*fpi_data_size) += block->bimg_len;
+
+		*cur_result++ = Int32GetDatum(block->hole_offset);
+		*cur_result++ = Int32GetDatum(block->hole_length);
+
+		if (!BKPIMAGE_COMPRESSED(block->bimg_info))
+		{
+			cur_result++;
+			continue;
+		}
+
+		*cur_result++ = Int32GetDatum(BLCKSZ - block->hole_length - block->bimg_len);
+	}
+
+	aout = construct_md_array(result_datums, result_nulls, 2, dims, lbs,
+			INT8OID, sizeof(int64), FLOAT8PASSBYVAL, TYPALIGN_DOUBLE);
+
+	PG_RETURN_POINTER(aout);
+}
+
+typedef enum wal_record_cols
+{
+	WAL_RECORD_START_LSN,
+	WAL_RECORD_END_LSN,
+	WAL_RECORD_PREV_LSN,
+	WAL_RECORD_XID,
+	WAL_RECORD_RMGR,
+	WAL_RECORD_TYPE,
+	WAL_RECORD_LENGTH,
+	WAL_RECORD_MAIN_DATA_LENGTH,
+	WAL_RECORD_FPI_LENGTH,
+	WAL_RECORD_DESC,
+	WAL_RECORD_BLOCK_REF
+} wal_record_cols;
+
+#define WAL_RECORD_NUM_COLS (WAL_RECORD_BLOCK_REF + 1)
+
 /*
  * Get a single WAL record info.
  */
@@ -183,40 +275,35 @@ GetWALRecordInfo(XLogReaderState *record, Datum *values,
 {
 	const char *id;
 	RmgrData	desc;
-	uint32		fpi_len = 0;
 	StringInfoData rec_desc;
-	StringInfoData rec_blk_ref;
-	uint32		main_data_len;
-	int			i = 0;
+	Datum blkref_array;
+	uint32		fpi_len = 0;
+
+	values[WAL_RECORD_START_LSN] = LSNGetDatum(record->ReadRecPtr);
+	values[WAL_RECORD_END_LSN] = LSNGetDatum(record->EndRecPtr);
+	values[WAL_RECORD_PREV_LSN] = LSNGetDatum(XLogRecGetPrev(record));
+	values[WAL_RECORD_XID] = TransactionIdGetDatum(XLogRecGetXid(record));
 
 	desc = GetRmgr(XLogRecGetRmid(record));
-	id = desc.rm_identify(XLogRecGetInfo(record));
+	values[WAL_RECORD_RMGR] = CStringGetTextDatum(desc.rm_name);
 
+	id = desc.rm_identify(XLogRecGetInfo(record));
 	if (id == NULL)
 		id = psprintf("UNKNOWN (%x)", XLogRecGetInfo(record) & ~XLR_INFO_MASK);
+	values[WAL_RECORD_TYPE] = CStringGetTextDatum(id);
 
+	values[WAL_RECORD_LENGTH] = UInt32GetDatum(XLogRecGetTotalLen(record));
+	values[WAL_RECORD_MAIN_DATA_LENGTH] = UInt32GetDatum(XLogRecGetDataLen(record));
+
+	blkref_array = walinspect_get_blkrefs(record, &fpi_len);
+
+	values[WAL_RECORD_FPI_LENGTH] = UInt32GetDatum(fpi_len);
 	initStringInfo(&rec_desc);
 	desc.rm_desc(&rec_desc, record);
+	values[WAL_RECORD_DESC] = CStringGetTextDatum(rec_desc.data);
+	values[WAL_RECORD_BLOCK_REF] = blkref_array;
 
-	/* Block references. */
-	initStringInfo(&rec_blk_ref);
-	XLogRecGetBlockRefInfo(record, false, true, &rec_blk_ref, &fpi_len);
-
-	main_data_len = XLogRecGetDataLen(record);
-
-	values[i++] = LSNGetDatum(record->ReadRecPtr);
-	values[i++] = LSNGetDatum(record->EndRecPtr);
-	values[i++] = LSNGetDatum(XLogRecGetPrev(record));
-	values[i++] = TransactionIdGetDatum(XLogRecGetXid(record));
-	values[i++] = CStringGetTextDatum(desc.rm_name);
-	values[i++] = CStringGetTextDatum(id);
-	values[i++] = UInt32GetDatum(XLogRecGetTotalLen(record));
-	values[i++] = UInt32GetDatum(main_data_len);
-	values[i++] = UInt32GetDatum(fpi_len);
-	values[i++] = CStringGetTextDatum(rec_desc.data);
-	values[i++] = CStringGetTextDatum(rec_blk_ref.data);
-
-	Assert(i == ncols);
+	Assert(ncols == WAL_RECORD_NUM_COLS);
 }
 
 

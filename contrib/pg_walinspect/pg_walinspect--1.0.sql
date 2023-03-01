@@ -17,7 +17,7 @@ CREATE FUNCTION pg_get_wal_record_info(IN in_lsn pg_lsn,
     OUT main_data_length int4,
     OUT fpi_length int4,
     OUT description text,
-    OUT block_ref text
+    OUT block_ref int4[][]
 )
 AS 'MODULE_PATHNAME', 'pg_get_wal_record_info'
 LANGUAGE C STRICT PARALLEL SAFE;
@@ -40,7 +40,7 @@ CREATE FUNCTION pg_get_wal_records_info(IN start_lsn pg_lsn,
     OUT main_data_length int4,
     OUT fpi_length int4,
     OUT description text,
-    OUT block_ref text
+    OUT block_ref int4[][]
 )
 RETURNS SETOF record
 AS 'MODULE_PATHNAME', 'pg_get_wal_records_info'
@@ -63,7 +63,7 @@ CREATE FUNCTION pg_get_wal_records_info_till_end_of_wal(IN start_lsn pg_lsn,
     OUT main_data_length int4,
     OUT fpi_length int4,
     OUT description text,
-    OUT block_ref text
+    OUT block_ref int4[][]
 )
 RETURNS SETOF record
 AS 'MODULE_PATHNAME', 'pg_get_wal_records_info_till_end_of_wal'
