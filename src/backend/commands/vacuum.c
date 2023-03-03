@@ -2224,11 +2224,12 @@ vacuum_delay_point(void)
 		 *
 		 * Note that while autovacuum workers also reload the configuration
 		 * file here, their values of VacuumCostDelay and VacuumCostLimit are
-		 * overridden below in AutoVacuumUpdateDelay() with the values of
-		 * wi_cost_limit and wi_cost_delay stored in their worker info.
-		 * wi_cost_limit and wi_cost_delay are set by the autovacuum launcher
-		 * when processing the configuration file reload or by the autovacuum
-		 * worker between tables in autovac_balance_cost().
+		 * overridden below in AutoVacuumOverrideCostDelayParameters() with
+		 * the values of wi_cost_limit and wi_cost_delay stored in their
+		 * worker info. wi_cost_limit and wi_cost_delay are set by the
+		 * autovacuum launcher when processing the configuration file reload
+		 * or by the autovacuum worker between tables in
+		 * autovac_balance_cost().
 		 */
 		if (ConfigReloadPending && !analyze_in_outer_xact)
 		{
@@ -2240,7 +2241,7 @@ vacuum_delay_point(void)
 		VacuumCostActive = (VacuumCostDelay > 0);
 
 		/* update balance values for workers */
-		AutoVacuumUpdateDelay();
+		AutoVacuumOverrideCostDelayParameters();
 
 		/* Might have gotten an interrupt while sleeping */
 		CHECK_FOR_INTERRUPTS();

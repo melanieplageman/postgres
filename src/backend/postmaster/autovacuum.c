@@ -322,7 +322,7 @@ static void launch_worker(TimestampTz now);
 static List *get_database_list(void);
 static void rebuild_database_list(Oid newdb);
 static int	db_comparator(const void *a, const void *b);
-static void autovac_balance_cost(void);
+static void autovac_balance_cost_update_delay(void);
 
 static void do_autovacuum(void);
 static void FreeWorkerInfo(int code, Datum arg);
@@ -673,7 +673,7 @@ AutoVacLauncherMain(int argc, char *argv[])
 			{
 				LWLockAcquire(AutovacuumLock, LW_EXCLUSIVE);
 				AutoVacuumShmem->av_signal[AutoVacRebalance] = false;
-				autovac_balance_cost();
+				autovac_balance_cost_update_delay();
 				LWLockRelease(AutovacuumLock);
 			}
 
@@ -824,7 +824,7 @@ HandleAutoVacLauncherInterrupts(void)
 
 		/* rebalance in case the default cost parameters changed */
 		LWLockAcquire(AutovacuumLock, LW_EXCLUSIVE);
-		autovac_balance_cost();
+		autovac_balance_cost_update_delay();
 		LWLockRelease(AutovacuumLock);
 
 		/* rebuild the list in case the naptime changed */
@@ -1781,7 +1781,7 @@ FreeWorkerInfo(int code, Datum arg)
  * each a fraction of the total available I/O.
  */
 void
-AutoVacuumUpdateDelay(void)
+AutoVacuumOverrideCostDelayParameters(void)
 {
 	if (MyWorkerInfo)
 	{
@@ -1792,14 +1792,14 @@ AutoVacuumUpdateDelay(void)
 }
 
 /*
- * autovac_balance_cost
+ * autovac_balance_cost_update_delay
  *		Recalculate the cost limit setting for each active worker and update
  *		each active worker's cost delay.
  *
  * Caller must hold the AutovacuumLock in exclusive mode.
  */
 static void
-autovac_balance_cost(void)
+autovac_balance_cost_update_delay(void)
 {
 	/*
 	 * The idea here is that we ration out I/O equally.  The amount of I/O
@@ -2483,10 +2483,10 @@ do_autovacuum(void)
 		MyWorkerInfo->wi_cost_limit_base = tab->at_vacuum_cost_limit;
 
 		/* do a balance */
-		autovac_balance_cost();
+		autovac_balance_cost_update_delay();
 
 		/* set the active cost parameters from the result of that */
-		AutoVacuumUpdateDelay();
+		AutoVacuumOverrideCostDelayParameters();
 
 		/* done */
 		LWLockRelease(AutovacuumLock);
