@@ -139,6 +139,9 @@ int			Log_autovacuum_min_duration = 600000;
 static bool am_autovacuum_launcher = false;
 static bool am_autovacuum_worker = false;
 
+static bool av_use_table_option_cost_delay = false;
+static double av_table_option_cost_delay = 0;
+
 /* Flags set by signal handlers */
 static volatile sig_atomic_t got_SIGUSR2 = false;
 
@@ -189,7 +192,6 @@ typedef struct autovac_table
 {
 	Oid			at_relid;
 	VacuumParams at_params;
-	double		at_vacuum_cost_delay;
 	int			at_vacuum_cost_limit;
 	bool		at_dobalance;
 	bool		at_sharedrel;
@@ -225,8 +227,7 @@ typedef struct WorkerInfoData
 	TimestampTz wi_launchtime;
 	bool		wi_dobalance;
 	bool		wi_sharedrel;
-	double		wi_cost_delay;
-	int			wi_cost_limit;
+	pg_atomic_uint32 wi_cost_limit;
 	int			wi_cost_limit_base;
 } WorkerInfoData;
 
@@ -743,6 +744,7 @@ AutoVacLauncherMain(int argc, char *argv[])
 					worker = AutoVacuumShmem->av_startingWorker;
 					worker->wi_dboid = InvalidOid;
 					worker->wi_tableoid = InvalidOid;
+					pg_atomic_write_u32(&MyWorkerInfo->wi_cost_limit, 0);
 					worker->wi_sharedrel = false;
 					worker->wi_proc = NULL;
 					worker->wi_launchtime = 0;
@@ -815,6 +817,7 @@ HandleAutoVacLauncherInterrupts(void)
 		ConfigReloadPending = false;
 		ProcessConfigFile(PGC_SIGHUP);
 
+		AutoVacuumUpdateDelay();
 		/* shutdown requested in config file? */
 		if (!AutoVacuumingActive())
 			AutoVacLauncherShutdown();
@@ -1756,8 +1759,7 @@ FreeWorkerInfo(int code, Datum arg)
 		MyWorkerInfo->wi_proc = NULL;
 		MyWorkerInfo->wi_launchtime = 0;
 		MyWorkerInfo->wi_dobalance = false;
-		MyWorkerInfo->wi_cost_delay = 0;
-		MyWorkerInfo->wi_cost_limit = 0;
+		pg_atomic_write_u32(&MyWorkerInfo->wi_cost_limit, 0);
 		MyWorkerInfo->wi_cost_limit_base = 0;
 		dlist_push_head(&AutoVacuumShmem->av_freeWorkers,
 						&MyWorkerInfo->wi_links);
@@ -1780,11 +1782,35 @@ FreeWorkerInfo(int code, Datum arg)
 void
 AutoVacuumUpdateDelay(void)
 {
-	if (MyWorkerInfo)
+	/*
+	 * We are using autovacuum-related GUCs to update VacuumCostDelay, so we
+	 * only want autovacuum workers and autovacuum launcher to do this.
+	 */
+	if (!(am_autovacuum_worker || am_autovacuum_launcher))
+		return;
+
+	if (av_use_table_option_cost_delay)
 	{
-		VacuumCostDelay = MyWorkerInfo->wi_cost_delay;
-		VacuumCostLimit = MyWorkerInfo->wi_cost_limit;
+		VacuumCostDelay = av_table_option_cost_delay;
 	}
+	else
+	{
+		VacuumCostDelay = autovacuum_vac_cost_delay >= 0 ?
+			autovacuum_vac_cost_delay : VacuumCostDelay;
+	}
+}
+
+/*
+ * Helper for vacuum_delay_point() to allow workers to read their
+ * wi_cost_limit.
+ */
+void
+AutoVacuumUpdateLimit(void)
+{
+	if (!MyWorkerInfo)
+		return;
+
+	VacuumCostLimit = pg_atomic_read_u32(&MyWorkerInfo->wi_cost_limit);
 }
 
 /*
@@ -1824,9 +1850,9 @@ autovac_balance_cost(void)
 
 		if (worker->wi_proc != NULL &&
 			worker->wi_dobalance &&
-			worker->wi_cost_limit_base > 0 && worker->wi_cost_delay > 0)
+			worker->wi_cost_limit_base > 0 && vac_cost_delay > 0)
 			cost_total +=
-				(double) worker->wi_cost_limit_base / worker->wi_cost_delay;
+				(double) worker->wi_cost_limit_base / vac_cost_delay;
 	}
 
 	/* there are no cost limits -- nothing to do */
@@ -1844,7 +1870,7 @@ autovac_balance_cost(void)
 
 		if (worker->wi_proc != NULL &&
 			worker->wi_dobalance &&
-			worker->wi_cost_limit_base > 0 && worker->wi_cost_delay > 0)
+			worker->wi_cost_limit_base > 0 && vac_cost_delay > 0)
 		{
 			int			limit = (int)
 			(cost_avail * worker->wi_cost_limit_base / cost_total);
@@ -1855,17 +1881,15 @@ autovac_balance_cost(void)
 			 * in these calculations, let's be sure we don't ever set
 			 * cost_limit to more than the base value.
 			 */
-			worker->wi_cost_limit = Max(Min(limit,
-											worker->wi_cost_limit_base),
-										1);
+			pg_atomic_unlocked_write_u32(&worker->wi_cost_limit,
+										 Max(Min(limit, worker->wi_cost_limit_base), 1));
 		}
 
 		if (worker->wi_proc != NULL)
-			elog(DEBUG2, "autovac_balance_cost(pid=%d db=%u, rel=%u, dobalance=%s cost_limit=%d, cost_limit_base=%d, cost_delay=%g)",
+			elog(DEBUG2, "autovac_balance_cost(pid=%d db=%u, rel=%u, dobalance=%s cost_limit=%d, cost_limit_base=%d)",
 				 worker->wi_proc->pid, worker->wi_dboid, worker->wi_tableoid,
 				 worker->wi_dobalance ? "yes" : "no",
-				 worker->wi_cost_limit, worker->wi_cost_limit_base,
-				 worker->wi_cost_delay);
+				 pg_atomic_read_u32(&worker->wi_cost_limit), worker->wi_cost_limit_base);
 	}
 }
 
@@ -2327,6 +2351,13 @@ do_autovacuum(void)
 			ProcessConfigFile(PGC_SIGHUP);
 
 			/*
+			 * Autovacuum workers should always update VacuumCostDelay and
+			 * VacuumCostLimit in case they were overridden by the reload.
+			 */
+			AutoVacuumUpdateDelay();
+			AutoVacuumUpdateLimit();
+
+			/*
 			 * You might be tempted to bail out if we see autovacuum is now
 			 * disabled.  Must resist that temptation -- this might be a
 			 * for-wraparound emergency worker, in which case that would be
@@ -2424,20 +2455,21 @@ do_autovacuum(void)
 		stdVacuumCostDelay = VacuumCostDelay;
 		stdVacuumCostLimit = VacuumCostLimit;
 
+		AutoVacuumUpdateDelay();
+
 		/* Must hold AutovacuumLock while mucking with cost balance info */
 		LWLockAcquire(AutovacuumLock, LW_EXCLUSIVE);
 
 		/* advertise my cost delay parameters for the balancing algorithm */
 		MyWorkerInfo->wi_dobalance = tab->at_dobalance;
-		MyWorkerInfo->wi_cost_delay = tab->at_vacuum_cost_delay;
-		MyWorkerInfo->wi_cost_limit = tab->at_vacuum_cost_limit;
+		/* this cannot exceed 10000 anyway */
+		pg_atomic_unlocked_write_u32(&MyWorkerInfo->wi_cost_limit,
+									 tab->at_vacuum_cost_limit);
 		MyWorkerInfo->wi_cost_limit_base = tab->at_vacuum_cost_limit;
+		AutoVacuumUpdateLimit();
 
 		/* do a balance */
 		autovac_balance_cost();
-
-		/* set the active cost parameters from the result of that */
-		AutoVacuumUpdateDelay();
 
 		/* done */
 		LWLockRelease(AutovacuumLock);
@@ -2569,6 +2601,8 @@ deleted:
 		{
 			ConfigReloadPending = false;
 			ProcessConfigFile(PGC_SIGHUP);
+			AutoVacuumUpdateDelay();
+			AutoVacuumUpdateLimit();
 		}
 
 		LWLockAcquire(AutovacuumLock, LW_EXCLUSIVE);
@@ -2771,7 +2805,11 @@ table_recheck_autovac(Oid relid, HTAB *table_toast_map,
 	/* fetch the relation's relcache entry */
 	classTup = SearchSysCacheCopy1(RELOID, ObjectIdGetDatum(relid));
 	if (!HeapTupleIsValid(classTup))
+	{
+		av_use_table_option_cost_delay = false;
+		av_table_option_cost_delay = 0;
 		return NULL;
+	}
 	classForm = (Form_pg_class) GETSTRUCT(classTup);
 
 	/*
@@ -2802,7 +2840,6 @@ table_recheck_autovac(Oid relid, HTAB *table_toast_map,
 		int			multixact_freeze_min_age;
 		int			multixact_freeze_table_age;
 		int			vac_cost_limit;
-		double		vac_cost_delay;
 		int			log_min_duration;
 
 		/*
@@ -2812,12 +2849,16 @@ table_recheck_autovac(Oid relid, HTAB *table_toast_map,
 		 * defaults, autovacuum's own first and plain vacuum second.
 		 */
 
-		/* -1 in autovac setting means use plain vacuum_cost_delay */
-		vac_cost_delay = (avopts && avopts->vacuum_cost_delay >= 0)
-			? avopts->vacuum_cost_delay
-			: (autovacuum_vac_cost_delay >= 0)
-			? autovacuum_vac_cost_delay
-			: VacuumCostDelay;
+		if (avopts && avopts->vacuum_cost_delay >= 0)
+		{
+			av_use_table_option_cost_delay = true;
+			av_table_option_cost_delay = avopts->vacuum_cost_delay;
+		}
+		else
+		{
+			av_use_table_option_cost_delay = false;
+			av_table_option_cost_delay = 0;
+		}
 
 		/* 0 or -1 in autovac setting means use plain vacuum_cost_limit */
 		vac_cost_limit = (avopts && avopts->vacuum_cost_limit > 0)
@@ -2882,7 +2923,6 @@ table_recheck_autovac(Oid relid, HTAB *table_toast_map,
 		tab->at_params.is_wraparound = wraparound;
 		tab->at_params.log_min_duration = log_min_duration;
 		tab->at_vacuum_cost_limit = vac_cost_limit;
-		tab->at_vacuum_cost_delay = vac_cost_delay;
 		tab->at_relname = NULL;
 		tab->at_nspname = NULL;
 		tab->at_datname = NULL;
@@ -2894,6 +2934,11 @@ table_recheck_autovac(Oid relid, HTAB *table_toast_map,
 		tab->at_dobalance =
 			!(avopts && (avopts->vacuum_cost_limit > 0 ||
 						 avopts->vacuum_cost_delay > 0));
+	}
+	else
+	{
+		av_use_table_option_cost_delay = false;
+		av_table_option_cost_delay = 0;
 	}
 
 	heap_freetuple(classTup);
@@ -3361,6 +3406,7 @@ AutoVacuumShmemInit(void)
 	{
 		WorkerInfo	worker;
 		int			i;
+		dlist_iter	iter;
 
 		Assert(!found);
 
@@ -3374,10 +3420,17 @@ AutoVacuumShmemInit(void)
 		worker = (WorkerInfo) ((char *) AutoVacuumShmem +
 							   MAXALIGN(sizeof(AutoVacuumShmemStruct)));
 
+
 		/* initialize the WorkerInfo free list */
 		for (i = 0; i < autovacuum_max_workers; i++)
 			dlist_push_head(&AutoVacuumShmem->av_freeWorkers,
 							&worker[i].wi_links);
+
+		dlist_foreach(iter, &AutoVacuumShmem->av_freeWorkers)
+			pg_atomic_init_u32(
+							   &(dlist_container(WorkerInfoData, wi_links, iter.cur))->wi_cost_limit,
+							   0);
+
 	}
 	else
 		Assert(found);
