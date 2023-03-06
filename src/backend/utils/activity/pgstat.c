@@ -95,9 +95,11 @@
 
 #include "access/transam.h"
 #include "access/xact.h"
+#include "executor/instrument.h"
 #include "lib/dshash.h"
 #include "pgstat.h"
 #include "port/atomics.h"
+#include "storage/bufmgr.h"
 #include "storage/fd.h"
 #include "storage/ipc.h"
 #include "storage/lwlock.h"
@@ -107,7 +109,6 @@
 #include "utils/memutils.h"
 #include "utils/pgstat_internal.h"
 #include "utils/timestamp.h"
-
 
 /* ----------
  * Timer definitions.
@@ -905,6 +906,80 @@ pgstat_have_entry(PgStat_Kind kind, Oid dboid, Oid objoid)
 
 	return pgstat_get_entry_ref(kind, dboid, objoid, false, NULL) != NULL;
 }
+
+instr_time
+pgstat_io_start(void)
+{
+	instr_time	io_start;
+
+	if (track_io_timing)
+		INSTR_TIME_SET_CURRENT(io_start);
+	else
+		INSTR_TIME_SET_ZERO(io_start);
+
+	return io_start;
+}
+
+void
+pgstat_io_end(instr_time io_start, IOObject io_object,
+			  IOContext io_context, IOOp io_op)
+{
+	instr_time	io_time;
+
+	if (track_io_timing)
+	{
+		INSTR_TIME_SET_CURRENT(io_time);
+		INSTR_TIME_SUBTRACT(io_time, io_start);
+		pgstat_count_io_time(io_object, io_context, io_op, io_time);
+
+		if (io_op == IOOP_WRITE)
+		{
+			if (io_object == IOOBJECT_RELATION)
+			{
+				/* TODO: AFAICT, pgstat_count_buffer_write_time is only called */
+				/* for shared buffers whereas pgstat_count_buffer_read_time is */
+				/* called for temp relations and shared buffers. */
+				/*
+				 * is this intentional and should I match current behavior or
+				 * not?
+				 */
+				pgstat_count_buffer_write_time(INSTR_TIME_GET_MICROSEC(io_time));
+				INSTR_TIME_ADD(pgBufferUsage.blk_write_time, io_time);
+			}
+		}
+		else if (io_op == IOOP_READ)
+		{
+			pgstat_count_buffer_read_time(INSTR_TIME_GET_MICROSEC(io_time));
+			if (io_object == IOOBJECT_RELATION)
+			{
+				INSTR_TIME_ADD(pgBufferUsage.blk_read_time, io_time);
+			}
+		}
+	}
+
+	pgstat_count_io_op(io_object, io_context, io_op);
+
+	if (io_op == IOOP_WRITE)
+	{
+		if (io_object == IOOBJECT_RELATION)
+			pgBufferUsage.shared_blks_written++;
+		else if (io_object == IOOBJECT_TEMP_RELATION)
+			pgBufferUsage.local_blks_written++;
+	}
+
+	/*
+	 * TODO: this is normally done later in ReadBuffer_common() is it okay to
+	 * do here?
+	 */
+	else if (io_op == IOOP_READ)
+	{
+		if (io_object == IOOBJECT_RELATION)
+			pgBufferUsage.shared_blks_read++;
+		else if (io_object == IOOBJECT_TEMP_RELATION)
+			pgBufferUsage.local_blks_read++;
+	}
+}
+
 
 /*
  * Ensure snapshot for fixed-numbered 'kind' exists.

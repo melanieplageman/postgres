@@ -1000,12 +1000,17 @@ ReadBuffer_common(SMgrRelation smgr, char relpersistence, ForkNumber forkNum,
 
 	if (isExtend)
 	{
+		instr_time	io_start;
+
 		/* new buffers are zero-filled */
 		MemSet((char *) bufBlock, 0, BLCKSZ);
+
+		io_start = pgstat_io_start();
+
 		/* don't set checksum for all-zero page */
 		smgrextend(smgr, forkNum, blockNum, bufBlock, false);
 
-		pgstat_count_io_op(io_object, io_context, IOOP_EXTEND);
+		pgstat_io_end(io_start, io_object, io_context, IOOP_EXTEND);
 
 		/*
 		 * NB: we're *not* doing a ScheduleBufferTagForWriteback here;
@@ -1024,25 +1029,13 @@ ReadBuffer_common(SMgrRelation smgr, char relpersistence, ForkNumber forkNum,
 			MemSet((char *) bufBlock, 0, BLCKSZ);
 		else
 		{
-			instr_time	io_start,
-						io_time;
+			instr_time	io_start;
 
-			if (track_io_timing)
-				INSTR_TIME_SET_CURRENT(io_start);
-			else
-				INSTR_TIME_SET_ZERO(io_start);
+			io_start = pgstat_io_start();
 
 			smgrread(smgr, forkNum, blockNum, bufBlock);
 
-			pgstat_count_io_op(io_object, io_context, IOOP_READ);
-
-			if (track_io_timing)
-			{
-				INSTR_TIME_SET_CURRENT(io_time);
-				INSTR_TIME_SUBTRACT(io_time, io_start);
-				pgstat_count_buffer_read_time(INSTR_TIME_GET_MICROSEC(io_time));
-				INSTR_TIME_ADD(pgBufferUsage.blk_read_time, io_time);
-			}
+			pgstat_io_end(io_start, io_object, io_context, IOOP_READ);
 
 			/* check for garbage data */
 			if (!PageIsVerifiedExtended((Page) bufBlock, blockNum,
@@ -2848,6 +2841,7 @@ BufferGetTag(Buffer buffer, RelFileLocator *rlocator, ForkNumber *forknum,
 	*blknum = bufHdr->tag.blockNum;
 }
 
+
 /*
  * FlushBuffer
  *		Physically write out a shared buffer.
@@ -2873,8 +2867,7 @@ FlushBuffer(BufferDesc *buf, SMgrRelation reln, IOObject io_object,
 {
 	XLogRecPtr	recptr;
 	ErrorContextCallback errcallback;
-	instr_time	io_start,
-				io_time;
+	instr_time	io_start;
 	Block		bufBlock;
 	char	   *bufToWrite;
 	uint32		buf_state;
@@ -2949,10 +2942,7 @@ FlushBuffer(BufferDesc *buf, SMgrRelation reln, IOObject io_object,
 	 */
 	bufToWrite = PageSetChecksumCopy((Page) bufBlock, buf->tag.blockNum);
 
-	if (track_io_timing)
-		INSTR_TIME_SET_CURRENT(io_start);
-	else
-		INSTR_TIME_SET_ZERO(io_start);
+	io_start = pgstat_io_start();
 
 	/*
 	 * bufToWrite is either the shared buffer or a copy, as appropriate.
@@ -2981,17 +2971,7 @@ FlushBuffer(BufferDesc *buf, SMgrRelation reln, IOObject io_object,
 	 * When a strategy is not in use, the write can only be a "regular" write
 	 * of a dirty shared buffer (IOCONTEXT_NORMAL IOOP_WRITE).
 	 */
-	pgstat_count_io_op(IOOBJECT_RELATION, io_context, IOOP_WRITE);
-
-	if (track_io_timing)
-	{
-		INSTR_TIME_SET_CURRENT(io_time);
-		INSTR_TIME_SUBTRACT(io_time, io_start);
-		pgstat_count_buffer_write_time(INSTR_TIME_GET_MICROSEC(io_time));
-		INSTR_TIME_ADD(pgBufferUsage.blk_write_time, io_time);
-	}
-
-	pgBufferUsage.shared_blks_written++;
+	pgstat_io_end(io_start, IOOBJECT_RELATION, io_context, IOOP_WRITE);
 
 	/*
 	 * Mark the buffer as clean (unless BM_JUST_DIRTIED has become set) and
@@ -3597,6 +3577,7 @@ FlushRelationBuffers(Relation rel)
 		for (i = 0; i < NLocBuffer; i++)
 		{
 			uint32		buf_state;
+			instr_time	io_start;
 
 			bufHdr = GetLocalBufferDescriptor(i);
 			if (BufTagMatchesRelFileLocator(&bufHdr->tag, &rel->rd_locator) &&
@@ -3616,6 +3597,12 @@ FlushRelationBuffers(Relation rel)
 
 				PageSetChecksumInplace(localpage, bufHdr->tag.blockNum);
 
+				/*
+				 * TODO: is it okay that this formerly didn't count
+				 * pgBufferUsage or pgStatBlockReadTime
+				 */
+				io_start = pgstat_io_start();
+
 				smgrwrite(RelationGetSmgr(rel),
 						  BufTagGetForkNum(&bufHdr->tag),
 						  bufHdr->tag.blockNum,
@@ -3625,12 +3612,13 @@ FlushRelationBuffers(Relation rel)
 				buf_state &= ~(BM_DIRTY | BM_JUST_DIRTIED);
 				pg_atomic_unlocked_write_u32(&bufHdr->state, buf_state);
 
-				pgstat_count_io_op(IOOBJECT_TEMP_RELATION, IOCONTEXT_NORMAL, IOOP_WRITE);
+				pgstat_io_end(io_start, IOOBJECT_TEMP_RELATION, IOCONTEXT_NORMAL, IOOP_WRITE);
 
 				/* Pop the error context stack */
 				error_context_stack = errcallback.previous;
 			}
 		}
+
 
 		return;
 	}

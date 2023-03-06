@@ -304,7 +304,12 @@ typedef enum IOOp
 
 typedef struct PgStat_BktypeIO
 {
-	PgStat_Counter data[IOOBJECT_NUM_TYPES][IOCONTEXT_NUM_TYPES][IOOP_NUM_TYPES];
+	PgStat_Counter counts[IOOBJECT_NUM_TYPES][IOCONTEXT_NUM_TYPES][IOOP_NUM_TYPES];
+	union
+	{
+		instr_time	pending_times[IOOBJECT_NUM_TYPES][IOCONTEXT_NUM_TYPES][IOOP_NUM_TYPES];
+		PgStat_Counter times[IOOBJECT_NUM_TYPES][IOCONTEXT_NUM_TYPES][IOOP_NUM_TYPES];
+	};
 } PgStat_BktypeIO;
 
 typedef struct PgStat_IO
@@ -466,6 +471,11 @@ extern TimestampTz pgstat_get_stat_snapshot_timestamp(bool *have_snapshot);
 extern PgStat_Kind pgstat_get_kind_from_str(char *kind_str);
 extern bool pgstat_have_entry(PgStat_Kind kind, Oid dboid, Oid objoid);
 
+extern instr_time pgstat_io_start(void);
+
+extern void pgstat_io_end(instr_time io_start, IOObject io_object,
+						  IOContext io_context, IOOp io_op);
+
 
 /*
  * Functions in pgstat_archiver.c
@@ -498,6 +508,7 @@ extern PgStat_CheckpointerStats *pgstat_fetch_stat_checkpointer(void);
 extern bool pgstat_bktype_io_stats_valid(PgStat_BktypeIO *context_ops,
 										 BackendType bktype);
 extern void pgstat_count_io_op(IOObject io_object, IOContext io_context, IOOp io_op);
+extern void pgstat_count_io_time(IOObject io_object, IOContext io_context, IOOp io_op, instr_time time);
 extern PgStat_IO *pgstat_fetch_stat_io(void);
 extern const char *pgstat_get_io_context_name(IOContext io_context);
 extern const char *pgstat_get_io_object_name(IOObject io_object);
@@ -507,6 +518,7 @@ extern bool pgstat_tracks_io_object(BackendType bktype,
 									IOObject io_object, IOContext io_context);
 extern bool pgstat_tracks_io_op(BackendType bktype, IOObject io_object,
 								IOContext io_context, IOOp io_op);
+extern IOOp pgstat_tracks_io_time(IOOp io_op);
 
 
 /*

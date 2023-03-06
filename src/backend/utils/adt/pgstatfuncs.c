@@ -1255,12 +1255,16 @@ typedef enum io_stat_col
 	IO_COL_IO_OBJECT,
 	IO_COL_IO_CONTEXT,
 	IO_COL_READS,
+	IO_COL_READ_TIME,
 	IO_COL_WRITES,
+	IO_COL_WRITE_TIME,
 	IO_COL_EXTENDS,
+	IO_COL_EXTEND_TIME,
 	IO_COL_CONVERSION,
 	IO_COL_EVICTIONS,
 	IO_COL_REUSES,
 	IO_COL_FSYNCS,
+	IO_COL_FSYNC_TIME,
 	IO_COL_RESET_TIME,
 	IO_NUM_COLUMNS,
 } io_stat_col;
@@ -1290,6 +1294,28 @@ pgstat_get_io_op_index(IOOp io_op)
 
 	elog(ERROR, "unrecognized IOOp value: %d", io_op);
 	pg_unreachable();
+}
+
+/*
+ * Get the number of the column containing IO times for the specified IOOp. If
+ * the specified IOOp is one for which IO time is not tracked, return -1. Note
+ * that this function assumes that IO time for an IOOp is displayed in the view
+ * in the column directly after the IOOp counts.
+ */
+static io_stat_col
+pgstat_get_io_time_index(IOOp io_op)
+{
+	if (pgstat_tracks_io_time(io_op) == -1)
+		return -1;
+
+	return pgstat_get_io_op_index(io_op) + 1;
+}
+
+static inline
+PgStat_Counter
+pg_stat_micro_to_millisecs(PgStat_Counter val_microsec)
+{
+	return val_microsec * 0.001;
 }
 
 Datum
@@ -1359,20 +1385,32 @@ pg_stat_get_io(PG_FUNCTION_ARGS)
 
 				for (int io_op = 0; io_op < IOOP_NUM_TYPES; io_op++)
 				{
-					int			col_idx = pgstat_get_io_op_index(io_op);
+					PgStat_Counter count = bktype_stats->counts[io_obj][io_context][io_op];
+					int			i = pgstat_get_io_op_index(io_op);
 
 					/*
 					 * Some combinations of BackendType and IOOp, of IOContext
 					 * and IOOp, and of IOObject and IOOp are not tracked. Set
 					 * these cells in the view NULL.
 					 */
-					nulls[col_idx] = !pgstat_tracks_io_op(bktype, io_obj, io_context, io_op);
+					if (pgstat_tracks_io_op(bktype, io_obj, io_context, io_op))
+						values[i] = Int64GetDatum(count);
+					else
+						nulls[i] = true;
+				}
 
-					if (nulls[col_idx])
+				for (int io_op = 0; io_op < IOOP_NUM_TYPES; io_op++)
+				{
+					PgStat_Counter time = bktype_stats->times[io_obj][io_context][io_op];
+					int			i = pgstat_get_io_time_index(io_op);
+
+					if (i == -1)
 						continue;
 
-					values[col_idx] =
-						Int64GetDatum(bktype_stats->data[io_obj][io_context][io_op]);
+					if (!nulls[pgstat_get_io_op_index(io_op)])
+						values[i] = Float8GetDatum(pg_stat_micro_to_millisecs(time));
+					else
+						nulls[i] = true;
 				}
 
 				tuplestore_putvalues(rsinfo->setResult, rsinfo->setDesc,

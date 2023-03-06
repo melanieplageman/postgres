@@ -1030,6 +1030,17 @@ register_dirty_segment(SMgrRelation reln, ForkNumber forknum, MdfdVec *seg)
 
 	if (!RegisterSyncRequest(&tag, SYNC_REQUEST, false /* retryOnError */ ))
 	{
+		instr_time	io_start = pgstat_io_start();
+
+		ereport(DEBUG1,
+				(errmsg_internal("could not forward fsync request because request queue is full")));
+
+		if (FileSync(seg->mdfd_vfd, WAIT_EVENT_DATA_FILE_SYNC) < 0)
+			ereport(data_sync_elevel(ERROR),
+					(errcode_for_file_access(),
+					 errmsg("could not fsync file \"%s\": %m",
+							FilePathName(seg->mdfd_vfd))));
+
 		/*
 		 * We have no way of knowing if the current IOContext is
 		 * IOCONTEXT_NORMAL or IOCONTEXT_[BULKREAD, BULKWRITE, VACUUM] at this
@@ -1041,16 +1052,7 @@ register_dirty_segment(SMgrRelation reln, ForkNumber forknum, MdfdVec *seg)
 		 * IOCONTEXT_NORMAL is likely clearer when investigating the number of
 		 * backend fsyncs.
 		 */
-		pgstat_count_io_op(IOOBJECT_RELATION, IOCONTEXT_NORMAL, IOOP_FSYNC);
-
-		ereport(DEBUG1,
-				(errmsg_internal("could not forward fsync request because request queue is full")));
-
-		if (FileSync(seg->mdfd_vfd, WAIT_EVENT_DATA_FILE_SYNC) < 0)
-			ereport(data_sync_elevel(ERROR),
-					(errcode_for_file_access(),
-					 errmsg("could not fsync file \"%s\": %m",
-							FilePathName(seg->mdfd_vfd))));
+		pgstat_io_end(io_start, IOOBJECT_RELATION, IOCONTEXT_NORMAL, IOOP_FSYNC);
 	}
 }
 
@@ -1399,6 +1401,7 @@ int
 mdsyncfiletag(const FileTag *ftag, char *path)
 {
 	SMgrRelation reln = smgropen(ftag->rlocator, InvalidBackendId);
+	instr_time	io_start;
 	File		file;
 	bool		need_to_close;
 	int			result,
@@ -1425,6 +1428,8 @@ mdsyncfiletag(const FileTag *ftag, char *path)
 		need_to_close = true;
 	}
 
+	io_start = pgstat_io_start();
+
 	/* Sync the file. */
 	result = FileSync(file, WAIT_EVENT_DATA_FILE_SYNC);
 	save_errno = errno;
@@ -1432,7 +1437,7 @@ mdsyncfiletag(const FileTag *ftag, char *path)
 	if (need_to_close)
 		FileClose(file);
 
-	pgstat_count_io_op(IOOBJECT_RELATION, IOCONTEXT_NORMAL, IOOP_FSYNC);
+	pgstat_io_end(io_start, IOOBJECT_RELATION, IOCONTEXT_NORMAL, IOOP_FSYNC);
 
 	errno = save_errno;
 	return result;
