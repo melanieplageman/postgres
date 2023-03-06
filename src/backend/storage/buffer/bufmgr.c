@@ -1000,10 +1000,26 @@ ReadBuffer_common(SMgrRelation smgr, char relpersistence, ForkNumber forkNum,
 
 	if (isExtend)
 	{
+		instr_time	io_start,
+					io_time;
+
 		/* new buffers are zero-filled */
 		MemSet((char *) bufBlock, 0, BLCKSZ);
+
+		if (track_io_timing)
+			INSTR_TIME_SET_CURRENT(io_start);
+		else
+			INSTR_TIME_SET_ZERO(io_start);
+
 		/* don't set checksum for all-zero page */
 		smgrextend(smgr, forkNum, blockNum, bufBlock, false);
+
+		if (track_io_timing)
+		{
+			INSTR_TIME_SET_CURRENT(io_time);
+			INSTR_TIME_SUBTRACT(io_time, io_start);
+			pgstat_count_io_time(io_object, io_context, IOOP_EXTEND, io_time);
+		}
 
 		pgstat_count_io_op(io_object, io_context, IOOP_EXTEND);
 
@@ -1034,15 +1050,16 @@ ReadBuffer_common(SMgrRelation smgr, char relpersistence, ForkNumber forkNum,
 
 			smgrread(smgr, forkNum, blockNum, bufBlock);
 
-			pgstat_count_io_op(io_object, io_context, IOOP_READ);
-
 			if (track_io_timing)
 			{
 				INSTR_TIME_SET_CURRENT(io_time);
 				INSTR_TIME_SUBTRACT(io_time, io_start);
 				pgstat_count_buffer_read_time(INSTR_TIME_GET_MICROSEC(io_time));
 				INSTR_TIME_ADD(pgBufferUsage.blk_read_time, io_time);
+				pgstat_count_io_time(io_object, io_context, IOOP_READ, io_time);
 			}
+
+			pgstat_count_io_op(io_object, io_context, IOOP_READ);
 
 			/* check for garbage data */
 			if (!PageIsVerifiedExtended((Page) bufBlock, blockNum,
@@ -2981,16 +2998,16 @@ FlushBuffer(BufferDesc *buf, SMgrRelation reln, IOObject io_object,
 	 * When a strategy is not in use, the write can only be a "regular" write
 	 * of a dirty shared buffer (IOCONTEXT_NORMAL IOOP_WRITE).
 	 */
-	pgstat_count_io_op(IOOBJECT_RELATION, io_context, IOOP_WRITE);
-
 	if (track_io_timing)
 	{
 		INSTR_TIME_SET_CURRENT(io_time);
 		INSTR_TIME_SUBTRACT(io_time, io_start);
 		pgstat_count_buffer_write_time(INSTR_TIME_GET_MICROSEC(io_time));
 		INSTR_TIME_ADD(pgBufferUsage.blk_write_time, io_time);
+		pgstat_count_io_time(IOOBJECT_RELATION, io_context, IOOP_WRITE, io_time);
 	}
 
+	pgstat_count_io_op(IOOBJECT_RELATION, io_context, IOOP_WRITE);
 	pgBufferUsage.shared_blks_written++;
 
 	/*
@@ -3594,6 +3611,9 @@ FlushRelationBuffers(Relation rel)
 
 	if (RelationUsesLocalBuffers(rel))
 	{
+		instr_time	io_start,
+					io_time;
+
 		for (i = 0; i < NLocBuffer; i++)
 		{
 			uint32		buf_state;
@@ -3616,6 +3636,11 @@ FlushRelationBuffers(Relation rel)
 
 				PageSetChecksumInplace(localpage, bufHdr->tag.blockNum);
 
+				if (track_io_timing)
+					INSTR_TIME_SET_CURRENT(io_start);
+				else
+					INSTR_TIME_SET_ZERO(io_start);
+
 				smgrwrite(RelationGetSmgr(rel),
 						  BufTagGetForkNum(&bufHdr->tag),
 						  bufHdr->tag.blockNum,
@@ -3624,6 +3649,13 @@ FlushRelationBuffers(Relation rel)
 
 				buf_state &= ~(BM_DIRTY | BM_JUST_DIRTIED);
 				pg_atomic_unlocked_write_u32(&bufHdr->state, buf_state);
+
+				if (track_io_timing)
+				{
+					INSTR_TIME_SET_CURRENT(io_time);
+					INSTR_TIME_SUBTRACT(io_time, io_start);
+					pgstat_count_io_time(IOOBJECT_TEMP_RELATION, IOCONTEXT_NORMAL, IOOP_WRITE, io_time);
+				}
 
 				pgstat_count_io_op(IOOBJECT_TEMP_RELATION, IOCONTEXT_NORMAL, IOOP_WRITE);
 
