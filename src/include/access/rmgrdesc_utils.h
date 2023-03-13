@@ -25,5 +25,7 @@ extern void redirect_elem_desc(StringInfo buf, void *restrict offset, void *rest
 
 extern void relid_desc(StringInfo buf, void *restrict relid, void *restrict data);
 
+extern void uint16_elem_desc(StringInfo buf, void *restrict value, void *restrict data);
+
 
 #endif							/* RMGRDESC_UTILS_H */
