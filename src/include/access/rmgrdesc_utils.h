@@ -29,5 +29,8 @@ void
 void
 			relid_desc(StringInfo buf, void *restrict relid, void *restrict data);
 
+void
+			uint16_elem_desc(StringInfo buf, void *restrict value, void *restrict data);
+
 
 #endif							/* RMGRDESC_UTILS_H */
