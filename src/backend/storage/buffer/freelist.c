@@ -164,6 +164,15 @@ ClockSweepTick(void)
 }
 
 /*
+ * bas_nbuffers -- an accessory for the number of buffers in the ring
+ */
+int
+bas_nbuffers(BufferAccessStrategy strategy)
+{
+	return strategy->nbuffers;
+}
+
+/*
  * have_free_buffer -- a lockless check to see if there is a free buffer in
  *					   buffer pool.
  *
@@ -531,6 +540,19 @@ StrategyInitialize(bool init)
  * ----------------------------------------------------------------
  */
 
+/*
+ * Helper to convert a size to a number of buffers.
+ */
+static inline int
+bufsize_limit_to_nbuffers(int bufsize_limit_kb)
+{
+	int			blcksz_kb = BLCKSZ / 1024;
+
+	Assert(blcksz_kb > 0);
+
+	return bufsize_limit_kb / blcksz_kb;
+}
+
 
 /*
  * GetAccessStrategy -- create a BufferAccessStrategy object
@@ -540,7 +562,6 @@ StrategyInitialize(bool init)
 BufferAccessStrategy
 GetAccessStrategy(BufferAccessStrategyType btype)
 {
-	BufferAccessStrategy strategy;
 	int			nbuffers;
 
 	/*
@@ -574,6 +595,23 @@ GetAccessStrategy(BufferAccessStrategyType btype)
 	/* Make sure ring isn't an undue fraction of shared buffers */
 	nbuffers = Min(NBuffers / 8, nbuffers);
 
+	return GetAccessStrategyWithNBuffers(btype, nbuffers);
+}
+
+
+/*
+ * GetAccessStrategyWithNBuffers -- create a BufferAccessStrategy object with
+ * 					space for the passed-in number of buffers
+ *
+ * Also used as a helper for the other GetAccessStrategy* methods.
+ */
+BufferAccessStrategy
+GetAccessStrategyWithNBuffers(BufferAccessStrategyType btype, int nbuffers)
+{
+	BufferAccessStrategy strategy;
+
+	Assert(nbuffers > 0);
+
 	/* Allocate the object and initialize all elements to zeroes */
 	strategy = (BufferAccessStrategy)
 		palloc0(offsetof(BufferAccessStrategyData, buffers) +
@@ -585,6 +623,56 @@ GetAccessStrategy(BufferAccessStrategyType btype)
 
 	return strategy;
 }
+
+
+/*
+ * GetAccessStrategyWithSize -- create a BufferAccessStrategy object with a
+ * 						number of buffers equivalent to the passed in size
+ */
+BufferAccessStrategy
+GetAccessStrategyWithSize(BufferAccessStrategyType btype, int ring_size)
+{
+	int			nbuffers;
+	int			clamped_nbuffers;
+
+	/* Default nbuffers should have resulted in calling GetAccessStrategy() */
+	Assert(ring_size >= 0);
+
+	if (ring_size == 0)
+		return NULL;
+
+	Assert(ring_size <= MAX_BAS_RING_SIZE_KB);
+
+	if (ring_size < MIN_BAS_RING_SIZE_KB)
+	{
+		ereport(DEBUG1,
+				(errmsg_internal("Buffer Access Strategy ring_size %d kB has been clamped to minimum %d kB",
+								 ring_size,
+								 MIN_BAS_RING_SIZE_KB)));
+
+		nbuffers = bufsize_limit_to_nbuffers(MIN_BAS_RING_SIZE_KB);
+	}
+	else
+		nbuffers = bufsize_limit_to_nbuffers(ring_size);
+
+	clamped_nbuffers = Min(NBuffers / 8, nbuffers);
+
+	/*
+	 * Though default GetAccessStrategy() may also clamp the number of
+	 * buffers, only bother warning the user when the input size was
+	 * user-specified.
+	 */
+	if (clamped_nbuffers < nbuffers)
+		ereport(DEBUG1,
+				(errmsg_internal("active Buffer Access Strategy may use a maximum of %d buffers. %d has been clamped",
+								 NBuffers / 8,
+								 nbuffers)));
+
+	nbuffers = clamped_nbuffers;
+
+	return GetAccessStrategyWithNBuffers(btype, nbuffers);
+}
+
 
 /*
  * FreeAccessStrategy -- release a BufferAccessStrategy object

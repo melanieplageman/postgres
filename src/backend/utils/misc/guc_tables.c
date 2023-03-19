@@ -2225,6 +2225,17 @@ struct config_int ConfigureNamesInt[] =
 	},
 
 	{
+		{"vacuum_buffer_usage_limit", PGC_USERSET, RESOURCES_MEM,
+			gettext_noop("Sets the buffer pool size for VACUUM and autovacuum."),
+			NULL,
+			GUC_UNIT_KB
+		},
+		&vacuum_buffer_usage_limit,
+		-1, -1, MAX_BAS_RING_SIZE_KB,
+		NULL, NULL, NULL
+	},
+
+	{
 		{"shared_memory_size", PGC_INTERNAL, PRESET_OPTIONS,
 			gettext_noop("Shows the size of the server's main shared memory area (rounded up to the nearest MB)."),
 			NULL,

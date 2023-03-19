@@ -236,6 +236,7 @@ typedef struct VacuumParams
 	 * disabled.
 	 */
 	int			nworkers;
+	int			ring_size;
 } VacuumParams;
 
 /*

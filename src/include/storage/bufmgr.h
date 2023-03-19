@@ -101,6 +101,9 @@ extern PGDLLIMPORT int32 *LocalRefCount;
 /* upper limit for effective_io_concurrency */
 #define MAX_IO_CONCURRENCY 1000
 
+#define MAX_BAS_RING_SIZE_KB (16 * 1024 * 1024)
+#define MIN_BAS_RING_SIZE_KB 128
+
 /* special block number for ReadBuffer() */
 #define P_NEW	InvalidBlockNumber	/* grow the file to get a new page */
 
@@ -194,7 +197,12 @@ extern Size BufferShmemSize(void);
 extern void AtProcExit_LocalBuffers(void);
 
 /* in freelist.c */
+extern int	bas_nbuffers(BufferAccessStrategy strategy);
+
 extern BufferAccessStrategy GetAccessStrategy(BufferAccessStrategyType btype);
+extern BufferAccessStrategy GetAccessStrategyWithNBuffers(BufferAccessStrategyType btype, int nbuffers);
+extern BufferAccessStrategy GetAccessStrategyWithSize(BufferAccessStrategyType btype, int nbuffers);
+
 extern void FreeAccessStrategy(BufferAccessStrategy strategy);
 
 

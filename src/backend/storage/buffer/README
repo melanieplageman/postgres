@@ -229,12 +229,21 @@ update hint bits).  In a scan that modifies every page in the scan, like a
 bulk UPDATE or DELETE, the buffers in the ring will always be dirtied and
 the ring strategy effectively degrades to the normal strategy.
 
-VACUUM uses a 256KB ring like sequential scans, but dirty pages are not
-removed from the ring.  Instead, WAL is flushed if needed to allow reuse of
-the buffers.  Before introducing the buffer ring strategy in 8.3, VACUUM's
-buffers were sent to the freelist, which was effectively a buffer ring of 1
-buffer, resulting in excessive WAL flushing.  Allowing VACUUM to update
-256KB between WAL flushes should be more efficient.
+VACUUM's default Buffer Access Strategy uses a 256KB ring like sequential
+scans, but dirty pages are not removed from the ring.  Instead, WAL is flushed
+if needed to allow reuse of the buffers.  Before introducing the buffer ring
+strategy in 8.3, VACUUM's buffers were sent to the freelist, which was
+effectively a buffer ring of 1 buffer, resulting in excessive WAL flushing.
+Allowing VACUUM to update 256KB between WAL flushes should be more efficient.
+
+As an alternative, VACUUM can use a user-specified ring size. The VACUUM
+parameter "BUFFER_USAGE_LIMIT" and GUC vacuum_buffer_usage_limit can be used to
+specify the amount of shared memory to be used during vacuuming. This size is
+used to calculate the number of buffers in the ring when it is created. A value
+of 0 for vacuum_buffer_usage_limit will disable use of the Buffer Access
+Strategy and allow vacuuming to use shared buffers as normal.
+In failsafe mode, autovacuum will always abandon use of a Buffer Access
+Strategy.
 
 Bulk writes work similarly to VACUUM.  Currently this applies only to
 COPY IN and CREATE TABLE AS SELECT.  (Might it be interesting to make

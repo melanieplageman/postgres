@@ -124,6 +124,9 @@ ExecVacuum(ParseState *pstate, VacuumStmt *vacstmt, bool isTopLevel)
 	/* By default parallel vacuum is enabled */
 	params.nworkers = 0;
 
+	/* by default use buffer access strategy with default size */
+	params.ring_size = -1;
+
 	/* Parse options list */
 	foreach(lc, vacstmt->options)
 	{
@@ -207,6 +210,42 @@ ExecVacuum(ParseState *pstate, VacuumStmt *vacstmt, bool isTopLevel)
 			skip_database_stats = defGetBoolean(opt);
 		else if (strcmp(opt->defname, "only_database_stats") == 0)
 			only_database_stats = defGetBoolean(opt);
+		else if (strcmp(opt->defname, "buffer_usage_limit") == 0)
+		{
+			char	   *vac_buffer_size;
+			int			result;
+			const char *hintmsg;
+
+			if (opt->arg == NULL)
+			{
+				ereport(ERROR,
+						(errcode(ERRCODE_SYNTAX_ERROR),
+						 errmsg("buffer_usage_limit option requires a valid value"),
+						 parser_errposition(pstate, opt->location)));
+			}
+
+			vac_buffer_size = defGetString(opt);
+
+			if (!parse_int(vac_buffer_size, &result, GUC_UNIT_KB, &hintmsg))
+			{
+				ereport(ERROR,
+						(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+						 errmsg("value: \"%s\": is invalid for buffer_usage_limit",
+								vac_buffer_size),
+						 hintmsg ? errhint("%s", _(hintmsg)) : 0));
+			}
+
+			/* check for out-of-bounds */
+			if (result < -1 || result > MAX_BAS_RING_SIZE_KB)
+			{
+				ereport(ERROR,
+						(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+						 errmsg("buffer_usage_limit for a vacuum must be between -1 and %d",
+								MAX_BAS_RING_SIZE_KB)));
+			}
+
+			params.ring_size = result;
+		}
 		else
 			ereport(ERROR,
 					(errcode(ERRCODE_SYNTAX_ERROR),
@@ -237,6 +276,16 @@ ExecVacuum(ParseState *pstate, VacuumStmt *vacstmt, bool isTopLevel)
 		ereport(ERROR,
 				(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
 				 errmsg("VACUUM FULL cannot be performed in parallel")));
+
+	if ((params.options & VACOPT_FULL) && params.ring_size > -1)
+		ereport(ERROR,
+				(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+				 errmsg("BUFFER_USAGE_LIMIT cannot be specified for VACUUM FULL")));
+
+	if ((params.options & VACOPT_ONLY_DATABASE_STATS) && params.ring_size > -1)
+		ereport(ERROR,
+				(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+				 errmsg("BUFFER_USAGE_LIMIT cannot be specified for VACUUM ONLY_DATABASE_STATS")));
 
 	/*
 	 * Make sure VACOPT_ANALYZE is specified if any column lists are present.
@@ -401,7 +450,18 @@ vacuum(List *relations, VacuumParams *params,
 	{
 		MemoryContext old_context = MemoryContextSwitchTo(vac_context);
 
-		bstrategy = GetAccessStrategy(BAS_VACUUM);
+		Assert(params->ring_size >= -1);
+
+		if (params->ring_size == -1)
+		{
+			if (vacuum_buffer_usage_limit == -1)
+				bstrategy = GetAccessStrategy(BAS_VACUUM);
+			else
+				bstrategy = GetAccessStrategyWithSize(BAS_VACUUM, vacuum_buffer_usage_limit);
+		}
+		else
+			bstrategy = GetAccessStrategyWithSize(BAS_VACUUM, params->ring_size);
+
 		MemoryContextSwitchTo(old_context);
 	}
 

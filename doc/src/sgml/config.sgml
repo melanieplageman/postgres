@@ -2001,6 +2001,36 @@ include_dir 'conf.d'
       </listitem>
      </varlistentry>
 
+     <varlistentry id="guc-vacuum-buffer-usage-limit" xreflabel="vacuum_buffer_usage_limit">
+      <term>
+       <varname>vacuum_buffer_usage_limit</varname> (<type>integer</type>)
+       <indexterm>
+        <primary><varname>vacuum_buffer_usage_limit</varname> configuration parameter</primary>
+       </indexterm>
+      </term>
+      <listitem>
+       <para>
+        Specifies the size of <varname>shared_buffers</varname> to be reused
+        for each backend participating in a given invocation of
+        <command>VACUUM</command> or <command>ANALYZE</command> or in
+        autovacuum. This size is converted to the number of shared buffers
+        which will be reused as part of a <glossterm
+        linkend="glossary-buffer-access-strategy">Buffer Access
+        Strategy</glossterm>. <literal>0</literal> will disable use of a
+        <literal>Buffer Access Strategy</literal>. <literal>-1</literal> will
+        set the size to a default of <literal>256 kB</literal>. The maximum
+        ring buffer size is <literal>16 GB</literal>. Though you may set
+        <varname>vacuum_buffer_usage_limit</varname> below <literal>128
+        kB</literal>, it will be clamped to <literal>128 kB</literal> at
+        runtime. The default value is <literal>-1</literal>. If this value is
+        specified without units, it is taken as kilobytes. This parameter can
+        be set at any time. It can be overridden for <link
+        linkend="sql-vacuum"><command>VACUUM</command></link> when passing the
+        <command>BUFFER_USAGE_LIMIT</command> parameter.
+       </para>
+      </listitem>
+     </varlistentry>
+
      <varlistentry id="guc-logical-decoding-work-mem" xreflabel="logical_decoding_work_mem">
       <term><varname>logical_decoding_work_mem</varname> (<type>integer</type>)
       <indexterm>

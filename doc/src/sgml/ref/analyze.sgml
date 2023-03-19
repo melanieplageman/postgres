@@ -51,9 +51,13 @@ ANALYZE [ VERBOSE ] [ <replaceable class="parameter">table_and_columns</replacea
    Without a <replaceable class="parameter">table_and_columns</replaceable>
    list, <command>ANALYZE</command> processes every table and materialized view
    in the current database that the current user has permission to analyze.
-   With a list, <command>ANALYZE</command> processes only those table(s).
-   It is further possible to give a list of column names for a table,
-   in which case only the statistics for those columns are collected.
+   With a list, <command>ANALYZE</command> processes only those table(s). It is
+   further possible to give a list of column names for a table, in which case
+   only the statistics for those columns are collected.
+   <command>ANALYZE</command> uses a <glossterm
+   linkend="glossary-buffer-access-strategy">Buffer Access Strategy</glossterm>
+   when reading in the sample data. The number of buffers consumed for this can
+   be controlled by <xref linkend="guc-vacuum-buffer-usage-limit"/>.
   </para>
 
   <para>

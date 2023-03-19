@@ -272,6 +272,19 @@ SELECT t.relfilenode = :toast_filenode AS is_same_toast_filenode
   FROM pg_class c, pg_class t
   WHERE c.reltoastrelid = t.oid AND c.relname = 'vac_option_tab';
 
+-- BUFFER_USAGE_LIMIT option
+VACUUM (BUFFER_USAGE_LIMIT '512 kB') vac_option_tab;
+-- works with PARALLEL option
+VACUUM (BUFFER_USAGE_LIMIT '512 kB', PARALLEL 2) vac_option_tab;
+-- integer overflow error
+VACUUM (BUFFER_USAGE_LIMIT 10000000000) vac_option_tab;
+-- value exceeds ring size max error
+VACUUM (BUFFER_USAGE_LIMIT '17 GB') vac_option_tab;
+-- incompatible with VACUUM FULL error
+VACUUM (BUFFER_USAGE_LIMIT '512 kB', FULL) vac_option_tab;
+-- incompatible with VACUUM ONLY_DATABASE_STATS error
+VACUUM (BUFFER_USAGE_LIMIT '512 kB', ONLY_DATABASE_STATS) vac_option_tab;
+
 -- SKIP_DATABASE_STATS option
 VACUUM (SKIP_DATABASE_STATS) vactst;
 
