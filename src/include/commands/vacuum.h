@@ -236,6 +236,12 @@ typedef struct VacuumParams
 	 * disabled.
 	 */
 	int			nworkers;
+
+	/*
+	 * The size in KB of the Buffer Access Strategy ring to be used for VACUUM
+	 * and ANALYZE.
+	 */
+	int			ring_size;
 } VacuumParams;
 
 /*

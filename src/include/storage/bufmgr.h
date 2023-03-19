@@ -194,7 +194,13 @@ extern Size BufferShmemSize(void);
 extern void AtProcExit_LocalBuffers(void);
 
 /* in freelist.c */
+
 extern BufferAccessStrategy GetAccessStrategy(BufferAccessStrategyType btype);
+extern BufferAccessStrategy GetAccessStrategyWithSize(
+													  BufferAccessStrategyType btype,
+													  int ring_size_kb);
+extern int	StrategyGetBufferCount(BufferAccessStrategy strategy);
+
 extern void FreeAccessStrategy(BufferAccessStrategy strategy);
 
 
@@ -284,6 +290,27 @@ static inline Page
 BufferGetPage(Buffer buffer)
 {
 	return (Page) BufferGetBlock(buffer);
+}
+
+/*
+ * StrategyGetClampedBufsize
+ * 		Returns a clamped buffer size in KB
+ *
+ * Buffer Access Strategies should not consume more than the 1/8 of shared
+ * buffers. Given a size in KB, this helper calculates an acceptable clamped
+ * value, given the current size of shared buffers.
+ */
+static inline int
+StrategyGetClampedBufsize(int bufsize_kb)
+{
+	int			sb_limit_kb;
+	int			blcksz_kb = BLCKSZ / 1024;
+
+	Assert(blcksz_kb > 0);
+
+	sb_limit_kb = NBuffers / 8 * blcksz_kb;
+
+	return Min(sb_limit_kb, bufsize_kb);
 }
 
 /*

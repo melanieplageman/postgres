@@ -2290,9 +2290,18 @@ do_autovacuum(void)
 	/*
 	 * Create a buffer access strategy object for VACUUM to use.  We want to
 	 * use the same one across all the vacuum operations we perform, since the
-	 * point is for VACUUM not to blow out the shared cache.
+	 * point is for VACUUM not to blow out the shared cache. If we later enter
+	 * failsafe mode, we will cease use of the BufferAccessStrategy. Either
+	 * way, we clean up the BufferAccessStrategy object at the end of this
+	 * function.
+	 *
+	 * XXX: In the future we may want to react to changes in
+	 * VacuumBufferUsageLimit while vacuuming.
 	 */
-	bstrategy = GetAccessStrategy(BAS_VACUUM);
+	if (VacuumBufferUsageLimit > -1)
+		bstrategy = GetAccessStrategyWithSize(BAS_VACUUM, VacuumBufferUsageLimit);
+	else
+		bstrategy = GetAccessStrategy(BAS_VACUUM);
 
 	/*
 	 * create a memory context to act as fake PortalContext, so that the
@@ -2884,6 +2893,15 @@ table_recheck_autovac(Oid relid, HTAB *table_toast_map,
 		tab->at_params.multixact_freeze_table_age = multixact_freeze_table_age;
 		tab->at_params.is_wraparound = wraparound;
 		tab->at_params.log_min_duration = log_min_duration;
+
+		/*
+		 * Since we currently do not change the size of the Buffer Access
+		 * Strategy while the autovacuum worker is running, always set this to
+		 * 0 to avoid changes in VacuumBufferUsageLimit affecting allocation of
+		 * the Buffer Usage Strategy.
+		 */
+		tab->at_params.ring_size = 0;
+
 		tab->at_vacuum_cost_limit = vac_cost_limit;
 		tab->at_vacuum_cost_delay = vac_cost_delay;
 		tab->at_relname = NULL;

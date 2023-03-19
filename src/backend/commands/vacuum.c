@@ -56,6 +56,7 @@
 #include "utils/acl.h"
 #include "utils/fmgroids.h"
 #include "utils/guc.h"
+#include "utils/guc_hooks.h"
 #include "utils/memutils.h"
 #include "utils/pg_rusage.h"
 #include "utils/snapmgr.h"
@@ -96,6 +97,29 @@ static bool vac_tid_reaped(ItemPointer itemptr, void *state);
 static int	vac_cmp_itemptr(const void *left, const void *right);
 
 /*
+ * GUC check function to ensure GUC value specified is within the allowable
+ * range. This should match the checking in ExecVacuum().
+ */
+bool
+check_vacuum_buffer_usage_limit(int *newval, void **extra,
+								GucSource source)
+{
+	/* Allow specifying the default or disabling Buffer Access Strategy */
+	if (*newval == -1 || *newval == 0)
+		return true;
+
+	/* Value upper and lower hard limits are inclusive */
+	if (*newval >= MIN_BAS_VAC_RING_SIZE_KB && *newval <= MAX_BAS_VAC_RING_SIZE_KB)
+		return true;
+
+	/* Value does not fall within any allowable range */
+	GUC_check_errdetail("\"vacuum_buffer_usage_limit\" must be 0 or between %d KB and %d KB",
+						MIN_BAS_VAC_RING_SIZE_KB, MAX_BAS_VAC_RING_SIZE_KB);
+
+	return false;
+}
+
+/*
  * Primary entry point for manual VACUUM and ANALYZE commands
  *
  * This is mainly a preparation wrapper for the real operations that will
@@ -124,6 +148,9 @@ ExecVacuum(ParseState *pstate, VacuumStmt *vacstmt, bool isTopLevel)
 	/* By default parallel vacuum is enabled */
 	params.nworkers = 0;
 
+	/* by default use buffer access strategy with default size */
+	params.ring_size = -1;
+
 	/* Parse options list */
 	foreach(lc, vacstmt->options)
 	{
@@ -134,6 +161,46 @@ ExecVacuum(ParseState *pstate, VacuumStmt *vacstmt, bool isTopLevel)
 			verbose = defGetBoolean(opt);
 		else if (strcmp(opt->defname, "skip_locked") == 0)
 			skip_locked = defGetBoolean(opt);
+		else if (strcmp(opt->defname, "buffer_usage_limit") == 0)
+		{
+			const char *hintmsg;
+			int			result;
+			char	   *vac_buffer_size;
+
+			if (opt->arg == NULL)
+			{
+				ereport(ERROR,
+						(errcode(ERRCODE_SYNTAX_ERROR),
+						 errmsg("buffer_usage_limit option requires a valid value"),
+						 parser_errposition(pstate, opt->location)));
+			}
+
+			vac_buffer_size = defGetString(opt);
+
+			if (!parse_int(vac_buffer_size, &result, GUC_UNIT_KB, &hintmsg))
+			{
+				ereport(ERROR,
+						(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+						 errmsg("value: \"%s\": is invalid for buffer_usage_limit",
+								vac_buffer_size),
+						 hintmsg ? errhint("%s", _(hintmsg)) : 0));
+			}
+
+			/*
+			 * Check that the specified size falls within the hard upper and
+			 * lower limits if it is not -1 or 0.
+			 */
+			if (result != -1 && result != 0 &&
+				(result < MIN_BAS_VAC_RING_SIZE_KB || result > MAX_BAS_VAC_RING_SIZE_KB))
+			{
+				ereport(ERROR,
+						(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+						 errmsg("buffer_usage_limit for a vacuum must be 0 or between %d KB and %d KB",
+								MIN_BAS_VAC_RING_SIZE_KB, MAX_BAS_VAC_RING_SIZE_KB)));
+			}
+
+			params.ring_size = result;
+		}
 		else if (!vacstmt->is_vacuumcmd)
 			ereport(ERROR,
 					(errcode(ERRCODE_SYNTAX_ERROR),
@@ -237,6 +304,16 @@ ExecVacuum(ParseState *pstate, VacuumStmt *vacstmt, bool isTopLevel)
 		ereport(ERROR,
 				(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
 				 errmsg("VACUUM FULL cannot be performed in parallel")));
+
+	if ((params.options & VACOPT_FULL) && params.ring_size > -1)
+		ereport(ERROR,
+				(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+				 errmsg("BUFFER_USAGE_LIMIT cannot be specified for VACUUM FULL")));
+
+	if ((params.options & VACOPT_ONLY_DATABASE_STATS) && params.ring_size > -1)
+		ereport(ERROR,
+				(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+				 errmsg("BUFFER_USAGE_LIMIT cannot be specified for VACUUM ONLY_DATABASE_STATS")));
 
 	/*
 	 * Make sure VACOPT_ANALYZE is specified if any column lists are present.
@@ -401,7 +478,24 @@ vacuum(List *relations, VacuumParams *params,
 	{
 		MemoryContext old_context = MemoryContextSwitchTo(vac_context);
 
-		bstrategy = GetAccessStrategy(BAS_VACUUM);
+		Assert(params->ring_size >= -1);
+
+		/*
+		 * If explicit VACUUM or ANALYZE specified a non-default
+		 * BUFFER_USAGE_LIMIT, that overrides the value of GUC
+		 * VacuumBufferUsageLimit. If VacuumBufferUsageLimit is set to
+		 * something other than the default, use its value. Otherwise, use the
+		 * default sizes for a Buffer Access Strategy. Note that autovacuum
+		 * will have set VacuumParams->ring_size to the value it derived from
+		 * VacuumBufferUsageLimit.
+		 */
+		if (params->ring_size > -1)
+			bstrategy = GetAccessStrategyWithSize(BAS_VACUUM, params->ring_size);
+		else if (VacuumBufferUsageLimit > -1)
+			bstrategy = GetAccessStrategyWithSize(BAS_VACUUM, VacuumBufferUsageLimit);
+		else
+			bstrategy = GetAccessStrategy(BAS_VACUUM);
+
 		MemoryContextSwitchTo(old_context);
 	}
 

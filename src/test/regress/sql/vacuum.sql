@@ -272,6 +272,9 @@ SELECT t.relfilenode = :toast_filenode AS is_same_toast_filenode
   FROM pg_class c, pg_class t
   WHERE c.reltoastrelid = t.oid AND c.relname = 'vac_option_tab';
 
+-- BUFFER_USAGE_LIMIT integer overflow error
+VACUUM (BUFFER_USAGE_LIMIT 10000000000) vac_option_tab;
+
 -- SKIP_DATABASE_STATS option
 VACUUM (SKIP_DATABASE_STATS) vactst;
 
