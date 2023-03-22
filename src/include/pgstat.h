@@ -544,10 +544,6 @@ extern void pgstat_report_checksum_failures_in_db(Oid dboid, int failurecount);
 extern void pgstat_report_checksum_failure(void);
 extern void pgstat_report_connect(Oid dboid);
 
-#define pgstat_count_buffer_read_time(n)							\
-	(pgStatBlockReadTime += (n))
-#define pgstat_count_buffer_write_time(n)							\
-	(pgStatBlockWriteTime += (n))
 #define pgstat_count_conn_active_time(n)							\
 	(pgStatActiveTime += (n))
 #define pgstat_count_conn_txn_idle_time(n)							\

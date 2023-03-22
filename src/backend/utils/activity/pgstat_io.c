@@ -121,13 +121,11 @@ pgstat_count_io_op_time(IOObject io_object, IOContext io_context, IOOp io_op,
 
 		if (io_op == IOOP_WRITE)
 		{
-			pgstat_count_buffer_write_time(INSTR_TIME_GET_MICROSEC(io_time));
 			if (io_object == IOOBJECT_RELATION)
 				INSTR_TIME_ADD(pgBufferUsage.blk_write_time, io_time);
 		}
 		else if (io_op == IOOP_READ)
 		{
-			pgstat_count_buffer_read_time(INSTR_TIME_GET_MICROSEC(io_time));
 			if (io_object == IOOBJECT_RELATION)
 				INSTR_TIME_ADD(pgBufferUsage.blk_read_time, io_time);
 		}
@@ -178,15 +176,19 @@ pgstat_flush_io(bool nowait)
 		{
 			for (int io_op = 0; io_op < IOOP_NUM_TYPES; io_op++)
 			{
-				instr_time	time;
+				PgStat_Counter time;
 
 				bktype_shstats->counts[io_object][io_context][io_op] +=
 					PendingIOStats.counts[io_object][io_context][io_op];
 
-				time = PendingIOStats.pending_times[io_object][io_context][io_op];
+				time = INSTR_TIME_GET_MICROSEC(PendingIOStats.pending_times[io_object][io_context][io_op]);
 
-				bktype_shstats->times[io_object][io_context][io_op] +=
-					INSTR_TIME_GET_MICROSEC(time);
+				bktype_shstats->times[io_object][io_context][io_op] += time;
+
+				if (io_op == IOOP_WRITE)
+					pgStatBlockWriteTime += time;
+				else if (io_op == IOOP_READ)
+					pgStatBlockReadTime += time;
 			}
 		}
 	}
