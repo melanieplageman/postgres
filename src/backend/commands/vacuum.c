@@ -77,6 +77,7 @@ int			vacuum_multixact_failsafe_age;
 static MemoryContext vac_context = NULL;
 static BufferAccessStrategy vac_strategy;
 
+bool		VacuumFailsafeActive = false;
 
 /*
  * Variables for cost-based parallel vacuum.  See comments atop
@@ -492,6 +493,7 @@ vacuum(List *relations, VacuumParams *params,
 
 		in_vacuum = true;
 		VacuumCostActive = (VacuumCostDelay > 0);
+		VacuumFailsafeActive = false;
 		VacuumCostBalance = 0;
 		VacuumPageHit = 0;
 		VacuumPageMiss = 0;
@@ -1849,6 +1851,8 @@ vacuum_rel(Oid relid, RangeVar *relation, VacuumParams *params, bool skip_privs)
 	int			save_nestlevel;
 
 	Assert(params != NULL);
+
+	VacuumFailsafeActive = false;
 
 	/* Begin a transaction for vacuuming this relation */
 	StartTransactionCommand();
