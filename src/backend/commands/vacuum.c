@@ -2228,11 +2228,11 @@ vacuum_delay_point(void)
 
 	/*
 	 * Reload the configuration file if requested. This allows changes to
-	 * vacuum_cost_limit and vacuum_cost_delay to take effect while a table is
-	 * being vacuumed or analyzed. Analyze should not reload configuration
-	 * file if it is in an outer transaction. as GUC values shouldn't be
-	 * allowed to refer to some uncommitted state (e.g. database objects
-	 * created in this transaction).
+	 * [autovacuum_]vacuum_cost_limit and [autovacuum_]vacuum_cost_delay to
+	 * take effect while a table is being vacuumed or analyzed. Analyze should
+	 * not reload configuration file if it is in an outer transaction. as GUC
+	 * values shouldn't be allowed to refer to some uncommitted state (e.g.
+	 * database objects created in this transaction).
 	 */
 	if (ConfigReloadPending && !analyze_in_outer_xact)
 	{
@@ -2245,6 +2245,12 @@ vacuum_delay_point(void)
 		 * by reload.
 		 */
 		AutoVacuumUpdateDelay();
+		AutoVacuumUpdateLimit();
+
+		/*
+		 * Autovacuum workers will have already done this in
+		 * AutoVacuumUpdateDelay()
+		 */
 		if (!VacuumFailsafeActive)
 			VacuumCostActive = (VacuumCostDelay > 0);
 	}
@@ -2290,11 +2296,13 @@ vacuum_delay_point(void)
 		VacuumCostBalance = 0;
 
 		/*
-		 * For autovacuum workers, someone may have called
-		 * autovac_balance_cost() since they last updated their VacuumCostLimit
-		 * above. Do so again now to ensure they have a current value.
+		 * Update limit values for workers. We must always do this in case the
+		 * autovacuum launcher or another autovacuum worker has recalculated
+		 * the number of workers across which we must balance the limit. This
+		 * is done by the launcher when launching a new worker and by workers
+		 * before vacuuming each table.
 		 */
-		AutoVacuumUpdateDelay();
+		AutoVacuumUpdateLimit();
 
 		/* Might have gotten an interrupt while sleeping */
 		CHECK_FOR_INTERRUPTS();
