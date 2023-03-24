@@ -64,6 +64,7 @@ extern int	StartAutoVacWorker(void);
 extern void AutoVacWorkerFailed(void);
 
 /* autovacuum cost-delay balancer */
+extern void AutoVacuumOverrideCosts(void);
 extern void AutoVacuumUpdateDelay(void);
 
 #ifdef EXEC_BACKEND

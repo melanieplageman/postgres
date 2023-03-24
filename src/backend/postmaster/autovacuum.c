@@ -1778,13 +1778,33 @@ FreeWorkerInfo(int code, Datum arg)
  * each a fraction of the total available I/O.
  */
 void
-AutoVacuumUpdateDelay(void)
+AutoVacuumOverrideCosts(void)
 {
 	if (MyWorkerInfo)
 	{
 		VacuumCostDelay = MyWorkerInfo->wi_cost_delay;
 		VacuumCostLimit = MyWorkerInfo->wi_cost_limit;
 	}
+}
+
+/*
+ * Caller must not already hold the AutovacuumLock
+ */
+void
+AutoVacuumUpdateDelay(void)
+{
+	/*
+	 * Even though this autovacuum worker may be vacuuming a table with a cost
+	 * limit table option and not a cost delay table option, we still don't
+	 * refresh the cost delay value.
+	 */
+	if (!MyWorkerInfo || !MyWorkerInfo->wi_dobalance)
+		return;
+
+	LWLockAcquire(AutovacuumLock, LW_EXCLUSIVE);
+	MyWorkerInfo->wi_cost_delay = autovacuum_vac_cost_delay >= 0 ?
+			autovacuum_vac_cost_delay : VacuumCostDelay;
+	LWLockRelease(AutovacuumLock);
 }
 
 /*
@@ -2437,7 +2457,7 @@ do_autovacuum(void)
 		autovac_balance_cost();
 
 		/* set the active cost parameters from the result of that */
-		AutoVacuumUpdateDelay();
+		AutoVacuumOverrideCosts();
 
 		/* done */
 		LWLockRelease(AutovacuumLock);
