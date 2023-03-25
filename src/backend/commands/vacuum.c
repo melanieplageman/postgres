@@ -2257,12 +2257,13 @@ vacuum_delay_point(void)
 		 * VacuumCostLimit and VacuumCostDelay in case they were overwritten
 		 * by reload.
 		 */
-		AutoVacuumUpdateCosts();
-		AutoVacuumOverrideCosts();
+		AutoVacuumUpdateDelay();
+		AutoVacuumUpdateLimit();
 
 		/*
 		 * If configuration changes are allowed to impact VacuumCostInactive,
-		 * make sure it is updated.
+		 * make sure it is updated. Autovacuum workers will have already done
+		 * this in AutoVacuumUpdateDelay()
 		 */
 		if (VacuumCostInactive == VACUUM_COST_INACTIVE_AND_LOCKED)
 			return;
@@ -2314,12 +2315,13 @@ vacuum_delay_point(void)
 		VacuumCostBalance = 0;
 
 		/*
-		 * For autovacuum workers, someone may have called
-		 * autovac_balance_cost() since they last updated their
-		 * VacuumCostLimit above. Do so again now to ensure they have a
-		 * current value.
+		 * Update limit values for autovacuum workers. We must always do this
+		 * in case the autovacuum launcher or another autovacuum worker has
+		 * recalculated the number of workers across which we must balance the
+		 * limit. This is done by the launcher when launching a new worker and
+		 * by workers before vacuuming each table.
 		 */
-		AutoVacuumOverrideCosts();
+		AutoVacuumUpdateLimit();
 
 		/* Might have gotten an interrupt while sleeping */
 		CHECK_FOR_INTERRUPTS();
