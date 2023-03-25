@@ -2637,7 +2637,7 @@ lazy_check_wraparound_failsafe(LVRelState *vacrel)
 						 "You might also need to consider other ways for VACUUM to keep up with the allocation of transaction IDs.")));
 
 		/* Stop applying cost limits from this point on */
-		VacuumCostActive = false;
+		VacuumCostInactive = VACUUM_COST_INACTIVE_AND_LOCKED;
 		VacuumCostBalance = 0;
 
 		return true;

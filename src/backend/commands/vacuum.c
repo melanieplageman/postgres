@@ -491,7 +491,6 @@ vacuum(List *relations, VacuumParams *params,
 		ListCell   *cur;
 
 		in_vacuum = true;
-		VacuumCostActive = (VacuumCostDelay > 0);
 		VacuumCostBalance = 0;
 		VacuumPageHit = 0;
 		VacuumPageMiss = 0;
@@ -506,6 +505,24 @@ vacuum(List *relations, VacuumParams *params,
 		foreach(cur, relations)
 		{
 			VacuumRelation *vrel = lfirst_node(VacuumRelation, cur);
+
+			/*
+			 * failsafe_active is reset per relation, so we must be sure that
+			 * VacuumCostInactive is set to either VACUUM_COST_INACTIVE or
+			 * VACUUM_COST_INACTIVE_AND_UNLOCKED in between vacuuming
+			 * relations.
+			 */
+			VacuumCostInactive = VacuumCostDelay > 0 ? VACUUM_COST_ACTIVE :
+				VACUUM_COST_INACTIVE_AND_UNLOCKED;
+
+			/*
+			 * We should not have transitioned VacuumCostInactive from
+			 * VACUUM_COST_ACTIVE to VACUUM_COST_INACTIVE_AND_UNLOCKED above,
+			 * as that should have happened when we changed the value of
+			 * VacuumCostDelay.
+			 */
+			Assert(VacuumCostInactive == VACUUM_COST_ACTIVE ||
+				   VacuumCostBalance == 0);
 
 			if (params->options & VACOPT_VACUUM)
 			{
@@ -549,7 +566,7 @@ vacuum(List *relations, VacuumParams *params,
 	PG_FINALLY();
 	{
 		in_vacuum = false;
-		VacuumCostActive = false;
+		VacuumCostInactive = VACUUM_COST_INACTIVE_AND_UNLOCKED;
 		VacuumCostBalance = 0;
 	}
 	PG_END_TRY();
@@ -2216,7 +2233,7 @@ vacuum_delay_point(void)
 	/* Always check for interrupts */
 	CHECK_FOR_INTERRUPTS();
 
-	if (!VacuumCostActive || InterruptPending)
+	if (VacuumCostInactive || InterruptPending)
 		return;
 
 	/*

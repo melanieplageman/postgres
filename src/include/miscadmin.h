@@ -274,8 +274,7 @@ extern PGDLLIMPORT int64 VacuumPageMiss;
 extern PGDLLIMPORT int64 VacuumPageDirty;
 
 extern PGDLLIMPORT int VacuumCostBalance;
-extern PGDLLIMPORT bool VacuumCostActive;
-
+extern PGDLLIMPORT int VacuumCostInactive;
 
 /* in tcop/postgres.c */
 

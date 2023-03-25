@@ -893,7 +893,7 @@ ReadBuffer_common(SMgrRelation smgr, char relpersistence, ForkNumber forkNum,
 			*hit = true;
 			VacuumPageHit++;
 
-			if (VacuumCostActive)
+			if (!VacuumCostInactive)
 				VacuumCostBalance += VacuumCostPageHit;
 
 			TRACE_POSTGRESQL_BUFFER_READ_DONE(forkNum, blockNum,
@@ -1098,7 +1098,7 @@ ReadBuffer_common(SMgrRelation smgr, char relpersistence, ForkNumber forkNum,
 	}
 
 	VacuumPageMiss++;
-	if (VacuumCostActive)
+	if (!VacuumCostInactive)
 		VacuumCostBalance += VacuumCostPageMiss;
 
 	TRACE_POSTGRESQL_BUFFER_READ_DONE(forkNum, blockNum,
@@ -1672,7 +1672,7 @@ MarkBufferDirty(Buffer buffer)
 	{
 		VacuumPageDirty++;
 		pgBufferUsage.shared_blks_dirtied++;
-		if (VacuumCostActive)
+		if (!VacuumCostInactive)
 			VacuumCostBalance += VacuumCostPageDirty;
 	}
 }
@@ -4199,7 +4199,7 @@ MarkBufferDirtyHint(Buffer buffer, bool buffer_std)
 		{
 			VacuumPageDirty++;
 			pgBufferUsage.shared_blks_dirtied++;
-			if (VacuumCostActive)
+			if (!VacuumCostInactive)
 				VacuumCostBalance += VacuumCostPageDirty;
 		}
 	}
