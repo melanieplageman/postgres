@@ -302,6 +302,14 @@ extern PGDLLIMPORT int vacuum_failsafe_age;
 extern PGDLLIMPORT int vacuum_multixact_failsafe_age;
 
 /* Variables for cost-based parallel vacuum */
+
+typedef enum VacuumCostStatus
+{
+	VACUUM_COST_INACTIVE_AND_LOCKED = -1,
+	VACUUM_COST_ACTIVE = 0,
+	VACUUM_COST_INACTIVE_AND_UNLOCKED = 1,
+}			VacuumCostStatus;
+
 extern PGDLLIMPORT pg_atomic_uint32 *VacuumSharedCostBalance;
 extern PGDLLIMPORT pg_atomic_uint32 *VacuumActiveNWorkers;
 extern PGDLLIMPORT int VacuumCostBalanceLocal;

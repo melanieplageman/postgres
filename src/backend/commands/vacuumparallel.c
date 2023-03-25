@@ -989,8 +989,12 @@ parallel_vacuum_main(dsm_segment *seg, shm_toc *toc)
 												 PARALLEL_VACUUM_KEY_DEAD_ITEMS,
 												 false);
 
-	/* Set cost-based vacuum delay */
-	VacuumCostActive = (VacuumCostDelay > 0);
+	/*
+	 * Set cost-based vacuum delay Parallel vacuum workers will not execute
+	 * failsafe VACUUM.
+	 */
+	VacuumCostInactive = VacuumCostDelay > 0 ? VACUUM_COST_ACTIVE :
+		VACUUM_COST_INACTIVE_AND_UNLOCKED;
 	VacuumCostBalance = 0;
 	VacuumPageHit = 0;
 	VacuumPageMiss = 0;
