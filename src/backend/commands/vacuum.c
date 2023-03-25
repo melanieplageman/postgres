@@ -2257,10 +2257,10 @@ vacuum_delay_point(void)
 
 	/*
 	 * Reload the configuration file if requested. This allows changes to
-	 * vacuum_cost_limit and vacuum_cost_delay to take effect while a table is
-	 * being vacuumed or analyzed. Analyze should not reload configuration
-	 * file if it is in an outer transaction, as we currently only allow
-	 * configuration reload when in top-level statements.
+	 * [autovacuum_]vacuum_cost_limit and [autovacuum_]vacuum_cost_delay to
+	 * take effect while a table is being vacuumed or analyzed. Analyze should
+	 * not reload configuration file if it is in an outer transaction, as we
+	 * currently only allow configuration reload when in top-level statements.
 	 */
 	if (ConfigReloadPending && vacuum_can_reload_config)
 	{
@@ -2306,7 +2306,14 @@ vacuum_delay_point(void)
 
 		VacuumCostBalance = 0;
 
-		VacuumUpdateCosts();
+		/*
+		 * Balance and update limit values for autovacuum workers. We must
+		 * always do this in case the autovacuum launcher or another
+		 * autovacuum worker has recalculated the number of workers across
+		 * which we must balance the limit. This is done by the launcher when
+		 * launching a new worker and by workers before vacuuming each table.
+		 */
+		AutoVacuumUpdateLimit();
 
 		/* Might have gotten an interrupt while sleeping */
 		CHECK_FOR_INTERRUPTS();
