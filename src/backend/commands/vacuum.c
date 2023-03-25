@@ -550,6 +550,7 @@ vacuum(List *relations, VacuumParams *params,
 	{
 		in_vacuum = false;
 		VacuumCostActive = false;
+		VacuumCostBalance = 0;
 	}
 	PG_END_TRY();
 
