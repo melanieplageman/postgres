@@ -48,6 +48,7 @@
 #include "pgstat.h"
 #include "postmaster/autovacuum.h"
 #include "postmaster/bgworker_internals.h"
+#include "postmaster/interrupt.h"
 #include "storage/bufmgr.h"
 #include "storage/lmgr.h"
 #include "storage/pmsignal.h"
@@ -76,6 +77,7 @@ int			vacuum_multixact_failsafe_age;
 /* A few variables that don't seem worth passing around as parameters */
 static MemoryContext vac_context = NULL;
 static BufferAccessStrategy vac_strategy;
+static bool analyze_in_outer_xact = false;
 
 
 /*
@@ -314,8 +316,7 @@ vacuum(List *relations, VacuumParams *params,
 	static bool in_vacuum = false;
 
 	const char *stmttype;
-	volatile bool in_outer_xact,
-				use_own_xacts;
+	volatile bool use_own_xacts;
 
 	Assert(params != NULL);
 
@@ -332,10 +333,10 @@ vacuum(List *relations, VacuumParams *params,
 	if (params->options & VACOPT_VACUUM)
 	{
 		PreventInTransactionBlock(isTopLevel, stmttype);
-		in_outer_xact = false;
+		analyze_in_outer_xact = false;
 	}
 	else
-		in_outer_xact = IsInTransactionBlock(isTopLevel);
+		analyze_in_outer_xact = IsInTransactionBlock(isTopLevel);
 
 	/*
 	 * Due to static variables vac_context, anl_context and vac_strategy,
@@ -457,7 +458,7 @@ vacuum(List *relations, VacuumParams *params,
 		Assert(params->options & VACOPT_ANALYZE);
 		if (IsAutoVacuumWorkerProcess())
 			use_own_xacts = true;
-		else if (in_outer_xact)
+		else if (analyze_in_outer_xact)
 			use_own_xacts = false;
 		else if (list_length(relations) > 1)
 			use_own_xacts = true;
@@ -475,7 +476,7 @@ vacuum(List *relations, VacuumParams *params,
 	 */
 	if (use_own_xacts)
 	{
-		Assert(!in_outer_xact);
+		Assert(!analyze_in_outer_xact);
 
 		/* ActiveSnapshot is not set by autovacuum */
 		if (ActiveSnapshotSet())
@@ -544,7 +545,7 @@ vacuum(List *relations, VacuumParams *params,
 				}
 
 				analyze_rel(vrel->oid, vrel->relation, params,
-							vrel->va_cols, in_outer_xact, vac_strategy);
+							vrel->va_cols, analyze_in_outer_xact, vac_strategy);
 
 				if (use_own_xacts)
 				{
@@ -568,6 +569,7 @@ vacuum(List *relations, VacuumParams *params,
 		in_vacuum = false;
 		VacuumCostInactive = VACUUM_COST_INACTIVE_AND_UNLOCKED;
 		VacuumCostBalance = 0;
+		analyze_in_outer_xact = false;
 	}
 	PG_END_TRY();
 
@@ -2233,7 +2235,50 @@ vacuum_delay_point(void)
 	/* Always check for interrupts */
 	CHECK_FOR_INTERRUPTS();
 
-	if (VacuumCostInactive || InterruptPending)
+	if (InterruptPending ||
+		(VacuumCostInactive && !ConfigReloadPending))
+		return;
+
+	/*
+	 * Reload the configuration file if requested. This allows changes to
+	 * vacuum_cost_limit and vacuum_cost_delay to take effect while a table is
+	 * being vacuumed or analyzed. Analyze should not reload configuration file
+	 * if it is in an outer transaction, as we currently only allow
+	 * configuration reload when in top-level statements.
+	 */
+	if (ConfigReloadPending && !analyze_in_outer_xact)
+	{
+		ConfigReloadPending = false;
+		ProcessConfigFile(PGC_SIGHUP);
+
+		/*
+		 * Autovacuum workers must restore the correct values of
+		 * VacuumCostLimit and VacuumCostDelay in case they were overwritten
+		 * by reload.
+		 */
+		AutoVacuumUpdateDelay();
+
+		/*
+		 * If configuration changes are allowed to impact VacuumCostInactive,
+		 * make sure it is updated.
+		 */
+		if (VacuumCostInactive == VACUUM_COST_INACTIVE_AND_LOCKED)
+			return;
+
+		if (VacuumCostDelay > 0)
+			VacuumCostInactive = VACUUM_COST_ACTIVE;
+		else
+		{
+			VacuumCostInactive = VACUUM_COST_INACTIVE_AND_UNLOCKED;
+			VacuumCostBalance = 0;
+		}
+	}
+
+	/*
+	 * If we disabled cost-based delays after reloading the config file,
+	 * return.
+	 */
+	if (VacuumCostInactive)
 		return;
 
 	/*
