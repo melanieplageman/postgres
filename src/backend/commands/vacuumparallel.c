@@ -995,10 +995,9 @@ parallel_vacuum_main(dsm_segment *seg, shm_toc *toc)
 												 false);
 
 	/* Set cost-based vacuum delay */
-	VacuumFailsafeActive = false;
-	VacuumUpdateCosts();
-	VacuumCostActive = (VacuumCostDelay > 0);
+	Assert(!VacuumFailsafeActive);
 	VacuumCostBalance = 0;
+	VacuumUpdateCosts();
 	VacuumPageHit = 0;
 	VacuumPageMiss = 0;
 	VacuumPageDirty = 0;

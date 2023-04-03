@@ -48,6 +48,7 @@
 #include "pgstat.h"
 #include "postmaster/autovacuum.h"
 #include "postmaster/bgworker_internals.h"
+#include "postmaster/interrupt.h"
 #include "storage/bufmgr.h"
 #include "storage/lmgr.h"
 #include "storage/pmsignal.h"
@@ -83,6 +84,7 @@ int			vacuum_cost_limit;
  */
 int			VacuumCostLimit = 0;
 double		VacuumCostDelay = -1;
+static bool vacuum_can_reload_config = false;
 
 /*
  * VacuumFailsafeActive is a defined as a global so that we can determine
@@ -354,6 +356,8 @@ vacuum(List *relations, VacuumParams *params,
 	else
 		in_outer_xact = IsInTransactionBlock(isTopLevel);
 
+	vacuum_can_reload_config = !in_outer_xact;
+
 	/*
 	 * Check for and disallow recursive calls.  This could happen when VACUUM
 	 * FULL or ANALYZE calls a hostile index expression that itself calls
@@ -510,9 +514,9 @@ vacuum(List *relations, VacuumParams *params,
 	{
 		ListCell   *cur;
 
-		VacuumUpdateCosts();
 		in_vacuum = true;
-		VacuumCostActive = (VacuumCostDelay > 0);
+		VacuumFailsafeActive = false;
+		VacuumUpdateCosts();
 		VacuumCostBalance = 0;
 		VacuumPageHit = 0;
 		VacuumPageMiss = 0;
@@ -566,12 +570,21 @@ vacuum(List *relations, VacuumParams *params,
 					CommandCounterIncrement();
 				}
 			}
+
+			/*
+			 * Ensure VacuumFailsafeActive has been reset before vacuuming the
+			 * next relation relation.
+			 */
+			VacuumFailsafeActive = false;
 		}
 	}
 	PG_FINALLY();
 	{
 		in_vacuum = false;
 		VacuumCostActive = false;
+		VacuumFailsafeActive = false;
+		VacuumCostBalance = 0;
+		vacuum_can_reload_config = false;
 	}
 	PG_END_TRY();
 
@@ -2238,7 +2251,29 @@ vacuum_delay_point(void)
 	/* Always check for interrupts */
 	CHECK_FOR_INTERRUPTS();
 
-	if (!VacuumCostActive || InterruptPending)
+	if (InterruptPending ||
+		(!VacuumCostActive && !ConfigReloadPending))
+		return;
+
+	/*
+	 * Reload the configuration file if requested. This allows changes to
+	 * vacuum_cost_limit and vacuum_cost_delay to take effect while a table is
+	 * being vacuumed or analyzed. Analyze should not reload configuration
+	 * file if it is in an outer transaction, as we currently only allow
+	 * configuration reload when in top-level statements.
+	 */
+	if (ConfigReloadPending && vacuum_can_reload_config)
+	{
+		ConfigReloadPending = false;
+		ProcessConfigFile(PGC_SIGHUP);
+		VacuumUpdateCosts();
+	}
+
+	/*
+	 * If we disabled cost-based delays after reloading the config file,
+	 * return.
+	 */
+	if (!VacuumCostActive)
 		return;
 
 	/*

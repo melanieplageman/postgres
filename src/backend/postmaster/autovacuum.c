@@ -1796,6 +1796,24 @@ VacuumUpdateCosts(void)
 		VacuumCostLimit = vacuum_cost_limit;
 		VacuumCostDelay = vacuum_cost_delay;
 	}
+
+	/*
+	 * If configuration changes are allowed to impact VacuumCostActive, make
+	 * sure it is updated.
+	 */
+	if (VacuumFailsafeActive)
+	{
+		Assert(!VacuumCostActive);
+		return;
+	}
+
+	if (VacuumCostDelay > 0)
+		VacuumCostActive = true;
+	else
+	{
+		VacuumCostActive = false;
+		VacuumCostBalance = 0;
+	}
 }
 
 /*
