@@ -83,6 +83,7 @@ int			vacuum_cost_limit;
  */
 int			VacuumCostLimit = 200;
 double		VacuumCostDelay = 0;
+static bool VacuumCanReloadConfig = false;
 
 /*
  * VacuumFailsafeActive is a defined as a global so that we can determine
@@ -354,6 +355,8 @@ vacuum(List *relations, VacuumParams *params,
 	else
 		in_outer_xact = IsInTransactionBlock(isTopLevel);
 
+	VacuumCanReloadConfig = !in_outer_xact;
+
 	/*
 	 * Check for and disallow recursive calls.  This could happen when VACUUM
 	 * FULL or ANALYZE calls a hostile index expression that itself calls
@@ -580,6 +583,7 @@ vacuum(List *relations, VacuumParams *params,
 		VacuumCostActive = false;
 		VacuumFailsafeActive = false;
 		VacuumCostBalance = 0;
+		VacuumCanReloadConfig = false;
 	}
 	PG_END_TRY();
 
@@ -2252,10 +2256,12 @@ vacuum_delay_point(void)
 
 	/*
 	 * Reload the configuration file if requested. This allows changes to
-	 * autovacuum_vacuum_cost_limit and autovacuum_vacuum_cost_delay to take
-	 * effect while a table is being vacuumed or analyzed.
+	 * [autovacuum_]vacuum_cost_limit and [autovacuum}_vacuum_cost_delay to
+	 * take effect while a table is being vacuumed or analyzed. Analyze should
+	 * not reload configuration file if it is in an outer transaction, as we
+	 * currently only allow configuration reload when in top-level statements.
 	 */
-	if (ConfigReloadPending && IsAutoVacuumWorkerProcess())
+	if (ConfigReloadPending && VacuumCanReloadConfig)
 	{
 		ConfigReloadPending = false;
 		ProcessConfigFile(PGC_SIGHUP);
