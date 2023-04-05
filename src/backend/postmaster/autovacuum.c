@@ -2289,9 +2289,18 @@ do_autovacuum(void)
 	/*
 	 * Create a buffer access strategy object for VACUUM to use.  We want to
 	 * use the same one across all the vacuum operations we perform, since the
-	 * point is for VACUUM not to blow out the shared cache.
+	 * point is for VACUUM not to blow out the shared cache. If we later enter
+	 * failsafe mode, we will cease use of the BufferAccessStrategy. Either
+	 * way, we clean up the BufferAccessStrategy object at the end of this
+	 * function.
+	 *
+	 * XXX: In the future we may want to react to changes in
+	 * VacuumBufferUsageLimit while vacuuming.
 	 */
-	bstrategy = GetAccessStrategy(BAS_VACUUM);
+	if (VacuumBufferUsageLimit > -1)
+		bstrategy = GetAccessStrategyWithSize(BAS_VACUUM, VacuumBufferUsageLimit);
+	else
+		bstrategy = GetAccessStrategy(BAS_VACUUM);
 
 	/*
 	 * create a memory context to act as fake PortalContext, so that the

@@ -260,7 +260,13 @@ extern Size BufferShmemSize(void);
 extern void AtProcExit_LocalBuffers(void);
 
 /* in freelist.c */
+
 extern BufferAccessStrategy GetAccessStrategy(BufferAccessStrategyType btype);
+extern BufferAccessStrategy GetAccessStrategyWithSize(
+													  BufferAccessStrategyType btype,
+													  int ring_size_kb);
+extern int	StrategyGetBufferCount(BufferAccessStrategy strategy);
+
 extern void FreeAccessStrategy(BufferAccessStrategy strategy);
 
 

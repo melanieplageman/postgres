@@ -263,6 +263,19 @@ extern PGDLLIMPORT double hash_mem_multiplier;
 extern PGDLLIMPORT int maintenance_work_mem;
 extern PGDLLIMPORT int max_parallel_maintenance_workers;
 
+/*
+ * Global values used by VACUUM and autovacuum.
+ */
+extern PGDLLIMPORT int VacuumBufferUsageLimit;
+
+/*
+ * Upper and lower hard limits for the Buffer Access Strategy ring size
+ * specified by the vacuum_buffer_usage_limit GUC and BUFFER_USAGE_LIMIT option
+ * to VACUUM and ANALYZE.
+ */
+#define MAX_BAS_VAC_RING_SIZE_KB (16 * 1024 * 1024)
+#define MIN_BAS_VAC_RING_SIZE_KB 128
+
 extern PGDLLIMPORT int VacuumCostPageHit;
 extern PGDLLIMPORT int VacuumCostPageMiss;
 extern PGDLLIMPORT int VacuumCostPageDirty;
