@@ -53,10 +53,36 @@ begin
 end;
 $$;
 
+-- Return the number of actual rows returned by a query. This is useful when a
+-- count(*) would not execute the desired codepath but a SELECT * would produce
+-- an excessive number of rows.
+create or replace function join_hash_actual_rows(query text)
+returns jsonb language plpgsql
+as
+$$
+declare
+  elements jsonb;
+begin
+  execute 'explain (analyze, costs off, summary off, timing off, format ''json'') ' || query into strict elements;
+  if jsonb_array_length(elements) > 1 then
+    raise exception 'Cannot return actual rows from more than one plan';
+  end if;
+  return elements->0->'Plan'->'Actual Rows';
+end;
+$$;
+
 -- Make a simple relation with well distributed keys and correctly
 -- estimated size.
-create table simple as
-  select generate_series(1, 20000) AS id, 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa';
+create table simple (id int, value text);
+insert into simple values (1, 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa');
+-- Hash join reuses the HOT status bit to indicate match status. This can only
+-- be guaranteed to produce correct results if all the hash join tuple match
+-- bits are reset before reuse. This is done upon loading them into the
+-- hashtable. To test this, update simple, creating a HOT tuple. If this status
+-- bit isn't cleared, we won't correctly emit the NULL-extended unmatching
+-- tuple in full hash join.
+update simple set id = 1;
+insert into simple select generate_series(2, 20000), 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa';
 alter table simple set (parallel_workers = 2);
 analyze simple;
 
@@ -179,6 +205,7 @@ set local max_parallel_workers_per_gather = 2;
 set local work_mem = '192kB';
 set local hash_mem_multiplier = 1.0;
 set local enable_parallel_hash = on;
+set local parallel_tuple_cost = 0;
 explain (costs off)
   select count(*) from simple r join simple s using (id);
 select count(*) from simple r join simple s using (id);
@@ -188,7 +215,8 @@ $$
   select count(*) from simple r join simple s using (id);
 $$);
 -- parallel full multi-batch hash join
-select count(*) from simple r full outer join simple s using (id);
+select join_hash_actual_rows(
+  'select * from simple r full outer join simple s on (r.id = 0 - s.id)');
 rollback to settings;
 
 -- The "bad" case: during execution we need to increase number of
@@ -460,8 +488,9 @@ rollback to settings;
 savepoint settings;
 set local max_parallel_workers_per_gather = 0;
 explain (costs off)
-     select  count(*) from simple r full outer join simple s on (r.id = 0 - s.id);
-select  count(*) from simple r full outer join simple s on (r.id = 0 - s.id);
+  select * from simple r full outer join simple s on (r.id = 0 - s.id);
+select join_hash_actual_rows(
+  'select * from simple r full outer join simple s on (r.id = 0 - s.id)');
 rollback to settings;
 
 -- parallelism not possible with parallel-oblivious full hash join
@@ -476,9 +505,11 @@ rollback to settings;
 -- parallelism is possible with parallel-aware full hash join
 savepoint settings;
 set local max_parallel_workers_per_gather = 2;
+set local parallel_tuple_cost = 0;
 explain (costs off)
-     select  count(*) from simple r full outer join simple s on (r.id = 0 - s.id);
-select  count(*) from simple r full outer join simple s on (r.id = 0 - s.id);
+  select * from simple r full outer join simple s on (r.id = 0 - s.id);
+select join_hash_actual_rows(
+  'select * from simple r full outer join simple s on (r.id = 0 - s.id)');
 rollback to settings;
 
 
@@ -505,33 +536,6 @@ $$
   from wide left join (select id, coalesce(t, '') || '' as t from wide) s using (id);
 $$);
 rollback to settings;
-
-
--- Hash join reuses the HOT status bit to indicate match status. This can only
--- be guaranteed to produce correct results if all the hash join tuple match
--- bits are reset before reuse. This is done upon loading them into the
--- hashtable.
-SAVEPOINT settings;
-SET enable_parallel_hash = on;
-SET min_parallel_table_scan_size = 0;
-SET parallel_setup_cost = 0;
-SET parallel_tuple_cost = 0;
-CREATE TABLE hjtest_matchbits_t1(id int);
-CREATE TABLE hjtest_matchbits_t2(id int);
-INSERT INTO hjtest_matchbits_t1 VALUES (1);
-INSERT INTO hjtest_matchbits_t2 VALUES (2);
--- Update should create a HOT tuple. If this status bit isn't cleared, we won't
--- correctly emit the NULL-extended unmatching tuple in full hash join.
-UPDATE hjtest_matchbits_t2 set id = 2;
-SELECT * FROM hjtest_matchbits_t1 t1 FULL JOIN hjtest_matchbits_t2 t2 ON t1.id = t2.id;
--- Test serial full hash join.
--- Resetting parallel_setup_cost should force a serial plan.
--- Just to be safe, however, set enable_parallel_hash to off, as parallel full
--- hash joins are only supported with shared hashtables.
-RESET parallel_setup_cost;
-SET enable_parallel_hash = off;
-SELECT * FROM hjtest_matchbits_t1 t1 FULL JOIN hjtest_matchbits_t2 t2 ON t1.id = t2.id;
-ROLLBACK TO settings;
 
 rollback;
 
