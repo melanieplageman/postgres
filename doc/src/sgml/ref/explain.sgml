@@ -32,7 +32,6 @@ PostgreSQL documentation
  <refsynopsisdiv>
 <synopsis>
 EXPLAIN [ ( <replaceable class="parameter">option</replaceable> [, ...] ) ] <replaceable class="parameter">statement</replaceable>
-EXPLAIN [ ANALYZE ] [ VERBOSE ] <replaceable class="parameter">statement</replaceable>
 
 <phrase>where <replaceable class="parameter">option</replaceable> can be one of:</phrase>
 
@@ -528,6 +527,14 @@ EXPLAIN (GENERIC_PLAN)
 
   <para>
    There is no <command>EXPLAIN</command> statement defined in the SQL standard.
+  </para>
+
+  <para>
+   The following syntax was used before <productname>PostgreSQL</productname>
+   version 9.0 and is still supported:
+   <synopsis>
+    EXPLAIN [ ANALYZE ] [ VERBOSE ] <replaceable class="parameter">statement</replaceable>
+   </synopsis>
   </para>
  </refsect1>
 
