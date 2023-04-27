@@ -63,6 +63,7 @@
 #include "utils/pg_lsn.h"
 #include "utils/ps_status.h"
 #include "utils/pg_rusage.h"
+#include "utils/timeout.h"
 
 /* Unsupported old recovery command file names (relative to $PGDATA) */
 #define RECOVERY_COMMAND_FILE	"recovery.conf"
@@ -91,6 +92,7 @@ TimestampTz recoveryTargetTime;
 const char *recoveryTargetName;
 XLogRecPtr	recoveryTargetLSN;
 int			recovery_min_apply_delay = 0;
+
 
 /* options formerly taken from recovery.conf for XLOG streaming */
 char	   *PrimaryConnInfo = NULL;
@@ -1674,6 +1676,9 @@ PerformWalRecovery(void)
 			if (!StandbyMode)
 				ereport_startup_progress("redo in progress, elapsed time: %ld.%02d s, current LSN: %X/%X",
 										 LSN_FORMAT_ARGS(xlogreader->ReadRecPtr));
+
+			/* Is this the right place to enable this? */
+			enable_startup_stat_flush_timeout();
 
 #ifdef WAL_DEBUG
 			if (XLOG_DEBUG ||
@@ -3617,6 +3622,13 @@ WaitForWALToBecomeAvailable(XLogRecPtr RecPtr, bool randAccess,
 						/* Do background tasks that might benefit us later. */
 						KnownAssignedTransactionIdsIdleMaintenance();
 
+						/* 
+						 * Need to disable flush timeout to avoid unnecessary
+						 * wakeups. Enable it again after a WAL record is read
+						 * in PerformWalRecovery.
+						 */
+						disable_startup_stat_flush_timeout();
+
 						(void) WaitLatch(&XLogRecoveryCtl->recoveryWakeupLatch,
 										 WL_LATCH_SET | WL_TIMEOUT |
 										 WL_EXIT_ON_PM_DEATH,
@@ -3888,6 +3900,13 @@ WaitForWALToBecomeAvailable(XLogRecPtr RecPtr, bool randAccess,
 
 					/* Update pg_stat_recovery_prefetch before sleeping. */
 					XLogPrefetcherComputeStats(xlogprefetcher);
+
+					/* 
+					 * Need to disable flush timeout to avoid unnecessary
+					 * wakeups. Enable it again after a WAL record is read
+					 * in PerformWalRecovery.
+					 */
+					disable_startup_stat_flush_timeout();
 
 					/*
 					 * Wait for more WAL to arrive, when we will be woken

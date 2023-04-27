@@ -72,6 +72,11 @@ static TimestampTz startup_progress_phase_start_time;
  */
 static volatile sig_atomic_t startup_progress_timer_expired = false;
 
+/* Indicates whether flushing stats is needed. */
+static volatile sig_atomic_t startup_stat_need_flush = false;
+
+int			pgstat_stat_flush_timeout = 1000;	/* 1 sec ?? */
+
 /*
  * Time between progress updates for long-running startup operations.
  */
@@ -206,6 +211,13 @@ HandleStartupProcInterrupts(void)
 	/* Perform logging of memory contexts of this process */
 	if (LogMemoryContextPending)
 		ProcessLogMemoryContextInterrupt();
+
+	if (startup_stat_need_flush)
+	{
+		/* It's time to flush wal stats. */
+		pgstat_report_wal(true);
+		startup_stat_need_flush = false;
+	}
 }
 
 
@@ -255,6 +267,10 @@ StartupProcessMain(void)
 	RegisterTimeout(STANDBY_DEADLOCK_TIMEOUT, StandbyDeadLockHandler);
 	RegisterTimeout(STANDBY_TIMEOUT, StandbyTimeoutHandler);
 	RegisterTimeout(STANDBY_LOCK_TIMEOUT, StandbyLockTimeoutHandler);
+
+	/* Register the timeout to flush stats periodically. */
+	RegisterTimeout(STARTUP_STAT_FLUSH_TIMEOUT,
+					startup_stat_flush_timeout_handler);
 
 	/*
 	 * Unblock signals (they were blocked when the postmaster forked us)
@@ -384,4 +400,34 @@ has_startup_progress_timeout_expired(long *secs, int *usecs)
 	startup_progress_timer_expired = false;
 
 	return true;
+}
+
+/* Set a flag indicating that it's time to flush. */
+void
+startup_stat_flush_timeout_handler(void)
+{
+	startup_stat_need_flush = true;
+}
+
+/* Disable the timeout set for startup stat flush. */
+void
+disable_startup_stat_flush_timeout(void)
+{
+	/* one last flush might be needed before disabling. */
+	startup_stat_need_flush = true;
+
+	disable_timeout(STARTUP_STAT_FLUSH_TIMEOUT, false);
+}
+
+/* Enable the timeout set for startup stat flush. */
+void
+enable_startup_stat_flush_timeout(void)
+{
+	TimestampTz fin_time;
+
+	startup_progress_phase_start_time = GetCurrentTimestamp();
+	fin_time = TimestampTzPlusMilliseconds(startup_progress_phase_start_time,
+										   pgstat_stat_flush_timeout);
+	enable_timeout_every(STARTUP_STAT_FLUSH_TIMEOUT, fin_time,
+						 pgstat_stat_flush_timeout);
 }
