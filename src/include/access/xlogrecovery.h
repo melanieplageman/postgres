@@ -58,6 +58,8 @@ extern PGDLLIMPORT char *recoveryRestoreCommand;
 extern PGDLLIMPORT char *recoveryEndCommand;
 extern PGDLLIMPORT char *archiveCleanupCommand;
 
+extern PGDLLIMPORT bool rearm_timer;
+
 /* indirectly set via GUC system */
 extern PGDLLIMPORT TransactionId recoveryTargetXid;
 extern PGDLLIMPORT char *recovery_target_time_string;

@@ -216,7 +216,10 @@ HandleStartupProcInterrupts(void)
 	{
 		/* It's time to flush wal stats. */
 		pgstat_report_wal(true);
+		elog(WARNING, "MELANIE: flushing stats");
 		startup_stat_need_flush = false;
+		if (rearm_timer)
+			arm_startup_stat_flush_timer();
 	}
 }
 
@@ -409,25 +412,12 @@ startup_stat_flush_timeout_handler(void)
 	startup_stat_need_flush = true;
 }
 
-/* Disable the timeout set for startup stat flush. */
-void
-disable_startup_stat_flush_timeout(void)
-{
-	/* one last flush might be needed before disabling. */
-	startup_stat_need_flush = true;
-
-	disable_timeout(STARTUP_STAT_FLUSH_TIMEOUT, false);
-}
-
 /* Enable the timeout set for startup stat flush. */
 void
-enable_startup_stat_flush_timeout(void)
+arm_startup_stat_flush_timer(void)
 {
-	TimestampTz fin_time;
+	TimestampTz fin_time = TimestampTzPlusMilliseconds(GetCurrentTimestamp(),
+										pgstat_stat_flush_timeout);
 
-	startup_progress_phase_start_time = GetCurrentTimestamp();
-	fin_time = TimestampTzPlusMilliseconds(startup_progress_phase_start_time,
-										   pgstat_stat_flush_timeout);
-	enable_timeout_every(STARTUP_STAT_FLUSH_TIMEOUT, fin_time,
-						 pgstat_stat_flush_timeout);
+	enable_timeout_at(STARTUP_STAT_FLUSH_TIMEOUT, fin_time);
 }

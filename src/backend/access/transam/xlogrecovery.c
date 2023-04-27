@@ -63,7 +63,6 @@
 #include "utils/pg_lsn.h"
 #include "utils/ps_status.h"
 #include "utils/pg_rusage.h"
-#include "utils/timeout.h"
 
 /* Unsupported old recovery command file names (relative to $PGDATA) */
 #define RECOVERY_COMMAND_FILE	"recovery.conf"
@@ -78,6 +77,8 @@ const struct config_enum_entry recovery_target_action_options[] = {
 	{"shutdown", RECOVERY_TARGET_ACTION_SHUTDOWN, false},
 	{NULL, 0, false}
 };
+
+bool rearm_timer = true;
 
 /* options formerly taken from recovery.conf for archive recovery */
 char	   *recoveryRestoreCommand = NULL;
@@ -1668,6 +1669,7 @@ PerformWalRecovery(void)
 		if (!StandbyMode)
 			begin_startup_progress_phase();
 
+		arm_startup_stat_flush_timer();
 		/*
 		 * main redo apply loop
 		 */
@@ -1676,9 +1678,6 @@ PerformWalRecovery(void)
 			if (!StandbyMode)
 				ereport_startup_progress("redo in progress, elapsed time: %ld.%02d s, current LSN: %X/%X",
 										 LSN_FORMAT_ARGS(xlogreader->ReadRecPtr));
-
-			/* Is this the right place to enable this? */
-			enable_startup_stat_flush_timeout();
 
 #ifdef WAL_DEBUG
 			if (XLOG_DEBUG ||
@@ -3622,13 +3621,6 @@ WaitForWALToBecomeAvailable(XLogRecPtr RecPtr, bool randAccess,
 						/* Do background tasks that might benefit us later. */
 						KnownAssignedTransactionIdsIdleMaintenance();
 
-						/* 
-						 * Need to disable flush timeout to avoid unnecessary
-						 * wakeups. Enable it again after a WAL record is read
-						 * in PerformWalRecovery.
-						 */
-						disable_startup_stat_flush_timeout();
-
 						(void) WaitLatch(&XLogRecoveryCtl->recoveryWakeupLatch,
 										 WL_LATCH_SET | WL_TIMEOUT |
 										 WL_EXIT_ON_PM_DEATH,
@@ -3638,7 +3630,9 @@ WaitForWALToBecomeAvailable(XLogRecPtr RecPtr, bool randAccess,
 						now = GetCurrentTimestamp();
 
 						/* Handle interrupt signals of startup process */
+						rearm_timer = false;
 						HandleStartupProcInterrupts();
+						rearm_timer = true;
 					}
 					last_fail_time = now;
 					currentSource = XLOG_FROM_ARCHIVE;
@@ -3901,13 +3895,6 @@ WaitForWALToBecomeAvailable(XLogRecPtr RecPtr, bool randAccess,
 					/* Update pg_stat_recovery_prefetch before sleeping. */
 					XLogPrefetcherComputeStats(xlogprefetcher);
 
-					/* 
-					 * Need to disable flush timeout to avoid unnecessary
-					 * wakeups. Enable it again after a WAL record is read
-					 * in PerformWalRecovery.
-					 */
-					disable_startup_stat_flush_timeout();
-
 					/*
 					 * Wait for more WAL to arrive, when we will be woken
 					 * immediately by the WAL receiver.
@@ -3917,6 +3904,7 @@ WaitForWALToBecomeAvailable(XLogRecPtr RecPtr, bool randAccess,
 									 -1L,
 									 WAIT_EVENT_RECOVERY_WAL_STREAM);
 					ResetLatch(&XLogRecoveryCtl->recoveryWakeupLatch);
+					arm_startup_stat_flush_timer();
 					break;
 				}
 
@@ -3936,7 +3924,10 @@ WaitForWALToBecomeAvailable(XLogRecPtr RecPtr, bool randAccess,
 		 * This possibly-long loop needs to handle interrupts of startup
 		 * process.
 		 */
+		rearm_timer = false;
 		HandleStartupProcInterrupts();
+		rearm_timer = true;
+
 	}
 
 	return XLREAD_FAIL;			/* not reached */
