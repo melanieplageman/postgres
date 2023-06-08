@@ -1111,6 +1111,12 @@ lazy_scan_heap(LVRelState *vacrel)
 			 * may be logged.  Given that this situation should only happen in
 			 * rare cases after a crash, it is not worth optimizing.
 			 */
+			// TODO: if we have already scanned the indexes or just HOT cleanup
+			// if this does WAL stuff, it could just have been done
+			// if no indexes, just do this during lazy_vacuum_heap_page()
+			//
+			// if there is no indexes do what lazy_vacuum_heap_page() in
+			// lazy_scan_prune()
 			PageSetAllVisible(page);
 			MarkBufferDirty(buf);
 			visibilitymap_set(vacrel->rel, blkno, buf, InvalidXLogRecPtr,
@@ -1587,6 +1593,10 @@ retry:
 	 * lpdead_items's final value can be thought of as the number of tuples
 	 * that were deleted from indexes.
 	 */
+	// TODO: combine this with the loop below
+	// freeze as part of pruning -- so do the freezing as part of heap_page_prune()
+	// extra CPU and extra WAL -- looping through all tuples
+	// HeapTuplesSatisfiesVacuum() called less
 	tuples_deleted = heap_page_prune(rel, buf, vacrel->vistest,
 									 InvalidTransactionId, 0, &nnewlpdead,
 									 &vacrel->offnum);
