@@ -1182,6 +1182,94 @@ HeapTupleSatisfiesVacuum(HeapTuple htup, TransactionId OldestXmin,
 	return res;
 }
 
+// TODO: add comments back in. consider if macro could improve this
+HTSV_Result
+HeapTupleSatisfiesVacuumHorizon2(HeapTuple htup, Buffer buffer, TransactionId *dead_after)
+{
+	HeapTupleHeader tuple = htup->t_data;
+	*dead_after = InvalidTransactionId;
+
+	if (!HeapTupleHeaderXminCommitted(tuple))
+	{
+		TransactionId xmin = HeapTupleHeaderGetRawXmin(tuple);
+
+		if (HeapTupleHeaderXminInvalid(tuple))
+			return HEAPTUPLE_DEAD;
+		if (TransactionIdIsCurrentTransactionId(xmin))
+		{
+			if (TransactionIdIsCurrentTransactionId(HeapTupleHeaderGetUpdateXid(tuple)))
+				return HEAPTUPLE_DELETE_IN_PROGRESS;
+			return HEAPTUPLE_INSERT_IN_PROGRESS;
+		}
+
+		if (TransactionIdIsInProgress(xmin))
+			return HEAPTUPLE_INSERT_IN_PROGRESS;
+
+		if (TransactionIdDidCommit(xmin))
+			SetHintBits(tuple, buffer, HEAP_XMIN_COMMITTED, xmin);
+		else
+		{
+			SetHintBits(tuple, buffer, HEAP_XMIN_INVALID, InvalidTransactionId);
+			return HEAPTUPLE_DEAD;
+		}
+	}
+
+	if (tuple->t_infomask & HEAP_XMAX_INVALID)
+		return HEAPTUPLE_LIVE;
+
+	if (HEAP_XMAX_IS_LOCKED_ONLY(tuple->t_infomask))
+	{
+		if (tuple->t_infomask & HEAP_XMAX_COMMITTED)
+			return HEAPTUPLE_LIVE;
+		if ((tuple->t_infomask & HEAP_XMAX_IS_MULTI) &&
+				(!HEAP_LOCKED_UPGRADED(tuple->t_infomask) &&
+					MultiXactIdIsRunning(HeapTupleHeaderGetRawXmax(tuple), true)))
+			return HEAPTUPLE_LIVE;
+		if (TransactionIdIsInProgress(HeapTupleHeaderGetRawXmax(tuple)))
+			return HEAPTUPLE_LIVE;
+
+		SetHintBits(tuple, buffer, HEAP_XMAX_INVALID, InvalidTransactionId);
+		return HEAPTUPLE_LIVE;
+	}
+
+	if (tuple->t_infomask & HEAP_XMAX_IS_MULTI)
+	{
+		TransactionId xmax = HeapTupleGetUpdateXid(tuple);
+
+		if (TransactionIdIsInProgress(xmax))
+			return HEAPTUPLE_DELETE_IN_PROGRESS;
+
+		if (TransactionIdDidCommit(xmax))
+		{
+			*dead_after = xmax;
+			return HEAPTUPLE_RECENTLY_DEAD;
+		}
+
+		if (!MultiXactIdIsRunning(HeapTupleHeaderGetRawXmax(tuple), false))
+			SetHintBits(tuple, buffer, HEAP_XMAX_INVALID, InvalidTransactionId);
+		return HEAPTUPLE_LIVE;
+	}
+
+	if (!(tuple->t_infomask & HEAP_XMAX_COMMITTED))
+	{
+		TransactionId xmax = HeapTupleHeaderGetRawXmax(tuple);
+
+		if (TransactionIdIsInProgress(xmax))
+			return HEAPTUPLE_DELETE_IN_PROGRESS;
+
+		if (TransactionIdDidCommit(xmax))
+			SetHintBits(tuple, buffer, HEAP_XMAX_COMMITTED, xmax);
+		else
+		{
+			SetHintBits(tuple, buffer, HEAP_XMAX_INVALID, InvalidTransactionId);
+			return HEAPTUPLE_LIVE;
+		}
+	}
+
+	*dead_after = HeapTupleHeaderGetRawXmax(tuple);
+	return HEAPTUPLE_RECENTLY_DEAD;
+}
+
 /*
  * Work horse for HeapTupleSatisfiesVacuum and similar routines.
  *
