@@ -51,8 +51,8 @@ typedef struct
 	TransactionId new_prune_xid;	/* new prune hint value for page */
 	TransactionId snapshotConflictHorizon;	/* latest xid removed */
 	int			nredirected;	/* numbers of entries in arrays below */
-	int			ndead;
-	int			nunused;
+	int			nkilled;
+	int			nobsoleted;
 	/* arrays that accumulate indexes of items to be changed */
 	OffsetNumber redirected[MaxHeapTuplesPerPage * 2];
 	OffsetNumber nowdead[MaxHeapTuplesPerPage];
@@ -295,7 +295,7 @@ heap_page_prune(Relation relation, Buffer buffer,
 	prstate.old_snap_ts = old_snap_ts;
 	prstate.old_snap_used = false;
 	prstate.snapshotConflictHorizon = InvalidTransactionId;
-	prstate.nredirected = prstate.ndead = prstate.nunused = 0;
+	prstate.nredirected = prstate.nkilled = prstate.nobsoleted = 0;
 	memset(prstate.marked, 0, sizeof(prstate.marked));
 
 	maxoff = PageGetMaxOffsetNumber(page);
@@ -383,7 +383,7 @@ heap_page_prune(Relation relation, Buffer buffer,
 	START_CRIT_SECTION();
 
 	/* Have we found any prunable items? */
-	if (prstate.nredirected > 0 || prstate.ndead > 0 || prstate.nunused > 0)
+	if (prstate.nredirected > 0 || prstate.nkilled > 0 || prstate.nobsoleted > 0)
 	{
 		/*
 		 * Apply the planned item changes, then repair page fragmentation, and
@@ -391,8 +391,8 @@ heap_page_prune(Relation relation, Buffer buffer,
 		 */
 		heap_page_prune_execute(buffer,
 								prstate.redirected, prstate.nredirected,
-								prstate.nowdead, prstate.ndead,
-								prstate.nowunused, prstate.nunused);
+								prstate.nowdead, prstate.nkilled,
+								prstate.nowunused, prstate.nobsoleted);
 
 		/*
 		 * Update the page's pd_prune_xid field to either zero, or the lowest
@@ -420,7 +420,7 @@ heap_page_prune(Relation relation, Buffer buffer,
 			xlrec.isCatalogRel = RelationIsAccessibleInLogicalDecoding(relation);
 			xlrec.snapshotConflictHorizon = prstate.snapshotConflictHorizon;
 			xlrec.nredirected = prstate.nredirected;
-			xlrec.ndead = prstate.ndead;
+			xlrec.ndead = prstate.nkilled;
 
 			XLogBeginInsert();
 			XLogRegisterData((char *) &xlrec, SizeOfHeapPrune);
@@ -437,13 +437,13 @@ heap_page_prune(Relation relation, Buffer buffer,
 									prstate.nredirected *
 									sizeof(OffsetNumber) * 2);
 
-			if (prstate.ndead > 0)
+			if (prstate.nkilled > 0)
 				XLogRegisterBufData(0, (char *) prstate.nowdead,
-									prstate.ndead * sizeof(OffsetNumber));
+									prstate.nkilled * sizeof(OffsetNumber));
 
-			if (prstate.nunused > 0)
+			if (prstate.nobsoleted > 0)
 				XLogRegisterBufData(0, (char *) prstate.nowunused,
-									prstate.nunused * sizeof(OffsetNumber));
+									prstate.nobsoleted * sizeof(OffsetNumber));
 
 			recptr = XLogInsert(RM_HEAP2_ID, XLOG_HEAP2_PRUNE);
 
@@ -473,7 +473,7 @@ heap_page_prune(Relation relation, Buffer buffer,
 	END_CRIT_SECTION();
 
 	/* Record number of newly-set-LP_DEAD items for caller */
-	*nnewlpdead = prstate.ndead;
+	*nnewlpdead = prstate.nkilled;
 
 	return ndeleted;
 }
@@ -884,9 +884,9 @@ heap_prune_record_redirect(PruneState *prstate,
 static void
 heap_prune_record_dead(PruneState *prstate, OffsetNumber offnum)
 {
-	Assert(prstate->ndead < MaxHeapTuplesPerPage);
-	prstate->nowdead[prstate->ndead] = offnum;
-	prstate->ndead++;
+	Assert(prstate->nkilled < MaxHeapTuplesPerPage);
+	prstate->nowdead[prstate->nkilled] = offnum;
+	prstate->nkilled++;
 	Assert(!prstate->marked[offnum]);
 	prstate->marked[offnum] = true;
 }
@@ -895,9 +895,9 @@ heap_prune_record_dead(PruneState *prstate, OffsetNumber offnum)
 static void
 heap_prune_record_unused(PruneState *prstate, OffsetNumber offnum)
 {
-	Assert(prstate->nunused < MaxHeapTuplesPerPage);
-	prstate->nowunused[prstate->nunused] = offnum;
-	prstate->nunused++;
+	Assert(prstate->nobsoleted < MaxHeapTuplesPerPage);
+	prstate->nowunused[prstate->nobsoleted] = offnum;
+	prstate->nobsoleted++;
 	Assert(!prstate->marked[offnum]);
 	prstate->marked[offnum] = true;
 }
