@@ -1558,7 +1558,6 @@ lazy_scan_prune(LVRelState *vacrel,
 	int			nnewlpdead;
 	HeapPageFreeze pagefrz;
 	int64		fpi_before = pgWalUsage.wal_fpi;
-	OffsetNumber deadoffsets[MaxHeapTuplesPerPage];
 	HeapTupleFreeze frozen[MaxHeapTuplesPerPage];
 
 	Assert(BufferGetBlockNumber(buf) == blkno);
@@ -1636,24 +1635,7 @@ retry:
 		}
 
 		if (ItemIdIsDead(itemid))
-		{
-			/*
-			 * Deliberately don't set hastup for LP_DEAD items.  We make the
-			 * soft assumption that any LP_DEAD items encountered here will
-			 * become LP_UNUSED later on, before count_nondeletable_pages is
-			 * reached.  If we don't make this assumption then rel truncation
-			 * will only happen every other VACUUM, at most.  Besides, VACUUM
-			 * must treat hastup/nonempty_pages as provisional no matter how
-			 * LP_DEAD items are handled (handled here, or handled later on).
-			 *
-			 * Also deliberately delay unsetting all_visible until just before
-			 * we return to lazy_scan_heap caller, as explained in full below.
-			 * (This is another case where it's useful to anticipate that any
-			 * LP_DEAD items will become LP_UNUSED during the ongoing VACUUM.)
-			 */
-			deadoffsets[lpdead_items++] = offnum;
 			continue;
-		}
 
 		Assert(ItemIdIsNormal(itemid));
 
@@ -1914,15 +1896,23 @@ retry:
 
 		ItemPointerSetBlockNumber(&tmp, blkno);
 
-		for (int i = 0; i < lpdead_items; i++)
+		for (offnum = FirstOffsetNumber;
+			offnum <= maxoff;
+			offnum = OffsetNumberNext(offnum))
 		{
-			ItemPointerSetOffsetNumber(&tmp, deadoffsets[i]);
+			itemid = PageGetItemId(page, offnum);
+
+			if (!ItemIdIsDead(itemid))
+				continue;
+
+			ItemPointerSetOffsetNumber(&tmp, offnum);
 			dead_items->items[dead_items->num_items++] = tmp;
 		}
 
 		Assert(dead_items->num_items <= dead_items->max_items);
 		pgstat_progress_update_param(PROGRESS_VACUUM_NUM_DEAD_TUPLES,
 									 dead_items->num_items);
+
 
 		/*
 		 * It was convenient to ignore LP_DEAD items in all_visible earlier on
@@ -1937,6 +1927,7 @@ retry:
 		 */
 		prunestate->all_visible = false;
 	}
+
 
 	/* Finally, add page-local counts to whole-VACUUM counts */
 	vacrel->tuples_deleted += tuples_deleted;
