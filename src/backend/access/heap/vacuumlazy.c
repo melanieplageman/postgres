@@ -1557,11 +1557,6 @@ lazy_scan_prune(LVRelState *vacrel,
 	page_prune_result->all_frozen = true;
 	page_prune_result->visibility_cutoff_xid = InvalidTransactionId;
 
-
-	// TODO: combine this with the loop below
-	// freeze as part of pruning -- so do the freezing as part of heap_page_prune()
-	// extra CPU and extra WAL -- looping through all tuples
-	// HeapTuplesSatisfiesVacuum() called less
 	heap_page_prune(rel, buf, vacrel->vistest,
 									 InvalidTransactionId, 0,
 									 &vacrel->offnum, page_prune_result, &pagefrz, true);
