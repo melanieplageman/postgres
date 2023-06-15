@@ -1524,7 +1524,7 @@ lazy_scan_prune(LVRelState *vacrel,
 				Buffer buf,
 				BlockNumber blkno,
 				Page page,
-				PagePruneResult *prunestate)
+				PagePruneResult *page_prune_result)
 {
 	Relation	rel = vacrel->rel;
 	OffsetNumber offnum,
@@ -1532,14 +1532,16 @@ lazy_scan_prune(LVRelState *vacrel,
 	ItemId		itemid;
 	HeapTupleData tuple;
 	HTSV_Result res;
-	int			tuples_deleted,
-				tuples_frozen,
+
+	int tuples_frozen,
 				live_tuples,
 				recently_dead_tuples;
+
 	HeapPageFreeze pagefrz;
-	ItemPointerData tmp;
 	int64		fpi_before = pgWalUsage.wal_fpi;
 	HeapTupleFreeze frozen[MaxHeapTuplesPerPage];
+
+	ItemPointerData tmp;
 	VacDeadItems *dead_items = vacrel->dead_items;
 	int original_num_dead_items = dead_items->num_items;
 
@@ -1560,7 +1562,6 @@ retry:
 	pagefrz.FreezePageRelminMxid = vacrel->NewRelminMxid;
 	pagefrz.NoFreezePageRelfrozenXid = vacrel->NewRelfrozenXid;
 	pagefrz.NoFreezePageRelminMxid = vacrel->NewRelminMxid;
-	tuples_deleted = 0;
 	tuples_frozen = 0;
 	// TODO: delete this variable
 	live_tuples = 0;
@@ -1570,19 +1571,19 @@ retry:
 	// freeze as part of pruning -- so do the freezing as part of heap_page_prune()
 	// extra CPU and extra WAL -- looping through all tuples
 	// HeapTuplesSatisfiesVacuum() called less
-	tuples_deleted = heap_page_prune(rel, buf, vacrel->vistest,
+	heap_page_prune(rel, buf, vacrel->vistest,
 									 InvalidTransactionId, 0,
-									 &vacrel->offnum);
+									 &vacrel->offnum, page_prune_result);
 
 	/*
 	 * Now scan the page to collect LP_DEAD items and check for tuples
 	 * requiring freezing among remaining tuples with storage
 	 */
-	prunestate->hastup = false;
-	prunestate->has_lpdead_items = false;
-	prunestate->all_visible = true;
-	prunestate->all_frozen = true;
-	prunestate->visibility_cutoff_xid = InvalidTransactionId;
+	page_prune_result->hastup = false;
+	page_prune_result->has_lpdead_items = false;
+	page_prune_result->all_visible = true;
+	page_prune_result->all_frozen = true;
+	page_prune_result->visibility_cutoff_xid = InvalidTransactionId;
 
 	for (offnum = FirstOffsetNumber;
 		 offnum <= maxoff;
@@ -1604,7 +1605,7 @@ retry:
 		if (ItemIdIsRedirected(itemid))
 		{
 			/* page makes rel truncation unsafe */
-			prunestate->hastup = true;
+			page_prune_result->hastup = true;
 			continue;
 		}
 
@@ -1667,13 +1668,13 @@ retry:
 				 * asynchronously. See SetHintBits for more info. Check that
 				 * the tuple is hinted xmin-committed because of that.
 				 */
-				if (prunestate->all_visible)
+				if (page_prune_result->all_visible)
 				{
 					TransactionId xmin;
 
 					if (!HeapTupleHeaderXminCommitted(tuple.t_data))
 					{
-						prunestate->all_visible = false;
+						page_prune_result->all_visible = false;
 						break;
 					}
 
@@ -1685,14 +1686,14 @@ retry:
 					if (!TransactionIdPrecedes(xmin,
 											   vacrel->cutoffs.OldestXmin))
 					{
-						prunestate->all_visible = false;
+						page_prune_result->all_visible = false;
 						break;
 					}
 
 					/* Track newest xmin on page. */
-					if (TransactionIdFollows(xmin, prunestate->visibility_cutoff_xid) &&
+					if (TransactionIdFollows(xmin, page_prune_result->visibility_cutoff_xid) &&
 						TransactionIdIsNormal(xmin))
-						prunestate->visibility_cutoff_xid = xmin;
+						page_prune_result->visibility_cutoff_xid = xmin;
 				}
 				break;
 			case HEAPTUPLE_RECENTLY_DEAD:
@@ -1703,7 +1704,7 @@ retry:
 				 * pruning.)
 				 */
 				recently_dead_tuples++;
-				prunestate->all_visible = false;
+				page_prune_result->all_visible = false;
 				break;
 			case HEAPTUPLE_INSERT_IN_PROGRESS:
 
@@ -1714,11 +1715,11 @@ retry:
 				 * results.  This assumption is a bit shaky, but it is what
 				 * acquire_sample_rows() does, so be consistent.
 				 */
-				prunestate->all_visible = false;
+				page_prune_result->all_visible = false;
 				break;
 			case HEAPTUPLE_DELETE_IN_PROGRESS:
 				/* This is an expected case during concurrent vacuum */
-				prunestate->all_visible = false;
+				page_prune_result->all_visible = false;
 
 				/*
 				 * Count such rows as live.  As above, we assume the deleting
@@ -1732,7 +1733,7 @@ retry:
 				break;
 		}
 
-		prunestate->hastup = true;	/* page makes rel truncation unsafe */
+		page_prune_result->hastup = true;	/* page makes rel truncation unsafe */
 
 		/* Tuple with storage -- consider need to freeze */
 		if (heap_prepare_freeze_tuple(tuple.t_data, &vacrel->cutoffs, &pagefrz,
@@ -1748,7 +1749,7 @@ retry:
 		 * definitely cannot be set all-frozen in the visibility map later on
 		 */
 		if (!totally_frozen)
-			prunestate->all_frozen = false;
+			page_prune_result->all_frozen = false;
 	}
 
 	/*
@@ -1766,7 +1767,7 @@ retry:
 	 * page all-frozen afterwards (might not happen until final heap pass).
 	 */
 	if (pagefrz.freeze_required || tuples_frozen == 0 ||
-		(prunestate->all_visible && prunestate->all_frozen &&
+		(page_prune_result->all_visible && page_prune_result->all_frozen &&
 		 fpi_before != pgWalUsage.wal_fpi))
 	{
 		/*
@@ -1804,11 +1805,11 @@ retry:
 			 * once we're done with it.  Otherwise we generate a conservative
 			 * cutoff by stepping back from OldestXmin.
 			 */
-			if (prunestate->all_visible && prunestate->all_frozen)
+			if (page_prune_result->all_visible && page_prune_result->all_frozen)
 			{
 				/* Using same cutoff when setting VM is now unnecessary */
-				snapshotConflictHorizon = prunestate->visibility_cutoff_xid;
-				prunestate->visibility_cutoff_xid = InvalidTransactionId;
+				snapshotConflictHorizon = page_prune_result->visibility_cutoff_xid;
+				page_prune_result->visibility_cutoff_xid = InvalidTransactionId;
 			}
 			else
 			{
@@ -1831,7 +1832,7 @@ retry:
 		 */
 		vacrel->NewRelfrozenXid = pagefrz.NoFreezePageRelfrozenXid;
 		vacrel->NewRelminMxid = pagefrz.NoFreezePageRelminMxid;
-		prunestate->all_frozen = false;
+		page_prune_result->all_frozen = false;
 		tuples_frozen = 0;		/* avoid miscounts in instrumentation */
 	}
 
@@ -1855,7 +1856,7 @@ retry:
 	if (original_num_dead_items > dead_items->num_items)
 	{
 		vacrel->lpdead_item_pages++;
-		prunestate->has_lpdead_items = true;
+		page_prune_result->has_lpdead_items = true;
 		pgstat_progress_update_param(PROGRESS_VACUUM_NUM_DEAD_TUPLES,
 										dead_items->num_items);
 
@@ -1868,7 +1869,7 @@ retry:
 	 */
 #ifdef USE_ASSERT_CHECKING
 		/* Note that all_frozen value does not matter when !all_visible */
-		if (prunestate->all_visible)
+		if (page_prune_result->all_visible)
 		{
 			TransactionId cutoff;
 			bool		all_frozen;
@@ -1877,7 +1878,7 @@ retry:
 				Assert(false);
 
 			Assert(!TransactionIdIsValid(cutoff) ||
-				cutoff == prunestate->visibility_cutoff_xid);
+				cutoff == page_prune_result->visibility_cutoff_xid);
 		}
 #endif
 
@@ -1892,11 +1893,11 @@ retry:
 		 * Now that freezing has been finalized, unset all_visible.  It needs
 		 * to reflect the present state of things, as expected by our caller.
 		 */
-		prunestate->all_visible = false;
+		page_prune_result->all_visible = false;
 	}
 
 	/* Finally, add page-local counts to whole-VACUUM counts */
-	vacrel->tuples_deleted += tuples_deleted;
+	vacrel->tuples_deleted += page_prune_result->ndeleted;
 	vacrel->tuples_frozen += tuples_frozen;
 	vacrel->lpdead_items += dead_items->num_items - original_num_dead_items;
 	vacrel->live_tuples += live_tuples;
