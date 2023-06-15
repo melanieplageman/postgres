@@ -21,12 +21,14 @@
 #include "access/xlog.h"
 #include "access/xloginsert.h"
 #include "catalog/catalog.h"
+#include "executor/instrument.h"
 #include "miscadmin.h"
 #include "pgstat.h"
 #include "storage/bufmgr.h"
 #include "utils/snapmgr.h"
 #include "utils/rel.h"
 #include "utils/snapmgr.h"
+
 
 /* Working data for heap_page_prune and subroutines */
 typedef struct
@@ -51,6 +53,8 @@ typedef struct
 	TransactionId new_prune_xid;	/* new prune hint value for page */
 	TransactionId snapshotConflictHorizon;	/* latest xid removed */
 	int			nredirected;	/* numbers of entries in arrays below */
+	// make sure all these numbers are right. can we calculate some from others like ndeleted
+	// are things that are dead before + dead after ete. unused not being same as deleted is stoops
 	int			nkilled;
 	int			nobsoleted;
 	/* arrays that accumulate indexes of items to be changed */
@@ -204,7 +208,7 @@ heap_page_prune_opt(Relation relation, Buffer buffer)
 		if (PageIsFull(page) || PageGetHeapFreeSpace(page) < minfree)
 		{
 			heap_page_prune(relation, buffer, vistest, limited_xmin,
-									   limited_ts, NULL, &page_prune_result, NULL);
+									   limited_ts, NULL, &page_prune_result, NULL, false);
 
 			/*
 			 * Report the number of tuples reclaimed to pgstats.  This is
@@ -265,7 +269,7 @@ heap_page_prune(Relation relation, Buffer buffer,
 				TransactionId old_snap_xmin,
 				TimestampTz old_snap_ts,
 				OffsetNumber *off_loc, PagePruneResult *page_prune_result,
-				HeapPageFreeze *pagefrz)
+				HeapPageFreeze *pagefrz, bool execute_freeze)
 {
 	int			ndeleted = 0;
 	Page		page = BufferGetPage(buffer);
@@ -274,6 +278,7 @@ heap_page_prune(Relation relation, Buffer buffer,
 	PruneState	prstate;
 	HeapTupleData tup;
 	HTSV_Result res;
+	int64		fpi_before = pgWalUsage.wal_fpi;
 
 	/*
 	 * Our strategy is to scan the page and make lists of items to change,
@@ -426,10 +431,10 @@ heap_page_prune(Relation relation, Buffer buffer,
 
 		/* Tuple with storage -- consider need to freeze */
 		if (heap_prepare_freeze_tuple(tup.t_data, pagefrz->cutoffs, pagefrz,
-									  &pagefrz->frozen[pagefrz->nfrozen], &totally_frozen))
+									  &pagefrz->frozen[page_prune_result->nfrozen], &totally_frozen))
 		{
 			/* Save prepared freeze plan for later */
-			pagefrz->frozen[pagefrz->nfrozen++].offset = offnum;
+			pagefrz->frozen[page_prune_result->nfrozen++].offset = offnum;
 		}
 
 		/*
@@ -535,6 +540,7 @@ heap_page_prune(Relation relation, Buffer buffer,
 				XLogRegisterBufData(0, (char *) prstate.nowunused,
 									prstate.nobsoleted * sizeof(OffsetNumber));
 
+			// TODO: it would be cool if xloginsert told us how many fpis it made
 			recptr = XLogInsert(RM_HEAP2_ID, XLOG_HEAP2_PRUNE);
 
 			PageSetLSN(BufferGetPage(buffer), recptr);
@@ -565,6 +571,62 @@ heap_page_prune(Relation relation, Buffer buffer,
 	/* Record number of newly-set-LP_DEAD items for caller */
 	page_prune_result->nkilled = prstate.nkilled;
 	page_prune_result->ndeleted = ndeleted;
+
+	page_prune_result->NewRelfrozenXid = pagefrz->FreezePageRelfrozenXid;
+	page_prune_result->NewRelminMxid = pagefrz->FreezePageRelminMxid;
+
+	if (!execute_freeze || page_prune_result->nfrozen == 0)
+		return;
+
+	/*
+	 * Freeze the page when heap_prepare_freeze_tuple indicates that at least
+	 * one XID/MXID from before FreezeLimit/MultiXactCutoff is present.  Also
+	 * freeze when pruning generated an FPI, if doing so means that we set the
+	 * page all-frozen afterwards (might not happen until final heap pass).
+	 */
+	if (pagefrz->freeze_required ||
+		(page_prune_result->all_visible && page_prune_result->all_frozen &&
+		 fpi_before != pgWalUsage.wal_fpi))
+	{
+		TransactionId snapshotConflictHorizon;
+
+		// TODO: see if this is same as all_frozen for our purposes
+		page_prune_result->froze_page = true;
+
+		/*
+			* We can use visibility_cutoff_xid as our cutoff for conflicts
+			* when the whole page is eligible to become all-frozen in the VM
+			* once we're done with it.  Otherwise we generate a conservative
+			* cutoff by stepping back from OldestXmin.
+			*/
+		if (page_prune_result->all_visible && page_prune_result->all_frozen)
+		{
+			/* Using same cutoff when setting VM is now unnecessary */
+			snapshotConflictHorizon = page_prune_result->visibility_cutoff_xid;
+			page_prune_result->visibility_cutoff_xid = InvalidTransactionId;
+		}
+		else
+		{
+			/* Avoids false conflicts when hot_standby_feedback in use */
+			snapshotConflictHorizon = pagefrz->cutoffs->OldestXmin;
+			TransactionIdRetreat(snapshotConflictHorizon);
+		}
+
+		/* Execute all freeze plans for page as a single atomic action */
+		heap_freeze_execute_prepared(relation, buffer,
+										snapshotConflictHorizon,
+										pagefrz->frozen, page_prune_result->nfrozen);
+	}
+	else
+	{
+		/*
+		 * Page requires "no freeze" processing.  It might be set all-visible
+		 * in the visibility map, but it can never be set all-frozen.
+		 */
+		page_prune_result->NewRelfrozenXid = pagefrz->NoFreezePageRelfrozenXid;
+		page_prune_result->NewRelminMxid = pagefrz->NoFreezePageRelminMxid;
+		page_prune_result->all_frozen = false;
+	}
 }
 
 

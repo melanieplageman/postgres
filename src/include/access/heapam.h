@@ -62,6 +62,12 @@ typedef struct PagePruneResult
 	/* stats on state of tuples in page */
 	int nlive;
 	int nrecently_dead;
+
+	/* outcome of freezing */
+	bool froze_page;
+	int nfrozen;
+	TransactionId NewRelfrozenXid;
+	MultiXactId NewRelminMxid;
 } PagePruneResult;
 
 
@@ -214,7 +220,6 @@ typedef struct HeapPageFreeze
 	VacuumCutoffs *cutoffs;
 	HeapTupleFreeze frozen[MaxHeapTuplesPerPage];
 	int nfrozen;
-
 } HeapPageFreeze;
 
 /* ----------------
@@ -315,7 +320,7 @@ extern void heap_page_prune(Relation relation, Buffer buffer,
 							TransactionId old_snap_xmin,
 							TimestampTz old_snap_ts,
 							OffsetNumber *off_loc, PagePruneResult *page_prune_result,
-							HeapPageFreeze *pagefrz);
+							HeapPageFreeze *pagefrz, bool execute_freeze);
 extern void heap_page_prune_execute(Buffer buffer,
 									OffsetNumber *redirected, int nredirected,
 									OffsetNumber *nowdead, int ndead,

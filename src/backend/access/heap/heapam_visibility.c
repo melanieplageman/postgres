@@ -1183,6 +1183,7 @@ HeapTupleSatisfiesVacuum(HeapTuple htup, TransactionId OldestXmin,
 }
 
 // TODO: add comments back in. consider if macro could improve this
+// TODO: consider making a version of this which combines functionality of heap_prepare_freeze_tuple()
 HTSV_Result
 HeapTupleSatisfiesVacuumHorizon2(HeapTuple htup, Buffer buffer, TransactionId *dead_after)
 {
