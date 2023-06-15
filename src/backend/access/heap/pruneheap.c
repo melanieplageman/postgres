@@ -204,7 +204,7 @@ heap_page_prune_opt(Relation relation, Buffer buffer)
 		if (PageIsFull(page) || PageGetHeapFreeSpace(page) < minfree)
 		{
 			heap_page_prune(relation, buffer, vistest, limited_xmin,
-									   limited_ts, NULL, &page_prune_result);
+									   limited_ts, NULL, &page_prune_result, NULL);
 
 			/*
 			 * Report the number of tuples reclaimed to pgstats.  This is
@@ -264,7 +264,8 @@ heap_page_prune(Relation relation, Buffer buffer,
 				GlobalVisState *vistest,
 				TransactionId old_snap_xmin,
 				TimestampTz old_snap_ts,
-				OffsetNumber *off_loc, PagePruneResult *page_prune_result)
+				OffsetNumber *off_loc, PagePruneResult *page_prune_result,
+				HeapPageFreeze *pagefrz)
 {
 	int			ndeleted = 0;
 	Page		page = BufferGetPage(buffer);
@@ -272,6 +273,7 @@ heap_page_prune(Relation relation, Buffer buffer,
 	OffsetNumber offnum, maxoff;
 	PruneState	prstate;
 	HeapTupleData tup;
+	HTSV_Result res;
 
 	/*
 	 * Our strategy is to scan the page and make lists of items to change,
@@ -321,8 +323,13 @@ heap_page_prune(Relation relation, Buffer buffer,
 		 offnum >= FirstOffsetNumber;
 		 offnum = OffsetNumberPrev(offnum))
 	{
+		bool		totally_frozen;
 		ItemId		itemid = PageGetItemId(page, offnum);
-		HeapTupleHeader htup;
+
+		/* Redirect items mustn't be touched */
+		/* page makes rel truncation unsafe */
+		if (ItemIdIsRedirected(itemid))
+			page_prune_result->hastup = true;
 
 		/* Nothing to do if slot doesn't contain a tuple */
 		if (!ItemIdIsNormal(itemid))
@@ -331,10 +338,10 @@ heap_page_prune(Relation relation, Buffer buffer,
 			continue;
 		}
 
-		htup = (HeapTupleHeader) PageGetItem(page, itemid);
-		tup.t_data = htup;
-		tup.t_len = ItemIdGetLength(itemid);
 		ItemPointerSet(&(tup.t_self), blockno, offnum);
+		tup.t_data = (HeapTupleHeader) PageGetItem(page, itemid);
+		tup.t_len = ItemIdGetLength(itemid);
+		tup.t_tableOid = RelationGetRelid(relation);
 
 		/*
 		 * Set the offset number so that we can display it along with any
@@ -343,8 +350,95 @@ heap_page_prune(Relation relation, Buffer buffer,
 		if (off_loc)
 			*off_loc = offnum;
 
-		prstate.htsv[offnum] = heap_prune_satisfies_vacuum(&prstate, &tup,
-														   buffer);
+		res = heap_prune_satisfies_vacuum(&prstate, &tup, buffer);
+		prstate.htsv[offnum] = res;
+
+		switch (res)
+		{
+			case HEAPTUPLE_LIVE:
+				page_prune_result->nlive++;
+				if (page_prune_result->all_visible)
+				{
+					TransactionId xmin;
+
+					if (!HeapTupleHeaderXminCommitted(tup.t_data))
+					{
+						page_prune_result->all_visible = false;
+						break;
+					}
+
+					/*
+					 * The inserter definitely committed. But is it old enough
+					 * that everyone sees it as committed?
+					 */
+					xmin = HeapTupleHeaderGetXmin(tup.t_data);
+					if (!TransactionIdPrecedes(xmin,
+											   pagefrz->cutoffs->OldestXmin))
+					{
+						page_prune_result->all_visible = false;
+						break;
+					}
+
+					/* Track newest xmin on page. */
+					if (TransactionIdFollows(xmin, page_prune_result->visibility_cutoff_xid) &&
+						TransactionIdIsNormal(xmin))
+						page_prune_result->visibility_cutoff_xid = xmin;
+				}
+				break;
+			case HEAPTUPLE_RECENTLY_DEAD:
+
+				/*
+				 * If tuple is recently dead then we must not remove it from
+				 * the relation.  (We only remove items that are LP_DEAD from
+				 * pruning.)
+				 */
+				page_prune_result->nrecently_dead++;
+				page_prune_result->all_visible = false;
+				break;
+			case HEAPTUPLE_INSERT_IN_PROGRESS:
+
+				/*
+				 * We do not count these rows as live, because we expect the
+				 * inserting transaction to update the counters at commit, and
+				 * we assume that will happen only after we report our
+				 * results.  This assumption is a bit shaky, but it is what
+				 * acquire_sample_rows() does, so be consistent.
+				 */
+				page_prune_result->all_visible = false;
+				break;
+			case HEAPTUPLE_DELETE_IN_PROGRESS:
+				/* This is an expected case during concurrent vacuum */
+				page_prune_result->all_visible = false;
+
+				/*
+				 * Count such rows as live.  As above, we assume the deleting
+				 * transaction will commit and update the counters after we
+				 * report.
+				 */
+				page_prune_result->nlive++;
+				break;
+			default:
+				elog(ERROR, "unexpected HeapTupleSatisfiesVacuum result");
+				break;
+		}
+
+		page_prune_result->hastup = true;	/* page makes rel truncation unsafe */
+
+		/* Tuple with storage -- consider need to freeze */
+		if (heap_prepare_freeze_tuple(tup.t_data, pagefrz->cutoffs, pagefrz,
+									  &pagefrz->frozen[pagefrz->nfrozen], &totally_frozen))
+		{
+			/* Save prepared freeze plan for later */
+			pagefrz->frozen[pagefrz->nfrozen++].offset = offnum;
+		}
+
+		/*
+		 * If any tuple isn't either totally frozen already or eligible to
+		 * become totally frozen (according to its freeze plan), then the page
+		 * definitely cannot be set all-frozen in the visibility map later on
+		 */
+		if (!totally_frozen)
+			page_prune_result->all_frozen = false;
 	}
 
 	/* Scan the page */
@@ -471,8 +565,6 @@ heap_page_prune(Relation relation, Buffer buffer,
 	/* Record number of newly-set-LP_DEAD items for caller */
 	page_prune_result->nkilled = prstate.nkilled;
 	page_prune_result->ndeleted = ndeleted;
-
-	return ndeleted;
 }
 
 

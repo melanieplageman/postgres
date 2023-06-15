@@ -20,6 +20,7 @@
 #include "access/skey.h"
 #include "access/table.h"		/* for backward compatibility */
 #include "access/tableam.h"
+#include "commands/vacuum.h"
 #include "nodes/lockoptions.h"
 #include "nodes/primnodes.h"
 #include "storage/bufpage.h"
@@ -58,6 +59,9 @@ typedef struct PagePruneResult
 	/* pruning accomplished this */
 	int nkilled;
 	int ndeleted;
+	/* stats on state of tuples in page */
+	int nlive;
+	int nrecently_dead;
 } PagePruneResult;
 
 
@@ -207,6 +211,9 @@ typedef struct HeapPageFreeze
 	 */
 	TransactionId NoFreezePageRelfrozenXid;
 	MultiXactId NoFreezePageRelminMxid;
+	VacuumCutoffs *cutoffs;
+	HeapTupleFreeze frozen[MaxHeapTuplesPerPage];
+	int nfrozen;
 
 } HeapPageFreeze;
 
@@ -277,7 +284,7 @@ extern TM_Result heap_lock_tuple(Relation relation, HeapTuple tuple,
 
 extern void heap_inplace_update(Relation relation, HeapTuple tuple);
 extern bool heap_prepare_freeze_tuple(HeapTupleHeader tuple,
-									  const struct VacuumCutoffs *cutoffs,
+									  const VacuumCutoffs *cutoffs,
 									  HeapPageFreeze *pagefrz,
 									  HeapTupleFreeze *frz, bool *totally_frozen);
 extern void heap_freeze_execute_prepared(Relation rel, Buffer buffer,
@@ -307,7 +314,8 @@ extern void heap_page_prune(Relation relation, Buffer buffer,
 							struct GlobalVisState *vistest,
 							TransactionId old_snap_xmin,
 							TimestampTz old_snap_ts,
-							OffsetNumber *off_loc, PagePruneResult *page_prune_result);
+							OffsetNumber *off_loc, PagePruneResult *page_prune_result,
+							HeapPageFreeze *pagefrz);
 extern void heap_page_prune_execute(Buffer buffer,
 									OffsetNumber *redirected, int nredirected,
 									OffsetNumber *nowdead, int ndead,

@@ -1530,16 +1530,9 @@ lazy_scan_prune(LVRelState *vacrel,
 	OffsetNumber offnum,
 				maxoff;
 	ItemId		itemid;
-	HeapTupleData tuple;
-	HTSV_Result res;
-
-	int tuples_frozen,
-				live_tuples,
-				recently_dead_tuples;
 
 	HeapPageFreeze pagefrz;
 	int64		fpi_before = pgWalUsage.wal_fpi;
-	HeapTupleFreeze frozen[MaxHeapTuplesPerPage];
 
 	ItemPointerData tmp;
 	VacDeadItems *dead_items = vacrel->dead_items;
@@ -1554,18 +1547,18 @@ lazy_scan_prune(LVRelState *vacrel,
 	 */
 	maxoff = PageGetMaxOffsetNumber(page);
 
-retry:
-
-	/* Initialize (or reset) page-level state */
 	pagefrz.freeze_required = false;
 	pagefrz.FreezePageRelfrozenXid = vacrel->NewRelfrozenXid;
 	pagefrz.FreezePageRelminMxid = vacrel->NewRelminMxid;
 	pagefrz.NoFreezePageRelfrozenXid = vacrel->NewRelfrozenXid;
 	pagefrz.NoFreezePageRelminMxid = vacrel->NewRelminMxid;
-	tuples_frozen = 0;
-	// TODO: delete this variable
-	live_tuples = 0;
-	recently_dead_tuples = 0;
+	pagefrz.cutoffs = &vacrel->cutoffs;
+	page_prune_result->hastup = false;
+	page_prune_result->has_lpdead_items = false;
+	page_prune_result->all_visible = true;
+	page_prune_result->all_frozen = true;
+	page_prune_result->visibility_cutoff_xid = InvalidTransactionId;
+
 
 	// TODO: combine this with the loop below
 	// freeze as part of pruning -- so do the freezing as part of heap_page_prune()
@@ -1573,185 +1566,12 @@ retry:
 	// HeapTuplesSatisfiesVacuum() called less
 	heap_page_prune(rel, buf, vacrel->vistest,
 									 InvalidTransactionId, 0,
-									 &vacrel->offnum, page_prune_result);
+									 &vacrel->offnum, page_prune_result, &pagefrz);
 
 	/*
 	 * Now scan the page to collect LP_DEAD items and check for tuples
 	 * requiring freezing among remaining tuples with storage
 	 */
-	page_prune_result->hastup = false;
-	page_prune_result->has_lpdead_items = false;
-	page_prune_result->all_visible = true;
-	page_prune_result->all_frozen = true;
-	page_prune_result->visibility_cutoff_xid = InvalidTransactionId;
-
-	for (offnum = FirstOffsetNumber;
-		 offnum <= maxoff;
-		 offnum = OffsetNumberNext(offnum))
-	{
-		bool		totally_frozen;
-
-		/*
-		 * Set the offset number so that we can display it along with any
-		 * error that occurred while processing this tuple.
-		 */
-		vacrel->offnum = offnum;
-		itemid = PageGetItemId(page, offnum);
-
-		if (!ItemIdIsUsed(itemid))
-			continue;
-
-		/* Redirect items mustn't be touched */
-		if (ItemIdIsRedirected(itemid))
-		{
-			/* page makes rel truncation unsafe */
-			page_prune_result->hastup = true;
-			continue;
-		}
-
-		if (ItemIdIsDead(itemid))
-			continue;
-
-		Assert(ItemIdIsNormal(itemid));
-
-		ItemPointerSet(&(tuple.t_self), blkno, offnum);
-		tuple.t_data = (HeapTupleHeader) PageGetItem(page, itemid);
-		tuple.t_len = ItemIdGetLength(itemid);
-		tuple.t_tableOid = RelationGetRelid(rel);
-
-		/*
-		 * DEAD tuples are almost always pruned into LP_DEAD line pointers by
-		 * heap_page_prune(), but it's possible that the tuple state changed
-		 * since heap_page_prune() looked.  Handle that here by restarting.
-		 * (See comments at the top of function for a full explanation.)
-		 */
-		res = HeapTupleSatisfiesVacuum(&tuple, vacrel->cutoffs.OldestXmin,
-									   buf);
-
-		if (unlikely(res == HEAPTUPLE_DEAD))
-			goto retry;
-
-		/*
-		 * The criteria for counting a tuple as live in this block need to
-		 * match what analyze.c's acquire_sample_rows() does, otherwise VACUUM
-		 * and ANALYZE may produce wildly different reltuples values, e.g.
-		 * when there are many recently-dead tuples.
-		 *
-		 * The logic here is a bit simpler than acquire_sample_rows(), as
-		 * VACUUM can't run inside a transaction block, which makes some cases
-		 * impossible (e.g. in-progress insert from the same transaction).
-		 *
-		 * We treat LP_DEAD items (which are the closest thing to DEAD tuples
-		 * that might be seen here) differently, too: we assume that they'll
-		 * become LP_UNUSED before VACUUM finishes.  This difference is only
-		 * superficial.  VACUUM effectively agrees with ANALYZE about DEAD
-		 * items, in the end.  VACUUM won't remember LP_DEAD items, but only
-		 * because they're not supposed to be left behind when it is done.
-		 * (Cases where we bypass index vacuuming will violate this optimistic
-		 * assumption, but the overall impact of that should be negligible.)
-		 */
-		switch (res)
-		{
-			case HEAPTUPLE_LIVE:
-
-				/*
-				 * Count it as live.  Not only is this natural, but it's also
-				 * what acquire_sample_rows() does.
-				 */
-				live_tuples++;
-
-				/*
-				 * Is the tuple definitely visible to all transactions?
-				 *
-				 * NB: Like with per-tuple hint bits, we can't set the
-				 * PD_ALL_VISIBLE flag if the inserter committed
-				 * asynchronously. See SetHintBits for more info. Check that
-				 * the tuple is hinted xmin-committed because of that.
-				 */
-				if (page_prune_result->all_visible)
-				{
-					TransactionId xmin;
-
-					if (!HeapTupleHeaderXminCommitted(tuple.t_data))
-					{
-						page_prune_result->all_visible = false;
-						break;
-					}
-
-					/*
-					 * The inserter definitely committed. But is it old enough
-					 * that everyone sees it as committed?
-					 */
-					xmin = HeapTupleHeaderGetXmin(tuple.t_data);
-					if (!TransactionIdPrecedes(xmin,
-											   vacrel->cutoffs.OldestXmin))
-					{
-						page_prune_result->all_visible = false;
-						break;
-					}
-
-					/* Track newest xmin on page. */
-					if (TransactionIdFollows(xmin, page_prune_result->visibility_cutoff_xid) &&
-						TransactionIdIsNormal(xmin))
-						page_prune_result->visibility_cutoff_xid = xmin;
-				}
-				break;
-			case HEAPTUPLE_RECENTLY_DEAD:
-
-				/*
-				 * If tuple is recently dead then we must not remove it from
-				 * the relation.  (We only remove items that are LP_DEAD from
-				 * pruning.)
-				 */
-				recently_dead_tuples++;
-				page_prune_result->all_visible = false;
-				break;
-			case HEAPTUPLE_INSERT_IN_PROGRESS:
-
-				/*
-				 * We do not count these rows as live, because we expect the
-				 * inserting transaction to update the counters at commit, and
-				 * we assume that will happen only after we report our
-				 * results.  This assumption is a bit shaky, but it is what
-				 * acquire_sample_rows() does, so be consistent.
-				 */
-				page_prune_result->all_visible = false;
-				break;
-			case HEAPTUPLE_DELETE_IN_PROGRESS:
-				/* This is an expected case during concurrent vacuum */
-				page_prune_result->all_visible = false;
-
-				/*
-				 * Count such rows as live.  As above, we assume the deleting
-				 * transaction will commit and update the counters after we
-				 * report.
-				 */
-				live_tuples++;
-				break;
-			default:
-				elog(ERROR, "unexpected HeapTupleSatisfiesVacuum result");
-				break;
-		}
-
-		page_prune_result->hastup = true;	/* page makes rel truncation unsafe */
-
-		/* Tuple with storage -- consider need to freeze */
-		if (heap_prepare_freeze_tuple(tuple.t_data, &vacrel->cutoffs, &pagefrz,
-									  &frozen[tuples_frozen], &totally_frozen))
-		{
-			/* Save prepared freeze plan for later */
-			frozen[tuples_frozen++].offset = offnum;
-		}
-
-		/*
-		 * If any tuple isn't either totally frozen already or eligible to
-		 * become totally frozen (according to its freeze plan), then the page
-		 * definitely cannot be set all-frozen in the visibility map later on
-		 */
-		if (!totally_frozen)
-			page_prune_result->all_frozen = false;
-	}
-
 	/*
 	 * We have now divided every item on the page into either an LP_DEAD item
 	 * that will need to be vacuumed in indexes later, or a LP_NORMAL tuple
@@ -1766,7 +1586,7 @@ retry:
 	 * freeze when pruning generated an FPI, if doing so means that we set the
 	 * page all-frozen afterwards (might not happen until final heap pass).
 	 */
-	if (pagefrz.freeze_required || tuples_frozen == 0 ||
+	if (pagefrz.freeze_required || pagefrz.nfrozen == 0 ||
 		(page_prune_result->all_visible && page_prune_result->all_frozen &&
 		 fpi_before != pgWalUsage.wal_fpi))
 	{
@@ -1777,7 +1597,7 @@ retry:
 		vacrel->NewRelfrozenXid = pagefrz.FreezePageRelfrozenXid;
 		vacrel->NewRelminMxid = pagefrz.FreezePageRelminMxid;
 
-		if (tuples_frozen == 0)
+		if (pagefrz.nfrozen == 0)
 		{
 			/*
 			 * We have no freeze plans to execute, so there's no added cost
@@ -1821,7 +1641,7 @@ retry:
 			/* Execute all freeze plans for page as a single atomic action */
 			heap_freeze_execute_prepared(vacrel->rel, buf,
 										 snapshotConflictHorizon,
-										 frozen, tuples_frozen);
+										 pagefrz.frozen, pagefrz.nfrozen);
 		}
 	}
 	else
@@ -1833,7 +1653,6 @@ retry:
 		vacrel->NewRelfrozenXid = pagefrz.NoFreezePageRelfrozenXid;
 		vacrel->NewRelminMxid = pagefrz.NoFreezePageRelminMxid;
 		page_prune_result->all_frozen = false;
-		tuples_frozen = 0;		/* avoid miscounts in instrumentation */
 	}
 
 
@@ -1898,10 +1717,10 @@ retry:
 
 	/* Finally, add page-local counts to whole-VACUUM counts */
 	vacrel->tuples_deleted += page_prune_result->ndeleted;
-	vacrel->tuples_frozen += tuples_frozen;
+	vacrel->tuples_frozen += pagefrz.nfrozen;
 	vacrel->lpdead_items += dead_items->num_items - original_num_dead_items;
-	vacrel->live_tuples += live_tuples;
-	vacrel->recently_dead_tuples += recently_dead_tuples;
+	vacrel->live_tuples += page_prune_result->nlive;
+	vacrel->recently_dead_tuples += page_prune_result->nrecently_dead;
 }
 
 /*
