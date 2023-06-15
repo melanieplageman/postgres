@@ -1552,13 +1552,15 @@ lazy_scan_prune(LVRelState *vacrel,
 	HTSV_Result res;
 	int			tuples_deleted,
 				tuples_frozen,
-				lpdead_items,
 				live_tuples,
 				recently_dead_tuples;
 	int			nnewlpdead;
 	HeapPageFreeze pagefrz;
+	ItemPointerData tmp;
 	int64		fpi_before = pgWalUsage.wal_fpi;
 	HeapTupleFreeze frozen[MaxHeapTuplesPerPage];
+	VacDeadItems *dead_items = vacrel->dead_items;
+	int original_num_dead_items = dead_items->num_items;
 
 	Assert(BufferGetBlockNumber(buf) == blkno);
 
@@ -1579,19 +1581,10 @@ retry:
 	pagefrz.NoFreezePageRelminMxid = vacrel->NewRelminMxid;
 	tuples_deleted = 0;
 	tuples_frozen = 0;
-	lpdead_items = 0;
+	// TODO: delete this variable
 	live_tuples = 0;
 	recently_dead_tuples = 0;
 
-	/*
-	 * Prune all HOT-update chains in this page.
-	 *
-	 * We count tuples removed by the pruning step as tuples_deleted.  Its
-	 * final value can be thought of as the number of tuples that have been
-	 * deleted from the table.  It should not be confused with lpdead_items;
-	 * lpdead_items's final value can be thought of as the number of tuples
-	 * that were deleted from indexes.
-	 */
 	// TODO: combine this with the loop below
 	// freeze as part of pruning -- so do the freezing as part of heap_page_prune()
 	// extra CPU and extra WAL -- looping through all tuples
@@ -1861,6 +1854,30 @@ retry:
 		tuples_frozen = 0;		/* avoid miscounts in instrumentation */
 	}
 
+
+	ItemPointerSetBlockNumber(&tmp, blkno);
+
+	for (offnum = FirstOffsetNumber;
+		offnum <= maxoff;
+		offnum = OffsetNumberNext(offnum))
+	{
+		itemid = PageGetItemId(page, offnum);
+
+		if (!ItemIdIsDead(itemid))
+			continue;
+
+		ItemPointerSetOffsetNumber(&tmp, offnum);
+		dead_items->items[dead_items->num_items++] = tmp;
+	}
+
+	Assert(dead_items->num_items <= dead_items->max_items);
+	if (original_num_dead_items > dead_items->num_items)
+	{
+		vacrel->lpdead_item_pages++;
+		prunestate->has_lpdead_items = true;
+		pgstat_progress_update_param(PROGRESS_VACUUM_NUM_DEAD_TUPLES,
+										dead_items->num_items);
+
 	/*
 	 * VACUUM will call heap_page_is_all_visible() during the second pass over
 	 * the heap to determine all_visible and all_frozen for the page -- this
@@ -1869,50 +1886,19 @@ retry:
 	 * agreement with heap_page_is_all_visible() using an assertion.
 	 */
 #ifdef USE_ASSERT_CHECKING
-	/* Note that all_frozen value does not matter when !all_visible */
-	if (prunestate->all_visible && lpdead_items == 0)
-	{
-		TransactionId cutoff;
-		bool		all_frozen;
-
-		if (!heap_page_is_all_visible(vacrel, buf, &cutoff, &all_frozen))
-			Assert(false);
-
-		Assert(!TransactionIdIsValid(cutoff) ||
-			   cutoff == prunestate->visibility_cutoff_xid);
-	}
-#endif
-
-	/*
-	 * Now save details of the LP_DEAD items from the page in vacrel
-	 */
-	if (lpdead_items > 0)
-	{
-		VacDeadItems *dead_items = vacrel->dead_items;
-		ItemPointerData tmp;
-
-		vacrel->lpdead_item_pages++;
-		prunestate->has_lpdead_items = true;
-
-		ItemPointerSetBlockNumber(&tmp, blkno);
-
-		for (offnum = FirstOffsetNumber;
-			offnum <= maxoff;
-			offnum = OffsetNumberNext(offnum))
+		/* Note that all_frozen value does not matter when !all_visible */
+		if (prunestate->all_visible)
 		{
-			itemid = PageGetItemId(page, offnum);
+			TransactionId cutoff;
+			bool		all_frozen;
 
-			if (!ItemIdIsDead(itemid))
-				continue;
+			if (!heap_page_is_all_visible(vacrel, buf, &cutoff, &all_frozen))
+				Assert(false);
 
-			ItemPointerSetOffsetNumber(&tmp, offnum);
-			dead_items->items[dead_items->num_items++] = tmp;
+			Assert(!TransactionIdIsValid(cutoff) ||
+				cutoff == prunestate->visibility_cutoff_xid);
 		}
-
-		Assert(dead_items->num_items <= dead_items->max_items);
-		pgstat_progress_update_param(PROGRESS_VACUUM_NUM_DEAD_TUPLES,
-									 dead_items->num_items);
-
+#endif
 
 		/*
 		 * It was convenient to ignore LP_DEAD items in all_visible earlier on
@@ -1928,11 +1914,10 @@ retry:
 		prunestate->all_visible = false;
 	}
 
-
 	/* Finally, add page-local counts to whole-VACUUM counts */
 	vacrel->tuples_deleted += tuples_deleted;
 	vacrel->tuples_frozen += tuples_frozen;
-	vacrel->lpdead_items += lpdead_items;
+	vacrel->lpdead_items += dead_items->num_items - original_num_dead_items;
 	vacrel->live_tuples += live_tuples;
 	vacrel->recently_dead_tuples += recently_dead_tuples;
 }
