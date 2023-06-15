@@ -42,6 +42,25 @@ struct VacuumCutoffs;
 
 #define MaxLockTupleMode	LockTupleExclusive
 
+typedef struct PagePruneResult
+{
+	bool		hastup;			/* Page prevents rel truncation? */
+	bool		has_lpdead_items;	/* includes existing LP_DEAD items */
+
+	/*
+	 * State describes the proper VM bit states to set for the page following
+	 * pruning and freezing.  all_visible implies !has_lpdead_items, but don't
+	 * trust all_frozen result unless all_visible is also set to true.
+	 */
+	bool		all_visible;	/* Every item visible to all? */
+	bool		all_frozen;		/* provided all_visible is also true */
+	TransactionId visibility_cutoff_xid;	/* For recovery conflicts */
+	/* pruning accomplished this */
+	int nkilled;
+	int ndeleted;
+} PagePruneResult;
+
+
 /*
  * Descriptor for heap table scans.
  */
@@ -288,8 +307,7 @@ extern int	heap_page_prune(Relation relation, Buffer buffer,
 							struct GlobalVisState *vistest,
 							TransactionId old_snap_xmin,
 							TimestampTz old_snap_ts,
-							int *nnewlpdead,
-							OffsetNumber *off_loc);
+							OffsetNumber *off_loc, PagePruneResult *page_prune_result);
 extern void heap_page_prune_execute(Buffer buffer,
 									OffsetNumber *redirected, int nredirected,
 									OffsetNumber *nowdead, int ndead,

@@ -113,6 +113,7 @@ heap_page_prune_opt(Relation relation, Buffer buffer)
 	TransactionId limited_xmin = InvalidTransactionId;
 	TimestampTz limited_ts = 0;
 	Size		minfree;
+	PagePruneResult page_prune_result;
 
 	/*
 	 * We can't write WAL in recovery mode, so there's no point trying to
@@ -202,11 +203,8 @@ heap_page_prune_opt(Relation relation, Buffer buffer)
 		 */
 		if (PageIsFull(page) || PageGetHeapFreeSpace(page) < minfree)
 		{
-			int			ndeleted,
-						nnewlpdead;
-
-			ndeleted = heap_page_prune(relation, buffer, vistest, limited_xmin,
-									   limited_ts, &nnewlpdead, NULL);
+			heap_page_prune(relation, buffer, vistest, limited_xmin,
+									   limited_ts, NULL, &page_prune_result);
 
 			/*
 			 * Report the number of tuples reclaimed to pgstats.  This is
@@ -222,9 +220,9 @@ heap_page_prune_opt(Relation relation, Buffer buffer)
 			 * tracks ndeleted, since it will set the same LP_DEAD items to
 			 * LP_UNUSED separately.
 			 */
-			if (ndeleted > nnewlpdead)
+			if (page_prune_result.ndeleted > page_prune_result.nkilled)
 				pgstat_update_heap_dead_tuples(relation,
-											   ndeleted - nnewlpdead);
+											   page_prune_result.ndeleted - page_prune_result.nkilled);
 		}
 
 		/* And release buffer lock */
@@ -253,7 +251,7 @@ heap_page_prune_opt(Relation relation, Buffer buffer)
  * either have been set by TransactionIdLimitedForOldSnapshots, or
  * InvalidTransactionId/0 respectively.
  *
- * Sets *nnewlpdead for caller, indicating the number of items that were
+ * returns x, indicating the number of items that were
  * newly set LP_DEAD during prune operation.
  *
  * off_loc is the offset location required by the caller to use in error
@@ -266,14 +264,12 @@ heap_page_prune(Relation relation, Buffer buffer,
 				GlobalVisState *vistest,
 				TransactionId old_snap_xmin,
 				TimestampTz old_snap_ts,
-				int *nnewlpdead,
-				OffsetNumber *off_loc)
+				OffsetNumber *off_loc, PagePruneResult *page_prune_result)
 {
 	int			ndeleted = 0;
 	Page		page = BufferGetPage(buffer);
 	BlockNumber blockno = BufferGetBlockNumber(buffer);
-	OffsetNumber offnum,
-				maxoff;
+	OffsetNumber offnum, maxoff;
 	PruneState	prstate;
 	HeapTupleData tup;
 
@@ -473,7 +469,8 @@ heap_page_prune(Relation relation, Buffer buffer,
 	END_CRIT_SECTION();
 
 	/* Record number of newly-set-LP_DEAD items for caller */
-	*nnewlpdead = prstate.nkilled;
+	page_prune_result->nkilled = prstate.nkilled;
+	page_prune_result->ndeleted = ndeleted;
 
 	return ndeleted;
 }

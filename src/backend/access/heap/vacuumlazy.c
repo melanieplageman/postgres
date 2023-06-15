@@ -212,24 +212,6 @@ typedef struct LVRelState
 	int64		missed_dead_tuples; /* # removable, but not removed */
 } LVRelState;
 
-/*
- * State returned by lazy_scan_prune()
- */
-typedef struct LVPagePruneState
-{
-	bool		hastup;			/* Page prevents rel truncation? */
-	bool		has_lpdead_items;	/* includes existing LP_DEAD items */
-
-	/*
-	 * State describes the proper VM bit states to set for the page following
-	 * pruning and freezing.  all_visible implies !has_lpdead_items, but don't
-	 * trust all_frozen result unless all_visible is also set to true.
-	 */
-	bool		all_visible;	/* Every item visible to all? */
-	bool		all_frozen;		/* provided all_visible is also true */
-	TransactionId visibility_cutoff_xid;	/* For recovery conflicts */
-} LVPagePruneState;
-
 /* Struct for saving and restoring vacuum error information. */
 typedef struct LVSavedErrInfo
 {
@@ -250,7 +232,7 @@ static bool lazy_scan_new_or_empty(LVRelState *vacrel, Buffer buf,
 								   bool sharelock, Buffer vmbuffer);
 static void lazy_scan_prune(LVRelState *vacrel, Buffer buf,
 							BlockNumber blkno, Page page,
-							LVPagePruneState *prunestate);
+							PagePruneResult *prunestate);
 static bool lazy_scan_noprune(LVRelState *vacrel, Buffer buf,
 							  BlockNumber blkno, Page page,
 							  bool *hastup, bool *recordfreespace);
@@ -854,7 +836,7 @@ lazy_scan_heap(LVRelState *vacrel)
 		Buffer		buf;
 		Page		page;
 		bool		all_visible_according_to_vm;
-		LVPagePruneState prunestate;
+		PagePruneResult prunestate;
 
 		if (blkno == next_unskippable_block)
 		{
@@ -1542,7 +1524,7 @@ lazy_scan_prune(LVRelState *vacrel,
 				Buffer buf,
 				BlockNumber blkno,
 				Page page,
-				LVPagePruneState *prunestate)
+				PagePruneResult *prunestate)
 {
 	Relation	rel = vacrel->rel;
 	OffsetNumber offnum,
@@ -1554,7 +1536,6 @@ lazy_scan_prune(LVRelState *vacrel,
 				tuples_frozen,
 				live_tuples,
 				recently_dead_tuples;
-	int			nnewlpdead;
 	HeapPageFreeze pagefrz;
 	ItemPointerData tmp;
 	int64		fpi_before = pgWalUsage.wal_fpi;
@@ -1590,7 +1571,7 @@ retry:
 	// extra CPU and extra WAL -- looping through all tuples
 	// HeapTuplesSatisfiesVacuum() called less
 	tuples_deleted = heap_page_prune(rel, buf, vacrel->vistest,
-									 InvalidTransactionId, 0, &nnewlpdead,
+									 InvalidTransactionId, 0,
 									 &vacrel->offnum);
 
 	/*
