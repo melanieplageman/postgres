@@ -336,6 +336,9 @@ extern TM_Result HeapTupleSatisfiesUpdate(HeapTuple htup, CommandId curcid,
 										  Buffer buffer);
 extern HTSV_Result HeapTupleSatisfiesVacuum(HeapTuple htup, TransactionId OldestXmin,
 											Buffer buffer);
+
+extern HTSV_Result
+HeapTupleSatisfiesVacuumHorizon2(HeapTuple htup, Buffer buffer, TransactionId *dead_after);
 extern HTSV_Result HeapTupleSatisfiesVacuumHorizon(HeapTuple htup, Buffer buffer,
 												   TransactionId *dead_after);
 extern void HeapTupleSetHintBits(HeapTupleHeader tuple, Buffer buffer,
