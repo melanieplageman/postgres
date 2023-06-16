@@ -562,33 +562,32 @@ heap_page_prune_freeze(LVRelState *vacrel, Buffer buffer, BlockNumber blockno,
 
 		prstate.htsv[offnum] = heap_prune_satisfies_vacuum(&prstate, &tup, buffer);
 
-		switch (prstat.htsv[offnum])
+		switch (prstate.htsv[offnum])
 		{
+			TransactionId xmin;
 			case HEAPTUPLE_LIVE:
 				vacrel->live_tuples++;
-				if (result->all_visible)
+				if (!result->all_visible)
+					break;
+
+				if (!HeapTupleHeaderXminCommitted(tup.t_data))
 				{
-					TransactionId xmin;
+					result->all_visible = false;
+					break;
+				}
 
-					if (!HeapTupleHeaderXminCommitted(tup.t_data))
-					{
-						result->all_visible = false;
-						break;
-					}
+				xmin = HeapTupleHeaderGetXmin(tup.t_data);
+				if (!TransactionIdPrecedes(xmin,
+											vacrel->cutoffs.OldestXmin))
+				{
+					result->all_visible = false;
+					break;
+				}
 
-					xmin = HeapTupleHeaderGetXmin(tup.t_data);
-					if (!TransactionIdPrecedes(xmin,
-											   vacrel->cutoffs.OldestXmin))
-					{
-						result->all_visible = false;
-						break;
-					}
-
-					if (TransactionIdFollows(xmin, result->visibility_cutoff_xid) &&
-						TransactionIdIsNormal(xmin))
-					{
-						result->visibility_cutoff_xid = xmin;
-					}
+				if (TransactionIdFollows(xmin, result->visibility_cutoff_xid) &&
+					TransactionIdIsNormal(xmin))
+				{
+					result->visibility_cutoff_xid = xmin;
 				}
 				break;
 			case HEAPTUPLE_RECENTLY_DEAD:
@@ -604,12 +603,13 @@ heap_page_prune_freeze(LVRelState *vacrel, Buffer buffer, BlockNumber blockno,
 				break;
 			default:
 				elog(ERROR, "unexpected HeapTupleSatisfiesVacuum result");
-				break;
 		}
 
 		if (heap_prepare_freeze_tuple(tup.t_data, &vacrel->cutoffs, &pagefrz,
 									  &frozen[nfrozen], &totally_frozen))
+		{
 			frozen[nfrozen++].offset = offnum;
+		}
 
 		if (!totally_frozen)
 			result->all_frozen = false;
