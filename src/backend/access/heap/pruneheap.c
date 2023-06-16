@@ -21,6 +21,7 @@
 #include "access/xlog.h"
 #include "access/xloginsert.h"
 #include "catalog/catalog.h"
+#include "commands/progress.h"
 #include "executor/instrument.h"
 #include "miscadmin.h"
 #include "pgstat.h"
@@ -483,38 +484,57 @@ heap_page_prune(Relation relation, Buffer buffer,
 	return ndeleted;
 }
 
+// TODO: turn this into lazy_scan_prune
+// TODO: add back in off_loc
 void
-heap_page_prune_freeze(Relation relation, Buffer buffer,
-				GlobalVisState *vistest,
-				TransactionId old_snap_xmin,
-				TimestampTz old_snap_ts,
-				OffsetNumber *off_loc, PagePruneResult *page_prune_result,
-				HeapPageFreeze *pagefrz)
+heap_page_prune_freeze(LVRelState *vacrel, Buffer buffer, BlockNumber blockno,
+		Page page, PagePruneResult *page_prune_result)
 {
-	int			ndeleted = 0;
+	Relation	relation = vacrel->rel;
+	OffsetNumber offnum;
+	ItemId		itemid;
 	int i = 0;
-	Page		page = BufferGetPage(buffer);
-	BlockNumber blockno = BufferGetBlockNumber(buffer);
-	OffsetNumber offnum, maxoff;
+	OffsetNumber maxoff = PageGetMaxOffsetNumber(page);
+
+	// TODO: can I use same one as in prstate?
+	TransactionId snapshotConflictHorizon = InvalidTransactionId;
+	int64		fpi_before = pgWalUsage.wal_fpi;
+
 	PruneState	prstate;
 	HeapTupleData tup;
 	HTSV_Result res;
-	int64		fpi_before = pgWalUsage.wal_fpi;
-	// TODO: can I use same one as in prstate?
-	TransactionId snapshotConflictHorizon = InvalidTransactionId;
+
+	HeapPageFreeze pagefrz;
+
+	ItemPointerData tmp;
+	VacDeadItems *dead_items = vacrel->dead_items;
+	int original_num_dead_items = dead_items->num_items;
+
+	Assert(BufferGetBlockNumber(buffer) == blockno);
+	maxoff = PageGetMaxOffsetNumber(page);
+
+	pagefrz.freeze_required = false;
+	pagefrz.FreezePageRelfrozenXid = vacrel->NewRelfrozenXid;
+	pagefrz.FreezePageRelminMxid = vacrel->NewRelminMxid;
+	pagefrz.NoFreezePageRelfrozenXid = vacrel->NewRelfrozenXid;
+	pagefrz.NoFreezePageRelminMxid = vacrel->NewRelminMxid;
+
+	page_prune_result->hastup = false;
+	page_prune_result->has_lpdead_items = false;
+	page_prune_result->all_visible = true;
+	page_prune_result->all_frozen = true;
+	page_prune_result->visibility_cutoff_xid = InvalidTransactionId;
 	page_prune_result->prune_page = false;
 
 	prstate.new_prune_xid = InvalidTransactionId;
 	prstate.rel = relation;
-	prstate.vistest = vistest;
-	prstate.old_snap_xmin = old_snap_xmin;
-	prstate.old_snap_ts = old_snap_ts;
+	prstate.vistest = vacrel->vistest;
+	prstate.old_snap_xmin = InvalidTransactionId;
+	prstate.old_snap_ts = 0;
 	prstate.old_snap_used = false;
 	prstate.snapshotConflictHorizon = InvalidTransactionId;
 	prstate.nredirected = prstate.nkilled = prstate.nobsoleted = 0;
 	memset(prstate.marked, 0, sizeof(prstate.marked));
-
-	maxoff = PageGetMaxOffsetNumber(page);
 	tup.t_tableOid = RelationGetRelid(prstate.rel);
 
 	for (offnum = maxoff;
@@ -522,7 +542,7 @@ heap_page_prune_freeze(Relation relation, Buffer buffer,
 		 offnum = OffsetNumberPrev(offnum))
 	{
 		bool		totally_frozen;
-		ItemId		itemid = PageGetItemId(page, offnum);
+		itemid = PageGetItemId(page, offnum);
 
 		if (ItemIdIsRedirected(itemid))
 			page_prune_result->hastup = true;
@@ -538,8 +558,7 @@ heap_page_prune_freeze(Relation relation, Buffer buffer,
 		tup.t_len = ItemIdGetLength(itemid);
 		tup.t_tableOid = RelationGetRelid(relation);
 
-		if (off_loc)
-			*off_loc = offnum;
+		vacrel->offnum = offnum;
 
 		res = heap_prune_satisfies_vacuum(&prstate, &tup, buffer);
 		prstate.htsv[offnum] = res;
@@ -560,7 +579,7 @@ heap_page_prune_freeze(Relation relation, Buffer buffer,
 
 					xmin = HeapTupleHeaderGetXmin(tup.t_data);
 					if (!TransactionIdPrecedes(xmin,
-											   pagefrz->cutoffs->OldestXmin))
+											   vacrel->cutoffs.OldestXmin))
 					{
 						page_prune_result->all_visible = false;
 						break;
@@ -568,7 +587,9 @@ heap_page_prune_freeze(Relation relation, Buffer buffer,
 
 					if (TransactionIdFollows(xmin, page_prune_result->visibility_cutoff_xid) &&
 						TransactionIdIsNormal(xmin))
+					{
 						page_prune_result->visibility_cutoff_xid = xmin;
+					}
 				}
 				break;
 			case HEAPTUPLE_RECENTLY_DEAD:
@@ -589,20 +610,20 @@ heap_page_prune_freeze(Relation relation, Buffer buffer,
 
 		page_prune_result->hastup = true;	/* page makes rel truncation unsafe */
 
-		if (heap_prepare_freeze_tuple(tup.t_data, pagefrz->cutoffs, pagefrz,
-									  &pagefrz->frozen[page_prune_result->nfrozen], &totally_frozen))
+		if (heap_prepare_freeze_tuple(tup.t_data, &vacrel->cutoffs, &pagefrz,
+									  &pagefrz.frozen[page_prune_result->nfrozen], &totally_frozen))
 		{
-			pagefrz->frozen[page_prune_result->nfrozen++].offset = offnum;
+			pagefrz.frozen[page_prune_result->nfrozen++].offset = offnum;
 		}
 		if (!totally_frozen)
 			page_prune_result->all_frozen = false;
 	}
 
-	page_prune_result->NewRelfrozenXid = pagefrz->FreezePageRelfrozenXid;
-	page_prune_result->NewRelminMxid = pagefrz->FreezePageRelminMxid;
+	page_prune_result->NewRelfrozenXid = pagefrz.FreezePageRelfrozenXid;
+	page_prune_result->NewRelminMxid = pagefrz.FreezePageRelminMxid;
 
 		// TODO: see if this is same as all_frozen for our purposes
-	page_prune_result->froze_page = pagefrz->freeze_required || page_prune_result->nfrozen == 0 ||
+	page_prune_result->froze_page = pagefrz.freeze_required || page_prune_result->nfrozen == 0 ||
 		(page_prune_result->all_visible && page_prune_result->all_frozen &&
 		 fpi_before != pgWalUsage.wal_fpi);
 
@@ -616,14 +637,14 @@ heap_page_prune_freeze(Relation relation, Buffer buffer,
 		}
 		else
 		{
-			snapshotConflictHorizon = pagefrz->cutoffs->OldestXmin;
+			snapshotConflictHorizon = vacrel->cutoffs.OldestXmin;
 			TransactionIdRetreat(snapshotConflictHorizon);
 		}
 	}
 	else
 	{
-		page_prune_result->NewRelfrozenXid = pagefrz->NoFreezePageRelfrozenXid;
-		page_prune_result->NewRelminMxid = pagefrz->NoFreezePageRelminMxid;
+		page_prune_result->NewRelfrozenXid = pagefrz.NoFreezePageRelfrozenXid;
+		page_prune_result->NewRelminMxid = pagefrz.NoFreezePageRelminMxid;
 		page_prune_result->all_frozen = false;
 	}
 
@@ -633,11 +654,11 @@ heap_page_prune_freeze(Relation relation, Buffer buffer,
 		 offnum = OffsetNumberNext(offnum))
 	{
 		// TODO: can get deadoffsets for vacuum in this loop
-		ItemId itemid = PageGetItemId(page, offnum);
+		itemid = PageGetItemId(page, offnum);
 		if (page_prune_result->froze_page)
 		{
 			// TODO: perhaps offset numbers can be used into freeze plans instead of random index i
-			HeapTupleFreeze *frz = pagefrz->frozen + i;
+			HeapTupleFreeze *frz = pagefrz.frozen + i;
 			HeapTupleHeader htup = (HeapTupleHeader) PageGetItem(page, itemid);
 			if (frz->checkflags & HEAP_FREEZE_CHECK_XMIN_COMMITTED)
 			{
@@ -667,20 +688,16 @@ heap_page_prune_freeze(Relation relation, Buffer buffer,
 		if (prstate.marked[offnum])
 			continue;
 
-		if (off_loc)
-			*off_loc = offnum;
 
 		if (!ItemIdIsUsed(itemid) || ItemIdIsDead(itemid))
 			continue;
 
-		ndeleted += heap_prune_chain(buffer, offnum, &prstate);
+		page_prune_result->ndeleted += heap_prune_chain(buffer, offnum, &prstate);
 	}
 
 	if (prstate.nredirected > 0 || prstate.nkilled > 0 || prstate.nobsoleted > 0)
 		page_prune_result->prune_page = true;
 
-	if (off_loc)
-		*off_loc = InvalidOffsetNumber;
 
 	// TODO: make a combined prune and freeze execution path -- maybe with its own prune state
 	START_CRIT_SECTION();
@@ -708,9 +725,9 @@ heap_page_prune_freeze(Relation relation, Buffer buffer,
 	{
 		for (i = 0; i < page_prune_result->nfrozen; i++)
 		{
-			HeapTupleFreeze *frz = pagefrz->frozen + i;
-			ItemId		itemid = PageGetItemId(page, frz->offset);
 			HeapTupleHeader htup;
+			HeapTupleFreeze *frz = pagefrz.frozen + i;
+			itemid = PageGetItemId(page, frz->offset);
 
 			htup = (HeapTupleHeader) PageGetItem(page, itemid);
 			heap_execute_freeze_tuple(htup, frz);
@@ -760,7 +777,7 @@ heap_page_prune_freeze(Relation relation, Buffer buffer,
 			xl_heap_freeze_page xlrec;
 			XLogRecPtr	recptr;
 
-			nplans = heap_log_freeze_plan(pagefrz->frozen, pagefrz->nfrozen, plans, offsets);
+			nplans = heap_log_freeze_plan(pagefrz.frozen, pagefrz.nfrozen, plans, offsets);
 
 			xlrec.snapshotConflictHorizon = snapshotConflictHorizon;
 			xlrec.isCatalogRel = RelationIsAccessibleInLogicalDecoding(relation);
@@ -773,7 +790,7 @@ heap_page_prune_freeze(Relation relation, Buffer buffer,
 			XLogRegisterBufData(0, (char *) plans,
 								nplans * sizeof(xl_heap_freeze_plan));
 			XLogRegisterBufData(0, (char *) offsets,
-								pagefrz->nfrozen * sizeof(OffsetNumber));
+								pagefrz.nfrozen * sizeof(OffsetNumber));
 
 			recptr = XLogInsert(RM_HEAP2_ID, XLOG_HEAP2_FREEZE_PAGE);
 
@@ -784,7 +801,56 @@ heap_page_prune_freeze(Relation relation, Buffer buffer,
 	END_CRIT_SECTION();
 
 	page_prune_result->nkilled = prstate.nkilled;
-	page_prune_result->ndeleted = ndeleted;
+
+	vacrel->offnum = InvalidOffsetNumber;
+
+	ItemPointerSetBlockNumber(&tmp, blockno);
+
+	for (offnum = FirstOffsetNumber;
+		offnum <= maxoff;
+		offnum = OffsetNumberNext(offnum))
+	{
+		itemid = PageGetItemId(page, offnum);
+
+		if (!ItemIdIsDead(itemid))
+			continue;
+
+		ItemPointerSetOffsetNumber(&tmp, offnum);
+		dead_items->items[dead_items->num_items++] = tmp;
+	}
+
+	Assert(dead_items->num_items <= dead_items->max_items);
+	if (original_num_dead_items > dead_items->num_items)
+	{
+		vacrel->lpdead_item_pages++;
+		page_prune_result->has_lpdead_items = true;
+		pgstat_progress_update_param(PROGRESS_VACUUM_NUM_DEAD_TUPLES,
+										dead_items->num_items);
+
+#ifdef USE_ASSERT_CHECKING
+		/* Note that all_frozen value does not matter when !all_visible */
+		if (page_prune_result->all_visible)
+		{
+			TransactionId cutoff;
+			bool		all_frozen;
+
+			if (!heap_page_is_all_visible(vacrel, buffer, &cutoff, &all_frozen))
+				Assert(false);
+
+			Assert(!TransactionIdIsValid(cutoff) ||
+				cutoff == page_prune_result->visibility_cutoff_xid);
+		}
+#endif
+
+		page_prune_result->all_visible = false;
+	}
+
+	/* Finally, add page-local counts to whole-VACUUM counts */
+	vacrel->tuples_deleted += page_prune_result->ndeleted;
+	vacrel->tuples_frozen += page_prune_result->nfrozen;
+	vacrel->lpdead_items += dead_items->num_items - original_num_dead_items;
+	vacrel->live_tuples += page_prune_result->nlive;
+	vacrel->recently_dead_tuples += page_prune_result->nrecently_dead;
 }
 
 

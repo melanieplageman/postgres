@@ -127,90 +127,7 @@
  */
 #define ParallelVacuumIsActive(vacrel) ((vacrel)->pvs != NULL)
 
-/* Phases of vacuum during which we report error context. */
-typedef enum
-{
-	VACUUM_ERRCB_PHASE_UNKNOWN,
-	VACUUM_ERRCB_PHASE_SCAN_HEAP,
-	VACUUM_ERRCB_PHASE_VACUUM_INDEX,
-	VACUUM_ERRCB_PHASE_VACUUM_HEAP,
-	VACUUM_ERRCB_PHASE_INDEX_CLEANUP,
-	VACUUM_ERRCB_PHASE_TRUNCATE
-} VacErrPhase;
 
-typedef struct LVRelState
-{
-	/* Target heap relation and its indexes */
-	Relation	rel;
-	Relation   *indrels;
-	int			nindexes;
-
-	/* Buffer access strategy and parallel vacuum state */
-	BufferAccessStrategy bstrategy;
-	ParallelVacuumState *pvs;
-
-	/* Aggressive VACUUM? (must set relfrozenxid >= FreezeLimit) */
-	bool		aggressive;
-	/* Use visibility map to skip? (disabled by DISABLE_PAGE_SKIPPING) */
-	bool		skipwithvm;
-	/* Consider index vacuuming bypass optimization? */
-	bool		consider_bypass_optimization;
-
-	/* Doing index vacuuming, index cleanup, rel truncation? */
-	bool		do_index_vacuuming;
-	bool		do_index_cleanup;
-	bool		do_rel_truncate;
-
-	/* VACUUM operation's cutoffs for freezing and pruning */
-	struct VacuumCutoffs cutoffs;
-	GlobalVisState *vistest;
-	/* Tracks oldest extant XID/MXID for setting relfrozenxid/relminmxid */
-	TransactionId NewRelfrozenXid;
-	MultiXactId NewRelminMxid;
-	bool		skippedallvis;
-
-	/* Error reporting state */
-	char	   *dbname;
-	char	   *relnamespace;
-	char	   *relname;
-	char	   *indname;		/* Current index name */
-	BlockNumber blkno;			/* used only for heap operations */
-	OffsetNumber offnum;		/* used only for heap operations */
-	VacErrPhase phase;
-	bool		verbose;		/* VACUUM VERBOSE? */
-
-	/*
-	 * dead_items stores TIDs whose index tuples are deleted by index
-	 * vacuuming. Each TID points to an LP_DEAD line pointer from a heap page
-	 * that has been processed by lazy_scan_prune.  Also needed by
-	 * lazy_vacuum_heap_rel, which marks the same LP_DEAD line pointers as
-	 * LP_UNUSED during second heap pass.
-	 */
-	VacDeadItems *dead_items;	/* TIDs whose index tuples we'll delete */
-	BlockNumber rel_pages;		/* total number of pages */
-	BlockNumber scanned_pages;	/* # pages examined (not skipped via VM) */
-	BlockNumber removed_pages;	/* # pages removed by relation truncation */
-	BlockNumber frozen_pages;	/* # pages with newly frozen tuples */
-	BlockNumber lpdead_item_pages;	/* # pages with LP_DEAD items */
-	BlockNumber missed_dead_pages;	/* # pages with missed dead tuples */
-	BlockNumber nonempty_pages; /* actually, last nonempty page + 1 */
-
-	/* Statistics output by us, for table */
-	double		new_rel_tuples; /* new estimated total # of tuples */
-	double		new_live_tuples;	/* new estimated total # of live tuples */
-	/* Statistics output by index AMs */
-	IndexBulkDeleteResult **indstats;
-
-	/* Instrumentation counters */
-	int			num_index_scans;
-	/* Counters that follow are only for scanned_pages */
-	int64		tuples_deleted; /* # deleted from table */
-	int64		tuples_frozen;	/* # newly frozen */
-	int64		lpdead_items;	/* # deleted from indexes */
-	int64		live_tuples;	/* # live tuples remaining */
-	int64		recently_dead_tuples;	/* # dead, but not yet removable */
-	int64		missed_dead_tuples; /* # removable, but not removed */
-} LVRelState;
 
 /* Struct for saving and restoring vacuum error information. */
 typedef struct LVSavedErrInfo
@@ -230,9 +147,6 @@ static BlockNumber lazy_scan_skip(LVRelState *vacrel, Buffer *vmbuffer,
 static bool lazy_scan_new_or_empty(LVRelState *vacrel, Buffer buf,
 								   BlockNumber blkno, Page page,
 								   bool sharelock, Buffer vmbuffer);
-static void lazy_scan_prune(LVRelState *vacrel, Buffer buf,
-							BlockNumber blkno, Page page,
-							PagePruneResult *prunestate);
 static bool lazy_scan_noprune(LVRelState *vacrel, Buffer buf,
 							  BlockNumber blkno, Page page,
 							  bool *hastup, bool *recordfreespace);
@@ -258,8 +172,6 @@ static BlockNumber count_nondeletable_pages(LVRelState *vacrel,
 											bool *lock_waiter_detected);
 static void dead_items_alloc(LVRelState *vacrel, int nworkers);
 static void dead_items_cleanup(LVRelState *vacrel);
-static bool heap_page_is_all_visible(LVRelState *vacrel, Buffer buf,
-									 TransactionId *visibility_cutoff_xid, bool *all_frozen);
 static void update_relstats_all_indexes(LVRelState *vacrel);
 static void vacuum_error_callback(void *arg);
 static void update_vacuum_error_info(LVRelState *vacrel,
@@ -1001,7 +913,7 @@ lazy_scan_heap(LVRelState *vacrel)
 		 * were pruned some time earlier.  Also considers freezing XIDs in the
 		 * tuple headers of remaining items with storage.
 		 */
-		lazy_scan_prune(vacrel, buf, blkno, page, &prunestate);
+		heap_page_prune_freeze(vacrel, buf, blkno, page, &prunestate);
 
 		Assert(!prunestate.all_visible || !prunestate.has_lpdead_items);
 
@@ -1497,113 +1409,6 @@ lazy_scan_new_or_empty(LVRelState *vacrel, Buffer buf, BlockNumber blkno,
 
 	/* page isn't new or empty -- keep lock and pin */
 	return false;
-}
-
-/*
- *	lazy_scan_prune() -- lazy_scan_heap() pruning and freezing.
- *
- * Caller must hold pin and buffer cleanup lock on the buffer.
- *
- * Prior to PostgreSQL 14 there were very rare cases where heap_page_prune()
- * was allowed to disagree with our HeapTupleSatisfiesVacuum() call about
- * whether or not a tuple should be considered DEAD.  This happened when an
- * inserting transaction concurrently aborted (after our heap_page_prune()
- * call, before our HeapTupleSatisfiesVacuum() call).  There was rather a lot
- * of complexity just so we could deal with tuples that were DEAD to VACUUM,
- * but nevertheless were left with storage after pruning.
- *
- * The approach we take now is to restart pruning when the race condition is
- * detected.  This allows heap_page_prune() to prune the tuples inserted by
- * the now-aborted transaction.  This is a little crude, but it guarantees
- * that any items that make it into the dead_items array are simple LP_DEAD
- * line pointers, and that every remaining item with tuple storage is
- * considered as a candidate for freezing.
- */
-static void
-lazy_scan_prune(LVRelState *vacrel,
-				Buffer buf,
-				BlockNumber blkno,
-				Page page,
-				PagePruneResult *page_prune_result)
-{
-	Relation	rel = vacrel->rel;
-	OffsetNumber offnum, maxoff;
-	ItemId		itemid;
-
-	HeapPageFreeze pagefrz;
-
-	ItemPointerData tmp;
-	VacDeadItems *dead_items = vacrel->dead_items;
-	int original_num_dead_items = dead_items->num_items;
-
-	Assert(BufferGetBlockNumber(buf) == blkno);
-	maxoff = PageGetMaxOffsetNumber(page);
-
-	pagefrz.freeze_required = false;
-	pagefrz.FreezePageRelfrozenXid = vacrel->NewRelfrozenXid;
-	pagefrz.FreezePageRelminMxid = vacrel->NewRelminMxid;
-	pagefrz.NoFreezePageRelfrozenXid = vacrel->NewRelfrozenXid;
-	pagefrz.NoFreezePageRelminMxid = vacrel->NewRelminMxid;
-	pagefrz.cutoffs = &vacrel->cutoffs;
-	page_prune_result->hastup = false;
-	page_prune_result->has_lpdead_items = false;
-	page_prune_result->all_visible = true;
-	page_prune_result->all_frozen = true;
-	page_prune_result->visibility_cutoff_xid = InvalidTransactionId;
-
-	heap_page_prune_freeze(rel, buf, vacrel->vistest,
-									 InvalidTransactionId, 0,
-									 &vacrel->offnum, page_prune_result, &pagefrz);
-
-	vacrel->offnum = InvalidOffsetNumber;
-
-
-	ItemPointerSetBlockNumber(&tmp, blkno);
-
-	for (offnum = FirstOffsetNumber;
-		offnum <= maxoff;
-		offnum = OffsetNumberNext(offnum))
-	{
-		itemid = PageGetItemId(page, offnum);
-
-		if (!ItemIdIsDead(itemid))
-			continue;
-
-		ItemPointerSetOffsetNumber(&tmp, offnum);
-		dead_items->items[dead_items->num_items++] = tmp;
-	}
-
-	Assert(dead_items->num_items <= dead_items->max_items);
-	if (original_num_dead_items > dead_items->num_items)
-	{
-		vacrel->lpdead_item_pages++;
-		page_prune_result->has_lpdead_items = true;
-		pgstat_progress_update_param(PROGRESS_VACUUM_NUM_DEAD_TUPLES,
-										dead_items->num_items);
-
-#ifdef USE_ASSERT_CHECKING
-		/* Note that all_frozen value does not matter when !all_visible */
-		if (page_prune_result->all_visible)
-		{
-			TransactionId cutoff;
-			bool		all_frozen;
-
-			if (!heap_page_is_all_visible(vacrel, buf, &cutoff, &all_frozen))
-				Assert(false);
-
-			Assert(!TransactionIdIsValid(cutoff) ||
-				cutoff == page_prune_result->visibility_cutoff_xid);
-		}
-#endif
-
-		page_prune_result->all_visible = false;
-	}
-
-	vacrel->tuples_deleted += page_prune_result->ndeleted;
-	vacrel->tuples_frozen += page_prune_result->nfrozen;
-	vacrel->lpdead_items += dead_items->num_items - original_num_dead_items;
-	vacrel->live_tuples += page_prune_result->nlive;
-	vacrel->recently_dead_tuples += page_prune_result->nrecently_dead;
 }
 
 /*
@@ -2904,7 +2709,7 @@ dead_items_cleanup(LVRelState *vacrel)
  * assertion calls us to verify that everybody still agrees.  Be sure to avoid
  * introducing new side-effects here.
  */
-static bool
+bool
 heap_page_is_all_visible(LVRelState *vacrel, Buffer buf,
 						 TransactionId *visibility_cutoff_xid,
 						 bool *all_frozen)

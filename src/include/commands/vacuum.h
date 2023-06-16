@@ -24,6 +24,7 @@
 #include "storage/buf.h"
 #include "storage/lock.h"
 #include "utils/relcache.h"
+#include "utils/snapmgr.h"
 
 /*
  * Flags for amparallelvacuumoptions to control the participation of bulkdelete
@@ -292,6 +293,91 @@ typedef struct VacDeadItems
 	ItemPointerData items[FLEXIBLE_ARRAY_MEMBER];
 } VacDeadItems;
 
+/* Phases of vacuum during which we report error context. */
+typedef enum
+{
+	VACUUM_ERRCB_PHASE_UNKNOWN,
+	VACUUM_ERRCB_PHASE_SCAN_HEAP,
+	VACUUM_ERRCB_PHASE_VACUUM_INDEX,
+	VACUUM_ERRCB_PHASE_VACUUM_HEAP,
+	VACUUM_ERRCB_PHASE_INDEX_CLEANUP,
+	VACUUM_ERRCB_PHASE_TRUNCATE
+} VacErrPhase;
+
+typedef struct LVRelState
+{
+	/* Target heap relation and its indexes */
+	Relation	rel;
+	Relation   *indrels;
+	int			nindexes;
+
+	/* Buffer access strategy and parallel vacuum state */
+	BufferAccessStrategy bstrategy;
+	ParallelVacuumState *pvs;
+
+	/* Aggressive VACUUM? (must set relfrozenxid >= FreezeLimit) */
+	bool		aggressive;
+	/* Use visibility map to skip? (disabled by DISABLE_PAGE_SKIPPING) */
+	bool		skipwithvm;
+	/* Consider index vacuuming bypass optimization? */
+	bool		consider_bypass_optimization;
+
+	/* Doing index vacuuming, index cleanup, rel truncation? */
+	bool		do_index_vacuuming;
+	bool		do_index_cleanup;
+	bool		do_rel_truncate;
+
+	/* VACUUM operation's cutoffs for freezing and pruning */
+	struct VacuumCutoffs cutoffs;
+	GlobalVisState *vistest;
+	/* Tracks oldest extant XID/MXID for setting relfrozenxid/relminmxid */
+	TransactionId NewRelfrozenXid;
+	MultiXactId NewRelminMxid;
+	bool		skippedallvis;
+
+	/* Error reporting state */
+	char	   *dbname;
+	char	   *relnamespace;
+	char	   *relname;
+	char	   *indname;		/* Current index name */
+	BlockNumber blkno;			/* used only for heap operations */
+	OffsetNumber offnum;		/* used only for heap operations */
+	VacErrPhase phase;
+	bool		verbose;		/* VACUUM VERBOSE? */
+
+	/*
+	 * dead_items stores TIDs whose index tuples are deleted by index
+	 * vacuuming. Each TID points to an LP_DEAD line pointer from a heap page
+	 * that has been processed by lazy_scan_prune.  Also needed by
+	 * lazy_vacuum_heap_rel, which marks the same LP_DEAD line pointers as
+	 * LP_UNUSED during second heap pass.
+	 */
+	VacDeadItems *dead_items;	/* TIDs whose index tuples we'll delete */
+	BlockNumber rel_pages;		/* total number of pages */
+	BlockNumber scanned_pages;	/* # pages examined (not skipped via VM) */
+	BlockNumber removed_pages;	/* # pages removed by relation truncation */
+	BlockNumber frozen_pages;	/* # pages with newly frozen tuples */
+	BlockNumber lpdead_item_pages;	/* # pages with LP_DEAD items */
+	BlockNumber missed_dead_pages;	/* # pages with missed dead tuples */
+	BlockNumber nonempty_pages; /* actually, last nonempty page + 1 */
+
+	/* Statistics output by us, for table */
+	double		new_rel_tuples; /* new estimated total # of tuples */
+	double		new_live_tuples;	/* new estimated total # of live tuples */
+	/* Statistics output by index AMs */
+	IndexBulkDeleteResult **indstats;
+
+	/* Instrumentation counters */
+	int			num_index_scans;
+	/* Counters that follow are only for scanned_pages */
+	int64		tuples_deleted; /* # deleted from table */
+	int64		tuples_frozen;	/* # newly frozen */
+	int64		lpdead_items;	/* # deleted from indexes */
+	int64		live_tuples;	/* # live tuples remaining */
+	int64		recently_dead_tuples;	/* # dead, but not yet removable */
+	int64		missed_dead_tuples; /* # removable, but not removed */
+} LVRelState;
+
 #define MAXDEADITEMS(avail_mem) \
 	(((avail_mem) - offsetof(VacDeadItems, items)) / sizeof(ItemPointerData))
 
@@ -382,5 +468,10 @@ extern bool std_typanalyze(VacAttrStats *stats);
 extern double anl_random_fract(void);
 extern double anl_init_selection_state(int n);
 extern double anl_get_next_S(double t, int n, double *stateptr);
+
+extern bool
+heap_page_is_all_visible(LVRelState *vacrel, Buffer buf,
+						 TransactionId *visibility_cutoff_xid,
+						 bool *all_frozen);
 
 #endif							/* VACUUM_H */
