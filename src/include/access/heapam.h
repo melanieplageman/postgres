@@ -15,6 +15,7 @@
 #define HEAPAM_H
 
 #include "access/relation.h"	/* for backward compatibility */
+#include "access/heapam_xlog.h"
 #include "access/relscan.h"
 #include "access/sdir.h"
 #include "access/skey.h"
@@ -62,6 +63,7 @@ typedef struct PagePruneResult
 	/* stats on state of tuples in page */
 	int nlive;
 	int nrecently_dead;
+	bool prune_page;
 
 	/* outcome of freezing */
 	bool froze_page;
@@ -292,9 +294,14 @@ extern bool heap_prepare_freeze_tuple(HeapTupleHeader tuple,
 									  const VacuumCutoffs *cutoffs,
 									  HeapPageFreeze *pagefrz,
 									  HeapTupleFreeze *frz, bool *totally_frozen);
-extern void heap_freeze_execute_prepared(Relation rel, Buffer buffer,
-										 TransactionId snapshotConflictHorizon,
-										 HeapTupleFreeze *tuples, int ntuples);
+// TODO: move wal for prune and freeze back in heapam probs
+extern int
+heap_log_freeze_plan(HeapTupleFreeze *tuples, int ntuples,
+					 xl_heap_freeze_plan *plans_out,
+					 OffsetNumber *offsets_out);
+
+extern void
+heap_execute_freeze_tuple(HeapTupleHeader tuple, HeapTupleFreeze *frz);
 extern bool heap_freeze_tuple(HeapTupleHeader tuple,
 							  TransactionId relfrozenxid, TransactionId relminmxid,
 							  TransactionId FreezeLimit, TransactionId MultiXactCutoff);
