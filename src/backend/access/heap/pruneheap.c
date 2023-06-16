@@ -484,7 +484,6 @@ heap_page_prune(Relation relation, Buffer buffer,
 	return ndeleted;
 }
 
-// TODO: turn this into lazy_scan_prune
 // TODO: add back in off_loc
 void
 heap_page_prune_freeze(LVRelState *vacrel, Buffer buffer, BlockNumber blockno,
@@ -495,6 +494,8 @@ heap_page_prune_freeze(LVRelState *vacrel, Buffer buffer, BlockNumber blockno,
 	ItemId		itemid;
 	int i = 0;
 	OffsetNumber maxoff = PageGetMaxOffsetNumber(page);
+
+	bool freeze_page = false;
 
 	// TODO: can I use same one as in prstate?
 	TransactionId snapshotConflictHorizon = InvalidTransactionId;
@@ -508,7 +509,7 @@ heap_page_prune_freeze(LVRelState *vacrel, Buffer buffer, BlockNumber blockno,
 
 	ItemPointerData tmp;
 	VacDeadItems *dead_items = vacrel->dead_items;
-	int original_num_dead_items = dead_items->num_items;
+	int original_num_dead_items;
 
 	Assert(BufferGetBlockNumber(buffer) == blockno);
 	maxoff = PageGetMaxOffsetNumber(page);
@@ -623,11 +624,11 @@ heap_page_prune_freeze(LVRelState *vacrel, Buffer buffer, BlockNumber blockno,
 	vacrel->tuples_frozen += page_prune_result->nfrozen;
 
 		// TODO: see if this is same as all_frozen for our purposes
-	page_prune_result->froze_page = pagefrz.freeze_required || page_prune_result->nfrozen == 0 ||
+	freeze_page = pagefrz.freeze_required || page_prune_result->nfrozen == 0 ||
 		(page_prune_result->all_visible && page_prune_result->all_frozen &&
 		 fpi_before != pgWalUsage.wal_fpi);
 
-	if (page_prune_result->froze_page)
+	if (freeze_page)
 	{
 
 		if (page_prune_result->all_visible && page_prune_result->all_frozen)
@@ -655,7 +656,7 @@ heap_page_prune_freeze(LVRelState *vacrel, Buffer buffer, BlockNumber blockno,
 	{
 		// TODO: can get deadoffsets for vacuum in this loop
 		itemid = PageGetItemId(page, offnum);
-		if (page_prune_result->froze_page)
+		if (freeze_page)
 		{
 			// TODO: perhaps offset numbers can be used into freeze plans instead of random index i
 			HeapTupleFreeze *frz = pagefrz.frozen + i;
@@ -701,7 +702,7 @@ heap_page_prune_freeze(LVRelState *vacrel, Buffer buffer, BlockNumber blockno,
 
 	// TODO: make a combined prune and freeze execution path -- maybe with its own prune state
 	START_CRIT_SECTION();
-	if (page_prune_result->prune_page || page_prune_result->froze_page)
+	if (page_prune_result->prune_page || freeze_page)
 	{
 		PageClearFull(page);
 		MarkBufferDirty(buffer);
@@ -720,8 +721,7 @@ heap_page_prune_freeze(LVRelState *vacrel, Buffer buffer, BlockNumber blockno,
 	}
 
 
-	// TODO: can combine this and page prune execute?
-	if (page_prune_result->froze_page)
+	if (freeze_page)
 	{
 		for (i = 0; i < page_prune_result->nfrozen; i++)
 		{
@@ -769,7 +769,7 @@ heap_page_prune_freeze(LVRelState *vacrel, Buffer buffer, BlockNumber blockno,
 
 			PageSetLSN(BufferGetPage(buffer), recptr);
 		}
-		if (page_prune_result->froze_page)
+		if (freeze_page)
 		{
 			xl_heap_freeze_plan plans[MaxHeapTuplesPerPage];
 			OffsetNumber offsets[MaxHeapTuplesPerPage];
@@ -803,6 +803,7 @@ heap_page_prune_freeze(LVRelState *vacrel, Buffer buffer, BlockNumber blockno,
 	vacrel->offnum = InvalidOffsetNumber;
 
 	ItemPointerSetBlockNumber(&tmp, blockno);
+	original_num_dead_items = dead_items->num_items;
 
 	for (offnum = FirstOffsetNumber;
 		offnum <= maxoff;
@@ -817,7 +818,10 @@ heap_page_prune_freeze(LVRelState *vacrel, Buffer buffer, BlockNumber blockno,
 		dead_items->items[dead_items->num_items++] = tmp;
 	}
 
+
 	Assert(dead_items->num_items <= dead_items->max_items);
+	vacrel->lpdead_items += dead_items->num_items - original_num_dead_items;
+
 	if (original_num_dead_items > dead_items->num_items)
 	{
 		vacrel->lpdead_item_pages++;
@@ -843,7 +847,6 @@ heap_page_prune_freeze(LVRelState *vacrel, Buffer buffer, BlockNumber blockno,
 		page_prune_result->all_visible = false;
 	}
 
-	vacrel->lpdead_items += dead_items->num_items - original_num_dead_items;
 }
 
 

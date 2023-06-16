@@ -61,7 +61,6 @@ typedef struct PagePruneResult
 	bool prune_page;
 
 	/* outcome of freezing */
-	bool froze_page;
 	int nfrozen;
 	TransactionId NewRelfrozenXid;
 	MultiXactId NewRelminMxid;
