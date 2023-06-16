@@ -1557,9 +1557,9 @@ lazy_scan_prune(LVRelState *vacrel,
 	page_prune_result->all_frozen = true;
 	page_prune_result->visibility_cutoff_xid = InvalidTransactionId;
 
-	heap_page_prune(rel, buf, vacrel->vistest,
+	heap_page_prune_freeze(rel, buf, vacrel->vistest,
 									 InvalidTransactionId, 0,
-									 &vacrel->offnum, page_prune_result, &pagefrz, true);
+									 &vacrel->offnum, page_prune_result, &pagefrz);
 
 	/*
 	 * Now scan the page to collect LP_DEAD items and check for tuples
