@@ -492,6 +492,7 @@ heap_page_prune_freeze(Relation relation, Buffer buffer,
 				HeapPageFreeze *pagefrz)
 {
 	int			ndeleted = 0;
+	int i = 0;
 	Page		page = BufferGetPage(buffer);
 	BlockNumber blockno = BufferGetBlockNumber(buffer);
 	OffsetNumber offnum, maxoff;
@@ -499,6 +500,8 @@ heap_page_prune_freeze(Relation relation, Buffer buffer,
 	HeapTupleData tup;
 	HTSV_Result res;
 	int64		fpi_before = pgWalUsage.wal_fpi;
+	// TODO: can I use same one as in prstate?
+	TransactionId snapshotConflictHorizon = InvalidTransactionId;
 
 	/*
 	 * Our strategy is to scan the page and make lists of items to change,
@@ -666,12 +669,104 @@ heap_page_prune_freeze(Relation relation, Buffer buffer,
 			page_prune_result->all_frozen = false;
 	}
 
+	page_prune_result->NewRelfrozenXid = pagefrz->FreezePageRelfrozenXid;
+	page_prune_result->NewRelminMxid = pagefrz->FreezePageRelminMxid;
+
+	/*
+	 * Freeze the page when heap_prepare_freeze_tuple indicates that at least
+	 * one XID/MXID from before FreezeLimit/MultiXactCutoff is present.  Also
+	 * freeze when pruning generated an FPI, if doing so means that we set the
+	 * page all-frozen afterwards (might not happen until final heap pass).
+	 */
+		// TODO: see if this is same as all_frozen for our purposes
+	page_prune_result->froze_page = pagefrz->freeze_required || page_prune_result->nfrozen == 0 ||
+		(page_prune_result->all_visible && page_prune_result->all_frozen &&
+		 fpi_before != pgWalUsage.wal_fpi);
+
+	if (page_prune_result->froze_page)
+	{
+
+		/*
+			* We can use visibility_cutoff_xid as our cutoff for conflicts
+			* when the whole page is eligible to become all-frozen in the VM
+			* once we're done with it.  Otherwise we generate a conservative
+			* cutoff by stepping back from OldestXmin.
+			*/
+		if (page_prune_result->all_visible && page_prune_result->all_frozen)
+		{
+			/* Using same cutoff when setting VM is now unnecessary */
+			snapshotConflictHorizon = page_prune_result->visibility_cutoff_xid;
+			page_prune_result->visibility_cutoff_xid = InvalidTransactionId;
+		}
+		else
+		{
+			/* Avoids false conflicts when hot_standby_feedback in use */
+			snapshotConflictHorizon = pagefrz->cutoffs->OldestXmin;
+			TransactionIdRetreat(snapshotConflictHorizon);
+		}
+	}
+	else
+	{
+		/*
+		 * Page requires "no freeze" processing.  It might be set all-visible
+		 * in the visibility map, but it can never be set all-frozen.
+		 */
+		page_prune_result->NewRelfrozenXid = pagefrz->NoFreezePageRelfrozenXid;
+		page_prune_result->NewRelminMxid = pagefrz->NoFreezePageRelminMxid;
+		page_prune_result->all_frozen = false;
+	}
+
+
 	/* Scan the page */
 	for (offnum = FirstOffsetNumber;
 		 offnum <= maxoff;
 		 offnum = OffsetNumberNext(offnum))
 	{
-		ItemId		itemid;
+		// TODO: can get deadoffsets for vacuum in this loop
+		ItemId itemid = PageGetItemId(page, offnum);
+
+		/*
+		* Perform xmin/xmax XID status sanity checks before critical section.
+		*
+		* heap_prepare_freeze_tuple doesn't perform these checks directly because
+		* pg_xact lookups are relatively expensive.  They shouldn't be repeated
+		* by successive VACUUMs that each decide against freezing the same page.
+		*/
+		if (page_prune_result->froze_page)
+		{
+			// TODO: perhaps offset numbers can be used into freeze plans instead of random index i
+			HeapTupleFreeze *frz = pagefrz->frozen + i;
+			HeapTupleHeader htup = (HeapTupleHeader) PageGetItem(page, itemid);
+			/* Deliberately avoid relying on tuple hint bits here */
+			if (frz->checkflags & HEAP_FREEZE_CHECK_XMIN_COMMITTED)
+			{
+				TransactionId xmin = HeapTupleHeaderGetRawXmin(htup);
+
+				Assert(!HeapTupleHeaderXminFrozen(htup));
+				if (unlikely(!TransactionIdDidCommit(xmin)))
+					ereport(ERROR,
+							(errcode(ERRCODE_DATA_CORRUPTED),
+							errmsg_internal("uncommitted xmin %u needs to be frozen",
+											xmin)));
+			}
+
+			/*
+			* TransactionIdDidAbort won't work reliably in the presence of XIDs
+			* left behind by transactions that were in progress during a crash,
+			* so we can only check that xmax didn't commit
+			*/
+			if (frz->checkflags & HEAP_FREEZE_CHECK_XMAX_ABORTED)
+			{
+				TransactionId xmax = HeapTupleHeaderGetRawXmax(htup);
+
+				Assert(TransactionIdIsNormal(xmax));
+				if (unlikely(TransactionIdDidCommit(xmax)))
+					ereport(ERROR,
+							(errcode(ERRCODE_DATA_CORRUPTED),
+							errmsg_internal("cannot freeze committed xmax %u",
+											xmax)));
+			}
+		}
 
 		/* Ignore items already processed as part of an earlier chain */
 		if (prstate.marked[offnum])
@@ -682,13 +777,19 @@ heap_page_prune_freeze(Relation relation, Buffer buffer,
 			*off_loc = offnum;
 
 		/* Nothing to do if slot is empty or already dead */
-		itemid = PageGetItemId(page, offnum);
+
 		if (!ItemIdIsUsed(itemid) || ItemIdIsDead(itemid))
 			continue;
 
 		/* Process this item or chain of items */
 		ndeleted += heap_prune_chain(buffer, offnum, &prstate);
 	}
+
+	/* Execute all freeze plans for page as a single atomic action */
+	if (page_prune_result->froze_page)
+		heap_freeze_execute_prepared(relation, buffer,
+										snapshotConflictHorizon,
+										pagefrz->frozen, page_prune_result->nfrozen);
 
 	/* Clear the offset information once we have processed the given page. */
 	if (off_loc)
@@ -791,62 +892,6 @@ heap_page_prune_freeze(Relation relation, Buffer buffer,
 	/* Record number of newly-set-LP_DEAD items for caller */
 	page_prune_result->nkilled = prstate.nkilled;
 	page_prune_result->ndeleted = ndeleted;
-
-	page_prune_result->NewRelfrozenXid = pagefrz->FreezePageRelfrozenXid;
-	page_prune_result->NewRelminMxid = pagefrz->FreezePageRelminMxid;
-
-	if (!execute_freeze || page_prune_result->nfrozen == 0)
-		return;
-
-	/*
-	 * Freeze the page when heap_prepare_freeze_tuple indicates that at least
-	 * one XID/MXID from before FreezeLimit/MultiXactCutoff is present.  Also
-	 * freeze when pruning generated an FPI, if doing so means that we set the
-	 * page all-frozen afterwards (might not happen until final heap pass).
-	 */
-	if (pagefrz->freeze_required ||
-		(page_prune_result->all_visible && page_prune_result->all_frozen &&
-		 fpi_before != pgWalUsage.wal_fpi))
-	{
-		TransactionId snapshotConflictHorizon;
-
-		// TODO: see if this is same as all_frozen for our purposes
-		page_prune_result->froze_page = true;
-
-		/*
-			* We can use visibility_cutoff_xid as our cutoff for conflicts
-			* when the whole page is eligible to become all-frozen in the VM
-			* once we're done with it.  Otherwise we generate a conservative
-			* cutoff by stepping back from OldestXmin.
-			*/
-		if (page_prune_result->all_visible && page_prune_result->all_frozen)
-		{
-			/* Using same cutoff when setting VM is now unnecessary */
-			snapshotConflictHorizon = page_prune_result->visibility_cutoff_xid;
-			page_prune_result->visibility_cutoff_xid = InvalidTransactionId;
-		}
-		else
-		{
-			/* Avoids false conflicts when hot_standby_feedback in use */
-			snapshotConflictHorizon = pagefrz->cutoffs->OldestXmin;
-			TransactionIdRetreat(snapshotConflictHorizon);
-		}
-
-		/* Execute all freeze plans for page as a single atomic action */
-		heap_freeze_execute_prepared(relation, buffer,
-										snapshotConflictHorizon,
-										pagefrz->frozen, page_prune_result->nfrozen);
-	}
-	else
-	{
-		/*
-		 * Page requires "no freeze" processing.  It might be set all-visible
-		 * in the visibility map, but it can never be set all-frozen.
-		 */
-		page_prune_result->NewRelfrozenXid = pagefrz->NoFreezePageRelfrozenXid;
-		page_prune_result->NewRelminMxid = pagefrz->NoFreezePageRelminMxid;
-		page_prune_result->all_frozen = false;
-	}
 }
 
 
