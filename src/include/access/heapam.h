@@ -57,13 +57,6 @@ typedef struct PagePruneResult
 	bool		all_visible;	/* Every item visible to all? */
 	bool		all_frozen;		/* provided all_visible is also true */
 	TransactionId visibility_cutoff_xid;	/* For recovery conflicts */
-	/* stats on state of tuples in page */
-	bool prune_page;
-
-	/* outcome of freezing */
-	int nfrozen;
-	TransactionId NewRelfrozenXid;
-	MultiXactId NewRelminMxid;
 } PagePruneResult;
 
 
@@ -215,8 +208,6 @@ typedef struct HeapPageFreeze
 	 */
 	TransactionId NoFreezePageRelfrozenXid;
 	MultiXactId NoFreezePageRelminMxid;
-	HeapTupleFreeze frozen[MaxHeapTuplesPerPage];
-	int nfrozen;
 } HeapPageFreeze;
 
 /* ----------------
