@@ -504,17 +504,6 @@ heap_page_prune_freeze(Relation relation, Buffer buffer,
 	TransactionId snapshotConflictHorizon = InvalidTransactionId;
 	page_prune_result->prune_page = false;
 
-	/*
-	 * Our strategy is to scan the page and make lists of items to change,
-	 * then apply the changes within a critical section.  This keeps as much
-	 * logic as possible out of the critical section, and also ensures that
-	 * WAL replay will work the same as the normal case.
-	 *
-	 * First, initialize the new pd_prune_xid value to zero (indicating no
-	 * prunable tuples).  If we find any tuples which may soon become
-	 * prunable, we will save the lowest relevant XID in new_prune_xid. Also
-	 * initialize the rest of our working state.
-	 */
 	prstate.new_prune_xid = InvalidTransactionId;
 	prstate.rel = relation;
 	prstate.vistest = vistest;
@@ -528,26 +517,6 @@ heap_page_prune_freeze(Relation relation, Buffer buffer,
 	maxoff = PageGetMaxOffsetNumber(page);
 	tup.t_tableOid = RelationGetRelid(prstate.rel);
 
-	/*
-	 * Determine HTSV for all tuples.
-	 *
-	 * This is required for correctness to deal with cases where running HTSV
-	 * twice could result in different results (e.g. RECENTLY_DEAD can turn to
-	 * DEAD if another checked item causes GlobalVisTestIsRemovableFullXid()
-	 * to update the horizon, INSERT_IN_PROGRESS can change to DEAD if the
-	 * inserting transaction aborts, ...). That in turn could cause
-	 * heap_prune_chain() to behave incorrectly if a tuple is reached twice,
-	 * once directly via a heap_prune_chain() and once following a HOT chain.
-	 *
-	 * It's also good for performance. Most commonly tuples within a page are
-	 * stored at decreasing offsets (while the items are stored at increasing
-	 * offsets). When processing all tuples on a page this leads to reading
-	 * memory at decreasing offsets within a page, with a variable stride.
-	 * That's hard for CPU prefetchers to deal with. Processing the items in
-	 * reverse order (and thus the tuples in increasing order) increases
-	 * prefetching efficiency significantly / decreases the number of cache
-	 * misses.
-	 */
 	for (offnum = maxoff;
 		 offnum >= FirstOffsetNumber;
 		 offnum = OffsetNumberPrev(offnum))
@@ -555,12 +524,9 @@ heap_page_prune_freeze(Relation relation, Buffer buffer,
 		bool		totally_frozen;
 		ItemId		itemid = PageGetItemId(page, offnum);
 
-		/* Redirect items mustn't be touched */
-		/* page makes rel truncation unsafe */
 		if (ItemIdIsRedirected(itemid))
 			page_prune_result->hastup = true;
 
-		/* Nothing to do if slot doesn't contain a tuple */
 		if (!ItemIdIsNormal(itemid))
 		{
 			prstate.htsv[offnum] = -1;
@@ -572,10 +538,6 @@ heap_page_prune_freeze(Relation relation, Buffer buffer,
 		tup.t_len = ItemIdGetLength(itemid);
 		tup.t_tableOid = RelationGetRelid(relation);
 
-		/*
-		 * Set the offset number so that we can display it along with any
-		 * error that occurred while processing this tuple.
-		 */
 		if (off_loc)
 			*off_loc = offnum;
 
@@ -596,10 +558,6 @@ heap_page_prune_freeze(Relation relation, Buffer buffer,
 						break;
 					}
 
-					/*
-					 * The inserter definitely committed. But is it old enough
-					 * that everyone sees it as committed?
-					 */
 					xmin = HeapTupleHeaderGetXmin(tup.t_data);
 					if (!TransactionIdPrecedes(xmin,
 											   pagefrz->cutoffs->OldestXmin))
@@ -608,42 +566,20 @@ heap_page_prune_freeze(Relation relation, Buffer buffer,
 						break;
 					}
 
-					/* Track newest xmin on page. */
 					if (TransactionIdFollows(xmin, page_prune_result->visibility_cutoff_xid) &&
 						TransactionIdIsNormal(xmin))
 						page_prune_result->visibility_cutoff_xid = xmin;
 				}
 				break;
 			case HEAPTUPLE_RECENTLY_DEAD:
-
-				/*
-				 * If tuple is recently dead then we must not remove it from
-				 * the relation.  (We only remove items that are LP_DEAD from
-				 * pruning.)
-				 */
 				page_prune_result->nrecently_dead++;
 				page_prune_result->all_visible = false;
 				break;
 			case HEAPTUPLE_INSERT_IN_PROGRESS:
-
-				/*
-				 * We do not count these rows as live, because we expect the
-				 * inserting transaction to update the counters at commit, and
-				 * we assume that will happen only after we report our
-				 * results.  This assumption is a bit shaky, but it is what
-				 * acquire_sample_rows() does, so be consistent.
-				 */
 				page_prune_result->all_visible = false;
 				break;
 			case HEAPTUPLE_DELETE_IN_PROGRESS:
-				/* This is an expected case during concurrent vacuum */
 				page_prune_result->all_visible = false;
-
-				/*
-				 * Count such rows as live.  As above, we assume the deleting
-				 * transaction will commit and update the counters after we
-				 * report.
-				 */
 				page_prune_result->nlive++;
 				break;
 			default:
@@ -653,19 +589,11 @@ heap_page_prune_freeze(Relation relation, Buffer buffer,
 
 		page_prune_result->hastup = true;	/* page makes rel truncation unsafe */
 
-		/* Tuple with storage -- consider need to freeze */
 		if (heap_prepare_freeze_tuple(tup.t_data, pagefrz->cutoffs, pagefrz,
 									  &pagefrz->frozen[page_prune_result->nfrozen], &totally_frozen))
 		{
-			/* Save prepared freeze plan for later */
 			pagefrz->frozen[page_prune_result->nfrozen++].offset = offnum;
 		}
-
-		/*
-		 * If any tuple isn't either totally frozen already or eligible to
-		 * become totally frozen (according to its freeze plan), then the page
-		 * definitely cannot be set all-frozen in the visibility map later on
-		 */
 		if (!totally_frozen)
 			page_prune_result->all_frozen = false;
 	}
@@ -673,12 +601,6 @@ heap_page_prune_freeze(Relation relation, Buffer buffer,
 	page_prune_result->NewRelfrozenXid = pagefrz->FreezePageRelfrozenXid;
 	page_prune_result->NewRelminMxid = pagefrz->FreezePageRelminMxid;
 
-	/*
-	 * Freeze the page when heap_prepare_freeze_tuple indicates that at least
-	 * one XID/MXID from before FreezeLimit/MultiXactCutoff is present.  Also
-	 * freeze when pruning generated an FPI, if doing so means that we set the
-	 * page all-frozen afterwards (might not happen until final heap pass).
-	 */
 		// TODO: see if this is same as all_frozen for our purposes
 	page_prune_result->froze_page = pagefrz->freeze_required || page_prune_result->nfrozen == 0 ||
 		(page_prune_result->all_visible && page_prune_result->all_frozen &&
@@ -687,58 +609,36 @@ heap_page_prune_freeze(Relation relation, Buffer buffer,
 	if (page_prune_result->froze_page)
 	{
 
-		/*
-			* We can use visibility_cutoff_xid as our cutoff for conflicts
-			* when the whole page is eligible to become all-frozen in the VM
-			* once we're done with it.  Otherwise we generate a conservative
-			* cutoff by stepping back from OldestXmin.
-			*/
 		if (page_prune_result->all_visible && page_prune_result->all_frozen)
 		{
-			/* Using same cutoff when setting VM is now unnecessary */
 			snapshotConflictHorizon = page_prune_result->visibility_cutoff_xid;
 			page_prune_result->visibility_cutoff_xid = InvalidTransactionId;
 		}
 		else
 		{
-			/* Avoids false conflicts when hot_standby_feedback in use */
 			snapshotConflictHorizon = pagefrz->cutoffs->OldestXmin;
 			TransactionIdRetreat(snapshotConflictHorizon);
 		}
 	}
 	else
 	{
-		/*
-		 * Page requires "no freeze" processing.  It might be set all-visible
-		 * in the visibility map, but it can never be set all-frozen.
-		 */
 		page_prune_result->NewRelfrozenXid = pagefrz->NoFreezePageRelfrozenXid;
 		page_prune_result->NewRelminMxid = pagefrz->NoFreezePageRelminMxid;
 		page_prune_result->all_frozen = false;
 	}
 
 
-	/* Scan the page */
 	for (offnum = FirstOffsetNumber;
 		 offnum <= maxoff;
 		 offnum = OffsetNumberNext(offnum))
 	{
 		// TODO: can get deadoffsets for vacuum in this loop
 		ItemId itemid = PageGetItemId(page, offnum);
-
-		/*
-		* Perform xmin/xmax XID status sanity checks before critical section.
-		*
-		* heap_prepare_freeze_tuple doesn't perform these checks directly because
-		* pg_xact lookups are relatively expensive.  They shouldn't be repeated
-		* by successive VACUUMs that each decide against freezing the same page.
-		*/
 		if (page_prune_result->froze_page)
 		{
 			// TODO: perhaps offset numbers can be used into freeze plans instead of random index i
 			HeapTupleFreeze *frz = pagefrz->frozen + i;
 			HeapTupleHeader htup = (HeapTupleHeader) PageGetItem(page, itemid);
-			/* Deliberately avoid relying on tuple hint bits here */
 			if (frz->checkflags & HEAP_FREEZE_CHECK_XMIN_COMMITTED)
 			{
 				TransactionId xmin = HeapTupleHeaderGetRawXmin(htup);
@@ -751,11 +651,6 @@ heap_page_prune_freeze(Relation relation, Buffer buffer,
 											xmin)));
 			}
 
-			/*
-			* TransactionIdDidAbort won't work reliably in the presence of XIDs
-			* left behind by transactions that were in progress during a crash,
-			* so we can only check that xmax didn't commit
-			*/
 			if (frz->checkflags & HEAP_FREEZE_CHECK_XMAX_ABORTED)
 			{
 				TransactionId xmax = HeapTupleHeaderGetRawXmax(htup);
@@ -769,88 +664,44 @@ heap_page_prune_freeze(Relation relation, Buffer buffer,
 			}
 		}
 
-		/* Ignore items already processed as part of an earlier chain */
 		if (prstate.marked[offnum])
 			continue;
 
-		/* see preceding loop */
 		if (off_loc)
 			*off_loc = offnum;
-
-		/* Nothing to do if slot is empty or already dead */
 
 		if (!ItemIdIsUsed(itemid) || ItemIdIsDead(itemid))
 			continue;
 
-		/* Process this item or chain of items */
 		ndeleted += heap_prune_chain(buffer, offnum, &prstate);
 	}
 
 	if (prstate.nredirected > 0 || prstate.nkilled > 0 || prstate.nobsoleted > 0)
 		page_prune_result->prune_page = true;
 
-	/* Clear the offset information once we have processed the given page. */
 	if (off_loc)
 		*off_loc = InvalidOffsetNumber;
 
-	/* Any error while applying the changes is critical */
 	START_CRIT_SECTION();
-
-		/*
-		* Also clear the "page is full" flag, since there's no point in
-		* repeating the prune/defrag process until something else happens to
-		* the page.
-		*/
 	if (page_prune_result->prune_page || page_prune_result->froze_page)
 	{
 		PageClearFull(page);
 		MarkBufferDirty(buffer);
 	}
-		/*
-		 * If we didn't prune anything, but have found a new value for the
-		 * pd_prune_xid field, update it and mark the buffer dirty. This is
-		 * treated as a non-WAL-logged hint.
-		 *
-		 * Also clear the "page is full" flag if it is set, since there's no
-		 * point in repeating the prune/defrag process until something else
-		 * happens to the page.
-		 */
 	else if (((PageHeader) page)->pd_prune_xid != prstate.new_prune_xid || PageIsFull(page))
 		MarkBufferDirtyHint(buffer, true);
 
-	/* Have we found any prunable items? */
 	if (page_prune_result->prune_page)
 	{
-		/*
-		 * Apply the planned item changes, then repair page fragmentation, and
-		 * update the page's hint bit about whether it has free line pointers.
-		 */
 		heap_page_prune_execute(buffer,
 								prstate.redirected, prstate.nredirected,
 								prstate.nowdead, prstate.nkilled,
 								prstate.nowunused, prstate.nobsoleted);
 
-		/*
-		 * Update the page's pd_prune_xid field to either zero, or the lowest
-		 * XID of any soon-prunable tuple.
-		 */
 		((PageHeader) page)->pd_prune_xid = prstate.new_prune_xid;
 	}
 
 
-	/*
-	*
-	* Executes freezing of one or more heap tuples on a page on behalf of caller.
-	* Caller passes an array of tuple plans from heap_prepare_freeze_tuple.
-	* Caller must set 'offset' in each plan for us.  Note that we destructively
-	* sort caller's tuples array in-place, so caller had better be done with it.
-	*
-	* WAL-logs the changes so that VACUUM can advance the rel's relfrozenxid
-	* later on without any risk of unsafe pg_xact lookups, even following a hard
-	* crash (or when querying from a standby).  We represent freezing by setting
-	* infomask bits in tuple headers, but this shouldn't be thought of as a hint.
-	* See section on buffer access rules in src/backend/storage/buffer/README.
-	*/
 	if (page_prune_result->froze_page)
 	{
 		for (i = 0; i < page_prune_result->nfrozen; i++)
@@ -864,9 +715,6 @@ heap_page_prune_freeze(Relation relation, Buffer buffer,
 		}
 	}
 
-	/*
-		* Emit a WAL XLOG_HEAP2_PRUNE record showing what we did
-		*/
 	if (RelationNeedsWAL(relation))
 	{
 		if (page_prune_result->prune_page)
@@ -884,11 +732,6 @@ heap_page_prune_freeze(Relation relation, Buffer buffer,
 
 			XLogRegisterBuffer(0, buffer, REGBUF_STANDARD);
 
-			/*
-				* The OffsetNumber arrays are not actually in the buffer, but we
-				* pretend that they are.  When XLogInsert stores the whole
-				* buffer, the offset arrays need not be stored too.
-				*/
 			if (prstate.nredirected > 0)
 				XLogRegisterBufData(0, (char *) prstate.redirected,
 									prstate.nredirected *
@@ -915,7 +758,6 @@ heap_page_prune_freeze(Relation relation, Buffer buffer,
 			xl_heap_freeze_page xlrec;
 			XLogRecPtr	recptr;
 
-			/* Prepare deduplicated representation for use in WAL record */
 			nplans = heap_log_freeze_plan(pagefrz->frozen, pagefrz->nfrozen, plans, offsets);
 
 			xlrec.snapshotConflictHorizon = snapshotConflictHorizon;
@@ -925,11 +767,6 @@ heap_page_prune_freeze(Relation relation, Buffer buffer,
 			XLogBeginInsert();
 			XLogRegisterData((char *) &xlrec, SizeOfHeapFreezePage);
 
-			/*
-			* The freeze plan array and offset array are not actually in the
-			* buffer, but pretend that they are.  When XLogInsert stores the
-			* whole buffer, the arrays need not be stored too.
-			*/
 			XLogRegisterBuffer(0, buffer, REGBUF_STANDARD);
 			XLogRegisterBufData(0, (char *) plans,
 								nplans * sizeof(xl_heap_freeze_plan));
@@ -944,7 +781,6 @@ heap_page_prune_freeze(Relation relation, Buffer buffer,
 
 	END_CRIT_SECTION();
 
-	/* Record number of newly-set-LP_DEAD items for caller */
 	page_prune_result->nkilled = prstate.nkilled;
 	page_prune_result->ndeleted = ndeleted;
 }
