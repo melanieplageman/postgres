@@ -1537,12 +1537,6 @@ lazy_scan_prune(LVRelState *vacrel,
 	int original_num_dead_items = dead_items->num_items;
 
 	Assert(BufferGetBlockNumber(buf) == blkno);
-
-	/*
-	 * maxoff might be reduced following line pointer array truncation in
-	 * heap_page_prune.  That's safe for us to ignore, since the reclaimed
-	 * space will continue to look like LP_UNUSED items below.
-	 */
 	maxoff = PageGetMaxOffsetNumber(page);
 
 	pagefrz.freeze_required = false;
@@ -1561,16 +1555,6 @@ lazy_scan_prune(LVRelState *vacrel,
 									 InvalidTransactionId, 0,
 									 &vacrel->offnum, page_prune_result, &pagefrz);
 
-	/*
-	 * Now scan the page to collect LP_DEAD items and check for tuples
-	 * requiring freezing among remaining tuples with storage
-	 */
-	/*
-	 * We have now divided every item on the page into either an LP_DEAD item
-	 * that will need to be vacuumed in indexes later, or a LP_NORMAL tuple
-	 * that remains and needs to be considered for freezing now (LP_UNUSED and
-	 * LP_REDIRECT items also remain, but are of no further interest to us).
-	 */
 	vacrel->offnum = InvalidOffsetNumber;
 
 
@@ -1597,13 +1581,6 @@ lazy_scan_prune(LVRelState *vacrel,
 		pgstat_progress_update_param(PROGRESS_VACUUM_NUM_DEAD_TUPLES,
 										dead_items->num_items);
 
-	/*
-	 * VACUUM will call heap_page_is_all_visible() during the second pass over
-	 * the heap to determine all_visible and all_frozen for the page -- this
-	 * is a specialized version of the logic from this function.  Now that
-	 * we've finished pruning and freezing, make sure that we're in total
-	 * agreement with heap_page_is_all_visible() using an assertion.
-	 */
 #ifdef USE_ASSERT_CHECKING
 		/* Note that all_frozen value does not matter when !all_visible */
 		if (page_prune_result->all_visible)
@@ -1619,21 +1596,9 @@ lazy_scan_prune(LVRelState *vacrel,
 		}
 #endif
 
-		/*
-		 * It was convenient to ignore LP_DEAD items in all_visible earlier on
-		 * to make the choice of whether or not to freeze the page unaffected
-		 * by the short-term presence of LP_DEAD items.  These LP_DEAD items
-		 * were effectively assumed to be LP_UNUSED items in the making.  It
-		 * doesn't matter which heap pass (initial pass or final pass) ends up
-		 * setting the page all-frozen, as long as the ongoing VACUUM does it.
-		 *
-		 * Now that freezing has been finalized, unset all_visible.  It needs
-		 * to reflect the present state of things, as expected by our caller.
-		 */
 		page_prune_result->all_visible = false;
 	}
 
-	/* Finally, add page-local counts to whole-VACUUM counts */
 	vacrel->tuples_deleted += page_prune_result->ndeleted;
 	vacrel->tuples_frozen += page_prune_result->nfrozen;
 	vacrel->lpdead_items += dead_items->num_items - original_num_dead_items;

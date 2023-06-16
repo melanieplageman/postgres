@@ -572,8 +572,8 @@ heap_page_prune_freeze(Relation relation, Buffer buffer,
 				}
 				break;
 			case HEAPTUPLE_RECENTLY_DEAD:
-				page_prune_result->nrecently_dead++;
 				page_prune_result->all_visible = false;
+				page_prune_result->nrecently_dead++;
 				break;
 			case HEAPTUPLE_INSERT_IN_PROGRESS:
 				page_prune_result->all_visible = false;
@@ -682,6 +682,7 @@ heap_page_prune_freeze(Relation relation, Buffer buffer,
 	if (off_loc)
 		*off_loc = InvalidOffsetNumber;
 
+	// TODO: make a combined prune and freeze execution path -- maybe with its own prune state
 	START_CRIT_SECTION();
 	if (page_prune_result->prune_page || page_prune_result->froze_page)
 	{
@@ -702,6 +703,7 @@ heap_page_prune_freeze(Relation relation, Buffer buffer,
 	}
 
 
+	// TODO: can combine this and page prune execute?
 	if (page_prune_result->froze_page)
 	{
 		for (i = 0; i < page_prune_result->nfrozen; i++)

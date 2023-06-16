@@ -138,6 +138,8 @@ typedef enum
 #define		HEAP_FREEZE_CHECK_XMIN_COMMITTED	0x01
 #define		HEAP_FREEZE_CHECK_XMAX_ABORTED		0x02
 
+// TODO: could potentially make some kind of freeze prune data structure which
+// includes all relevant info for every tuple and avoids so many loops
 /* heap_prepare_freeze_tuple state describing how to freeze a tuple */
 typedef struct HeapTupleFreeze
 {
