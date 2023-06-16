@@ -502,6 +502,7 @@ heap_page_prune_freeze(Relation relation, Buffer buffer,
 	int64		fpi_before = pgWalUsage.wal_fpi;
 	// TODO: can I use same one as in prstate?
 	TransactionId snapshotConflictHorizon = InvalidTransactionId;
+	page_prune_result->prune_page = false;
 
 	/*
 	 * Our strategy is to scan the page and make lists of items to change,
@@ -787,8 +788,6 @@ heap_page_prune_freeze(Relation relation, Buffer buffer,
 
 	if (prstate.nredirected > 0 || prstate.nkilled > 0 || prstate.nobsoleted > 0)
 		page_prune_result->prune_page = true;
-	else
-		page_prune_result->prune_page = false;
 
 	/* Clear the offset information once we have processed the given page. */
 	if (off_loc)
@@ -807,7 +806,16 @@ heap_page_prune_freeze(Relation relation, Buffer buffer,
 		PageClearFull(page);
 		MarkBufferDirty(buffer);
 	}
-	else
+		/*
+		 * If we didn't prune anything, but have found a new value for the
+		 * pd_prune_xid field, update it and mark the buffer dirty. This is
+		 * treated as a non-WAL-logged hint.
+		 *
+		 * Also clear the "page is full" flag if it is set, since there's no
+		 * point in repeating the prune/defrag process until something else
+		 * happens to the page.
+		 */
+	else if (((PageHeader) page)->pd_prune_xid != prstate.new_prune_xid || PageIsFull(page))
 		MarkBufferDirtyHint(buffer, true);
 
 	/* Have we found any prunable items? */
@@ -828,29 +836,9 @@ heap_page_prune_freeze(Relation relation, Buffer buffer,
 		 */
 		((PageHeader) page)->pd_prune_xid = prstate.new_prune_xid;
 	}
-	else
-	{
-		/*
-		 * If we didn't prune anything, but have found a new value for the
-		 * pd_prune_xid field, update it and mark the buffer dirty. This is
-		 * treated as a non-WAL-logged hint.
-		 *
-		 * Also clear the "page is full" flag if it is set, since there's no
-		 * point in repeating the prune/defrag process until something else
-		 * happens to the page.
-		 */
-		if (((PageHeader) page)->pd_prune_xid != prstate.new_prune_xid ||
-			PageIsFull(page))
-		{
-			((PageHeader) page)->pd_prune_xid = prstate.new_prune_xid;
-		}
-	}
 
-
-	if (page_prune_result->froze_page)
 
 	/*
-	* heap_freeze_execute_prepared
 	*
 	* Executes freezing of one or more heap tuples on a page on behalf of caller.
 	* Caller passes an array of tuple plans from heap_prepare_freeze_tuple.
@@ -863,6 +851,7 @@ heap_page_prune_freeze(Relation relation, Buffer buffer,
 	* infomask bits in tuple headers, but this shouldn't be thought of as a hint.
 	* See section on buffer access rules in src/backend/storage/buffer/README.
 	*/
+	if (page_prune_result->froze_page)
 	{
 		for (i = 0; i < page_prune_result->nfrozen; i++)
 		{
