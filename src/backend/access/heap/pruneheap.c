@@ -535,7 +535,6 @@ heap_page_prune_freeze(LVRelState *vacrel, Buffer buffer, BlockNumber blockno,
 	prstate.snapshotConflictHorizon = InvalidTransactionId;
 	prstate.nredirected = prstate.nkilled = prstate.nobsoleted = 0;
 	memset(prstate.marked, 0, sizeof(prstate.marked));
-	tup.t_tableOid = RelationGetRelid(prstate.rel);
 
 	for (offnum = maxoff;
 		 offnum >= FirstOffsetNumber;
@@ -566,7 +565,7 @@ heap_page_prune_freeze(LVRelState *vacrel, Buffer buffer, BlockNumber blockno,
 		switch (res)
 		{
 			case HEAPTUPLE_LIVE:
-				page_prune_result->nlive++;
+				vacrel->live_tuples++;
 				if (page_prune_result->all_visible)
 				{
 					TransactionId xmin;
@@ -594,14 +593,14 @@ heap_page_prune_freeze(LVRelState *vacrel, Buffer buffer, BlockNumber blockno,
 				break;
 			case HEAPTUPLE_RECENTLY_DEAD:
 				page_prune_result->all_visible = false;
-				page_prune_result->nrecently_dead++;
+				vacrel->recently_dead_tuples++;
 				break;
 			case HEAPTUPLE_INSERT_IN_PROGRESS:
 				page_prune_result->all_visible = false;
 				break;
 			case HEAPTUPLE_DELETE_IN_PROGRESS:
 				page_prune_result->all_visible = false;
-				page_prune_result->nlive++;
+				vacrel->live_tuples++;
 				break;
 			default:
 				elog(ERROR, "unexpected HeapTupleSatisfiesVacuum result");
@@ -621,6 +620,7 @@ heap_page_prune_freeze(LVRelState *vacrel, Buffer buffer, BlockNumber blockno,
 
 	page_prune_result->NewRelfrozenXid = pagefrz.FreezePageRelfrozenXid;
 	page_prune_result->NewRelminMxid = pagefrz.FreezePageRelminMxid;
+	vacrel->tuples_frozen += page_prune_result->nfrozen;
 
 		// TODO: see if this is same as all_frozen for our purposes
 	page_prune_result->froze_page = pagefrz.freeze_required || page_prune_result->nfrozen == 0 ||
@@ -692,7 +692,7 @@ heap_page_prune_freeze(LVRelState *vacrel, Buffer buffer, BlockNumber blockno,
 		if (!ItemIdIsUsed(itemid) || ItemIdIsDead(itemid))
 			continue;
 
-		page_prune_result->ndeleted += heap_prune_chain(buffer, offnum, &prstate);
+		vacrel->tuples_deleted += heap_prune_chain(buffer, offnum, &prstate);
 	}
 
 	if (prstate.nredirected > 0 || prstate.nkilled > 0 || prstate.nobsoleted > 0)
@@ -800,8 +800,6 @@ heap_page_prune_freeze(LVRelState *vacrel, Buffer buffer, BlockNumber blockno,
 
 	END_CRIT_SECTION();
 
-	page_prune_result->nkilled = prstate.nkilled;
-
 	vacrel->offnum = InvalidOffsetNumber;
 
 	ItemPointerSetBlockNumber(&tmp, blockno);
@@ -845,12 +843,7 @@ heap_page_prune_freeze(LVRelState *vacrel, Buffer buffer, BlockNumber blockno,
 		page_prune_result->all_visible = false;
 	}
 
-	/* Finally, add page-local counts to whole-VACUUM counts */
-	vacrel->tuples_deleted += page_prune_result->ndeleted;
-	vacrel->tuples_frozen += page_prune_result->nfrozen;
 	vacrel->lpdead_items += dead_items->num_items - original_num_dead_items;
-	vacrel->live_tuples += page_prune_result->nlive;
-	vacrel->recently_dead_tuples += page_prune_result->nrecently_dead;
 }
 
 

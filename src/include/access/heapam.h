@@ -57,12 +57,7 @@ typedef struct PagePruneResult
 	bool		all_visible;	/* Every item visible to all? */
 	bool		all_frozen;		/* provided all_visible is also true */
 	TransactionId visibility_cutoff_xid;	/* For recovery conflicts */
-	/* pruning accomplished this */
-	int nkilled;
-	int ndeleted;
 	/* stats on state of tuples in page */
-	int nlive;
-	int nrecently_dead;
 	bool prune_page;
 
 	/* outcome of freezing */
