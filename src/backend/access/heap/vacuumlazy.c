@@ -1542,7 +1542,6 @@ lazy_scan_prune(LVRelState *vacrel,
 	OffsetNumber offnum,
 				maxoff;
 	HeapTupleData tuple;
-	HTSV_Result res;
 	int			tuples_deleted,
 				tuples_frozen,
 				lpdead_items,
@@ -1581,8 +1580,6 @@ lazy_scan_prune(LVRelState *vacrel,
 	 * space will continue to look like LP_UNUSED items below.
 	 */
 	maxoff = PageGetMaxOffsetNumber(page);
-
-retry:
 
 	/* Initialize (or reset) page-level state */
 	pagefrz.freeze_required = false;
@@ -1808,20 +1805,6 @@ retry:
 			ItemPointerSetOffsetNumber(&tmp, offnum);
 			vacrel->dead_items->items[vacrel->dead_items->num_items++] = tmp;
 			lpdead_items++;
-			/*
-			 * Deliberately don't set hastup for LP_DEAD items.  We make the
-			 * soft assumption that any LP_DEAD items encountered here will
-			 * become LP_UNUSED later on, before count_nondeletable_pages is
-			 * reached.  If we don't make this assumption then rel truncation
-			 * will only happen every other VACUUM, at most.  Besides, VACUUM
-			 * must treat hastup/nonempty_pages as provisional no matter how
-			 * LP_DEAD items are handled (handled here, or handled later on).
-			 *
-			 * Also deliberately delay unsetting all_visible until just before
-			 * we return to lazy_scan_heap caller, as explained in full below.
-			 * (This is another case where it's useful to anticipate that any
-			 * LP_DEAD items will become LP_UNUSED during the ongoing VACUUM.)
-			 */
 			continue;
 		}
 
@@ -1832,55 +1815,10 @@ retry:
 		tuple.t_len = ItemIdGetLength(itemid);
 		tuple.t_tableOid = RelationGetRelid(rel);
 
-		/*
-		 * DEAD tuples are almost always pruned into LP_DEAD line pointers by
-		 * heap_page_prune(), but it's possible that the tuple state changed
-		 * since heap_page_prune() looked.  Handle that here by restarting.
-		 * (See comments at the top of function for a full explanation.)
-		 */
-		res = HeapTupleSatisfiesVacuum(&tuple, vacrel->cutoffs.OldestXmin,
-									   buf);
-
-		if (unlikely(res == HEAPTUPLE_DEAD))
-			goto retry;
-
-		/*
-		 * The criteria for counting a tuple as live in this block need to
-		 * match what analyze.c's acquire_sample_rows() does, otherwise VACUUM
-		 * and ANALYZE may produce wildly different reltuples values, e.g.
-		 * when there are many recently-dead tuples.
-		 *
-		 * The logic here is a bit simpler than acquire_sample_rows(), as
-		 * VACUUM can't run inside a transaction block, which makes some cases
-		 * impossible (e.g. in-progress insert from the same transaction).
-		 *
-		 * We treat LP_DEAD items (which are the closest thing to DEAD tuples
-		 * that might be seen here) differently, too: we assume that they'll
-		 * become LP_UNUSED before VACUUM finishes.  This difference is only
-		 * superficial.  VACUUM effectively agrees with ANALYZE about DEAD
-		 * items, in the end.  VACUUM won't remember LP_DEAD items, but only
-		 * because they're not supposed to be left behind when it is done.
-		 * (Cases where we bypass index vacuuming will violate this optimistic
-		 * assumption, but the overall impact of that should be negligible.)
-		 */
-		switch (res)
+		switch ((HTSV_Result) prstate.htsv[offnum])
 		{
 			case HEAPTUPLE_LIVE:
-
-				/*
-				 * Count it as live.  Not only is this natural, but it's also
-				 * what acquire_sample_rows() does.
-				 */
 				live_tuples++;
-
-				/*
-				 * Is the tuple definitely visible to all transactions?
-				 *
-				 * NB: Like with per-tuple hint bits, we can't set the
-				 * PD_ALL_VISIBLE flag if the inserter committed
-				 * asynchronously. See SetHintBits for more info. Check that
-				 * the tuple is hinted xmin-committed because of that.
-				 */
 				if (prunestate->all_visible)
 				{
 					TransactionId xmin;
@@ -1891,10 +1829,6 @@ retry:
 						break;
 					}
 
-					/*
-					 * The inserter definitely committed. But is it old enough
-					 * that everyone sees it as committed?
-					 */
 					xmin = HeapTupleHeaderGetXmin(tuple.t_data);
 					if (!TransactionIdPrecedes(xmin,
 											   vacrel->cutoffs.OldestXmin))
@@ -1903,47 +1837,26 @@ retry:
 						break;
 					}
 
-					/* Track newest xmin on page. */
 					if (TransactionIdFollows(xmin, prunestate->visibility_cutoff_xid) &&
 						TransactionIdIsNormal(xmin))
 						prunestate->visibility_cutoff_xid = xmin;
 				}
 				break;
 			case HEAPTUPLE_RECENTLY_DEAD:
-
-				/*
-				 * If tuple is recently dead then we must not remove it from
-				 * the relation.  (We only remove items that are LP_DEAD from
-				 * pruning.)
-				 */
 				recently_dead_tuples++;
 				prunestate->all_visible = false;
 				break;
 			case HEAPTUPLE_INSERT_IN_PROGRESS:
-
-				/*
-				 * We do not count these rows as live, because we expect the
-				 * inserting transaction to update the counters at commit, and
-				 * we assume that will happen only after we report our
-				 * results.  This assumption is a bit shaky, but it is what
-				 * acquire_sample_rows() does, so be consistent.
-				 */
 				prunestate->all_visible = false;
 				break;
 			case HEAPTUPLE_DELETE_IN_PROGRESS:
-				/* This is an expected case during concurrent vacuum */
 				prunestate->all_visible = false;
-
-				/*
-				 * Count such rows as live.  As above, we assume the deleting
-				 * transaction will commit and update the counters after we
-				 * report.
-				 */
 				live_tuples++;
+				break;
+			case HEAPTUPLE_DEAD:
 				break;
 			default:
 				elog(ERROR, "unexpected HeapTupleSatisfiesVacuum result");
-				break;
 		}
 
 		prunestate->hastup = true;	/* page makes rel truncation unsafe */
