@@ -1698,6 +1698,33 @@ lazy_scan_prune(LVRelState *vacrel,
 		(prunestate->all_visible && prunestate->all_frozen &&
 		 fpi_before != pgWalUsage.wal_fpi);
 
+	/*
+	 * Freeze the page when heap_prepare_freeze_tuple indicates that at least
+	 * one XID/MXID from before FreezeLimit/MultiXactCutoff is present.  Also
+	 * freeze when pruning generated an FPI, if doing so means that we set the
+	 * page all-frozen afterwards (might not happen until final heap pass).
+	 */
+	if (do_freeze)
+	{
+		/*
+		 * We're freezing the page.  Our final NewRelfrozenXid doesn't need to
+		 * be affected by the XIDs that are just about to be frozen anyway.
+		 */
+		vacrel->NewRelfrozenXid = pagefrz.FreezePageRelfrozenXid;
+		vacrel->NewRelminMxid = pagefrz.FreezePageRelminMxid;
+	}
+	else
+	{
+		/*
+		 * Page requires "no freeze" processing.  It might be set all-visible
+		 * in the visibility map, but it can never be set all-frozen.
+		 */
+		vacrel->NewRelfrozenXid = pagefrz.NoFreezePageRelfrozenXid;
+		vacrel->NewRelminMxid = pagefrz.NoFreezePageRelminMxid;
+		prunestate->all_frozen = false;
+		tuples_frozen = 0;		/* avoid miscounts in instrumentation */
+	}
+
 	/* Scan the page */
 	for (offnum = FirstOffsetNumber;
 		 offnum <= maxoff;
@@ -1818,78 +1845,35 @@ lazy_scan_prune(LVRelState *vacrel,
 
 	vacrel->offnum = InvalidOffsetNumber;
 
-	/*
-	 * Freeze the page when heap_prepare_freeze_tuple indicates that at least
-	 * one XID/MXID from before FreezeLimit/MultiXactCutoff is present.  Also
-	 * freeze when pruning generated an FPI, if doing so means that we set the
-	 * page all-frozen afterwards (might not happen until final heap pass).
-	 */
-	if (do_freeze)
+	if (do_freeze && tuples_frozen > 0)
 	{
-		/*
-		 * We're freezing the page.  Our final NewRelfrozenXid doesn't need to
-		 * be affected by the XIDs that are just about to be frozen anyway.
-		 */
-		vacrel->NewRelfrozenXid = pagefrz.FreezePageRelfrozenXid;
-		vacrel->NewRelminMxid = pagefrz.FreezePageRelminMxid;
+		TransactionId snapshotConflictHorizon;
 
-		if (tuples_frozen == 0)
+		vacrel->frozen_pages++;
+
+		/*
+			* We can use visibility_cutoff_xid as our cutoff for conflicts
+			* when the whole page is eligible to become all-frozen in the VM
+			* once we're done with it.  Otherwise we generate a conservative
+			* cutoff by stepping back from OldestXmin.
+			*/
+		if (prunestate->all_visible && prunestate->all_frozen)
 		{
-			/*
-			 * We have no freeze plans to execute, so there's no added cost
-			 * from following the freeze path.  That's why it was chosen. This
-			 * is important in the case where the page only contains totally
-			 * frozen tuples at this point (perhaps only following pruning).
-			 * Such pages can be marked all-frozen in the VM by our caller,
-			 * even though none of its tuples were newly frozen here (note
-			 * that the "no freeze" path never sets pages all-frozen).
-			 *
-			 * We never increment the frozen_pages instrumentation counter
-			 * here, since it only counts pages with newly frozen tuples
-			 * (don't confuse that with pages newly set all-frozen in VM).
-			 */
+			/* Using same cutoff when setting VM is now unnecessary */
+			snapshotConflictHorizon = prunestate->visibility_cutoff_xid;
+			prunestate->visibility_cutoff_xid = InvalidTransactionId;
 		}
 		else
 		{
-			TransactionId snapshotConflictHorizon;
-
-			vacrel->frozen_pages++;
-
-			/*
-			 * We can use visibility_cutoff_xid as our cutoff for conflicts
-			 * when the whole page is eligible to become all-frozen in the VM
-			 * once we're done with it.  Otherwise we generate a conservative
-			 * cutoff by stepping back from OldestXmin.
-			 */
-			if (prunestate->all_visible && prunestate->all_frozen)
-			{
-				/* Using same cutoff when setting VM is now unnecessary */
-				snapshotConflictHorizon = prunestate->visibility_cutoff_xid;
-				prunestate->visibility_cutoff_xid = InvalidTransactionId;
-			}
-			else
-			{
-				/* Avoids false conflicts when hot_standby_feedback in use */
-				snapshotConflictHorizon = vacrel->cutoffs.OldestXmin;
-				TransactionIdRetreat(snapshotConflictHorizon);
-			}
-
-			/* Execute all freeze plans for page as a single atomic action */
-			heap_freeze_execute_prepared(vacrel->rel, buf,
-										 snapshotConflictHorizon,
-										 frozen, tuples_frozen);
+			/* Avoids false conflicts when hot_standby_feedback in use */
+			snapshotConflictHorizon = vacrel->cutoffs.OldestXmin;
+			TransactionIdRetreat(snapshotConflictHorizon);
 		}
-	}
-	else
-	{
-		/*
-		 * Page requires "no freeze" processing.  It might be set all-visible
-		 * in the visibility map, but it can never be set all-frozen.
-		 */
-		vacrel->NewRelfrozenXid = pagefrz.NoFreezePageRelfrozenXid;
-		vacrel->NewRelminMxid = pagefrz.NoFreezePageRelminMxid;
-		prunestate->all_frozen = false;
-		tuples_frozen = 0;		/* avoid miscounts in instrumentation */
+
+		/* Execute all freeze plans for page as a single atomic action */
+		heap_freeze_execute_prepared(vacrel->rel, buf,
+										snapshotConflictHorizon,
+										frozen, tuples_frozen);
 	}
 
 	for (offnum = FirstOffsetNumber;
