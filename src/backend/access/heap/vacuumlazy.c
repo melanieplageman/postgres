@@ -1601,6 +1601,7 @@ retry:
 		 offnum >= FirstOffsetNumber;
 		 offnum = OffsetNumberPrev(offnum))
 	{
+		bool totally_frozen;
 		ItemId		itemid;
 		HeapTupleData tup;
 		HeapTupleHeader htup;
@@ -1623,6 +1624,25 @@ retry:
 
 		prstate.htsv[offnum] = heap_prune_satisfies_vacuum(&prstate, &tup,
 														   buf);
+
+		if (prstate.htsv[offnum] == HEAPTUPLE_DEAD)
+			continue;
+
+		/* Tuple with storage -- consider need to freeze */
+		if (heap_prepare_freeze_tuple(tup.t_data, &vacrel->cutoffs, &pagefrz,
+									  &frozen[tuples_frozen], &totally_frozen))
+		{
+			/* Save prepared freeze plan for later */
+			frozen[tuples_frozen++].offset = offnum;
+		}
+
+		/*
+		 * If any tuple isn't either totally frozen already or eligible to
+		 * become totally frozen (according to its freeze plan), then the page
+		 * definitely cannot be set all-frozen in the visibility map later on
+		 */
+		if (!totally_frozen)
+			prunestate->all_frozen = false;
 	}
 
 	/* Scan the page */
@@ -1757,7 +1777,6 @@ retry:
 		 offnum = OffsetNumberNext(offnum))
 	{
 		ItemId		itemid;
-		bool		totally_frozen;
 
 		/*
 		 * Set the offset number so that we can display it along with any
@@ -1919,22 +1938,6 @@ retry:
 		}
 
 		prunestate->hastup = true;	/* page makes rel truncation unsafe */
-
-		/* Tuple with storage -- consider need to freeze */
-		if (heap_prepare_freeze_tuple(tuple.t_data, &vacrel->cutoffs, &pagefrz,
-									  &frozen[tuples_frozen], &totally_frozen))
-		{
-			/* Save prepared freeze plan for later */
-			frozen[tuples_frozen++].offset = offnum;
-		}
-
-		/*
-		 * If any tuple isn't either totally frozen already or eligible to
-		 * become totally frozen (according to its freeze plan), then the page
-		 * definitely cannot be set all-frozen in the visibility map later on
-		 */
-		if (!totally_frozen)
-			prunestate->all_frozen = false;
 	}
 
 	/*
