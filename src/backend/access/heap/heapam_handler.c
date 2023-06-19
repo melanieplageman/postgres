@@ -854,6 +854,7 @@ heapam_relation_copy_for_cluster(Relation OldHeap, Relation NewHeap,
 			case HEAPTUPLE_RECENTLY_DEAD:
 				*tups_recently_dead += 1;
 				/* fall through */
+			case HEAPTUPLE_LIVE_AND_VISIBLE:
 			case HEAPTUPLE_LIVE:
 				/* Live or recently dead, must copy it */
 				isdead = false;
@@ -1070,6 +1071,7 @@ heapam_scan_analyze_next_tuple(TableScanDesc scan, TransactionId OldestXmin,
 		switch (HeapTupleSatisfiesVacuum(targtuple, OldestXmin,
 										 hscan->rs_cbuf))
 		{
+			case HEAPTUPLE_LIVE_AND_VISIBLE:
 			case HEAPTUPLE_LIVE:
 				sample_it = true;
 				*liverows += 1;

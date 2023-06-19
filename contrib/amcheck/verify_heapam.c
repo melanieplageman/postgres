@@ -1924,9 +1924,9 @@ update_cached_xid_range(HeapCheckContext *ctx)
 {
 	/* Make cached copies */
 	LWLockAcquire(XidGenLock, LW_SHARED);
-	ctx->next_fxid = ShmemVariableCache->nextXid;
 	ctx->oldest_xid = ShmemVariableCache->oldestXid;
 	LWLockRelease(XidGenLock);
+	ctx->next_fxid = FullTransactionIdFromAtomicU64(&ShmemVariableCache->nextXid);
 
 	/* And compute alternate versions of the same */
 	ctx->next_xid = XidFromFullTransactionId(ctx->next_fxid);

@@ -1059,6 +1059,32 @@ get_all_vacuum_rels(MemoryContext vac_context, int options)
 	return vacrels;
 }
 
+// TODO: what is the best structure for this? (e.g. return value, etc)
+// TODO: VacuumCutoffs is normally expected to be const, how should I handle that
+void
+lazy_update_freeze_limit(VacuumCutoffs *cutoffs, GlobalVisState *vistest)
+{
+	TransactionId nextXID;
+	int freeze_min_age = vacuum_freeze_min_age;
+
+	Assert(vistest);
+	Assert(cutoffs);
+
+	if (TransactionIdIsValid(cutoffs->FreezeLimit))
+		return;
+
+	freeze_min_age = Min(freeze_min_age, autovacuum_freeze_max_age / 2);
+	Assert(freeze_min_age >= 0);
+
+	// TODO: replace the xid in there with an atomic so that it is cheaper
+	nextXID = ReadNextTransactionId();
+	cutoffs->FreezeLimit = nextXID - freeze_min_age;
+	if (!TransactionIdIsNormal(cutoffs->FreezeLimit))
+		cutoffs->FreezeLimit = FirstNormalTransactionId;
+	if (!GlobalVisTestIsRemovableXid(vistest, cutoffs->FreezeLimit))
+		cutoffs->FreezeLimit = GlobalVisTestNonRemovableHorizon(vistest);
+}
+
 /*
  * vacuum_get_cutoffs() -- compute OldestXmin and freeze cutoff points
  *
@@ -1073,7 +1099,7 @@ get_all_vacuum_rels(MemoryContext vac_context, int options)
  */
 bool
 vacuum_get_cutoffs(Relation rel, const VacuumParams *params,
-				   struct VacuumCutoffs *cutoffs)
+				   VacuumCutoffs *cutoffs)
 {
 	int			freeze_min_age,
 				multixact_freeze_min_age,
@@ -1259,7 +1285,7 @@ vacuum_get_cutoffs(Relation rel, const VacuumParams *params,
  * When we return true, VACUUM caller triggers the failsafe.
  */
 bool
-vacuum_xid_failsafe_check(const struct VacuumCutoffs *cutoffs)
+vacuum_xid_failsafe_check(const VacuumCutoffs *cutoffs)
 {
 	TransactionId relfrozenxid = cutoffs->relfrozenxid;
 	MultiXactId relminmxid = cutoffs->relminmxid;

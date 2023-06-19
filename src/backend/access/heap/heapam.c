@@ -95,9 +95,6 @@ static void compute_new_xmax_infomask(TransactionId xmax, uint16 old_infomask,
 static TM_Result heap_lock_updated_tuple(Relation rel, HeapTuple tuple,
 										 ItemPointer ctid, TransactionId xid,
 										 LockTupleMode mode);
-static int	heap_log_freeze_plan(HeapTupleFreeze *tuples, int ntuples,
-								 xl_heap_freeze_plan *plans_out,
-								 OffsetNumber *offsets_out);
 static void GetMultiXactIdHintBits(MultiXactId multi, uint16 *new_infomask,
 								   uint16 *new_infomask2);
 static TransactionId MultiXactIdGetUpdateXid(TransactionId xmax,
@@ -6017,7 +6014,7 @@ heap_inplace_update(Relation relation, HeapTuple tuple)
  */
 static TransactionId
 FreezeMultiXactId(MultiXactId multi, uint16 t_infomask,
-				  const struct VacuumCutoffs *cutoffs, uint16 *flags,
+				  const VacuumCutoffs *cutoffs, uint16 *flags,
 				  HeapPageFreeze *pagefrz)
 {
 	TransactionId newxmax;
@@ -6035,6 +6032,7 @@ FreezeMultiXactId(MultiXactId multi, uint16 t_infomask,
 
 	/* We should only be called in Multis */
 	Assert(t_infomask & HEAP_XMAX_IS_MULTI);
+	Assert(!pagefrz->opportunistic);
 
 	if (!MultiXactIdIsValid(multi) ||
 		HEAP_LOCKED_UPGRADED(t_infomask))
@@ -6367,9 +6365,11 @@ FreezeMultiXactId(MultiXactId multi, uint16 t_infomask,
  */
 bool
 heap_prepare_freeze_tuple(HeapTupleHeader tuple,
-						  const struct VacuumCutoffs *cutoffs,
 						  HeapPageFreeze *pagefrz,
-						  HeapTupleFreeze *frz, bool *totally_frozen)
+						  HeapTupleFreeze *frz,
+						  bool *totally_frozen,
+						  GlobalVisState *vistest,
+						  bool opportunistic)
 {
 	bool		xmin_already_frozen = false,
 				xmax_already_frozen = false;
@@ -6395,14 +6395,18 @@ heap_prepare_freeze_tuple(HeapTupleHeader tuple,
 		xmin_already_frozen = true;
 	else
 	{
-		if (TransactionIdPrecedes(xid, cutoffs->relfrozenxid))
+		if (TransactionIdPrecedes(xid, pagefrz->cutoffs->relfrozenxid))
 			ereport(ERROR,
 					(errcode(ERRCODE_DATA_CORRUPTED),
 					 errmsg_internal("found xmin %u from before relfrozenxid %u",
-									 xid, cutoffs->relfrozenxid)));
+									 xid, pagefrz->cutoffs->relfrozenxid)));
 
 		/* Will set freeze_xmin flags in freeze plan below */
-		freeze_xmin = TransactionIdPrecedes(xid, cutoffs->OldestXmin);
+		// TODO: check cost of using GlobalVisTestIsRemovableXid() when not needed (e.g. vacuum)
+		if (vistest)
+			freeze_xmin = GlobalVisTestIsRemovableXid(vistest, xid);
+		else
+			freeze_xmin = TransactionIdPrecedes(xid, pagefrz->cutoffs->OldestXmin);
 
 		/* Verify that xmin committed if and when freeze plan is executed */
 		if (freeze_xmin)
@@ -6416,8 +6420,11 @@ heap_prepare_freeze_tuple(HeapTupleHeader tuple,
 	xid = HeapTupleHeaderGetXvac(tuple);
 	if (TransactionIdIsNormal(xid))
 	{
-		Assert(TransactionIdPrecedesOrEquals(cutoffs->relfrozenxid, xid));
-		Assert(TransactionIdPrecedes(xid, cutoffs->OldestXmin));
+		Assert(TransactionIdPrecedesOrEquals(pagefrz->cutoffs->relfrozenxid, xid));
+		if (vistest)
+			Assert(GlobalVisTestIsRemovableXid(vistest, xid));
+		else
+			Assert(TransactionIdPrecedes(xid, pagefrz->cutoffs->OldestXmin));
 
 		/*
 		 * For Xvac, we always freeze proactively.  This allows totally_frozen
@@ -6432,116 +6439,128 @@ heap_prepare_freeze_tuple(HeapTupleHeader tuple,
 	xid = frz->xmax;
 	if (tuple->t_infomask & HEAP_XMAX_IS_MULTI)
 	{
-		/* Raw xmax is a MultiXactId */
-		TransactionId newxmax;
-		uint16		flags;
-
 		/*
-		 * We will either remove xmax completely (in the "freeze_xmax" path),
-		 * process xmax by replacing it (in the "replace_xmax" path), or
-		 * perform no-op xmax processing.  The only constraint is that the
-		 * FreezeLimit/MultiXactCutoff postcondition must never be violated.
+		 * Raw xmax is a MultiXactId. Currently we do not attempt to
+		 * opportunistically freeze MultiXacts.
 		 */
-		newxmax = FreezeMultiXactId(xid, tuple->t_infomask, cutoffs,
-									&flags, pagefrz);
 
-		if (flags & FRM_NOOP)
+		if (!opportunistic)
 		{
+			TransactionId newxmax;
+			uint16		flags;
 			/*
-			 * xmax is a MultiXactId, and nothing about it changes for now.
-			 * This is the only case where 'freeze_required' won't have been
-			 * set for us by FreezeMultiXactId, as well as the only case where
-			 * neither freeze_xmax nor replace_xmax are set (given a multi).
-			 *
-			 * This is a no-op, but the call to FreezeMultiXactId might have
-			 * ratcheted back NewRelfrozenXid and/or NewRelminMxid trackers
-			 * for us (the "freeze page" variants, specifically).  That'll
-			 * make it safe for our caller to freeze the page later on, while
-			 * leaving this particular xmax undisturbed.
-			 *
-			 * FreezeMultiXactId is _not_ responsible for the "no freeze"
-			 * NewRelfrozenXid/NewRelminMxid trackers, though -- that's our
-			 * job.  A call to heap_tuple_should_freeze for this same tuple
-			 * will take place below if 'freeze_required' isn't set already.
-			 * (This repeats work from FreezeMultiXactId, but allows "no
-			 * freeze" tracker maintenance to happen in only one place.)
-			 */
-			Assert(!MultiXactIdPrecedes(newxmax, cutoffs->MultiXactCutoff));
-			Assert(MultiXactIdIsValid(newxmax) && xid == newxmax);
+			* We will either remove xmax completely (in the "freeze_xmax" path),
+			* process xmax by replacing it (in the "replace_xmax" path), or
+			* perform no-op xmax processing.  The only constraint is that the
+			* FreezeLimit/MultiXactCutoff postcondition must never be violated.
+			*/
+			newxmax = FreezeMultiXactId(xid, tuple->t_infomask, pagefrz->cutoffs,
+										&flags, pagefrz);
+
+			if (flags & FRM_NOOP)
+			{
+				/*
+				* xmax is a MultiXactId, and nothing about it changes for now.
+				* This is the only case where 'freeze_required' won't have been
+				* set for us by FreezeMultiXactId, as well as the only case where
+				* neither freeze_xmax nor replace_xmax are set (given a multi).
+				*
+				* This is a no-op, but the call to FreezeMultiXactId might have
+				* ratcheted back NewRelfrozenXid and/or NewRelminMxid trackers
+				* for us (the "freeze page" variants, specifically).  That'll
+				* make it safe for our caller to freeze the page later on, while
+				* leaving this particular xmax undisturbed.
+				*
+				* FreezeMultiXactId is _not_ responsible for the "no freeze"
+				* NewRelfrozenXid/NewRelminMxid trackers, though -- that's our
+				* job.  A call to heap_tuple_should_freeze for this same tuple
+				* will take place below if 'freeze_required' isn't set already.
+				* (This repeats work from FreezeMultiXactId, but allows "no
+				* freeze" tracker maintenance to happen in only one place.)
+				*/
+				Assert(!MultiXactIdPrecedes(newxmax, pagefrz->cutoffs->MultiXactCutoff));
+				Assert(MultiXactIdIsValid(newxmax) && xid == newxmax);
+			}
+			else if (flags & FRM_RETURN_IS_XID)
+			{
+				/*
+				* xmax will become an updater Xid (original MultiXact's updater
+				* member Xid will be carried forward as a simple Xid in Xmax).
+				*/
+				if (vistest)
+					Assert(!GlobalVisTestIsRemovableXid(vistest, newxmax));
+				else
+					Assert(!TransactionIdPrecedes(newxmax, pagefrz->cutoffs->OldestXmin));
+
+				/*
+				* NB -- some of these transformations are only valid because we
+				* know the return Xid is a tuple updater (i.e. not merely a
+				* locker.) Also note that the only reason we don't explicitly
+				* worry about HEAP_KEYS_UPDATED is because it lives in
+				* t_infomask2 rather than t_infomask.
+				*/
+				frz->t_infomask &= ~HEAP_XMAX_BITS;
+				frz->xmax = newxmax;
+				if (flags & FRM_MARK_COMMITTED)
+					frz->t_infomask |= HEAP_XMAX_COMMITTED;
+				replace_xmax = true;
+			}
+			else if (flags & FRM_RETURN_IS_MULTI)
+			{
+				uint16		newbits;
+				uint16		newbits2;
+
+				/*
+				* xmax is an old MultiXactId that we have to replace with a new
+				* MultiXactId, to carry forward two or more original member XIDs.
+				*/
+				Assert(!MultiXactIdPrecedes(newxmax, pagefrz->cutoffs->OldestMxact));
+
+				/*
+				* We can't use GetMultiXactIdHintBits directly on the new multi
+				* here; that routine initializes the masks to all zeroes, which
+				* would lose other bits we need.  Doing it this way ensures all
+				* unrelated bits remain untouched.
+				*/
+				frz->t_infomask &= ~HEAP_XMAX_BITS;
+				frz->t_infomask2 &= ~HEAP_KEYS_UPDATED;
+				GetMultiXactIdHintBits(newxmax, &newbits, &newbits2);
+				frz->t_infomask |= newbits;
+				frz->t_infomask2 |= newbits2;
+				frz->xmax = newxmax;
+				replace_xmax = true;
+			}
+			else
+			{
+				/*
+				* Freeze plan for tuple "freezes xmax" in the strictest sense:
+				* it'll leave nothing in xmax (neither an Xid nor a MultiXactId).
+				*/
+				Assert(flags & FRM_INVALIDATE_XMAX);
+				Assert(!TransactionIdIsValid(newxmax));
+
+				/* Will set freeze_xmax flags in freeze plan below */
+				freeze_xmax = true;
+			}
+
+			/* MultiXactId processing forces freezing (barring FRM_NOOP case) */
+			Assert(pagefrz->freeze_required || (!freeze_xmax && !replace_xmax));
 		}
-		else if (flags & FRM_RETURN_IS_XID)
-		{
-			/*
-			 * xmax will become an updater Xid (original MultiXact's updater
-			 * member Xid will be carried forward as a simple Xid in Xmax).
-			 */
-			Assert(!TransactionIdPrecedes(newxmax, cutoffs->OldestXmin));
-
-			/*
-			 * NB -- some of these transformations are only valid because we
-			 * know the return Xid is a tuple updater (i.e. not merely a
-			 * locker.) Also note that the only reason we don't explicitly
-			 * worry about HEAP_KEYS_UPDATED is because it lives in
-			 * t_infomask2 rather than t_infomask.
-			 */
-			frz->t_infomask &= ~HEAP_XMAX_BITS;
-			frz->xmax = newxmax;
-			if (flags & FRM_MARK_COMMITTED)
-				frz->t_infomask |= HEAP_XMAX_COMMITTED;
-			replace_xmax = true;
-		}
-		else if (flags & FRM_RETURN_IS_MULTI)
-		{
-			uint16		newbits;
-			uint16		newbits2;
-
-			/*
-			 * xmax is an old MultiXactId that we have to replace with a new
-			 * MultiXactId, to carry forward two or more original member XIDs.
-			 */
-			Assert(!MultiXactIdPrecedes(newxmax, cutoffs->OldestMxact));
-
-			/*
-			 * We can't use GetMultiXactIdHintBits directly on the new multi
-			 * here; that routine initializes the masks to all zeroes, which
-			 * would lose other bits we need.  Doing it this way ensures all
-			 * unrelated bits remain untouched.
-			 */
-			frz->t_infomask &= ~HEAP_XMAX_BITS;
-			frz->t_infomask2 &= ~HEAP_KEYS_UPDATED;
-			GetMultiXactIdHintBits(newxmax, &newbits, &newbits2);
-			frz->t_infomask |= newbits;
-			frz->t_infomask2 |= newbits2;
-			frz->xmax = newxmax;
-			replace_xmax = true;
-		}
-		else
-		{
-			/*
-			 * Freeze plan for tuple "freezes xmax" in the strictest sense:
-			 * it'll leave nothing in xmax (neither an Xid nor a MultiXactId).
-			 */
-			Assert(flags & FRM_INVALIDATE_XMAX);
-			Assert(!TransactionIdIsValid(newxmax));
-
-			/* Will set freeze_xmax flags in freeze plan below */
-			freeze_xmax = true;
-		}
-
-		/* MultiXactId processing forces freezing (barring FRM_NOOP case) */
-		Assert(pagefrz->freeze_required || (!freeze_xmax && !replace_xmax));
 	}
 	else if (TransactionIdIsNormal(xid))
 	{
 		/* Raw xmax is normal XID */
-		if (TransactionIdPrecedes(xid, cutoffs->relfrozenxid))
+		if (TransactionIdPrecedes(xid, pagefrz->cutoffs->relfrozenxid))
 			ereport(ERROR,
 					(errcode(ERRCODE_DATA_CORRUPTED),
 					 errmsg_internal("found xmax %u from before relfrozenxid %u",
-									 xid, cutoffs->relfrozenxid)));
+									 xid, pagefrz->cutoffs->relfrozenxid)));
 
 		/* Will set freeze_xmax flags in freeze plan below */
-		freeze_xmax = TransactionIdPrecedes(xid, cutoffs->OldestXmin);
+		if (vistest)
+			freeze_xmax = GlobalVisTestIsRemovableXid(vistest, xid);
+		else
+			freeze_xmax = TransactionIdPrecedes(xid, pagefrz->cutoffs->OldestXmin);
 
 		/*
 		 * Verify that xmax aborted if and when freeze plan is executed,
@@ -6621,14 +6640,16 @@ heap_prepare_freeze_tuple(HeapTupleHeader tuple,
 		 * Does this tuple force caller to freeze the entire page?
 		 */
 		pagefrz->freeze_required =
-			heap_tuple_should_freeze(tuple, cutoffs,
+			heap_tuple_should_freeze(tuple, pagefrz->cutoffs,
 									 &pagefrz->NoFreezePageRelfrozenXid,
-									 &pagefrz->NoFreezePageRelminMxid);
+									 &pagefrz->NoFreezePageRelminMxid,
+									 opportunistic, vistest);
 	}
 
 	/* Tell caller if this tuple has a usable freeze plan set in *frz */
 	return freeze_xmin || replace_xvac || replace_xmax || freeze_xmax;
 }
+
 
 /*
  * heap_execute_freeze_tuple
@@ -6670,109 +6691,22 @@ heap_execute_freeze_tuple(HeapTupleHeader tuple, HeapTupleFreeze *frz)
  */
 void
 heap_freeze_execute_prepared(Relation rel, Buffer buffer,
-							 TransactionId snapshotConflictHorizon,
 							 HeapTupleFreeze *tuples, int ntuples)
 {
 	Page		page = BufferGetPage(buffer);
 
 	Assert(ntuples > 0);
 
-	/*
-	 * Perform xmin/xmax XID status sanity checks before critical section.
-	 *
-	 * heap_prepare_freeze_tuple doesn't perform these checks directly because
-	 * pg_xact lookups are relatively expensive.  They shouldn't be repeated
-	 * by successive VACUUMs that each decide against freezing the same page.
-	 */
 	for (int i = 0; i < ntuples; i++)
 	{
 		HeapTupleFreeze *frz = tuples + i;
 		ItemId		itemid = PageGetItemId(page, frz->offset);
 		HeapTupleHeader htup;
 
-		htup = (HeapTupleHeader) PageGetItem(page, itemid);
-
-		/* Deliberately avoid relying on tuple hint bits here */
-		if (frz->checkflags & HEAP_FREEZE_CHECK_XMIN_COMMITTED)
-		{
-			TransactionId xmin = HeapTupleHeaderGetRawXmin(htup);
-
-			Assert(!HeapTupleHeaderXminFrozen(htup));
-			if (unlikely(!TransactionIdDidCommit(xmin)))
-				ereport(ERROR,
-						(errcode(ERRCODE_DATA_CORRUPTED),
-						 errmsg_internal("uncommitted xmin %u needs to be frozen",
-										 xmin)));
-		}
-
-		/*
-		 * TransactionIdDidAbort won't work reliably in the presence of XIDs
-		 * left behind by transactions that were in progress during a crash,
-		 * so we can only check that xmax didn't commit
-		 */
-		if (frz->checkflags & HEAP_FREEZE_CHECK_XMAX_ABORTED)
-		{
-			TransactionId xmax = HeapTupleHeaderGetRawXmax(htup);
-
-			Assert(TransactionIdIsNormal(xmax));
-			if (unlikely(TransactionIdDidCommit(xmax)))
-				ereport(ERROR,
-						(errcode(ERRCODE_DATA_CORRUPTED),
-						 errmsg_internal("cannot freeze committed xmax %u",
-										 xmax)));
-		}
-	}
-
-	START_CRIT_SECTION();
-
-	for (int i = 0; i < ntuples; i++)
-	{
-		HeapTupleFreeze *frz = tuples + i;
-		ItemId		itemid = PageGetItemId(page, frz->offset);
-		HeapTupleHeader htup;
-
+		Assert(ItemIdIsNormal(itemid));
 		htup = (HeapTupleHeader) PageGetItem(page, itemid);
 		heap_execute_freeze_tuple(htup, frz);
 	}
-
-	MarkBufferDirty(buffer);
-
-	/* Now WAL-log freezing if necessary */
-	if (RelationNeedsWAL(rel))
-	{
-		xl_heap_freeze_plan plans[MaxHeapTuplesPerPage];
-		OffsetNumber offsets[MaxHeapTuplesPerPage];
-		int			nplans;
-		xl_heap_freeze_page xlrec;
-		XLogRecPtr	recptr;
-
-		/* Prepare deduplicated representation for use in WAL record */
-		nplans = heap_log_freeze_plan(tuples, ntuples, plans, offsets);
-
-		xlrec.snapshotConflictHorizon = snapshotConflictHorizon;
-		xlrec.isCatalogRel = RelationIsAccessibleInLogicalDecoding(rel);
-		xlrec.nplans = nplans;
-
-		XLogBeginInsert();
-		XLogRegisterData((char *) &xlrec, SizeOfHeapFreezePage);
-
-		/*
-		 * The freeze plan array and offset array are not actually in the
-		 * buffer, but pretend that they are.  When XLogInsert stores the
-		 * whole buffer, the arrays need not be stored too.
-		 */
-		XLogRegisterBuffer(0, buffer, REGBUF_STANDARD);
-		XLogRegisterBufData(0, (char *) plans,
-							nplans * sizeof(xl_heap_freeze_plan));
-		XLogRegisterBufData(0, (char *) offsets,
-							ntuples * sizeof(OffsetNumber));
-
-		recptr = XLogInsert(RM_HEAP2_ID, XLOG_HEAP2_FREEZE_PAGE);
-
-		PageSetLSN(page, recptr);
-	}
-
-	END_CRIT_SECTION();
 }
 
 /*
@@ -6862,7 +6796,7 @@ heap_log_freeze_new_plan(xl_heap_freeze_plan *plan, HeapTupleFreeze *frz)
  * (actually there is one array per freeze plan, but that's not of immediate
  * concern to our caller).
  */
-static int
+int
 heap_log_freeze_plan(HeapTupleFreeze *tuples, int ntuples,
 					 xl_heap_freeze_plan *plans_out,
 					 OffsetNumber *offsets_out)
@@ -6927,7 +6861,7 @@ heap_freeze_tuple(HeapTupleHeader tuple,
 	HeapTupleFreeze frz;
 	bool		do_freeze;
 	bool		totally_frozen;
-	struct VacuumCutoffs cutoffs;
+	VacuumCutoffs cutoffs;
 	HeapPageFreeze pagefrz;
 
 	cutoffs.relfrozenxid = relfrozenxid;
@@ -6937,14 +6871,16 @@ heap_freeze_tuple(HeapTupleHeader tuple,
 	cutoffs.FreezeLimit = FreezeLimit;
 	cutoffs.MultiXactCutoff = MultiXactCutoff;
 
+	pagefrz.opportunistic = false;
 	pagefrz.freeze_required = true;
 	pagefrz.FreezePageRelfrozenXid = FreezeLimit;
 	pagefrz.FreezePageRelminMxid = MultiXactCutoff;
 	pagefrz.NoFreezePageRelfrozenXid = FreezeLimit;
 	pagefrz.NoFreezePageRelminMxid = MultiXactCutoff;
+	pagefrz.cutoffs = &cutoffs;
 
-	do_freeze = heap_prepare_freeze_tuple(tuple, &cutoffs,
-										  &pagefrz, &frz, &totally_frozen);
+	do_freeze = heap_prepare_freeze_tuple(tuple, &pagefrz, &frz,
+			&totally_frozen, NULL, false);
 
 	/*
 	 * Note that because this is not a WAL-logged operation, we don't need to
@@ -7382,9 +7318,10 @@ heap_tuple_needs_eventual_freeze(HeapTupleHeader tuple)
  */
 bool
 heap_tuple_should_freeze(HeapTupleHeader tuple,
-						 const struct VacuumCutoffs *cutoffs,
+						 VacuumCutoffs *cutoffs,
 						 TransactionId *NoFreezePageRelfrozenXid,
-						 MultiXactId *NoFreezePageRelminMxid)
+						 MultiXactId *NoFreezePageRelminMxid,
+						 bool opportunistic, GlobalVisState *vistest)
 {
 	TransactionId xid;
 	MultiXactId multi;
@@ -7397,17 +7334,34 @@ heap_tuple_should_freeze(HeapTupleHeader tuple,
 		Assert(TransactionIdPrecedesOrEquals(cutoffs->relfrozenxid, xid));
 		if (TransactionIdPrecedes(xid, *NoFreezePageRelfrozenXid))
 			*NoFreezePageRelfrozenXid = xid;
+
+		if (opportunistic)
+			lazy_update_freeze_limit(cutoffs, vistest);
+
 		if (TransactionIdPrecedes(xid, cutoffs->FreezeLimit))
 			freeze = true;
+	}
+
+	if (tuple->t_infomask & HEAP_MOVED)
+	{
+		xid = HeapTupleHeaderGetXvac(tuple);
+		if (TransactionIdIsNormal(xid))
+		{
+			Assert(TransactionIdPrecedesOrEquals(cutoffs->relfrozenxid, xid));
+			if (TransactionIdPrecedes(xid, *NoFreezePageRelfrozenXid))
+				*NoFreezePageRelfrozenXid = xid;
+			/* heap_prepare_freeze_tuple forces xvac freezing */
+			freeze = true;
+		}
 	}
 
 	/* Now deal with xmax */
 	xid = InvalidTransactionId;
 	multi = InvalidMultiXactId;
-	if (tuple->t_infomask & HEAP_XMAX_IS_MULTI)
-		multi = HeapTupleHeaderGetRawXmax(tuple);
-	else
+	if (!(tuple->t_infomask & HEAP_XMAX_IS_MULTI))
 		xid = HeapTupleHeaderGetRawXmax(tuple);
+	else if (!opportunistic)
+		multi = HeapTupleHeaderGetRawXmax(tuple);
 
 	if (TransactionIdIsNormal(xid))
 	{
@@ -7415,9 +7369,13 @@ heap_tuple_should_freeze(HeapTupleHeader tuple,
 		/* xmax is a non-permanent XID */
 		if (TransactionIdPrecedes(xid, *NoFreezePageRelfrozenXid))
 			*NoFreezePageRelfrozenXid = xid;
+		if (opportunistic)
+			lazy_update_freeze_limit(cutoffs, vistest);
 		if (TransactionIdPrecedes(xid, cutoffs->FreezeLimit))
 			freeze = true;
 	}
+	else if (opportunistic)
+		;
 	else if (!MultiXactIdIsValid(multi))
 	{
 		/* xmax is a permanent XID or invalid MultiXactId/XID */
@@ -7457,19 +7415,6 @@ heap_tuple_should_freeze(HeapTupleHeader tuple,
 		}
 		if (nmembers > 0)
 			pfree(members);
-	}
-
-	if (tuple->t_infomask & HEAP_MOVED)
-	{
-		xid = HeapTupleHeaderGetXvac(tuple);
-		if (TransactionIdIsNormal(xid))
-		{
-			Assert(TransactionIdPrecedesOrEquals(cutoffs->relfrozenxid, xid));
-			if (TransactionIdPrecedes(xid, *NoFreezePageRelfrozenXid))
-				*NoFreezePageRelfrozenXid = xid;
-			/* heap_prepare_freeze_tuple forces xvac freezing */
-			freeze = true;
-		}
 	}
 
 	return freeze;
@@ -8760,8 +8705,10 @@ heap_xlog_prune(XLogReaderState *record)
 	RelFileLocator rlocator;
 	BlockNumber blkno;
 	XLogRedoAction action;
+	Buffer		vmbuffer = InvalidBuffer;
 
 	XLogRecGetBlockTag(record, 0, &rlocator, NULL, &blkno);
+	Assert((xlrec->flags & VISIBILITYMAP_XLOG_VALID_BITS) == xlrec->flags);
 
 	/*
 	 * We're about to remove tuples. In Hot Standby mode, ensure that there's
@@ -8781,36 +8728,70 @@ heap_xlog_prune(XLogReaderState *record)
 	if (action == BLK_NEEDS_REDO)
 	{
 		Page		page = (Page) BufferGetPage(buffer);
-		OffsetNumber *end;
 		OffsetNumber *redirected;
 		OffsetNumber *nowdead;
 		OffsetNumber *nowunused;
 		int			nredirected;
 		int			ndead;
 		int			nunused;
+		int			nplans;
 		Size		datalen;
+		xl_heap_freeze_plan *plans;
+		OffsetNumber *frz_offsets;
+		int			curoff = 0;
 
-		redirected = (OffsetNumber *) XLogRecGetBlockData(record, 0, &datalen);
-
+		nplans = xlrec->nplans;
 		nredirected = xlrec->nredirected;
 		ndead = xlrec->ndead;
-		end = (OffsetNumber *) ((char *) redirected + datalen);
+		nunused = xlrec->nunused;
+
+		plans = (xl_heap_freeze_plan *) XLogRecGetBlockData(record, 0, &datalen);
+		redirected = (OffsetNumber *) ((char *) plans +
+									(nplans * sizeof(xl_heap_freeze_plan)));
 		nowdead = redirected + (nredirected * 2);
 		nowunused = nowdead + ndead;
-		nunused = (end - nowunused);
-		Assert(nunused >= 0);
+		frz_offsets = nowunused + nunused;
+
+		for (int p = 0; p < nplans; p++)
+		{
+			HeapTupleFreeze frz;
+
+			/*
+			 * Convert freeze plan representation from WAL record into
+			 * per-tuple format used by heap_execute_freeze_tuple
+			 */
+			frz.xmax = plans[p].xmax;
+			frz.t_infomask2 = plans[p].t_infomask2;
+			frz.t_infomask = plans[p].t_infomask;
+			frz.frzflags = plans[p].frzflags;
+			frz.offset = InvalidOffsetNumber;	/* unused, but be tidy */
+
+			for (int i = 0; i < plans[p].ntuples; i++)
+			{
+				OffsetNumber offset = frz_offsets[curoff++];
+				ItemId		lp;
+				HeapTupleHeader tuple;
+
+				lp = PageGetItemId(page, offset);
+				tuple = (HeapTupleHeader) PageGetItem(page, lp);
+				heap_execute_freeze_tuple(tuple, &frz);
+			}
+		}
 
 		/* Update all line pointers per the record, and repair fragmentation */
-		heap_page_prune_execute(buffer,
-								redirected, nredirected,
-								nowdead, ndead,
-								nowunused, nunused);
+		if (nredirected > 0 || ndead > 0 || nunused > 0)
+			heap_page_prune_execute(buffer,
+									redirected, nredirected,
+									nowdead, ndead,
+									nowunused, nunused);
+
+		if ((xlrec->flags & VISIBILITYMAP_ALL_VISIBLE) != 0)
+			PageSetAllVisible(page);
 
 		/*
 		 * Note: we don't worry about updating the page's prunability hints.
 		 * At worst this will cause an extra prune cycle to occur soon.
 		 */
-
 		PageSetLSN(page, lsn);
 		MarkBufferDirty(buffer);
 	}
@@ -8832,6 +8813,44 @@ heap_xlog_prune(XLogReaderState *record)
 		 */
 		XLogRecordPageWithFreeSpace(rlocator, blkno, freespace);
 	}
+
+	/*
+	 * Even if we skipped the heap page update due to the LSN interlock, it's
+	 * still safe to update the visibility map.  Any WAL record that clears
+	 * the visibility map bit does so before checking the page LSN, so any
+	 * bits that need to be cleared will still be cleared.
+	 */
+	if (XLogReadBufferForRedoExtended(record, 0, RBM_ZERO_ON_ERROR, false,
+									  &vmbuffer) == BLK_NEEDS_REDO)
+	{
+		Page		vmpage = BufferGetPage(vmbuffer);
+		Relation	reln;
+		uint8		vmbits;
+
+		/* initialize the page if it was read as zeros */
+		if (PageIsNew(vmpage))
+			PageInit(vmpage, BLCKSZ, 0);
+
+		/* remove VISIBILITYMAP_XLOG_* */
+		vmbits = xlrec->flags & VISIBILITYMAP_VALID_BITS;
+
+		/*
+		 * XLogReadBufferForRedoExtended locked the buffer. But
+		 * visibilitymap_set will handle locking itself.
+		 */
+		LockBuffer(vmbuffer, BUFFER_LOCK_UNLOCK);
+
+		reln = CreateFakeRelcacheEntry(rlocator);
+		visibilitymap_pin(reln, blkno, &vmbuffer);
+
+		visibilitymap_set(reln, blkno, InvalidBuffer, lsn, vmbuffer,
+						  xlrec->snapshotConflictHorizon, vmbits);
+
+		ReleaseBuffer(vmbuffer);
+		FreeFakeRelcacheEntry(reln);
+	}
+	else if (BufferIsValid(vmbuffer))
+		UnlockReleaseBuffer(vmbuffer);
 }
 
 /*
@@ -8847,7 +8866,16 @@ heap_xlog_vacuum(XLogReaderState *record)
 	Buffer		buffer;
 	BlockNumber blkno;
 	XLogRedoAction action;
+	RelFileLocator rlocator;
+	Buffer		vmbuffer = InvalidBuffer;
 
+	XLogRecGetBlockTag(record, 0, &rlocator, NULL, &blkno);
+	Assert((xlrec->flags & VISIBILITYMAP_XLOG_VALID_BITS) == xlrec->flags);
+
+	if (InHotStandby)
+		ResolveRecoveryConflictWithSnapshot(xlrec->snapshotConflictHorizon,
+											xlrec->isCatalogRel,
+											rlocator);
 	/*
 	 * If we have a full-page image, restore it	(without using a cleanup lock)
 	 * and we're done.
@@ -8880,6 +8908,9 @@ heap_xlog_vacuum(XLogReaderState *record)
 		/* Attempt to truncate line pointer array now */
 		PageTruncateLinePointerArray(page);
 
+		if ((xlrec->flags & VISIBILITYMAP_ALL_VISIBLE) != 0)
+			PageSetAllVisible(page);
+
 		PageSetLSN(page, lsn);
 		MarkBufferDirty(buffer);
 	}
@@ -8887,7 +8918,6 @@ heap_xlog_vacuum(XLogReaderState *record)
 	if (BufferIsValid(buffer))
 	{
 		Size		freespace = PageGetHeapFreeSpace(BufferGetPage(buffer));
-		RelFileLocator rlocator;
 
 		XLogRecGetBlockTag(record, 0, &rlocator, NULL, &blkno);
 
@@ -8904,6 +8934,38 @@ heap_xlog_vacuum(XLogReaderState *record)
 		 */
 		XLogRecordPageWithFreeSpace(rlocator, blkno, freespace);
 	}
+
+	if (XLogReadBufferForRedoExtended(record, 0, RBM_ZERO_ON_ERROR, false,
+									  &vmbuffer) == BLK_NEEDS_REDO)
+	{
+		Page		vmpage = BufferGetPage(vmbuffer);
+		Relation	reln;
+		uint8		vmbits;
+
+		/* initialize the page if it was read as zeros */
+		if (PageIsNew(vmpage))
+			PageInit(vmpage, BLCKSZ, 0);
+
+		/* remove VISIBILITYMAP_XLOG_* */
+		vmbits = xlrec->flags & VISIBILITYMAP_VALID_BITS;
+
+		/*
+		 * XLogReadBufferForRedoExtended locked the buffer. But
+		 * visibilitymap_set will handle locking itself.
+		 */
+		LockBuffer(vmbuffer, BUFFER_LOCK_UNLOCK);
+
+		reln = CreateFakeRelcacheEntry(rlocator);
+		visibilitymap_pin(reln, blkno, &vmbuffer);
+
+		visibilitymap_set(reln, blkno, InvalidBuffer, lsn, vmbuffer,
+						  xlrec->snapshotConflictHorizon, vmbits);
+
+		ReleaseBuffer(vmbuffer);
+		FreeFakeRelcacheEntry(reln);
+	}
+	else if (BufferIsValid(vmbuffer))
+		UnlockReleaseBuffer(vmbuffer);
 }
 
 /*
@@ -10168,6 +10230,7 @@ HeapCheckForSerializableConflictOut(bool visible, Relation relation,
 	htsvResult = HeapTupleSatisfiesVacuum(tuple, TransactionXmin, buffer);
 	switch (htsvResult)
 	{
+		case HEAPTUPLE_LIVE_AND_VISIBLE:
 		case HEAPTUPLE_LIVE:
 			if (visible)
 				return;
