@@ -1550,10 +1550,12 @@ lazy_scan_prune(LVRelState *vacrel,
 				recently_dead_tuples;
 	HeapPageFreeze pagefrz;
 	int64		fpi_before = pgWalUsage.wal_fpi;
-	OffsetNumber deadoffsets[MaxHeapTuplesPerPage];
 	HeapTupleFreeze frozen[MaxHeapTuplesPerPage];
 	PruneState	prstate;
 	Oid tableoid = RelationGetRelid(rel);
+
+	bool do_freeze;
+	bool do_prune;
 
 	Assert(BufferGetBlockNumber(buf) == blkno);
 
@@ -1566,6 +1568,12 @@ lazy_scan_prune(LVRelState *vacrel,
 	prstate.snapshotConflictHorizon = InvalidTransactionId;
 	prstate.nredirected = prstate.ndead = prstate.nunused = 0;
 	memset(prstate.marked, 0, sizeof(prstate.marked));
+
+	prunestate->hastup = false;
+	prunestate->has_lpdead_items = false;
+	prunestate->all_visible = true;
+	prunestate->all_frozen = true;
+	prunestate->visibility_cutoff_xid = InvalidTransactionId;
 
 	/*
 	 * maxoff might be reduced following line pointer array truncation in
@@ -1644,6 +1652,12 @@ retry:
 		if (!totally_frozen)
 			prunestate->all_frozen = false;
 	}
+
+	vacrel->offnum = InvalidOffsetNumber;
+
+	do_freeze = pagefrz.freeze_required || tuples_frozen == 0 ||
+		(prunestate->all_visible && prunestate->all_frozen &&
+		 fpi_before != pgWalUsage.wal_fpi);
 
 	/* Scan the page */
 	for (offnum = FirstOffsetNumber;
@@ -1762,15 +1776,6 @@ retry:
 	END_CRIT_SECTION();
 
 
-	/*
-	 * Now scan the page to collect LP_DEAD items and check for tuples
-	 * requiring freezing among remaining tuples with storage
-	 */
-	prunestate->hastup = false;
-	prunestate->has_lpdead_items = false;
-	prunestate->all_visible = true;
-	prunestate->all_frozen = true;
-	prunestate->visibility_cutoff_xid = InvalidTransactionId;
 
 	for (offnum = FirstOffsetNumber;
 		 offnum <= maxoff;
@@ -1798,6 +1803,11 @@ retry:
 
 		if (ItemIdIsDead(itemid))
 		{
+			ItemPointerData tmp;
+			ItemPointerSetBlockNumber(&tmp, blkno);
+			ItemPointerSetOffsetNumber(&tmp, offnum);
+			vacrel->dead_items->items[vacrel->dead_items->num_items++] = tmp;
+			lpdead_items++;
 			/*
 			 * Deliberately don't set hastup for LP_DEAD items.  We make the
 			 * soft assumption that any LP_DEAD items encountered here will
@@ -1812,7 +1822,6 @@ retry:
 			 * (This is another case where it's useful to anticipate that any
 			 * LP_DEAD items will become LP_UNUSED during the ongoing VACUUM.)
 			 */
-			deadoffsets[lpdead_items++] = offnum;
 			continue;
 		}
 
@@ -1954,9 +1963,7 @@ retry:
 	 * freeze when pruning generated an FPI, if doing so means that we set the
 	 * page all-frozen afterwards (might not happen until final heap pass).
 	 */
-	if (pagefrz.freeze_required || tuples_frozen == 0 ||
-		(prunestate->all_visible && prunestate->all_frozen &&
-		 fpi_before != pgWalUsage.wal_fpi))
+	if (do_freeze)
 	{
 		/*
 		 * We're freezing the page.  Our final NewRelfrozenXid doesn't need to
@@ -2051,23 +2058,12 @@ retry:
 	 */
 	if (lpdead_items > 0)
 	{
-		VacDeadItems *dead_items = vacrel->dead_items;
-		ItemPointerData tmp;
-
 		vacrel->lpdead_item_pages++;
 		prunestate->has_lpdead_items = true;
 
-		ItemPointerSetBlockNumber(&tmp, blkno);
-
-		for (int i = 0; i < lpdead_items; i++)
-		{
-			ItemPointerSetOffsetNumber(&tmp, deadoffsets[i]);
-			dead_items->items[dead_items->num_items++] = tmp;
-		}
-
-		Assert(dead_items->num_items <= dead_items->max_items);
+		Assert(vacrel->dead_items->num_items <= vacrel->dead_items->max_items);
 		pgstat_progress_update_param(PROGRESS_VACUUM_NUM_DEAD_TUPLES,
-									 dead_items->num_items);
+									 vacrel->dead_items->num_items);
 
 		/*
 		 * It was convenient to ignore LP_DEAD items in all_visible earlier on
