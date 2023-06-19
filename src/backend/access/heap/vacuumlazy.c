@@ -1816,43 +1816,6 @@ lazy_scan_prune(LVRelState *vacrel,
 
 
 
-	for (offnum = FirstOffsetNumber;
-		 offnum <= maxoff;
-		 offnum = OffsetNumberNext(offnum))
-	{
-		ItemId		itemid;
-
-		/*
-		 * Set the offset number so that we can display it along with any
-		 * error that occurred while processing this tuple.
-		 */
-		vacrel->offnum = offnum;
-		itemid = PageGetItemId(page, offnum);
-
-		if (!ItemIdIsUsed(itemid))
-			continue;
-
-		/* Redirect items mustn't be touched */
-		if (ItemIdIsRedirected(itemid))
-		{
-			/* page makes rel truncation unsafe */
-			prunestate->hastup = true;
-			continue;
-		}
-
-		if (ItemIdIsDead(itemid))
-		{
-			ItemPointerData tmp;
-			ItemPointerSetBlockNumber(&tmp, blkno);
-			ItemPointerSetOffsetNumber(&tmp, offnum);
-			vacrel->dead_items->items[vacrel->dead_items->num_items++] = tmp;
-			lpdead_items++;
-			continue;
-		}
-
-		prunestate->hastup = true;	/* page makes rel truncation unsafe */
-	}
-
 	/*
 	 * We have now divided every item on the page into either an LP_DEAD item
 	 * that will need to be vacuumed in indexes later, or a LP_NORMAL tuple
@@ -1934,6 +1897,44 @@ lazy_scan_prune(LVRelState *vacrel,
 		prunestate->all_frozen = false;
 		tuples_frozen = 0;		/* avoid miscounts in instrumentation */
 	}
+
+	for (offnum = FirstOffsetNumber;
+		 offnum <= maxoff;
+		 offnum = OffsetNumberNext(offnum))
+	{
+		ItemId		itemid;
+
+		/*
+		 * Set the offset number so that we can display it along with any
+		 * error that occurred while processing this tuple.
+		 */
+		vacrel->offnum = offnum;
+		itemid = PageGetItemId(page, offnum);
+
+		if (!ItemIdIsUsed(itemid))
+			continue;
+
+		/* Redirect items mustn't be touched */
+		if (ItemIdIsRedirected(itemid))
+		{
+			/* page makes rel truncation unsafe */
+			prunestate->hastup = true;
+			continue;
+		}
+
+		if (ItemIdIsDead(itemid))
+		{
+			ItemPointerData tmp;
+			ItemPointerSetBlockNumber(&tmp, blkno);
+			ItemPointerSetOffsetNumber(&tmp, offnum);
+			vacrel->dead_items->items[vacrel->dead_items->num_items++] = tmp;
+			lpdead_items++;
+			continue;
+		}
+
+		prunestate->hastup = true;	/* page makes rel truncation unsafe */
+	}
+
 
 	/*
 	 * VACUUM will call heap_page_is_all_visible() during the second pass over
