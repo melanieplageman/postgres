@@ -18,6 +18,7 @@
 #include "access/relscan.h"
 #include "access/sdir.h"
 #include "access/skey.h"
+#include "access/heapam_xlog.h"
 #include "access/table.h"		/* for backward compatibility */
 #include "access/tableam.h"
 #include "nodes/lockoptions.h"
@@ -386,5 +387,9 @@ extern HTSV_Result heap_prune_satisfies_vacuum(PruneState *prstate,
 extern int	heap_prune_chain(Buffer buffer,
 							 OffsetNumber rootoffnum,
 							 PruneState *prstate);
+
+extern int	heap_log_freeze_plan(HeapTupleFreeze *tuples, int ntuples,
+								 xl_heap_freeze_plan *plans_out,
+								 OffsetNumber *offsets_out);
 
 #endif							/* HEAPAM_H */

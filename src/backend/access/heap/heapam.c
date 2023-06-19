@@ -95,9 +95,6 @@ static void compute_new_xmax_infomask(TransactionId xmax, uint16 old_infomask,
 static TM_Result heap_lock_updated_tuple(Relation rel, HeapTuple tuple,
 										 ItemPointer ctid, TransactionId xid,
 										 LockTupleMode mode);
-static int	heap_log_freeze_plan(HeapTupleFreeze *tuples, int ntuples,
-								 xl_heap_freeze_plan *plans_out,
-								 OffsetNumber *offsets_out);
 static void GetMultiXactIdHintBits(MultiXactId multi, uint16 *new_infomask,
 								   uint16 *new_infomask2);
 static TransactionId MultiXactIdGetUpdateXid(TransactionId xmax,
@@ -6667,6 +6664,8 @@ heap_execute_freeze_tuple(HeapTupleHeader tuple, HeapTupleFreeze *frz)
  * crash (or when querying from a standby).  We represent freezing by setting
  * infomask bits in tuple headers, but this shouldn't be thought of as a hint.
  * See section on buffer access rules in src/backend/storage/buffer/README.
+ *
+ * Assume we are in critical section
  */
 void
 heap_freeze_execute_prepared(Relation rel, Buffer buffer,
@@ -6677,54 +6676,6 @@ heap_freeze_execute_prepared(Relation rel, Buffer buffer,
 
 	Assert(ntuples > 0);
 
-	/*
-	 * Perform xmin/xmax XID status sanity checks before critical section.
-	 *
-	 * heap_prepare_freeze_tuple doesn't perform these checks directly because
-	 * pg_xact lookups are relatively expensive.  They shouldn't be repeated
-	 * by successive VACUUMs that each decide against freezing the same page.
-	 */
-	for (int i = 0; i < ntuples; i++)
-	{
-		HeapTupleFreeze *frz = tuples + i;
-		ItemId		itemid = PageGetItemId(page, frz->offset);
-		HeapTupleHeader htup;
-
-		htup = (HeapTupleHeader) PageGetItem(page, itemid);
-
-		/* Deliberately avoid relying on tuple hint bits here */
-		if (frz->checkflags & HEAP_FREEZE_CHECK_XMIN_COMMITTED)
-		{
-			TransactionId xmin = HeapTupleHeaderGetRawXmin(htup);
-
-			Assert(!HeapTupleHeaderXminFrozen(htup));
-			if (unlikely(!TransactionIdDidCommit(xmin)))
-				ereport(ERROR,
-						(errcode(ERRCODE_DATA_CORRUPTED),
-						 errmsg_internal("uncommitted xmin %u needs to be frozen",
-										 xmin)));
-		}
-
-		/*
-		 * TransactionIdDidAbort won't work reliably in the presence of XIDs
-		 * left behind by transactions that were in progress during a crash,
-		 * so we can only check that xmax didn't commit
-		 */
-		if (frz->checkflags & HEAP_FREEZE_CHECK_XMAX_ABORTED)
-		{
-			TransactionId xmax = HeapTupleHeaderGetRawXmax(htup);
-
-			Assert(TransactionIdIsNormal(xmax));
-			if (unlikely(TransactionIdDidCommit(xmax)))
-				ereport(ERROR,
-						(errcode(ERRCODE_DATA_CORRUPTED),
-						 errmsg_internal("cannot freeze committed xmax %u",
-										 xmax)));
-		}
-	}
-
-	START_CRIT_SECTION();
-
 	for (int i = 0; i < ntuples; i++)
 	{
 		HeapTupleFreeze *frz = tuples + i;
@@ -6734,45 +6685,6 @@ heap_freeze_execute_prepared(Relation rel, Buffer buffer,
 		htup = (HeapTupleHeader) PageGetItem(page, itemid);
 		heap_execute_freeze_tuple(htup, frz);
 	}
-
-	MarkBufferDirty(buffer);
-
-	/* Now WAL-log freezing if necessary */
-	if (RelationNeedsWAL(rel))
-	{
-		xl_heap_freeze_plan plans[MaxHeapTuplesPerPage];
-		OffsetNumber offsets[MaxHeapTuplesPerPage];
-		int			nplans;
-		xl_heap_freeze_page xlrec;
-		XLogRecPtr	recptr;
-
-		/* Prepare deduplicated representation for use in WAL record */
-		nplans = heap_log_freeze_plan(tuples, ntuples, plans, offsets);
-
-		xlrec.snapshotConflictHorizon = snapshotConflictHorizon;
-		xlrec.isCatalogRel = RelationIsAccessibleInLogicalDecoding(rel);
-		xlrec.nplans = nplans;
-
-		XLogBeginInsert();
-		XLogRegisterData((char *) &xlrec, SizeOfHeapFreezePage);
-
-		/*
-		 * The freeze plan array and offset array are not actually in the
-		 * buffer, but pretend that they are.  When XLogInsert stores the
-		 * whole buffer, the arrays need not be stored too.
-		 */
-		XLogRegisterBuffer(0, buffer, REGBUF_STANDARD);
-		XLogRegisterBufData(0, (char *) plans,
-							nplans * sizeof(xl_heap_freeze_plan));
-		XLogRegisterBufData(0, (char *) offsets,
-							ntuples * sizeof(OffsetNumber));
-
-		recptr = XLogInsert(RM_HEAP2_ID, XLOG_HEAP2_FREEZE_PAGE);
-
-		PageSetLSN(page, recptr);
-	}
-
-	END_CRIT_SECTION();
 }
 
 /*
@@ -6862,7 +6774,7 @@ heap_log_freeze_new_plan(xl_heap_freeze_plan *plan, HeapTupleFreeze *frz)
  * (actually there is one array per freeze plan, but that's not of immediate
  * concern to our caller).
  */
-static int
+int
 heap_log_freeze_plan(HeapTupleFreeze *tuples, int ntuples,
 					 xl_heap_freeze_plan *plans_out,
 					 OffsetNumber *offsets_out)

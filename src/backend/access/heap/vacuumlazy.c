@@ -1554,6 +1554,7 @@ lazy_scan_prune(LVRelState *vacrel,
 
 	bool do_freeze;
 	bool do_prune;
+	TransactionId snapshotConflictHorizon;
 
 	Assert(BufferGetBlockNumber(buf) == blkno);
 
@@ -1725,6 +1726,76 @@ lazy_scan_prune(LVRelState *vacrel,
 		tuples_frozen = 0;		/* avoid miscounts in instrumentation */
 	}
 
+	if (do_freeze && tuples_frozen > 0)
+	{
+		vacrel->frozen_pages++;
+
+		/*
+			* We can use visibility_cutoff_xid as our cutoff for conflicts
+			* when the whole page is eligible to become all-frozen in the VM
+			* once we're done with it.  Otherwise we generate a conservative
+			* cutoff by stepping back from OldestXmin.
+			*/
+		if (prunestate->all_visible && prunestate->all_frozen)
+		{
+			/* Using same cutoff when setting VM is now unnecessary */
+			snapshotConflictHorizon = prunestate->visibility_cutoff_xid;
+			prunestate->visibility_cutoff_xid = InvalidTransactionId;
+		}
+		else
+		{
+			/* Avoids false conflicts when hot_standby_feedback in use */
+			snapshotConflictHorizon = vacrel->cutoffs.OldestXmin;
+			TransactionIdRetreat(snapshotConflictHorizon);
+		}
+
+		/*
+		* Perform xmin/xmax XID status sanity checks before critical section.
+		*
+		* heap_prepare_freeze_tuple doesn't perform these checks directly because
+		* pg_xact lookups are relatively expensive.  They shouldn't be repeated
+		* by successive VACUUMs that each decide against freezing the same page.
+		*/
+		for (int i = 0; i < tuples_frozen; i++)
+		{
+			HeapTupleFreeze *frz = frozen + i;
+			ItemId		itemid = PageGetItemId(page, frz->offset);
+			HeapTupleHeader htup;
+
+			htup = (HeapTupleHeader) PageGetItem(page, itemid);
+
+			/* Deliberately avoid relying on tuple hint bits here */
+			if (frz->checkflags & HEAP_FREEZE_CHECK_XMIN_COMMITTED)
+			{
+				TransactionId xmin = HeapTupleHeaderGetRawXmin(htup);
+
+				Assert(!HeapTupleHeaderXminFrozen(htup));
+				if (unlikely(!TransactionIdDidCommit(xmin)))
+					ereport(ERROR,
+							(errcode(ERRCODE_DATA_CORRUPTED),
+							errmsg_internal("uncommitted xmin %u needs to be frozen",
+											xmin)));
+			}
+
+			/*
+			* TransactionIdDidAbort won't work reliably in the presence of XIDs
+			* left behind by transactions that were in progress during a crash,
+			* so we can only check that xmax didn't commit
+			*/
+			if (frz->checkflags & HEAP_FREEZE_CHECK_XMAX_ABORTED)
+			{
+				TransactionId xmax = HeapTupleHeaderGetRawXmax(htup);
+
+				Assert(TransactionIdIsNormal(xmax));
+				if (unlikely(TransactionIdDidCommit(xmax)))
+					ereport(ERROR,
+							(errcode(ERRCODE_DATA_CORRUPTED),
+							errmsg_internal("cannot freeze committed xmax %u",
+											xmax)));
+			}
+		}
+	}
+
 	/* Scan the page */
 	for (offnum = FirstOffsetNumber;
 		 offnum <= maxoff;
@@ -1777,13 +1848,41 @@ lazy_scan_prune(LVRelState *vacrel,
 		 * the page.
 		 */
 		PageClearFull(page);
-
 		MarkBufferDirty(buf);
-
+	}
+	else
+	{
 		/*
-		 * Emit a WAL XLOG_HEAP2_PRUNE record showing what we did
+		 * If we didn't prune anything, but have found a new value for the
+		 * pd_prune_xid field, update it and mark the buffer dirty. This is
+		 * treated as a non-WAL-logged hint.
+		 *
+		 * Also clear the "page is full" flag if it is set, since there's no
+		 * point in repeating the prune/defrag process until something else
+		 * happens to the page.
 		 */
-		if (RelationNeedsWAL(rel))
+		if (((PageHeader) page)->pd_prune_xid != prstate.new_prune_xid ||
+			PageIsFull(page))
+		{
+			((PageHeader) page)->pd_prune_xid = prstate.new_prune_xid;
+			PageClearFull(page);
+			MarkBufferDirtyHint(buf, true);
+		}
+	}
+
+	if (do_freeze && tuples_frozen > 0)
+	{
+
+		/* Execute all freeze plans for page as a single atomic action */
+		heap_freeze_execute_prepared(vacrel->rel, buf,
+										snapshotConflictHorizon,
+										frozen, tuples_frozen);
+		MarkBufferDirty(buf);
+	}
+
+	if (RelationNeedsWAL(rel))
+	{
+		if (do_prune)
 		{
 			xl_heap_prune xlrec;
 			XLogRecPtr	recptr;
@@ -1820,24 +1919,38 @@ lazy_scan_prune(LVRelState *vacrel,
 
 			PageSetLSN(BufferGetPage(buf), recptr);
 		}
-	}
-	else
-	{
-		/*
-		 * If we didn't prune anything, but have found a new value for the
-		 * pd_prune_xid field, update it and mark the buffer dirty. This is
-		 * treated as a non-WAL-logged hint.
-		 *
-		 * Also clear the "page is full" flag if it is set, since there's no
-		 * point in repeating the prune/defrag process until something else
-		 * happens to the page.
-		 */
-		if (((PageHeader) page)->pd_prune_xid != prstate.new_prune_xid ||
-			PageIsFull(page))
+		if (do_freeze && tuples_frozen > 0)
 		{
-			((PageHeader) page)->pd_prune_xid = prstate.new_prune_xid;
-			PageClearFull(page);
-			MarkBufferDirtyHint(buf, true);
+			xl_heap_freeze_plan plans[MaxHeapTuplesPerPage];
+			OffsetNumber offsets[MaxHeapTuplesPerPage];
+			int			nplans;
+			xl_heap_freeze_page xlrec;
+			XLogRecPtr	recptr;
+
+			/* Prepare deduplicated representation for use in WAL record */
+			nplans = heap_log_freeze_plan(frozen, tuples_frozen, plans, offsets);
+
+			xlrec.snapshotConflictHorizon = snapshotConflictHorizon;
+			xlrec.isCatalogRel = RelationIsAccessibleInLogicalDecoding(rel);
+			xlrec.nplans = nplans;
+
+			XLogBeginInsert();
+			XLogRegisterData((char *) &xlrec, SizeOfHeapFreezePage);
+
+			/*
+			* The freeze plan array and offset array are not actually in the
+			* buffer, but pretend that they are.  When XLogInsert stores the
+			* whole buffer, the arrays need not be stored too.
+			*/
+			XLogRegisterBuffer(0, buf, REGBUF_STANDARD);
+			XLogRegisterBufData(0, (char *) plans,
+								nplans * sizeof(xl_heap_freeze_plan));
+			XLogRegisterBufData(0, (char *) offsets,
+								tuples_frozen * sizeof(OffsetNumber));
+
+			recptr = XLogInsert(RM_HEAP2_ID, XLOG_HEAP2_FREEZE_PAGE);
+
+			PageSetLSN(page, recptr);
 		}
 	}
 
@@ -1845,36 +1958,6 @@ lazy_scan_prune(LVRelState *vacrel,
 
 	vacrel->offnum = InvalidOffsetNumber;
 
-	if (do_freeze && tuples_frozen > 0)
-	{
-		TransactionId snapshotConflictHorizon;
-
-		vacrel->frozen_pages++;
-
-		/*
-			* We can use visibility_cutoff_xid as our cutoff for conflicts
-			* when the whole page is eligible to become all-frozen in the VM
-			* once we're done with it.  Otherwise we generate a conservative
-			* cutoff by stepping back from OldestXmin.
-			*/
-		if (prunestate->all_visible && prunestate->all_frozen)
-		{
-			/* Using same cutoff when setting VM is now unnecessary */
-			snapshotConflictHorizon = prunestate->visibility_cutoff_xid;
-			prunestate->visibility_cutoff_xid = InvalidTransactionId;
-		}
-		else
-		{
-			/* Avoids false conflicts when hot_standby_feedback in use */
-			snapshotConflictHorizon = vacrel->cutoffs.OldestXmin;
-			TransactionIdRetreat(snapshotConflictHorizon);
-		}
-
-		/* Execute all freeze plans for page as a single atomic action */
-		heap_freeze_execute_prepared(vacrel->rel, buf,
-										snapshotConflictHorizon,
-										frozen, tuples_frozen);
-	}
 
 	for (offnum = FirstOffsetNumber;
 		 offnum <= maxoff;
