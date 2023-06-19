@@ -1541,7 +1541,6 @@ lazy_scan_prune(LVRelState *vacrel,
 	Relation	rel = vacrel->rel;
 	OffsetNumber offnum,
 				maxoff;
-	HeapTupleData tuple;
 	int			tuples_deleted,
 				tuples_frozen,
 				lpdead_items,
@@ -1648,6 +1647,49 @@ lazy_scan_prune(LVRelState *vacrel,
 		 */
 		if (!totally_frozen)
 			prunestate->all_frozen = false;
+
+		switch ((HTSV_Result) prstate.htsv[offnum])
+		{
+			case HEAPTUPLE_LIVE:
+				live_tuples++;
+				if (prunestate->all_visible)
+				{
+					TransactionId xmin;
+
+					if (!HeapTupleHeaderXminCommitted(tup.t_data))
+					{
+						prunestate->all_visible = false;
+						break;
+					}
+
+					xmin = HeapTupleHeaderGetXmin(tup.t_data);
+					if (!TransactionIdPrecedes(xmin,
+											   vacrel->cutoffs.OldestXmin))
+					{
+						prunestate->all_visible = false;
+						break;
+					}
+
+					if (TransactionIdFollows(xmin, prunestate->visibility_cutoff_xid) &&
+						TransactionIdIsNormal(xmin))
+						prunestate->visibility_cutoff_xid = xmin;
+				}
+				break;
+			case HEAPTUPLE_RECENTLY_DEAD:
+				recently_dead_tuples++;
+				prunestate->all_visible = false;
+				break;
+			case HEAPTUPLE_INSERT_IN_PROGRESS:
+				prunestate->all_visible = false;
+				break;
+			case HEAPTUPLE_DELETE_IN_PROGRESS:
+				prunestate->all_visible = false;
+				live_tuples++;
+				break;
+			default:
+				elog(ERROR, "unexpected HeapTupleSatisfiesVacuum result");
+		}
+
 	}
 
 	vacrel->offnum = InvalidOffsetNumber;
@@ -1806,57 +1848,6 @@ lazy_scan_prune(LVRelState *vacrel,
 			vacrel->dead_items->items[vacrel->dead_items->num_items++] = tmp;
 			lpdead_items++;
 			continue;
-		}
-
-		Assert(ItemIdIsNormal(itemid));
-
-		ItemPointerSet(&(tuple.t_self), blkno, offnum);
-		tuple.t_data = (HeapTupleHeader) PageGetItem(page, itemid);
-		tuple.t_len = ItemIdGetLength(itemid);
-		tuple.t_tableOid = RelationGetRelid(rel);
-
-		switch ((HTSV_Result) prstate.htsv[offnum])
-		{
-			case HEAPTUPLE_LIVE:
-				live_tuples++;
-				if (prunestate->all_visible)
-				{
-					TransactionId xmin;
-
-					if (!HeapTupleHeaderXminCommitted(tuple.t_data))
-					{
-						prunestate->all_visible = false;
-						break;
-					}
-
-					xmin = HeapTupleHeaderGetXmin(tuple.t_data);
-					if (!TransactionIdPrecedes(xmin,
-											   vacrel->cutoffs.OldestXmin))
-					{
-						prunestate->all_visible = false;
-						break;
-					}
-
-					if (TransactionIdFollows(xmin, prunestate->visibility_cutoff_xid) &&
-						TransactionIdIsNormal(xmin))
-						prunestate->visibility_cutoff_xid = xmin;
-				}
-				break;
-			case HEAPTUPLE_RECENTLY_DEAD:
-				recently_dead_tuples++;
-				prunestate->all_visible = false;
-				break;
-			case HEAPTUPLE_INSERT_IN_PROGRESS:
-				prunestate->all_visible = false;
-				break;
-			case HEAPTUPLE_DELETE_IN_PROGRESS:
-				prunestate->all_visible = false;
-				live_tuples++;
-				break;
-			case HEAPTUPLE_DEAD:
-				break;
-			default:
-				elog(ERROR, "unexpected HeapTupleSatisfiesVacuum result");
 		}
 
 		prunestate->hastup = true;	/* page makes rel truncation unsafe */
