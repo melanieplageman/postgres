@@ -28,6 +28,7 @@
 #include "storage/shm_toc.h"
 #include "utils/relcache.h"
 #include "utils/snapshot.h"
+#include "utils/snapmgr.h"
 
 
 /* "options" flag bits for heap_insert */
@@ -99,6 +100,55 @@ typedef enum
 	HEAPTUPLE_INSERT_IN_PROGRESS,	/* inserting xact is still in progress */
 	HEAPTUPLE_DELETE_IN_PROGRESS	/* deleting xact is still in progress */
 } HTSV_Result;
+
+/* Working data for heap_page_prune and subroutines */
+typedef struct
+{
+	Relation	rel;
+
+	/* tuple visibility test, initialized for the relation */
+	GlobalVisState *vistest;
+
+	/*
+	 * Thresholds set by TransactionIdLimitedForOldSnapshots() if they have
+	 * been computed (done on demand, and only if
+	 * OldSnapshotThresholdActive()). The first time a tuple is about to be
+	 * removed based on the limited horizon, old_snap_used is set to true, and
+	 * SetOldSnapshotThresholdTimestamp() is called. See
+	 * heap_prune_satisfies_vacuum().
+	 */
+	TimestampTz old_snap_ts;
+	TransactionId old_snap_xmin;
+	bool		old_snap_used;
+
+	TransactionId new_prune_xid;	/* new prune hint value for page */
+	TransactionId snapshotConflictHorizon;	/* latest xid removed */
+	int			nredirected;	/* numbers of entries in arrays below */
+	int			ndead;
+	int			nunused;
+	/* arrays that accumulate indexes of items to be changed */
+	OffsetNumber redirected[MaxHeapTuplesPerPage * 2];
+	OffsetNumber nowdead[MaxHeapTuplesPerPage];
+	OffsetNumber nowunused[MaxHeapTuplesPerPage];
+
+	/*
+	 * marked[i] is true if item i is entered in one of the above arrays.
+	 *
+	 * This needs to be MaxHeapTuplesPerPage + 1 long as FirstOffsetNumber is
+	 * 1. Otherwise every access would need to subtract 1.
+	 */
+	bool		marked[MaxHeapTuplesPerPage + 1];
+
+	/*
+	 * Tuple visibility is only computed once for each tuple, for correctness
+	 * and efficiency reasons; see comment in heap_page_prune() for details.
+	 * This is of type int8[], instead of HTSV_Result[], so we can use -1 to
+	 * indicate no visibility has been computed, e.g. for LP_DEAD items.
+	 *
+	 * Same indexing as ->marked.
+	 */
+	int8		htsv[MaxHeapTuplesPerPage + 1];
+} PruneState;
 
 /*
  * heap_prepare_freeze_tuple may request that heap_freeze_execute_prepared
@@ -328,5 +378,13 @@ extern bool ResolveCminCmaxDuringDecoding(struct HTAB *tuplecid_data,
 										  CommandId *cmin, CommandId *cmax);
 extern void HeapCheckForSerializableConflictOut(bool visible, Relation relation, HeapTuple tuple,
 												Buffer buffer, Snapshot snapshot);
+
+extern HTSV_Result heap_prune_satisfies_vacuum(PruneState *prstate,
+											   HeapTuple tup,
+											   Buffer buffer);
+
+extern int	heap_prune_chain(Buffer buffer,
+							 OffsetNumber rootoffnum,
+							 PruneState *prstate);
 
 #endif							/* HEAPAM_H */

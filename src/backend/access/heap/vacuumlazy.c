@@ -1541,7 +1541,6 @@ lazy_scan_prune(LVRelState *vacrel,
 	Relation	rel = vacrel->rel;
 	OffsetNumber offnum,
 				maxoff;
-	ItemId		itemid;
 	HeapTupleData tuple;
 	HTSV_Result res;
 	int			tuples_deleted,
@@ -1549,13 +1548,24 @@ lazy_scan_prune(LVRelState *vacrel,
 				lpdead_items,
 				live_tuples,
 				recently_dead_tuples;
-	int			nnewlpdead;
 	HeapPageFreeze pagefrz;
 	int64		fpi_before = pgWalUsage.wal_fpi;
 	OffsetNumber deadoffsets[MaxHeapTuplesPerPage];
 	HeapTupleFreeze frozen[MaxHeapTuplesPerPage];
+	PruneState	prstate;
+	Oid tableoid = RelationGetRelid(rel);
 
 	Assert(BufferGetBlockNumber(buf) == blkno);
+
+	prstate.new_prune_xid = InvalidTransactionId;
+	prstate.rel = rel;
+	prstate.vistest = vacrel->vistest;
+	prstate.old_snap_xmin = InvalidTransactionId;
+	prstate.old_snap_ts = 0;
+	prstate.old_snap_used = false;
+	prstate.snapshotConflictHorizon = InvalidTransactionId;
+	prstate.nredirected = prstate.ndead = prstate.nunused = 0;
+	memset(prstate.marked, 0, sizeof(prstate.marked));
 
 	/*
 	 * maxoff might be reduced following line pointer array truncation in
@@ -1587,9 +1597,150 @@ retry:
 	 * lpdead_items's final value can be thought of as the number of tuples
 	 * that were deleted from indexes.
 	 */
-	tuples_deleted = heap_page_prune(rel, buf, vacrel->vistest,
-									 InvalidTransactionId, 0, &nnewlpdead,
-									 &vacrel->offnum);
+	for (offnum = maxoff;
+		 offnum >= FirstOffsetNumber;
+		 offnum = OffsetNumberPrev(offnum))
+	{
+		ItemId		itemid;
+		HeapTupleData tup;
+		HeapTupleHeader htup;
+		itemid = PageGetItemId(page, offnum);
+
+		/* Nothing to do if slot doesn't contain a tuple */
+		if (!ItemIdIsNormal(itemid))
+		{
+			prstate.htsv[offnum] = -1;
+			continue;
+		}
+
+		htup = (HeapTupleHeader) PageGetItem(page, itemid);
+		tup.t_data = htup;
+		tup.t_tableOid = tableoid;
+		tup.t_len = ItemIdGetLength(itemid);
+		ItemPointerSet(&(tup.t_self), blkno, offnum);
+
+		vacrel->offnum = offnum;
+
+		prstate.htsv[offnum] = heap_prune_satisfies_vacuum(&prstate, &tup,
+														   buf);
+	}
+
+	/* Scan the page */
+	for (offnum = FirstOffsetNumber;
+		 offnum <= maxoff;
+		 offnum = OffsetNumberNext(offnum))
+	{
+		ItemId		itemid;
+		/* Ignore items already processed as part of an earlier chain */
+		if (prstate.marked[offnum])
+			continue;
+
+		vacrel->offnum = offnum;
+
+		/* Nothing to do if slot is empty or already dead */
+		itemid = PageGetItemId(page, offnum);
+		if (!ItemIdIsUsed(itemid) || ItemIdIsDead(itemid))
+			continue;
+
+		/* Process this item or chain of items */
+		tuples_deleted += heap_prune_chain(buf, offnum, &prstate);
+	}
+
+	vacrel->offnum = InvalidOffsetNumber;
+
+	/* Any error while applying the changes is critical */
+	START_CRIT_SECTION();
+
+	/* Have we found any prunable items? */
+	if (prstate.nredirected > 0 || prstate.ndead > 0 || prstate.nunused > 0)
+	{
+		/*
+		 * Apply the planned item changes, then repair page fragmentation, and
+		 * update the page's hint bit about whether it has free line pointers.
+		 */
+		heap_page_prune_execute(buf,
+								prstate.redirected, prstate.nredirected,
+								prstate.nowdead, prstate.ndead,
+								prstate.nowunused, prstate.nunused);
+
+		/*
+		 * Update the page's pd_prune_xid field to either zero, or the lowest
+		 * XID of any soon-prunable tuple.
+		 */
+		((PageHeader) page)->pd_prune_xid = prstate.new_prune_xid;
+
+		/*
+		 * Also clear the "page is full" flag, since there's no point in
+		 * repeating the prune/defrag process until something else happens to
+		 * the page.
+		 */
+		PageClearFull(page);
+
+		MarkBufferDirty(buf);
+
+		/*
+		 * Emit a WAL XLOG_HEAP2_PRUNE record showing what we did
+		 */
+		if (RelationNeedsWAL(rel))
+		{
+			xl_heap_prune xlrec;
+			XLogRecPtr	recptr;
+
+			xlrec.isCatalogRel = RelationIsAccessibleInLogicalDecoding(rel);
+			xlrec.snapshotConflictHorizon = prstate.snapshotConflictHorizon;
+			xlrec.nredirected = prstate.nredirected;
+			xlrec.ndead = prstate.ndead;
+
+			XLogBeginInsert();
+			XLogRegisterData((char *) &xlrec, SizeOfHeapPrune);
+
+			XLogRegisterBuffer(0, buf, REGBUF_STANDARD);
+
+			/*
+			 * The OffsetNumber arrays are not actually in the buffer, but we
+			 * pretend that they are.  When XLogInsert stores the whole
+			 * buffer, the offset arrays need not be stored too.
+			 */
+			if (prstate.nredirected > 0)
+				XLogRegisterBufData(0, (char *) prstate.redirected,
+									prstate.nredirected *
+									sizeof(OffsetNumber) * 2);
+
+			if (prstate.ndead > 0)
+				XLogRegisterBufData(0, (char *) prstate.nowdead,
+									prstate.ndead * sizeof(OffsetNumber));
+
+			if (prstate.nunused > 0)
+				XLogRegisterBufData(0, (char *) prstate.nowunused,
+									prstate.nunused * sizeof(OffsetNumber));
+
+			recptr = XLogInsert(RM_HEAP2_ID, XLOG_HEAP2_PRUNE);
+
+			PageSetLSN(BufferGetPage(buf), recptr);
+		}
+	}
+	else
+	{
+		/*
+		 * If we didn't prune anything, but have found a new value for the
+		 * pd_prune_xid field, update it and mark the buffer dirty. This is
+		 * treated as a non-WAL-logged hint.
+		 *
+		 * Also clear the "page is full" flag if it is set, since there's no
+		 * point in repeating the prune/defrag process until something else
+		 * happens to the page.
+		 */
+		if (((PageHeader) page)->pd_prune_xid != prstate.new_prune_xid ||
+			PageIsFull(page))
+		{
+			((PageHeader) page)->pd_prune_xid = prstate.new_prune_xid;
+			PageClearFull(page);
+			MarkBufferDirtyHint(buf, true);
+		}
+	}
+
+	END_CRIT_SECTION();
+
 
 	/*
 	 * Now scan the page to collect LP_DEAD items and check for tuples
@@ -1605,6 +1756,7 @@ retry:
 		 offnum <= maxoff;
 		 offnum = OffsetNumberNext(offnum))
 	{
+		ItemId		itemid;
 		bool		totally_frozen;
 
 		/*

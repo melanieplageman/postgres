@@ -28,62 +28,8 @@
 #include "utils/rel.h"
 #include "utils/snapmgr.h"
 
-/* Working data for heap_page_prune and subroutines */
-typedef struct
-{
-	Relation	rel;
-
-	/* tuple visibility test, initialized for the relation */
-	GlobalVisState *vistest;
-
-	/*
-	 * Thresholds set by TransactionIdLimitedForOldSnapshots() if they have
-	 * been computed (done on demand, and only if
-	 * OldSnapshotThresholdActive()). The first time a tuple is about to be
-	 * removed based on the limited horizon, old_snap_used is set to true, and
-	 * SetOldSnapshotThresholdTimestamp() is called. See
-	 * heap_prune_satisfies_vacuum().
-	 */
-	TimestampTz old_snap_ts;
-	TransactionId old_snap_xmin;
-	bool		old_snap_used;
-
-	TransactionId new_prune_xid;	/* new prune hint value for page */
-	TransactionId snapshotConflictHorizon;	/* latest xid removed */
-	int			nredirected;	/* numbers of entries in arrays below */
-	int			ndead;
-	int			nunused;
-	/* arrays that accumulate indexes of items to be changed */
-	OffsetNumber redirected[MaxHeapTuplesPerPage * 2];
-	OffsetNumber nowdead[MaxHeapTuplesPerPage];
-	OffsetNumber nowunused[MaxHeapTuplesPerPage];
-
-	/*
-	 * marked[i] is true if item i is entered in one of the above arrays.
-	 *
-	 * This needs to be MaxHeapTuplesPerPage + 1 long as FirstOffsetNumber is
-	 * 1. Otherwise every access would need to subtract 1.
-	 */
-	bool		marked[MaxHeapTuplesPerPage + 1];
-
-	/*
-	 * Tuple visibility is only computed once for each tuple, for correctness
-	 * and efficiency reasons; see comment in heap_page_prune() for details.
-	 * This is of type int8[], instead of HTSV_Result[], so we can use -1 to
-	 * indicate no visibility has been computed, e.g. for LP_DEAD items.
-	 *
-	 * Same indexing as ->marked.
-	 */
-	int8		htsv[MaxHeapTuplesPerPage + 1];
-} PruneState;
 
 /* Local functions */
-static HTSV_Result heap_prune_satisfies_vacuum(PruneState *prstate,
-											   HeapTuple tup,
-											   Buffer buffer);
-static int	heap_prune_chain(Buffer buffer,
-							 OffsetNumber rootoffnum,
-							 PruneState *prstate);
 static void heap_prune_record_prunable(PruneState *prstate, TransactionId xid);
 static void heap_prune_record_redirect(PruneState *prstate,
 									   OffsetNumber offnum, OffsetNumber rdoffnum);
@@ -495,7 +441,7 @@ heap_page_prune(Relation relation, Buffer buffer,
  * old_snapshot_threshold. So we call TransactionIdLimitedForOldSnapshots() on
  * demand in here, if appropriate.
  */
-static HTSV_Result
+HTSV_Result
 heap_prune_satisfies_vacuum(PruneState *prstate, HeapTuple tup, Buffer buffer)
 {
 	HTSV_Result res;
@@ -587,7 +533,7 @@ heap_prune_satisfies_vacuum(PruneState *prstate, HeapTuple tup, Buffer buffer)
  *
  * Returns the number of tuples (to be) deleted from the page.
  */
-static int
+int
 heap_prune_chain(Buffer buffer, OffsetNumber rootoffnum, PruneState *prstate)
 {
 	int			ndeleted = 0;
