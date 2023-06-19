@@ -1721,11 +1721,13 @@ lazy_scan_prune(LVRelState *vacrel,
 
 	vacrel->offnum = InvalidOffsetNumber;
 
+	do_prune = prstate.nredirected > 0 || prstate.ndead > 0 || prstate.nunused > 0;
+
 	/* Any error while applying the changes is critical */
 	START_CRIT_SECTION();
 
 	/* Have we found any prunable items? */
-	if (prstate.nredirected > 0 || prstate.ndead > 0 || prstate.nunused > 0)
+	if (do_prune)
 	{
 		/*
 		 * Apply the planned item changes, then repair page fragmentation, and
@@ -1814,14 +1816,6 @@ lazy_scan_prune(LVRelState *vacrel,
 
 	END_CRIT_SECTION();
 
-
-
-	/*
-	 * We have now divided every item on the page into either an LP_DEAD item
-	 * that will need to be vacuumed in indexes later, or a LP_NORMAL tuple
-	 * that remains and needs to be considered for freezing now (LP_UNUSED and
-	 * LP_REDIRECT items also remain, but are of no further interest to us).
-	 */
 	vacrel->offnum = InvalidOffsetNumber;
 
 	/*
