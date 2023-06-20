@@ -249,7 +249,7 @@ static bool lazy_scan_new_or_empty(LVRelState *vacrel, Buffer buf,
 								   BlockNumber blkno, Page page,
 								   bool sharelock, Buffer vmbuffer);
 static void lazy_scan_prune(LVRelState *vacrel, Buffer buf,
-							BlockNumber blkno, Page page,
+							BlockNumber blkno, Page page, Buffer vmbuffer,
 							LVPagePruneState *prunestate);
 static bool lazy_scan_noprune(LVRelState *vacrel, Buffer buf,
 							  BlockNumber blkno, Page page,
@@ -1010,22 +1010,9 @@ lazy_scan_heap(LVRelState *vacrel)
 			continue;
 		}
 
-		/*
-		 * Prune, freeze, and count tuples.
-		 *
-		 * Accumulates details of remaining LP_DEAD line pointers on page in
-		 * dead_items array.  This includes LP_DEAD line pointers that we
-		 * pruned ourselves, as well as existing LP_DEAD line pointers that
-		 * were pruned some time earlier.  Also considers freezing XIDs in the
-		 * tuple headers of remaining items with storage.
-		 */
-		lazy_scan_prune(vacrel, buf, blkno, page, &prunestate);
+		lazy_scan_prune(vacrel, buf, blkno, page, vmbuffer, &prunestate);
 
 		Assert(!prunestate.all_visible || !prunestate.has_lpdead_items);
-
-		/* Remember the location of the last page with nonremovable tuples */
-		if (prunestate.hastup)
-			vacrel->nonempty_pages = blkno + 1;
 
 		if (vacrel->nindexes == 0)
 		{
@@ -1041,16 +1028,6 @@ lazy_scan_heap(LVRelState *vacrel)
 			{
 				Size		freespace;
 
-				lazy_vacuum_heap_page(vacrel, blkno, buf, 0, vmbuffer);
-
-				/* Forget the LP_DEAD items that we just vacuumed */
-				dead_items->num_items = 0;
-
-				/*
-				 * Periodically perform FSM vacuuming to make newly-freed
-				 * space visible on upper FSM pages.  Note we have not yet
-				 * performed FSM processing for blkno.
-				 */
 				if (blkno - next_fsm_block_to_vacuum >= VACUUM_FSM_EVERY_PAGES)
 				{
 					FreeSpaceMapVacuumRange(vacrel->rel, next_fsm_block_to_vacuum,
@@ -1536,6 +1513,7 @@ lazy_scan_prune(LVRelState *vacrel,
 				Buffer buf,
 				BlockNumber blkno,
 				Page page,
+				Buffer vmbuffer,
 				LVPagePruneState *prunestate)
 {
 	Relation	rel = vacrel->rel;
@@ -2045,6 +2023,16 @@ lazy_scan_prune(LVRelState *vacrel,
 	vacrel->lpdead_items += lpdead_items;
 	vacrel->live_tuples += live_tuples;
 	vacrel->recently_dead_tuples += recently_dead_tuples;
+
+	if (prunestate->hastup)
+		vacrel->nonempty_pages = blkno + 1;
+
+	if (vacrel->nindexes > 0 || lpdead_items == 0)
+		return;
+
+	lazy_vacuum_heap_page(vacrel, blkno, buf, 0, vmbuffer);
+
+	vacrel->dead_items->num_items = 0;
 }
 
 /*
