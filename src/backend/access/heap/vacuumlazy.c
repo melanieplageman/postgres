@@ -1836,22 +1836,14 @@ lazy_scan_prune(LVRelState *vacrel,
 								prstate.nowdead, prstate.ndead,
 								prstate.nowunused, prstate.nunused);
 
+	}
+
+	if (do_prune || (((PageHeader) page)->pd_prune_xid != prstate.new_prune_xid || PageIsFull(page)))
+	{
 		/*
 		 * Update the page's pd_prune_xid field to either zero, or the lowest
 		 * XID of any soon-prunable tuple.
 		 */
-		((PageHeader) page)->pd_prune_xid = prstate.new_prune_xid;
-
-		/*
-		 * Also clear the "page is full" flag, since there's no point in
-		 * repeating the prune/defrag process until something else happens to
-		 * the page.
-		 */
-		PageClearFull(page);
-		MarkBufferDirty(buf);
-	}
-	else
-	{
 		/*
 		 * If we didn't prune anything, but have found a new value for the
 		 * pd_prune_xid field, update it and mark the buffer dirty. This is
@@ -1861,24 +1853,22 @@ lazy_scan_prune(LVRelState *vacrel,
 		 * point in repeating the prune/defrag process until something else
 		 * happens to the page.
 		 */
-		if (((PageHeader) page)->pd_prune_xid != prstate.new_prune_xid ||
-			PageIsFull(page))
-		{
-			((PageHeader) page)->pd_prune_xid = prstate.new_prune_xid;
-			PageClearFull(page);
-			MarkBufferDirtyHint(buf, true);
-		}
+		((PageHeader) page)->pd_prune_xid = prstate.new_prune_xid;
+		PageClearFull(page);
 	}
 
 	if (do_freeze && tuples_frozen > 0)
 	{
-
 		/* Execute all freeze plans for page as a single atomic action */
 		heap_freeze_execute_prepared(vacrel->rel, buf,
 										snapshotConflictHorizon,
 										frozen, tuples_frozen);
-		MarkBufferDirty(buf);
 	}
+
+	if (do_prune || (do_freeze && tuples_frozen > 0))
+		MarkBufferDirty(buf);
+	else
+		MarkBufferDirtyHint(buf, true);
 
 	if (RelationNeedsWAL(rel))
 	{
@@ -1995,6 +1985,7 @@ lazy_scan_prune(LVRelState *vacrel,
 
 		prunestate->hastup = true;	/* page makes rel truncation unsafe */
 	}
+	// TODO: figure out what I can clean up and make new WAL also find all visible WAL
 
 
 	/*
