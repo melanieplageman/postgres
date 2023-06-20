@@ -1554,7 +1554,8 @@ lazy_scan_prune(LVRelState *vacrel,
 
 	bool do_freeze;
 	bool do_prune;
-	TransactionId snapshotConflictHorizon;
+	// TODO: can we consolidate pruning and freezing conflict horizons?
+	TransactionId frzsnapshotConflictHorizon;
 
 	Assert(BufferGetBlockNumber(buf) == blkno);
 
@@ -1711,6 +1712,7 @@ lazy_scan_prune(LVRelState *vacrel,
 		 * We're freezing the page.  Our final NewRelfrozenXid doesn't need to
 		 * be affected by the XIDs that are just about to be frozen anyway.
 		 */
+		// TODO: why do we still want to set these when tuples_frozen == 0
 		vacrel->NewRelfrozenXid = pagefrz.FreezePageRelfrozenXid;
 		vacrel->NewRelminMxid = pagefrz.FreezePageRelminMxid;
 	}
@@ -1720,6 +1722,7 @@ lazy_scan_prune(LVRelState *vacrel,
 		 * Page requires "no freeze" processing.  It might be set all-visible
 		 * in the visibility map, but it can never be set all-frozen.
 		 */
+		// TODO: what are these
 		vacrel->NewRelfrozenXid = pagefrz.NoFreezePageRelfrozenXid;
 		vacrel->NewRelminMxid = pagefrz.NoFreezePageRelminMxid;
 		prunestate->all_frozen = false;
@@ -1739,14 +1742,14 @@ lazy_scan_prune(LVRelState *vacrel,
 		if (prunestate->all_visible && prunestate->all_frozen)
 		{
 			/* Using same cutoff when setting VM is now unnecessary */
-			snapshotConflictHorizon = prunestate->visibility_cutoff_xid;
+			frzsnapshotConflictHorizon = prunestate->visibility_cutoff_xid;
 			prunestate->visibility_cutoff_xid = InvalidTransactionId;
 		}
 		else
 		{
 			/* Avoids false conflicts when hot_standby_feedback in use */
-			snapshotConflictHorizon = vacrel->cutoffs.OldestXmin;
-			TransactionIdRetreat(snapshotConflictHorizon);
+			frzsnapshotConflictHorizon = vacrel->cutoffs.OldestXmin;
+			TransactionIdRetreat(frzsnapshotConflictHorizon);
 		}
 
 		/*
@@ -1861,7 +1864,7 @@ lazy_scan_prune(LVRelState *vacrel,
 	{
 		/* Execute all freeze plans for page as a single atomic action */
 		heap_freeze_execute_prepared(vacrel->rel, buf,
-										snapshotConflictHorizon,
+										frzsnapshotConflictHorizon,
 										frozen, tuples_frozen);
 	}
 
@@ -1920,7 +1923,7 @@ lazy_scan_prune(LVRelState *vacrel,
 			/* Prepare deduplicated representation for use in WAL record */
 			nplans = heap_log_freeze_plan(frozen, tuples_frozen, plans, offsets);
 
-			xlrec.snapshotConflictHorizon = snapshotConflictHorizon;
+			xlrec.snapshotConflictHorizon = frzsnapshotConflictHorizon;
 			xlrec.isCatalogRel = RelationIsAccessibleInLogicalDecoding(rel);
 			xlrec.nplans = nplans;
 
