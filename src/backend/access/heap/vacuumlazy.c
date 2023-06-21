@@ -845,7 +845,6 @@ lazy_scan_heap(LVRelState *vacrel)
 	initprog_val[2] = dead_items->max_items;
 	pgstat_progress_update_multi_param(3, initprog_index, initprog_val);
 
-	/* Set up an initial range of skippable blocks using the visibility map */
 	next_unskippable_block = lazy_scan_skip(vacrel, &vmbuffer, 0,
 											&next_unskippable_allvis,
 											&skipping_current_range);
@@ -858,10 +857,6 @@ lazy_scan_heap(LVRelState *vacrel)
 
 		if (blkno == next_unskippable_block)
 		{
-			/*
-			 * Can't skip this page safely.  Must scan the page.  But
-			 * determine the next skippable range after the page first.
-			 */
 			all_visible_according_to_vm = next_unskippable_allvis;
 			next_unskippable_block = lazy_scan_skip(vacrel, &vmbuffer,
 													blkno + 1,
@@ -872,88 +867,47 @@ lazy_scan_heap(LVRelState *vacrel)
 		}
 		else
 		{
-			/* Last page always scanned (may need to set nonempty_pages) */
 			Assert(blkno < rel_pages - 1);
 
 			if (skipping_current_range)
 				continue;
 
-			/* Current range is too small to skip -- just scan the page */
 			all_visible_according_to_vm = true;
 		}
 
 		vacrel->scanned_pages++;
 
-		/* Report as block scanned, update error traceback information */
 		pgstat_progress_update_param(PROGRESS_VACUUM_HEAP_BLKS_SCANNED, blkno);
 		update_vacuum_error_info(vacrel, NULL, VACUUM_ERRCB_PHASE_SCAN_HEAP,
 								 blkno, InvalidOffsetNumber);
 
 		vacuum_delay_point();
-
-		/*
-		 * Regularly check if wraparound failsafe should trigger.
-		 *
-		 * There is a similar check inside lazy_vacuum_all_indexes(), but
-		 * relfrozenxid might start to look dangerously old before we reach
-		 * that point.  This check also provides failsafe coverage for the
-		 * one-pass strategy, and the two-pass strategy with the index_cleanup
-		 * param set to 'off'.
-		 */
 		if (vacrel->scanned_pages % FAILSAFE_EVERY_PAGES == 0)
 			lazy_check_wraparound_failsafe(vacrel);
 
-		/*
-		 * Consider if we definitely have enough space to process TIDs on page
-		 * already.  If we are close to overrunning the available space for
-		 * dead_items TIDs, pause and do a cycle of vacuuming before we tackle
-		 * this page.
-		 */
 		Assert(dead_items->max_items >= MaxHeapTuplesPerPage);
+
 		if (dead_items->max_items - dead_items->num_items < MaxHeapTuplesPerPage)
 		{
-			/*
-			 * Before beginning index vacuuming, we release any pin we may
-			 * hold on the visibility map page.  This isn't necessary for
-			 * correctness, but we do it anyway to avoid holding the pin
-			 * across a lengthy, unrelated operation.
-			 */
 			if (BufferIsValid(vmbuffer))
 			{
 				ReleaseBuffer(vmbuffer);
 				vmbuffer = InvalidBuffer;
 			}
 
-			/* Perform a round of index and heap vacuuming */
 			vacrel->consider_bypass_optimization = false;
 			lazy_vacuum(vacrel);
 
-			/*
-			 * Vacuum the Free Space Map to make newly-freed space visible on
-			 * upper-level FSM pages.  Note we have not yet processed blkno.
-			 */
 			FreeSpaceMapVacuumRange(vacrel->rel, next_fsm_block_to_vacuum,
 									blkno);
 			next_fsm_block_to_vacuum = blkno;
 
-			/* Report that we are once again scanning the heap */
 			pgstat_progress_update_param(PROGRESS_VACUUM_PHASE,
 										 PROGRESS_VACUUM_PHASE_SCAN_HEAP);
 		}
 
-		/*
-		 * Pin the visibility map page in case we need to mark the page
-		 * all-visible.  In most cases this will be very cheap, because we'll
-		 * already have the correct page pinned anyway.
-		 */
 		visibilitymap_pin(vacrel->rel, blkno, &vmbuffer);
 
-		/*
-		 * We need a buffer cleanup lock to prune HOT chains and defragment
-		 * the page in lazy_scan_prune.  But when it's not possible to acquire
-		 * a cleanup lock right away, we may be able to settle for reduced
-		 * processing using lazy_scan_noprune.
-		 */
 		buf = ReadBufferExtended(vacrel->rel, MAIN_FORKNUM, blkno, RBM_NORMAL,
 								 vacrel->bstrategy);
 		page = BufferGetPage(buf);
