@@ -1724,27 +1724,6 @@ lazy_scan_prune(LVRelState *vacrel,
 
 	if (prunestate->hastup)
 		vacrel->nonempty_pages = blkno + 1;
-	/*
-	 * VACUUM will call heap_page_is_all_visible() during the second pass over
-	 * the heap to determine all_visible and all_frozen for the page -- this
-	 * is a specialized version of the logic from this function.  Now that
-	 * we've finished pruning and freezing, make sure that we're in total
-	 * agreement with heap_page_is_all_visible() using an assertion.
-	 */
-#ifdef USE_ASSERT_CHECKING
-	/* Note that all_frozen value does not matter when !all_visible */
-	if (prunestate->all_visible && lpdead_items == 0)
-	{
-		TransactionId cutoff;
-		bool		all_frozen;
-
-		if (!heap_page_is_all_visible(vacrel, buf, &cutoff, &all_frozen))
-			Assert(false);
-
-		Assert(!TransactionIdIsValid(cutoff) ||
-			   cutoff == prunestate->visibility_cutoff_xid);
-	}
-#endif
 
 	if (vacrel->nindexes == 0 && lpdead_items > 0)
 	{
@@ -1754,6 +1733,7 @@ lazy_scan_prune(LVRelState *vacrel,
 		pgstat_progress_update_param(PROGRESS_VACUUM_NUM_DEAD_TUPLES,
 									 vacrel->dead_items->num_items);
 
+		// TODO: inline this
 		lazy_vacuum_heap_page(vacrel, blkno, buf, 0, vmbuffer);
 
 		vacrel->dead_items->num_items = 0;
@@ -1762,11 +1742,26 @@ lazy_scan_prune(LVRelState *vacrel,
 	else
 	{
 		/* (vacrel->nindexes > 0 || lpdead_items == 0) */
-
 		if (lpdead_items > 0)
 		{
 			prunestate->all_visible = false;
 			vacrel->lpdead_item_pages++;
+			Assert(vacrel->dead_items->num_items <= vacrel->dead_items->max_items);
+			pgstat_progress_update_param(PROGRESS_VACUUM_NUM_DEAD_TUPLES,
+										vacrel->dead_items->num_items);
+		}
+		else if (prunestate->all_visible)
+		{
+#ifdef USE_ASSERT_CHECKING
+			TransactionId cutoff;
+			bool		all_frozen;
+
+			if (!heap_page_is_all_visible(vacrel, buf, &cutoff, &all_frozen))
+				Assert(false);
+
+			Assert(!TransactionIdIsValid(cutoff) ||
+				cutoff == prunestate->visibility_cutoff_xid);
+#endif
 		}
 
 		if (!all_visible_according_to_vm && prunestate->all_visible)
@@ -1817,13 +1812,6 @@ lazy_scan_prune(LVRelState *vacrel,
 							  vmbuffer, InvalidTransactionId,
 							  VISIBILITYMAP_ALL_VISIBLE |
 							  VISIBILITYMAP_ALL_FROZEN);
-		}
-
-		if (lpdead_items > 0)
-		{
-			Assert(vacrel->dead_items->num_items <= vacrel->dead_items->max_items);
-			pgstat_progress_update_param(PROGRESS_VACUUM_NUM_DEAD_TUPLES,
-										vacrel->dead_items->num_items);
 		}
 	}
 
