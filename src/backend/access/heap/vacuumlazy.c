@@ -1653,6 +1653,15 @@ lazy_scan_prune(LVRelState *vacrel,
 	vacrel->lpdead_items += lpdead_items;
 
 	vacuum_now = vacrel->nindexes == 0 && lpdead_items > 0;
+	if (vacuum_now)
+	{
+		vacrel->lpdead_item_pages++;
+		prunestate->all_visible = false;
+		Assert(vacrel->dead_items->num_items <= vacrel->dead_items->max_items);
+		pgstat_progress_update_param(PROGRESS_VACUUM_NUM_DEAD_TUPLES,
+									 vacrel->dead_items->num_items);
+		pgstat_progress_update_param(PROGRESS_VACUUM_HEAP_BLKS_VACUUMED, blkno);
+	}
 
 	if (do_prune || (do_freeze && tuples_frozen > 0) || vacuum_now)
 		MarkBufferDirty(buf);
@@ -1738,13 +1747,6 @@ lazy_scan_prune(LVRelState *vacrel,
 		OffsetNumber unused[MaxHeapTuplesPerPage];
 		int			nunused = 0;
 
-		vacrel->lpdead_item_pages++;
-		prunestate->all_visible = false;
-		Assert(vacrel->dead_items->num_items <= vacrel->dead_items->max_items);
-		pgstat_progress_update_param(PROGRESS_VACUUM_NUM_DEAD_TUPLES,
-									 vacrel->dead_items->num_items);
-		pgstat_progress_update_param(PROGRESS_VACUUM_HEAP_BLKS_VACUUMED, blkno);
-
 		for (int i = 0; i < vacrel->dead_items->num_items; i++)
 		{
 			BlockNumber tblk;
@@ -1766,7 +1768,6 @@ lazy_scan_prune(LVRelState *vacrel,
 
 		/* Attempt to truncate line pointer array now */
 		PageTruncateLinePointerArray(page);
-
 
 		/* XLOG stuff */
 		if (RelationNeedsWAL(vacrel->rel))
