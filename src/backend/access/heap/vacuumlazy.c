@@ -1707,6 +1707,32 @@ lazy_scan_prune(LVRelState *vacrel,
 
 			PageSetLSN(page, recptr);
 	}
+
+
+	if (vacuum_now)
+	{
+		for (int i = 0; i < vacrel->dead_items->num_items; i++)
+		{
+			BlockNumber tblk;
+			OffsetNumber toff;
+			ItemId		itemid;
+
+			tblk = ItemPointerGetBlockNumber(&vacrel->dead_items->items[i]);
+			if (tblk != blkno)
+				break;				/* past end of tuples for this block */
+			toff = ItemPointerGetOffsetNumber(&vacrel->dead_items->items[i]);
+			itemid = PageGetItemId(page, toff);
+
+			Assert(ItemIdIsDead(itemid) && !ItemIdHasStorage(itemid));
+			ItemIdSetUnused(itemid);
+			vac_unused[vac_nunused++] = toff;
+		}
+
+		Assert(vac_nunused > 0);
+		/* Attempt to truncate line pointer array now */
+		PageTruncateLinePointerArray(page);
+	}
+
 	if (RelationNeedsWAL(rel) && do_freeze && tuples_frozen > 0)
 	{
 		xl_heap_freeze_plan plans[MaxHeapTuplesPerPage];
@@ -1739,30 +1765,6 @@ lazy_scan_prune(LVRelState *vacrel,
 		recptr = XLogInsert(RM_HEAP2_ID, XLOG_HEAP2_FREEZE_PAGE);
 
 		PageSetLSN(page, recptr);
-	}
-
-	if (vacuum_now)
-	{
-		for (int i = 0; i < vacrel->dead_items->num_items; i++)
-		{
-			BlockNumber tblk;
-			OffsetNumber toff;
-			ItemId		itemid;
-
-			tblk = ItemPointerGetBlockNumber(&vacrel->dead_items->items[i]);
-			if (tblk != blkno)
-				break;				/* past end of tuples for this block */
-			toff = ItemPointerGetOffsetNumber(&vacrel->dead_items->items[i]);
-			itemid = PageGetItemId(page, toff);
-
-			Assert(ItemIdIsDead(itemid) && !ItemIdHasStorage(itemid));
-			ItemIdSetUnused(itemid);
-			vac_unused[vac_nunused++] = toff;
-		}
-
-		Assert(vac_nunused > 0);
-		/* Attempt to truncate line pointer array now */
-		PageTruncateLinePointerArray(page);
 	}
 
 	if (RelationNeedsWAL(rel) && vacuum_now)
