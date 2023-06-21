@@ -1288,6 +1288,7 @@ lazy_scan_prune(LVRelState *vacrel,
 	// TODO: add in vacuum error phase for this prune freeze vacuum combo (for update_vacuum_error_info)
 	bool do_freeze;
 	bool do_prune;
+	bool vacuum_now = false;
 	// TODO: can we consolidate pruning and freezing conflict horizons?
 	TransactionId frzsnapshotConflictHorizon = InvalidTransactionId;
 
@@ -1646,6 +1647,8 @@ lazy_scan_prune(LVRelState *vacrel,
 		prunestate->hastup = true;	/* page makes rel truncation unsafe */
 	}
 
+	vacuum_now = vacrel->nindexes == 0 && lpdead_items > 0;
+
 	if (do_prune || (do_freeze && tuples_frozen > 0))
 		MarkBufferDirty(buf);
 	else
@@ -1734,13 +1737,11 @@ lazy_scan_prune(LVRelState *vacrel,
 	if (prunestate->hastup)
 		vacrel->nonempty_pages = blkno + 1;
 
-	if (vacrel->nindexes == 0 && lpdead_items > 0)
+	if (vacuum_now)
 	{
 		VacDeadItems *dead_items = vacrel->dead_items;
 		OffsetNumber unused[MaxHeapTuplesPerPage];
 		int			nunused = 0;
-		TransactionId visibility_cutoff_xid;
-		bool		all_frozen;
 
 		vacrel->lpdead_item_pages++;
 		prunestate->all_visible = false;
@@ -1806,6 +1807,12 @@ lazy_scan_prune(LVRelState *vacrel,
 		*/
 		END_CRIT_SECTION();
 
+	}
+
+	if (vacuum_now)
+	{
+		TransactionId visibility_cutoff_xid;
+		bool		all_frozen;
 		/*
 		* Now that we have removed the LP_DEAD items from the page, once again
 		* check if the page has become all-visible.  The page is already marked
