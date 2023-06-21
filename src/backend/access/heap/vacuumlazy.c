@@ -1728,16 +1728,11 @@ lazy_scan_prune(LVRelState *vacrel,
 		}
 	}
 
-
-
-	END_CRIT_SECTION();
-
 	vacrel->lpdead_items += lpdead_items;
 
 	if (prunestate->hastup)
 		vacrel->nonempty_pages = blkno + 1;
 
-	START_CRIT_SECTION();
 	if (vacuum_now)
 	{
 		OffsetNumber unused[MaxHeapTuplesPerPage];
