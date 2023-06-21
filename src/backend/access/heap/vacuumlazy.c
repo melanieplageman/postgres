@@ -1647,6 +1647,11 @@ lazy_scan_prune(LVRelState *vacrel,
 		prunestate->hastup = true;	/* page makes rel truncation unsafe */
 	}
 
+	if (prunestate->hastup)
+		vacrel->nonempty_pages = blkno + 1;
+
+	vacrel->lpdead_items += lpdead_items;
+
 	vacuum_now = vacrel->nindexes == 0 && lpdead_items > 0;
 
 	if (do_prune || (do_freeze && tuples_frozen > 0))
@@ -1727,11 +1732,6 @@ lazy_scan_prune(LVRelState *vacrel,
 			PageSetLSN(page, recptr);
 		}
 	}
-
-	vacrel->lpdead_items += lpdead_items;
-
-	if (prunestate->hastup)
-		vacrel->nonempty_pages = blkno + 1;
 
 	if (vacuum_now)
 	{
