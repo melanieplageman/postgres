@@ -1285,6 +1285,7 @@ lazy_scan_prune(LVRelState *vacrel,
 	PruneState	prstate;
 	Oid tableoid = RelationGetRelid(rel);
 
+	// TODO: add in vacuum error phase for this prune freeze vacuum combo (for update_vacuum_error_info)
 	bool do_freeze;
 	bool do_prune;
 	// TODO: can we consolidate pruning and freezing conflict horizons?
@@ -1740,7 +1741,6 @@ lazy_scan_prune(LVRelState *vacrel,
 		int			nunused = 0;
 		TransactionId visibility_cutoff_xid;
 		bool		all_frozen;
-		LVSavedErrInfo saved_err_info;
 
 		vacrel->lpdead_item_pages++;
 		prunestate->all_visible = false;
@@ -1829,8 +1829,6 @@ lazy_scan_prune(LVRelState *vacrel,
 							vmbuffer, visibility_cutoff_xid, flags);
 		}
 
-		/* Revert to the previous phase information for error traceback */
-		restore_vacuum_error_info(vacrel, &saved_err_info);
 
 		vacrel->dead_items->num_items = 0;
 	}
