@@ -1733,6 +1733,24 @@ lazy_scan_prune(LVRelState *vacrel,
 		PageTruncateLinePointerArray(page);
 	}
 
+	if (RelationNeedsWAL(rel) && vacuum_now)
+	{
+		xl_heap_vacuum xlrec;
+		XLogRecPtr	recptr;
+
+		xlrec.nunused = vac_nunused;
+
+		XLogBeginInsert();
+		XLogRegisterData((char *) &xlrec, SizeOfHeapVacuum);
+
+		XLogRegisterBuffer(0, buf, REGBUF_STANDARD);
+		XLogRegisterBufData(0, (char *) vac_unused, vac_nunused * sizeof(OffsetNumber));
+
+		recptr = XLogInsert(RM_HEAP2_ID, XLOG_HEAP2_VACUUM);
+
+		PageSetLSN(page, recptr);
+	}
+
 	if (RelationNeedsWAL(rel) && do_freeze && tuples_frozen > 0)
 	{
 		xl_heap_freeze_plan plans[MaxHeapTuplesPerPage];
@@ -1763,24 +1781,6 @@ lazy_scan_prune(LVRelState *vacrel,
 							tuples_frozen * sizeof(OffsetNumber));
 
 		recptr = XLogInsert(RM_HEAP2_ID, XLOG_HEAP2_FREEZE_PAGE);
-
-		PageSetLSN(page, recptr);
-	}
-
-	if (RelationNeedsWAL(rel) && vacuum_now)
-	{
-		xl_heap_vacuum xlrec;
-		XLogRecPtr	recptr;
-
-		xlrec.nunused = vac_nunused;
-
-		XLogBeginInsert();
-		XLogRegisterData((char *) &xlrec, SizeOfHeapVacuum);
-
-		XLogRegisterBuffer(0, buf, REGBUF_STANDARD);
-		XLogRegisterBufData(0, (char *) vac_unused, vac_nunused * sizeof(OffsetNumber));
-
-		recptr = XLogInsert(RM_HEAP2_ID, XLOG_HEAP2_VACUUM);
 
 		PageSetLSN(page, recptr);
 	}
