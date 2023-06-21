@@ -1735,14 +1735,102 @@ lazy_scan_prune(LVRelState *vacrel,
 
 	if (vacrel->nindexes == 0 && lpdead_items > 0)
 	{
+		VacDeadItems *dead_items = vacrel->dead_items;
+		OffsetNumber unused[MaxHeapTuplesPerPage];
+		int			nunused = 0;
+		TransactionId visibility_cutoff_xid;
+		bool		all_frozen;
+		LVSavedErrInfo saved_err_info;
+
 		vacrel->lpdead_item_pages++;
 		prunestate->all_visible = false;
 		Assert(vacrel->dead_items->num_items <= vacrel->dead_items->max_items);
 		pgstat_progress_update_param(PROGRESS_VACUUM_NUM_DEAD_TUPLES,
 									 vacrel->dead_items->num_items);
+		pgstat_progress_update_param(PROGRESS_VACUUM_HEAP_BLKS_VACUUMED, blkno);
 
-		// TODO: inline this
-		lazy_vacuum_heap_page(vacrel, blkno, buf, 0, vmbuffer);
+
+		START_CRIT_SECTION();
+
+		for (int i = 0; i < dead_items->num_items; i++)
+		{
+			BlockNumber tblk;
+			OffsetNumber toff;
+			ItemId		itemid;
+
+			tblk = ItemPointerGetBlockNumber(&dead_items->items[i]);
+			if (tblk != blkno)
+				break;				/* past end of tuples for this block */
+			toff = ItemPointerGetOffsetNumber(&dead_items->items[i]);
+			itemid = PageGetItemId(page, toff);
+
+			Assert(ItemIdIsDead(itemid) && !ItemIdHasStorage(itemid));
+			ItemIdSetUnused(itemid);
+			unused[nunused++] = toff;
+		}
+
+		Assert(nunused > 0);
+
+		/* Attempt to truncate line pointer array now */
+		PageTruncateLinePointerArray(page);
+
+		/*
+		* Mark buffer dirty before we write WAL.
+		*/
+		MarkBufferDirty(buf);
+
+		/* XLOG stuff */
+		if (RelationNeedsWAL(vacrel->rel))
+		{
+			xl_heap_vacuum xlrec;
+			XLogRecPtr	recptr;
+
+			xlrec.nunused = nunused;
+
+			XLogBeginInsert();
+			XLogRegisterData((char *) &xlrec, SizeOfHeapVacuum);
+
+			XLogRegisterBuffer(0, buf, REGBUF_STANDARD);
+			XLogRegisterBufData(0, (char *) unused, nunused * sizeof(OffsetNumber));
+
+			recptr = XLogInsert(RM_HEAP2_ID, XLOG_HEAP2_VACUUM);
+
+			PageSetLSN(page, recptr);
+		}
+
+		/*
+		* End critical section, so we safely can do visibility tests (which
+		* possibly need to perform IO and allocate memory!). If we crash now the
+		* page (including the corresponding vm bit) might not be marked all
+		* visible, but that's fine. A later vacuum will fix that.
+		*/
+		END_CRIT_SECTION();
+
+		/*
+		* Now that we have removed the LP_DEAD items from the page, once again
+		* check if the page has become all-visible.  The page is already marked
+		* dirty, exclusively locked, and, if needed, a full page image has been
+		* emitted.
+		*/
+		Assert(!PageIsAllVisible(page));
+		if (heap_page_is_all_visible(vacrel, buf, &visibility_cutoff_xid,
+									&all_frozen))
+		{
+			uint8		flags = VISIBILITYMAP_ALL_VISIBLE;
+
+			if (all_frozen)
+			{
+				Assert(!TransactionIdIsValid(visibility_cutoff_xid));
+				flags |= VISIBILITYMAP_ALL_FROZEN;
+			}
+
+			PageSetAllVisible(page);
+			visibilitymap_set(vacrel->rel, blkno, buf, InvalidXLogRecPtr,
+							vmbuffer, visibility_cutoff_xid, flags);
+		}
+
+		/* Revert to the previous phase information for error traceback */
+		restore_vacuum_error_info(vacrel, &saved_err_info);
 
 		vacrel->dead_items->num_items = 0;
 	}
