@@ -1737,6 +1737,7 @@ lazy_scan_prune(LVRelState *vacrel,
 	if (prunestate->hastup)
 		vacrel->nonempty_pages = blkno + 1;
 
+	START_CRIT_SECTION();
 	if (vacuum_now)
 	{
 		OffsetNumber unused[MaxHeapTuplesPerPage];
@@ -1744,7 +1745,6 @@ lazy_scan_prune(LVRelState *vacrel,
 
 
 
-		START_CRIT_SECTION();
 		vacrel->lpdead_item_pages++;
 		prunestate->all_visible = false;
 		Assert(vacrel->dead_items->num_items <= vacrel->dead_items->max_items);
@@ -1797,16 +1797,8 @@ lazy_scan_prune(LVRelState *vacrel,
 
 			PageSetLSN(page, recptr);
 		}
-
-		/*
-		* End critical section, so we safely can do visibility tests (which
-		* possibly need to perform IO and allocate memory!). If we crash now the
-		* page (including the corresponding vm bit) might not be marked all
-		* visible, but that's fine. A later vacuum will fix that.
-		*/
-		END_CRIT_SECTION();
-
 	}
+	END_CRIT_SECTION();
 
 	if (vacuum_now)
 	{
