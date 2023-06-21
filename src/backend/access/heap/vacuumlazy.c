@@ -250,7 +250,7 @@ static bool lazy_scan_new_or_empty(LVRelState *vacrel, Buffer buf,
 								   bool sharelock, Buffer vmbuffer);
 static void lazy_scan_prune(LVRelState *vacrel, Buffer buf,
 							BlockNumber blkno, Page page, Buffer vmbuffer,
-							LVPagePruneState *prunestate);
+							LVPagePruneState *prunestate, bool all_visible_according_to_vm);
 static bool lazy_scan_noprune(LVRelState *vacrel, Buffer buf,
 							  BlockNumber blkno, Page page,
 							  bool *hastup, bool *recordfreespace);
@@ -964,26 +964,13 @@ lazy_scan_heap(LVRelState *vacrel)
 
 			LockBuffer(buf, BUFFER_LOCK_SHARE);
 
-			/* Check for new or empty pages before lazy_scan_noprune call */
-			if (lazy_scan_new_or_empty(vacrel, buf, blkno, page, true,
-									   vmbuffer))
-			{
-				/* Processed as new/empty page (lock and pin released) */
+			if (lazy_scan_new_or_empty(vacrel, buf, blkno, page, true, vmbuffer))
 				continue;
-			}
 
-			/* Collect LP_DEAD items in dead_items array, count tuples */
-			if (lazy_scan_noprune(vacrel, buf, blkno, page, &hastup,
-								  &recordfreespace))
+			if (lazy_scan_noprune(vacrel, buf, blkno, page, &hastup, &recordfreespace))
 			{
 				Size		freespace = 0;
 
-				/*
-				 * Processed page successfully (without cleanup lock) -- just
-				 * need to perform rel truncation and FSM steps, much like the
-				 * lazy_scan_prune case.  Don't bother trying to match its
-				 * visibility map setting steps, though.
-				 */
 				if (hastup)
 					vacrel->nonempty_pages = blkno + 1;
 				if (recordfreespace)
@@ -994,215 +981,45 @@ lazy_scan_heap(LVRelState *vacrel)
 				continue;
 			}
 
-			/*
-			 * lazy_scan_noprune could not do all required processing.  Wait
-			 * for a cleanup lock, and call lazy_scan_prune in the usual way.
-			 */
 			Assert(vacrel->aggressive);
 			LockBuffer(buf, BUFFER_LOCK_UNLOCK);
 			LockBufferForCleanup(buf);
 		}
 
-		/* Check for new or empty pages before lazy_scan_prune call */
 		if (lazy_scan_new_or_empty(vacrel, buf, blkno, page, false, vmbuffer))
-		{
-			/* Processed as new/empty page (lock and pin released) */
 			continue;
-		}
 
-		lazy_scan_prune(vacrel, buf, blkno, page, vmbuffer, &prunestate);
+		lazy_scan_prune(vacrel, buf, blkno, page, vmbuffer, &prunestate, all_visible_according_to_vm);
 
 		Assert(!prunestate.all_visible || !prunestate.has_lpdead_items);
 
-		if (vacrel->nindexes == 0)
+		if (vacrel->nindexes == 0 && prunestate.has_lpdead_items)
 		{
-			/*
-			 * Consider the need to do page-at-a-time heap vacuuming when
-			 * using the one-pass strategy now.
-			 *
-			 * The one-pass strategy will never call lazy_vacuum().  The steps
-			 * performed here can be thought of as the one-pass equivalent of
-			 * a call to lazy_vacuum().
-			 */
-			if (prunestate.has_lpdead_items)
+			Size		freespace;
+
+			// TODO: move into lazy_scan_prune()?
+			if (blkno - next_fsm_block_to_vacuum >= VACUUM_FSM_EVERY_PAGES)
 			{
-				Size		freespace;
-
-				if (blkno - next_fsm_block_to_vacuum >= VACUUM_FSM_EVERY_PAGES)
-				{
-					FreeSpaceMapVacuumRange(vacrel->rel, next_fsm_block_to_vacuum,
-											blkno);
-					next_fsm_block_to_vacuum = blkno;
-				}
-
-				/*
-				 * Now perform FSM processing for blkno, and move on to next
-				 * page.
-				 *
-				 * Our call to lazy_vacuum_heap_page() will have considered if
-				 * it's possible to set all_visible/all_frozen independently
-				 * of lazy_scan_prune().  Note that prunestate was invalidated
-				 * by lazy_vacuum_heap_page() call.
-				 */
-				freespace = PageGetHeapFreeSpace(page);
-
-				UnlockReleaseBuffer(buf);
-				RecordPageWithFreeSpace(vacrel->rel, blkno, freespace);
-				continue;
+				FreeSpaceMapVacuumRange(vacrel->rel, next_fsm_block_to_vacuum,
+										blkno);
+				next_fsm_block_to_vacuum = blkno;
 			}
 
-			/*
-			 * There was no call to lazy_vacuum_heap_page() because pruning
-			 * didn't encounter/create any LP_DEAD items that needed to be
-			 * vacuumed.  Prune state has not been invalidated, so proceed
-			 * with prunestate-driven visibility map and FSM steps (just like
-			 * the two-pass strategy).
-			 */
-			Assert(dead_items->num_items == 0);
-		}
+			freespace = PageGetHeapFreeSpace(page);
 
-		/*
-		 * Handle setting visibility map bit based on information from the VM
-		 * (as of last lazy_scan_skip() call), and from prunestate
-		 */
-		if (!all_visible_according_to_vm && prunestate.all_visible)
-		{
-			uint8		flags = VISIBILITYMAP_ALL_VISIBLE;
-
-			if (prunestate.all_frozen)
-			{
-				Assert(!TransactionIdIsValid(prunestate.visibility_cutoff_xid));
-				flags |= VISIBILITYMAP_ALL_FROZEN;
-			}
-
-			/*
-			 * It should never be the case that the visibility map page is set
-			 * while the page-level bit is clear, but the reverse is allowed
-			 * (if checksums are not enabled).  Regardless, set both bits so
-			 * that we get back in sync.
-			 *
-			 * NB: If the heap page is all-visible but the VM bit is not set,
-			 * we don't need to dirty the heap page.  However, if checksums
-			 * are enabled, we do need to make sure that the heap page is
-			 * dirtied before passing it to visibilitymap_set(), because it
-			 * may be logged.  Given that this situation should only happen in
-			 * rare cases after a crash, it is not worth optimizing.
-			 */
-			PageSetAllVisible(page);
-			MarkBufferDirty(buf);
-			visibilitymap_set(vacrel->rel, blkno, buf, InvalidXLogRecPtr,
-							  vmbuffer, prunestate.visibility_cutoff_xid,
-							  flags);
-		}
-
-		/*
-		 * As of PostgreSQL 9.2, the visibility map bit should never be set if
-		 * the page-level bit is clear.  However, it's possible that the bit
-		 * got cleared after lazy_scan_skip() was called, so we must recheck
-		 * with buffer lock before concluding that the VM is corrupt.
-		 */
-		else if (all_visible_according_to_vm && !PageIsAllVisible(page) &&
-				 visibilitymap_get_status(vacrel->rel, blkno, &vmbuffer) != 0)
-		{
-			elog(WARNING, "page is not marked all-visible but visibility map bit is set in relation \"%s\" page %u",
-				 vacrel->relname, blkno);
-			visibilitymap_clear(vacrel->rel, blkno, vmbuffer,
-								VISIBILITYMAP_VALID_BITS);
-		}
-
-		/*
-		 * It's possible for the value returned by
-		 * GetOldestNonRemovableTransactionId() to move backwards, so it's not
-		 * wrong for us to see tuples that appear to not be visible to
-		 * everyone yet, while PD_ALL_VISIBLE is already set. The real safe
-		 * xmin value never moves backwards, but
-		 * GetOldestNonRemovableTransactionId() is conservative and sometimes
-		 * returns a value that's unnecessarily small, so if we see that
-		 * contradiction it just means that the tuples that we think are not
-		 * visible to everyone yet actually are, and the PD_ALL_VISIBLE flag
-		 * is correct.
-		 *
-		 * There should never be LP_DEAD items on a page with PD_ALL_VISIBLE
-		 * set, however.
-		 */
-		else if (prunestate.has_lpdead_items && PageIsAllVisible(page))
-		{
-			elog(WARNING, "page containing LP_DEAD items is marked as all-visible in relation \"%s\" page %u",
-				 vacrel->relname, blkno);
-			PageClearAllVisible(page);
-			MarkBufferDirty(buf);
-			visibilitymap_clear(vacrel->rel, blkno, vmbuffer,
-								VISIBILITYMAP_VALID_BITS);
-		}
-
-		/*
-		 * If the all-visible page is all-frozen but not marked as such yet,
-		 * mark it as all-frozen.  Note that all_frozen is only valid if
-		 * all_visible is true, so we must check both prunestate fields.
-		 */
-		else if (all_visible_according_to_vm && prunestate.all_visible &&
-				 prunestate.all_frozen &&
-				 !VM_ALL_FROZEN(vacrel->rel, blkno, &vmbuffer))
-		{
-			/*
-			 * Avoid relying on all_visible_according_to_vm as a proxy for the
-			 * page-level PD_ALL_VISIBLE bit being set, since it might have
-			 * become stale -- even when all_visible is set in prunestate
-			 */
-			if (!PageIsAllVisible(page))
-			{
-				PageSetAllVisible(page);
-				MarkBufferDirty(buf);
-			}
-
-			/*
-			 * Set the page all-frozen (and all-visible) in the VM.
-			 *
-			 * We can pass InvalidTransactionId as our visibility_cutoff_xid,
-			 * since a snapshotConflictHorizon sufficient to make everything
-			 * safe for REDO was logged when the page's tuples were frozen.
-			 */
-			Assert(!TransactionIdIsValid(prunestate.visibility_cutoff_xid));
-			visibilitymap_set(vacrel->rel, blkno, buf, InvalidXLogRecPtr,
-							  vmbuffer, InvalidTransactionId,
-							  VISIBILITYMAP_ALL_VISIBLE |
-							  VISIBILITYMAP_ALL_FROZEN);
-		}
-
-		/*
-		 * Final steps for block: drop cleanup lock, record free space in the
-		 * FSM
-		 */
-		if (prunestate.has_lpdead_items && vacrel->do_index_vacuuming)
-		{
-			/*
-			 * Wait until lazy_vacuum_heap_rel() to save free space.  This
-			 * doesn't just save us some cycles; it also allows us to record
-			 * any additional free space that lazy_vacuum_heap_page() will
-			 * make available in cases where it's possible to truncate the
-			 * page's line pointer array.
-			 *
-			 * Note: It's not in fact 100% certain that we really will call
-			 * lazy_vacuum_heap_rel() -- lazy_vacuum() might yet opt to skip
-			 * index vacuuming (and so must skip heap vacuuming).  This is
-			 * deemed okay because it only happens in emergencies, or when
-			 * there is very little free space anyway. (Besides, we start
-			 * recording free space in the FSM once index vacuuming has been
-			 * abandoned.)
-			 *
-			 * Note: The one-pass (no indexes) case is only supposed to make
-			 * it this far when there were no LP_DEAD items during pruning.
-			 */
-			Assert(vacrel->nindexes > 0);
 			UnlockReleaseBuffer(buf);
+			RecordPageWithFreeSpace(vacrel->rel, blkno, freespace);
 		}
-		else
+
+		else if (!vacrel->do_index_vacuuming || !prunestate.has_lpdead_items)
 		{
 			Size		freespace = PageGetHeapFreeSpace(page);
 
 			UnlockReleaseBuffer(buf);
 			RecordPageWithFreeSpace(vacrel->rel, blkno, freespace);
 		}
+		else
+			UnlockReleaseBuffer(buf);
 	}
 
 	vacrel->blkno = InvalidBlockNumber;
@@ -1508,13 +1325,14 @@ lazy_scan_new_or_empty(LVRelState *vacrel, Buffer buf, BlockNumber blkno,
  * line pointers, and that every remaining item with tuple storage is
  * considered as a candidate for freezing.
  */
+// TODO: is it okay to just get the visibility map status again instead of passing this parameter
 static void
 lazy_scan_prune(LVRelState *vacrel,
 				Buffer buf,
 				BlockNumber blkno,
 				Page page,
 				Buffer vmbuffer,
-				LVPagePruneState *prunestate)
+				LVPagePruneState *prunestate, bool all_visible_according_to_vm)
 {
 	Relation	rel = vacrel->rel;
 	OffsetNumber offnum,
@@ -2027,12 +1845,69 @@ lazy_scan_prune(LVRelState *vacrel,
 	if (prunestate->hastup)
 		vacrel->nonempty_pages = blkno + 1;
 
+	// TODO: change return type to indicate whether or not we need to continue on to stages 2 and 3
 	if (vacrel->nindexes > 0 || lpdead_items == 0)
-		return;
+	{
+		// TODO: is it that expensive to just check the visi map again?
+		//
+		// TODO: is it okay that these checks are in here
+		if (!all_visible_according_to_vm && prunestate->all_visible)
+		{
+			uint8		flags = VISIBILITYMAP_ALL_VISIBLE;
 
-	lazy_vacuum_heap_page(vacrel, blkno, buf, 0, vmbuffer);
+			if (prunestate->all_frozen)
+			{
+				Assert(!TransactionIdIsValid(prunestate->visibility_cutoff_xid));
+				flags |= VISIBILITYMAP_ALL_FROZEN;
+			}
+			PageSetAllVisible(page);
+			MarkBufferDirty(buf);
+			visibilitymap_set(vacrel->rel, blkno, buf, InvalidXLogRecPtr,
+							  vmbuffer, prunestate->visibility_cutoff_xid,
+							  flags);
+		}
 
-	vacrel->dead_items->num_items = 0;
+		else if (all_visible_according_to_vm && !PageIsAllVisible(page) &&
+				 visibilitymap_get_status(vacrel->rel, blkno, &vmbuffer) != 0)
+		{
+			elog(WARNING, "page is not marked all-visible but visibility map bit is set in relation \"%s\" page %u",
+				 vacrel->relname, blkno);
+			visibilitymap_clear(vacrel->rel, blkno, vmbuffer,
+								VISIBILITYMAP_VALID_BITS);
+		}
+		else if (prunestate->has_lpdead_items && PageIsAllVisible(page))
+		{
+			elog(WARNING, "page containing LP_DEAD items is marked as all-visible in relation \"%s\" page %u",
+				 vacrel->relname, blkno);
+			PageClearAllVisible(page);
+			MarkBufferDirty(buf);
+			visibilitymap_clear(vacrel->rel, blkno, vmbuffer,
+								VISIBILITYMAP_VALID_BITS);
+		}
+		else if (all_visible_according_to_vm && prunestate->all_visible &&
+				 prunestate->all_frozen &&
+				 !VM_ALL_FROZEN(vacrel->rel, blkno, &vmbuffer))
+		{
+			if (!PageIsAllVisible(page))
+			{
+				PageSetAllVisible(page);
+				MarkBufferDirty(buf);
+			}
+			Assert(!TransactionIdIsValid(prunestate->visibility_cutoff_xid));
+			visibilitymap_set(vacrel->rel, blkno, buf, InvalidXLogRecPtr,
+							  vmbuffer, InvalidTransactionId,
+							  VISIBILITYMAP_ALL_VISIBLE |
+							  VISIBILITYMAP_ALL_FROZEN);
+		}
+	}
+
+	// TODO expand and squash with above
+	else
+	{
+		lazy_vacuum_heap_page(vacrel, blkno, buf, 0, vmbuffer);
+
+		vacrel->dead_items->num_items = 0;
+	}
 }
 
 /*
