@@ -1557,6 +1557,11 @@ lazy_scan_prune(LVRelState *vacrel,
 
 	do_prune = prstate.nredirected > 0 || prstate.ndead > 0 || prstate.nunused > 0;
 
+	vacrel->tuples_deleted += tuples_deleted;
+	vacrel->tuples_frozen += tuples_frozen;
+	vacrel->live_tuples += live_tuples;
+	vacrel->recently_dead_tuples += recently_dead_tuples;
+
 	/* Any error while applying the changes is critical */
 	START_CRIT_SECTION();
 
@@ -1684,7 +1689,6 @@ lazy_scan_prune(LVRelState *vacrel,
 
 	vacrel->offnum = InvalidOffsetNumber;
 
-
 	for (offnum = FirstOffsetNumber;
 		 offnum <= maxoff;
 		 offnum = OffsetNumberNext(offnum))
@@ -1721,6 +1725,8 @@ lazy_scan_prune(LVRelState *vacrel,
 
 		prunestate->hastup = true;	/* page makes rel truncation unsafe */
 	}
+
+	vacrel->lpdead_items += lpdead_items;
 
 	if (prunestate->hastup)
 		vacrel->nonempty_pages = blkno + 1;
@@ -1815,11 +1821,6 @@ lazy_scan_prune(LVRelState *vacrel,
 		}
 	}
 
-	vacrel->tuples_deleted += tuples_deleted;
-	vacrel->tuples_frozen += tuples_frozen;
-	vacrel->lpdead_items += lpdead_items;
-	vacrel->live_tuples += live_tuples;
-	vacrel->recently_dead_tuples += recently_dead_tuples;
 }
 
 /*
