@@ -1739,10 +1739,12 @@ lazy_scan_prune(LVRelState *vacrel,
 
 	if (vacuum_now)
 	{
-		VacDeadItems *dead_items = vacrel->dead_items;
 		OffsetNumber unused[MaxHeapTuplesPerPage];
 		int			nunused = 0;
 
+
+
+		START_CRIT_SECTION();
 		vacrel->lpdead_item_pages++;
 		prunestate->all_visible = false;
 		Assert(vacrel->dead_items->num_items <= vacrel->dead_items->max_items);
@@ -1750,19 +1752,16 @@ lazy_scan_prune(LVRelState *vacrel,
 									 vacrel->dead_items->num_items);
 		pgstat_progress_update_param(PROGRESS_VACUUM_HEAP_BLKS_VACUUMED, blkno);
 
-
-		START_CRIT_SECTION();
-
-		for (int i = 0; i < dead_items->num_items; i++)
+		for (int i = 0; i < vacrel->dead_items->num_items; i++)
 		{
 			BlockNumber tblk;
 			OffsetNumber toff;
 			ItemId		itemid;
 
-			tblk = ItemPointerGetBlockNumber(&dead_items->items[i]);
+			tblk = ItemPointerGetBlockNumber(&vacrel->dead_items->items[i]);
 			if (tblk != blkno)
 				break;				/* past end of tuples for this block */
-			toff = ItemPointerGetOffsetNumber(&dead_items->items[i]);
+			toff = ItemPointerGetOffsetNumber(&vacrel->dead_items->items[i]);
 			itemid = PageGetItemId(page, toff);
 
 			Assert(ItemIdIsDead(itemid) && !ItemIdHasStorage(itemid));
