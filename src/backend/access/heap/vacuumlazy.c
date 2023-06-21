@@ -1705,7 +1705,7 @@ lazy_scan_prune(LVRelState *vacrel,
 
 			recptr = XLogInsert(RM_HEAP2_ID, XLOG_HEAP2_PRUNE);
 
-			PageSetLSN(BufferGetPage(buf), recptr);
+			PageSetLSN(page, recptr);
 		}
 		if (do_freeze && tuples_frozen > 0)
 		{
