@@ -1654,7 +1654,7 @@ lazy_scan_prune(LVRelState *vacrel,
 
 	vacuum_now = vacrel->nindexes == 0 && lpdead_items > 0;
 
-	if (do_prune || (do_freeze && tuples_frozen > 0))
+	if (do_prune || (do_freeze && tuples_frozen > 0) || vacuum_now)
 		MarkBufferDirty(buf);
 	else
 		MarkBufferDirtyHint(buf, true);
@@ -1738,8 +1738,6 @@ lazy_scan_prune(LVRelState *vacrel,
 		OffsetNumber unused[MaxHeapTuplesPerPage];
 		int			nunused = 0;
 
-
-
 		vacrel->lpdead_item_pages++;
 		prunestate->all_visible = false;
 		Assert(vacrel->dead_items->num_items <= vacrel->dead_items->max_items);
@@ -1769,10 +1767,6 @@ lazy_scan_prune(LVRelState *vacrel,
 		/* Attempt to truncate line pointer array now */
 		PageTruncateLinePointerArray(page);
 
-		/*
-		* Mark buffer dirty before we write WAL.
-		*/
-		MarkBufferDirty(buf);
 
 		/* XLOG stuff */
 		if (RelationNeedsWAL(vacrel->rel))
@@ -1793,6 +1787,7 @@ lazy_scan_prune(LVRelState *vacrel,
 			PageSetLSN(page, recptr);
 		}
 	}
+
 	END_CRIT_SECTION();
 
 	if (vacuum_now)
