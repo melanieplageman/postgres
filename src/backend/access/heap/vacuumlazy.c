@@ -1764,6 +1764,10 @@ lazy_scan_prune(LVRelState *vacrel,
 		}
 
 		Assert(vac_nunused > 0);
+	}
+
+	if (vacuum_now)
+	{
 
 		/* Attempt to truncate line pointer array now */
 		PageTruncateLinePointerArray(page);
