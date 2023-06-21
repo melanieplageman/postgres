@@ -1765,7 +1765,7 @@ lazy_scan_prune(LVRelState *vacrel,
 		PageTruncateLinePointerArray(page);
 	}
 
-	if (RelationNeedsWAL(vacrel->rel) && vacuum_now)
+	if (RelationNeedsWAL(rel) && vacuum_now)
 	{
 		xl_heap_vacuum xlrec;
 		XLogRecPtr	recptr;
