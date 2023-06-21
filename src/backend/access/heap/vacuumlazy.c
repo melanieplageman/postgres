@@ -1279,6 +1279,8 @@ lazy_scan_prune(LVRelState *vacrel,
 				live_tuples,
 				recently_dead_tuples;
 
+	OffsetNumber vac_unused[MaxHeapTuplesPerPage];
+	int			vac_nunused = 0;
 	HeapPageFreeze pagefrz;
 	int64		fpi_before = pgWalUsage.wal_fpi;
 	HeapTupleFreeze frozen[MaxHeapTuplesPerPage];
@@ -1744,9 +1746,6 @@ lazy_scan_prune(LVRelState *vacrel,
 
 	if (vacuum_now)
 	{
-		OffsetNumber unused[MaxHeapTuplesPerPage];
-		int			nunused = 0;
-
 		for (int i = 0; i < vacrel->dead_items->num_items; i++)
 		{
 			BlockNumber tblk;
@@ -1761,10 +1760,10 @@ lazy_scan_prune(LVRelState *vacrel,
 
 			Assert(ItemIdIsDead(itemid) && !ItemIdHasStorage(itemid));
 			ItemIdSetUnused(itemid);
-			unused[nunused++] = toff;
+			vac_unused[vac_nunused++] = toff;
 		}
 
-		Assert(nunused > 0);
+		Assert(vac_nunused > 0);
 
 		/* Attempt to truncate line pointer array now */
 		PageTruncateLinePointerArray(page);
@@ -1775,13 +1774,13 @@ lazy_scan_prune(LVRelState *vacrel,
 			xl_heap_vacuum xlrec;
 			XLogRecPtr	recptr;
 
-			xlrec.nunused = nunused;
+			xlrec.nunused = vac_nunused;
 
 			XLogBeginInsert();
 			XLogRegisterData((char *) &xlrec, SizeOfHeapVacuum);
 
 			XLogRegisterBuffer(0, buf, REGBUF_STANDARD);
-			XLogRegisterBufData(0, (char *) unused, nunused * sizeof(OffsetNumber));
+			XLogRegisterBufData(0, (char *) vac_unused, vac_nunused * sizeof(OffsetNumber));
 
 			recptr = XLogInsert(RM_HEAP2_ID, XLOG_HEAP2_VACUUM);
 
