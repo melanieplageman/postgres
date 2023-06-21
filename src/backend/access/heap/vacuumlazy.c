@@ -1288,7 +1288,7 @@ lazy_scan_prune(LVRelState *vacrel,
 	bool do_freeze;
 	bool do_prune;
 	// TODO: can we consolidate pruning and freezing conflict horizons?
-	TransactionId frzsnapshotConflictHorizon;
+	TransactionId frzsnapshotConflictHorizon = InvalidTransactionId;
 
 
 	Assert(BufferGetBlockNumber(buf) == blkno);
@@ -1606,6 +1606,45 @@ lazy_scan_prune(LVRelState *vacrel,
 										frozen, tuples_frozen);
 	}
 
+	vacrel->offnum = InvalidOffsetNumber;
+
+	for (offnum = FirstOffsetNumber;
+		 offnum <= maxoff;
+		 offnum = OffsetNumberNext(offnum))
+	{
+		ItemId		itemid;
+
+		/*
+		 * Set the offset number so that we can display it along with any
+		 * error that occurred while processing this tuple.
+		 */
+		vacrel->offnum = offnum;
+		itemid = PageGetItemId(page, offnum);
+
+		if (!ItemIdIsUsed(itemid))
+			continue;
+
+		/* Redirect items mustn't be touched */
+		if (ItemIdIsRedirected(itemid))
+		{
+			/* page makes rel truncation unsafe */
+			prunestate->hastup = true;
+			continue;
+		}
+
+		if (ItemIdIsDead(itemid))
+		{
+			ItemPointerData tmp;
+			ItemPointerSetBlockNumber(&tmp, blkno);
+			ItemPointerSetOffsetNumber(&tmp, offnum);
+			vacrel->dead_items->items[vacrel->dead_items->num_items++] = tmp;
+			lpdead_items++;
+			continue;
+		}
+
+		prunestate->hastup = true;	/* page makes rel truncation unsafe */
+	}
+
 	if (do_prune || (do_freeze && tuples_frozen > 0))
 		MarkBufferDirty(buf);
 	else
@@ -1685,46 +1724,9 @@ lazy_scan_prune(LVRelState *vacrel,
 		}
 	}
 
+
+
 	END_CRIT_SECTION();
-
-	vacrel->offnum = InvalidOffsetNumber;
-
-	for (offnum = FirstOffsetNumber;
-		 offnum <= maxoff;
-		 offnum = OffsetNumberNext(offnum))
-	{
-		ItemId		itemid;
-
-		/*
-		 * Set the offset number so that we can display it along with any
-		 * error that occurred while processing this tuple.
-		 */
-		vacrel->offnum = offnum;
-		itemid = PageGetItemId(page, offnum);
-
-		if (!ItemIdIsUsed(itemid))
-			continue;
-
-		/* Redirect items mustn't be touched */
-		if (ItemIdIsRedirected(itemid))
-		{
-			/* page makes rel truncation unsafe */
-			prunestate->hastup = true;
-			continue;
-		}
-
-		if (ItemIdIsDead(itemid))
-		{
-			ItemPointerData tmp;
-			ItemPointerSetBlockNumber(&tmp, blkno);
-			ItemPointerSetOffsetNumber(&tmp, offnum);
-			vacrel->dead_items->items[vacrel->dead_items->num_items++] = tmp;
-			lpdead_items++;
-			continue;
-		}
-
-		prunestate->hastup = true;	/* page makes rel truncation unsafe */
-	}
 
 	vacrel->lpdead_items += lpdead_items;
 
