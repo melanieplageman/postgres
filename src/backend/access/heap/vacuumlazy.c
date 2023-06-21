@@ -218,7 +218,6 @@ typedef struct LVRelState
 typedef struct LVPagePruneState
 {
 	bool		hastup;			/* Page prevents rel truncation? */
-	bool		has_lpdead_items;	/* includes existing LP_DEAD items */
 
 	/*
 	 * State describes the proper VM bit states to set for the page following
@@ -831,7 +830,8 @@ lazy_scan_heap(LVRelState *vacrel)
 	VacDeadItems *dead_items = vacrel->dead_items;
 	Buffer		vmbuffer = InvalidBuffer;
 	bool		next_unskippable_allvis,
-				skipping_current_range;
+				skipping_current_range,
+				recordfreespace;
 	const int	initprog_index[] = {
 		PROGRESS_VACUUM_PHASE,
 		PROGRESS_VACUUM_TOTAL_HEAP_BLKS,
@@ -853,6 +853,7 @@ lazy_scan_heap(LVRelState *vacrel)
 		Buffer		buf;
 		Page		page;
 		bool		all_visible_according_to_vm;
+		// TODO: seems like we don't need prunestate here anymore
 		LVPagePruneState prunestate;
 
 		if (blkno == next_unskippable_block)
@@ -913,8 +914,7 @@ lazy_scan_heap(LVRelState *vacrel)
 		page = BufferGetPage(buf);
 		if (!ConditionalLockBufferForCleanup(buf))
 		{
-			bool		hastup,
-						recordfreespace;
+			bool		hastup;
 
 			LockBuffer(buf, BUFFER_LOCK_SHARE);
 
@@ -923,15 +923,13 @@ lazy_scan_heap(LVRelState *vacrel)
 
 			if (lazy_scan_noprune(vacrel, buf, blkno, page, &hastup, &recordfreespace))
 			{
-				Size		freespace = 0;
-
 				if (hastup)
 					vacrel->nonempty_pages = blkno + 1;
-				if (recordfreespace)
-					freespace = PageGetHeapFreeSpace(page);
+
 				UnlockReleaseBuffer(buf);
+
 				if (recordfreespace)
-					RecordPageWithFreeSpace(vacrel->rel, blkno, freespace);
+					RecordPageWithFreeSpace(vacrel->rel, blkno, PageGetHeapFreeSpace(page));
 				continue;
 			}
 
@@ -943,37 +941,20 @@ lazy_scan_heap(LVRelState *vacrel)
 		if (lazy_scan_new_or_empty(vacrel, buf, blkno, page, false, vmbuffer))
 			continue;
 
-		lazy_scan_prune(vacrel, buf, blkno, page, vmbuffer, &prunestate, all_visible_according_to_vm);
+		lazy_scan_prune(vacrel, buf, blkno, page, vmbuffer,
+				&prunestate, all_visible_according_to_vm);
 
-		Assert(!prunestate.all_visible || !prunestate.has_lpdead_items);
-
-		if (vacrel->nindexes == 0 && prunestate.has_lpdead_items)
+		// TODO: ***** MUST FIX FSM vacuuming and recording to use prior criteria *********
+		if (blkno - next_fsm_block_to_vacuum >= VACUUM_FSM_EVERY_PAGES)
 		{
-			Size		freespace;
-
-			// TODO: move into lazy_scan_prune()?
-			if (blkno - next_fsm_block_to_vacuum >= VACUUM_FSM_EVERY_PAGES)
-			{
-				FreeSpaceMapVacuumRange(vacrel->rel, next_fsm_block_to_vacuum,
-										blkno);
-				next_fsm_block_to_vacuum = blkno;
-			}
-
-			freespace = PageGetHeapFreeSpace(page);
-
-			UnlockReleaseBuffer(buf);
-			RecordPageWithFreeSpace(vacrel->rel, blkno, freespace);
+			FreeSpaceMapVacuumRange(vacrel->rel, next_fsm_block_to_vacuum,
+									blkno);
+			next_fsm_block_to_vacuum = blkno;
 		}
 
-		else if (!vacrel->do_index_vacuuming || !prunestate.has_lpdead_items)
-		{
-			Size		freespace = PageGetHeapFreeSpace(page);
+		UnlockReleaseBuffer(buf);
 
-			UnlockReleaseBuffer(buf);
-			RecordPageWithFreeSpace(vacrel->rel, blkno, freespace);
-		}
-		else
-			UnlockReleaseBuffer(buf);
+		RecordPageWithFreeSpace(vacrel->rel, blkno, PageGetHeapFreeSpace(page));
 	}
 
 	vacrel->blkno = InvalidBlockNumber;
@@ -1280,6 +1261,7 @@ lazy_scan_new_or_empty(LVRelState *vacrel, Buffer buf, BlockNumber blkno,
  * considered as a candidate for freezing.
  */
 // TODO: is it okay to just get the visibility map status again instead of passing this parameter
+// TODO: figure out what I can clean up and make new WAL
 static void
 lazy_scan_prune(LVRelState *vacrel,
 				Buffer buf,
@@ -1296,6 +1278,7 @@ lazy_scan_prune(LVRelState *vacrel,
 				lpdead_items,
 				live_tuples,
 				recently_dead_tuples;
+
 	HeapPageFreeze pagefrz;
 	int64		fpi_before = pgWalUsage.wal_fpi;
 	HeapTupleFreeze frozen[MaxHeapTuplesPerPage];
@@ -1306,6 +1289,7 @@ lazy_scan_prune(LVRelState *vacrel,
 	bool do_prune;
 	// TODO: can we consolidate pruning and freezing conflict horizons?
 	TransactionId frzsnapshotConflictHorizon;
+
 
 	Assert(BufferGetBlockNumber(buf) == blkno);
 
@@ -1320,7 +1304,6 @@ lazy_scan_prune(LVRelState *vacrel,
 	memset(prstate.marked, 0, sizeof(prstate.marked));
 
 	prunestate->hastup = false;
-	prunestate->has_lpdead_items = false;
 	prunestate->all_visible = true;
 	prunestate->all_frozen = true;
 	prunestate->visibility_cutoff_xid = InvalidTransactionId;
@@ -1738,9 +1721,9 @@ lazy_scan_prune(LVRelState *vacrel,
 
 		prunestate->hastup = true;	/* page makes rel truncation unsafe */
 	}
-	// TODO: figure out what I can clean up and make new WAL also find all visible WAL
 
-
+	if (prunestate->hastup)
+		vacrel->nonempty_pages = blkno + 1;
 	/*
 	 * VACUUM will call heap_page_is_all_visible() during the second pass over
 	 * the heap to determine all_visible and all_frozen for the page -- this
@@ -1763,48 +1746,29 @@ lazy_scan_prune(LVRelState *vacrel,
 	}
 #endif
 
-	/*
-	 * Now save details of the LP_DEAD items from the page in vacrel
-	 */
-	if (lpdead_items > 0)
+	if (vacrel->nindexes == 0 && lpdead_items > 0)
 	{
 		vacrel->lpdead_item_pages++;
-		prunestate->has_lpdead_items = true;
-
+		prunestate->all_visible = false;
 		Assert(vacrel->dead_items->num_items <= vacrel->dead_items->max_items);
 		pgstat_progress_update_param(PROGRESS_VACUUM_NUM_DEAD_TUPLES,
 									 vacrel->dead_items->num_items);
 
-		/*
-		 * It was convenient to ignore LP_DEAD items in all_visible earlier on
-		 * to make the choice of whether or not to freeze the page unaffected
-		 * by the short-term presence of LP_DEAD items.  These LP_DEAD items
-		 * were effectively assumed to be LP_UNUSED items in the making.  It
-		 * doesn't matter which heap pass (initial pass or final pass) ends up
-		 * setting the page all-frozen, as long as the ongoing VACUUM does it.
-		 *
-		 * Now that freezing has been finalized, unset all_visible.  It needs
-		 * to reflect the present state of things, as expected by our caller.
-		 */
-		prunestate->all_visible = false;
+		lazy_vacuum_heap_page(vacrel, blkno, buf, 0, vmbuffer);
+
+		vacrel->dead_items->num_items = 0;
 	}
 
-	/* Finally, add page-local counts to whole-VACUUM counts */
-	vacrel->tuples_deleted += tuples_deleted;
-	vacrel->tuples_frozen += tuples_frozen;
-	vacrel->lpdead_items += lpdead_items;
-	vacrel->live_tuples += live_tuples;
-	vacrel->recently_dead_tuples += recently_dead_tuples;
-
-	if (prunestate->hastup)
-		vacrel->nonempty_pages = blkno + 1;
-
-	// TODO: change return type to indicate whether or not we need to continue on to stages 2 and 3
-	if (vacrel->nindexes > 0 || lpdead_items == 0)
+	else
 	{
-		// TODO: is it that expensive to just check the visi map again?
-		//
-		// TODO: is it okay that these checks are in here
+		/* (vacrel->nindexes > 0 || lpdead_items == 0) */
+
+		if (lpdead_items > 0)
+		{
+			prunestate->all_visible = false;
+			vacrel->lpdead_item_pages++;
+		}
+
 		if (!all_visible_according_to_vm && prunestate->all_visible)
 		{
 			uint8		flags = VISIBILITYMAP_ALL_VISIBLE;
@@ -1816,6 +1780,7 @@ lazy_scan_prune(LVRelState *vacrel,
 			}
 			PageSetAllVisible(page);
 			MarkBufferDirty(buf);
+			// TODO: get visimap WAL all set up with other WAL
 			visibilitymap_set(vacrel->rel, blkno, buf, InvalidXLogRecPtr,
 							  vmbuffer, prunestate->visibility_cutoff_xid,
 							  flags);
@@ -1829,7 +1794,7 @@ lazy_scan_prune(LVRelState *vacrel,
 			visibilitymap_clear(vacrel->rel, blkno, vmbuffer,
 								VISIBILITYMAP_VALID_BITS);
 		}
-		else if (prunestate->has_lpdead_items && PageIsAllVisible(page))
+		else if (lpdead_items > 0 && PageIsAllVisible(page))
 		{
 			elog(WARNING, "page containing LP_DEAD items is marked as all-visible in relation \"%s\" page %u",
 				 vacrel->relname, blkno);
@@ -1853,15 +1818,20 @@ lazy_scan_prune(LVRelState *vacrel,
 							  VISIBILITYMAP_ALL_VISIBLE |
 							  VISIBILITYMAP_ALL_FROZEN);
 		}
+
+		if (lpdead_items > 0)
+		{
+			Assert(vacrel->dead_items->num_items <= vacrel->dead_items->max_items);
+			pgstat_progress_update_param(PROGRESS_VACUUM_NUM_DEAD_TUPLES,
+										vacrel->dead_items->num_items);
+		}
 	}
 
-	// TODO expand and squash with above
-	else
-	{
-		lazy_vacuum_heap_page(vacrel, blkno, buf, 0, vmbuffer);
-
-		vacrel->dead_items->num_items = 0;
-	}
+	vacrel->tuples_deleted += tuples_deleted;
+	vacrel->tuples_frozen += tuples_frozen;
+	vacrel->lpdead_items += lpdead_items;
+	vacrel->live_tuples += live_tuples;
+	vacrel->recently_dead_tuples += recently_dead_tuples;
 }
 
 /*
