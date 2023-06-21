@@ -1670,10 +1670,8 @@ lazy_scan_prune(LVRelState *vacrel,
 	else
 		MarkBufferDirtyHint(buf, true);
 
-	if (RelationNeedsWAL(rel))
+	if (RelationNeedsWAL(rel) && do_prune)
 	{
-		if (do_prune)
-		{
 			xl_heap_prune xlrec;
 			XLogRecPtr	recptr;
 
@@ -1708,40 +1706,39 @@ lazy_scan_prune(LVRelState *vacrel,
 			recptr = XLogInsert(RM_HEAP2_ID, XLOG_HEAP2_PRUNE);
 
 			PageSetLSN(page, recptr);
-		}
-		if (do_freeze && tuples_frozen > 0)
-		{
-			xl_heap_freeze_plan plans[MaxHeapTuplesPerPage];
-			OffsetNumber offsets[MaxHeapTuplesPerPage];
-			int			nplans;
-			xl_heap_freeze_page xlrec;
-			XLogRecPtr	recptr;
+	}
+	if (RelationNeedsWAL(rel) && do_freeze && tuples_frozen > 0)
+	{
+		xl_heap_freeze_plan plans[MaxHeapTuplesPerPage];
+		OffsetNumber offsets[MaxHeapTuplesPerPage];
+		int			nplans;
+		xl_heap_freeze_page xlrec;
+		XLogRecPtr	recptr;
 
-			/* Prepare deduplicated representation for use in WAL record */
-			nplans = heap_log_freeze_plan(frozen, tuples_frozen, plans, offsets);
+		/* Prepare deduplicated representation for use in WAL record */
+		nplans = heap_log_freeze_plan(frozen, tuples_frozen, plans, offsets);
 
-			xlrec.snapshotConflictHorizon = frzsnapshotConflictHorizon;
-			xlrec.isCatalogRel = RelationIsAccessibleInLogicalDecoding(rel);
-			xlrec.nplans = nplans;
+		xlrec.snapshotConflictHorizon = frzsnapshotConflictHorizon;
+		xlrec.isCatalogRel = RelationIsAccessibleInLogicalDecoding(rel);
+		xlrec.nplans = nplans;
 
-			XLogBeginInsert();
-			XLogRegisterData((char *) &xlrec, SizeOfHeapFreezePage);
+		XLogBeginInsert();
+		XLogRegisterData((char *) &xlrec, SizeOfHeapFreezePage);
 
-			/*
-			* The freeze plan array and offset array are not actually in the
-			* buffer, but pretend that they are.  When XLogInsert stores the
-			* whole buffer, the arrays need not be stored too.
-			*/
-			XLogRegisterBuffer(0, buf, REGBUF_STANDARD);
-			XLogRegisterBufData(0, (char *) plans,
-								nplans * sizeof(xl_heap_freeze_plan));
-			XLogRegisterBufData(0, (char *) offsets,
-								tuples_frozen * sizeof(OffsetNumber));
+		/*
+		* The freeze plan array and offset array are not actually in the
+		* buffer, but pretend that they are.  When XLogInsert stores the
+		* whole buffer, the arrays need not be stored too.
+		*/
+		XLogRegisterBuffer(0, buf, REGBUF_STANDARD);
+		XLogRegisterBufData(0, (char *) plans,
+							nplans * sizeof(xl_heap_freeze_plan));
+		XLogRegisterBufData(0, (char *) offsets,
+							tuples_frozen * sizeof(OffsetNumber));
 
-			recptr = XLogInsert(RM_HEAP2_ID, XLOG_HEAP2_FREEZE_PAGE);
+		recptr = XLogInsert(RM_HEAP2_ID, XLOG_HEAP2_FREEZE_PAGE);
 
-			PageSetLSN(page, recptr);
-		}
+		PageSetLSN(page, recptr);
 	}
 
 	if (vacuum_now)
@@ -1764,32 +1761,26 @@ lazy_scan_prune(LVRelState *vacrel,
 		}
 
 		Assert(vac_nunused > 0);
-	}
-
-	if (vacuum_now)
-	{
-
 		/* Attempt to truncate line pointer array now */
 		PageTruncateLinePointerArray(page);
+	}
 
-		/* XLOG stuff */
-		if (RelationNeedsWAL(vacrel->rel))
-		{
-			xl_heap_vacuum xlrec;
-			XLogRecPtr	recptr;
+	if (RelationNeedsWAL(vacrel->rel) && vacuum_now)
+	{
+		xl_heap_vacuum xlrec;
+		XLogRecPtr	recptr;
 
-			xlrec.nunused = vac_nunused;
+		xlrec.nunused = vac_nunused;
 
-			XLogBeginInsert();
-			XLogRegisterData((char *) &xlrec, SizeOfHeapVacuum);
+		XLogBeginInsert();
+		XLogRegisterData((char *) &xlrec, SizeOfHeapVacuum);
 
-			XLogRegisterBuffer(0, buf, REGBUF_STANDARD);
-			XLogRegisterBufData(0, (char *) vac_unused, vac_nunused * sizeof(OffsetNumber));
+		XLogRegisterBuffer(0, buf, REGBUF_STANDARD);
+		XLogRegisterBufData(0, (char *) vac_unused, vac_nunused * sizeof(OffsetNumber));
 
-			recptr = XLogInsert(RM_HEAP2_ID, XLOG_HEAP2_VACUUM);
+		recptr = XLogInsert(RM_HEAP2_ID, XLOG_HEAP2_VACUUM);
 
-			PageSetLSN(page, recptr);
-		}
+		PageSetLSN(page, recptr);
 	}
 
 	END_CRIT_SECTION();
