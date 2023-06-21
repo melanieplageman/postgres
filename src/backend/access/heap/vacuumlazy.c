@@ -1672,40 +1672,40 @@ lazy_scan_prune(LVRelState *vacrel,
 
 	if (RelationNeedsWAL(rel) && do_prune)
 	{
-			xl_heap_prune xlrec;
-			XLogRecPtr	recptr;
+		xl_heap_prune xlrec;
+		XLogRecPtr	recptr;
 
-			xlrec.isCatalogRel = RelationIsAccessibleInLogicalDecoding(rel);
-			xlrec.snapshotConflictHorizon = prstate.snapshotConflictHorizon;
-			xlrec.nredirected = prstate.nredirected;
-			xlrec.ndead = prstate.ndead;
+		xlrec.isCatalogRel = RelationIsAccessibleInLogicalDecoding(rel);
+		xlrec.snapshotConflictHorizon = prstate.snapshotConflictHorizon;
+		xlrec.nredirected = prstate.nredirected;
+		xlrec.ndead = prstate.ndead;
 
-			XLogBeginInsert();
-			XLogRegisterData((char *) &xlrec, SizeOfHeapPrune);
+		XLogBeginInsert();
+		XLogRegisterData((char *) &xlrec, SizeOfHeapPrune);
 
-			XLogRegisterBuffer(0, buf, REGBUF_STANDARD);
+		XLogRegisterBuffer(0, buf, REGBUF_STANDARD);
 
-			/*
-			 * The OffsetNumber arrays are not actually in the buffer, but we
-			 * pretend that they are.  When XLogInsert stores the whole
-			 * buffer, the offset arrays need not be stored too.
-			 */
-			if (prstate.nredirected > 0)
-				XLogRegisterBufData(0, (char *) prstate.redirected,
-									prstate.nredirected *
-									sizeof(OffsetNumber) * 2);
+		/*
+			* The OffsetNumber arrays are not actually in the buffer, but we
+			* pretend that they are.  When XLogInsert stores the whole
+			* buffer, the offset arrays need not be stored too.
+			*/
+		if (prstate.nredirected > 0)
+			XLogRegisterBufData(0, (char *) prstate.redirected,
+								prstate.nredirected *
+								sizeof(OffsetNumber) * 2);
 
-			if (prstate.ndead > 0)
-				XLogRegisterBufData(0, (char *) prstate.nowdead,
-									prstate.ndead * sizeof(OffsetNumber));
+		if (prstate.ndead > 0)
+			XLogRegisterBufData(0, (char *) prstate.nowdead,
+								prstate.ndead * sizeof(OffsetNumber));
 
-			if (prstate.nunused > 0)
-				XLogRegisterBufData(0, (char *) prstate.nowunused,
-									prstate.nunused * sizeof(OffsetNumber));
+		if (prstate.nunused > 0)
+			XLogRegisterBufData(0, (char *) prstate.nowunused,
+								prstate.nunused * sizeof(OffsetNumber));
 
-			recptr = XLogInsert(RM_HEAP2_ID, XLOG_HEAP2_PRUNE);
+		recptr = XLogInsert(RM_HEAP2_ID, XLOG_HEAP2_PRUNE);
 
-			PageSetLSN(page, recptr);
+		PageSetLSN(page, recptr);
 	}
 
 
