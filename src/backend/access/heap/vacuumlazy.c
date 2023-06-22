@@ -1820,6 +1820,7 @@ lazy_scan_prune(LVRelState *vacrel,
 
 	else
 	{
+		uint8 flags = 0;
 		/* (vacrel->nindexes > 0 || lpdead_items == 0) */
 		if (lpdead_items > 0)
 		{
@@ -1843,55 +1844,47 @@ lazy_scan_prune(LVRelState *vacrel,
 #endif
 		}
 
-		if (!all_visible_according_to_vm && prunestate->all_visible)
+		if (prunestate->all_frozen)
 		{
-			uint8		flags = VISIBILITYMAP_ALL_VISIBLE;
+			Assert(!TransactionIdIsValid(prunestate->visibility_cutoff_xid));
+			flags |= VISIBILITYMAP_ALL_FROZEN;
+		}
+		if (prunestate->all_visible)
+			flags |= VISIBILITYMAP_ALL_VISIBLE;
 
-			if (prunestate->all_frozen)
-			{
-				Assert(!TransactionIdIsValid(prunestate->visibility_cutoff_xid));
-				flags |= VISIBILITYMAP_ALL_FROZEN;
-			}
+		if (!prunestate->all_visible && PageIsAllVisible(page))
+		{
+			PageClearAllVisible(page);
+			MarkBufferDirty(buf);
+		}
+		else if (prunestate->all_visible &&
+				(!all_visible_according_to_vm || !PageIsAllVisible(page)))
+		{
 			PageSetAllVisible(page);
 			MarkBufferDirty(buf);
-			// TODO: get visimap WAL all set up with other WAL
+		}
+
+		if (!all_visible_according_to_vm && prunestate->all_visible)
+		{
 			visibilitymap_set(vacrel->rel, blkno, buf, InvalidXLogRecPtr,
 							  vmbuffer, prunestate->visibility_cutoff_xid,
 							  flags);
-		}
-
-		else if (all_visible_according_to_vm && !PageIsAllVisible(page) &&
-				 visibilitymap_get_status(vacrel->rel, blkno, &vmbuffer) != 0)
-		{
-			elog(WARNING, "page is not marked all-visible but visibility map bit is set in relation \"%s\" page %u",
-				 vacrel->relname, blkno);
-			visibilitymap_clear(vacrel->rel, blkno, vmbuffer,
-								VISIBILITYMAP_VALID_BITS);
-		}
-		else if (lpdead_items > 0 && PageIsAllVisible(page))
-		{
-			elog(WARNING, "page containing LP_DEAD items is marked as all-visible in relation \"%s\" page %u",
-				 vacrel->relname, blkno);
-			PageClearAllVisible(page);
-			MarkBufferDirty(buf);
-			visibilitymap_clear(vacrel->rel, blkno, vmbuffer,
-								VISIBILITYMAP_VALID_BITS);
 		}
 		else if (all_visible_according_to_vm && prunestate->all_visible &&
 				 prunestate->all_frozen &&
 				 !VM_ALL_FROZEN(vacrel->rel, blkno, &vmbuffer))
 		{
-			if (!PageIsAllVisible(page))
-			{
-				PageSetAllVisible(page);
-				MarkBufferDirty(buf);
-			}
-			Assert(!TransactionIdIsValid(prunestate->visibility_cutoff_xid));
 			visibilitymap_set(vacrel->rel, blkno, buf, InvalidXLogRecPtr,
-							  vmbuffer, InvalidTransactionId,
-							  VISIBILITYMAP_ALL_VISIBLE |
-							  VISIBILITYMAP_ALL_FROZEN);
+							  vmbuffer, InvalidTransactionId, flags);
 		}
+		else if ((all_visible_according_to_vm && !PageIsAllVisible(page) &&
+				 visibilitymap_get_status(vacrel->rel, blkno, &vmbuffer) != 0) ||
+				(!prunestate->all_visible && PageIsAllVisible(page)))
+		{
+			visibilitymap_clear(vacrel->rel, blkno, vmbuffer,
+								VISIBILITYMAP_VALID_BITS);
+		}
+
 	}
 
 }
