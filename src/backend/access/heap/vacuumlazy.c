@@ -1785,7 +1785,6 @@ lazy_scan_prune(LVRelState *vacrel,
 		PageSetLSN(page, recptr);
 	}
 
-	END_CRIT_SECTION();
 
 	if (vacuum_now)
 	{
@@ -1822,6 +1821,7 @@ lazy_scan_prune(LVRelState *vacrel,
 	{
 		uint8 flags = 0;
 		bool page_all_visible;
+		bool vm_modified;
 		/* (vacrel->nindexes > 0 || lpdead_items == 0) */
 		if (lpdead_items > 0)
 		{
@@ -1869,16 +1869,76 @@ lazy_scan_prune(LVRelState *vacrel,
 
 		if (prunestate->all_visible && !all_visible_according_to_vm)
 		{
-			visibilitymap_set(vacrel->rel, blkno, buf, InvalidXLogRecPtr,
+			vm_modified = visibilitymap_set_soft(vacrel->rel, blkno, buf, InvalidXLogRecPtr,
 							  vmbuffer, prunestate->visibility_cutoff_xid,
 							  flags);
+			if (vm_modified && RelationNeedsWAL(rel))
+			{
+				xl_heap_visible xlrec;
+				XLogRecPtr	recptr;
+
+				Assert(BufferIsValid(buf));
+				Assert(BufferIsValid(vmbuffer));
+
+				xlrec.snapshotConflictHorizon = prunestate->visibility_cutoff_xid;
+				xlrec.flags = flags;
+				if (RelationIsAccessibleInLogicalDecoding(rel))
+					xlrec.flags |= VISIBILITYMAP_XLOG_CATALOG_REL;
+				XLogBeginInsert();
+				XLogRegisterData((char *) &xlrec, SizeOfHeapVisible);
+
+				XLogRegisterBuffer(0, vmbuffer, 0);
+
+				flags = REGBUF_STANDARD;
+				if (!XLogHintBitIsNeeded())
+					flags |= REGBUF_NO_IMAGE;
+				XLogRegisterBuffer(1, buf, flags);
+
+				recptr = XLogInsert(RM_HEAP2_ID, XLOG_HEAP2_VISIBLE);
+
+				if (XLogHintBitIsNeeded())
+					PageSetLSN(page, recptr);
+				PageSetLSN(BufferGetPage(vmbuffer), recptr);
+			}
+			LockBuffer(vmbuffer, BUFFER_LOCK_UNLOCK);
 		}
 		else if (prunestate->all_visible && all_visible_according_to_vm &&
 				 prunestate->all_frozen &&
 				 !VM_ALL_FROZEN(vacrel->rel, blkno, &vmbuffer))
 		{
-			visibilitymap_set(vacrel->rel, blkno, buf, InvalidXLogRecPtr,
+			vm_modified = visibilitymap_set_soft(vacrel->rel, blkno, buf, InvalidXLogRecPtr,
 							  vmbuffer, InvalidTransactionId, flags);
+
+			if (vm_modified && RelationNeedsWAL(rel))
+			{
+				xl_heap_visible xlrec;
+				XLogRecPtr	recptr;
+
+				Assert(BufferIsValid(buf));
+				Assert(BufferIsValid(vmbuffer));
+
+				xlrec.snapshotConflictHorizon = InvalidTransactionId;
+				xlrec.flags = flags;
+				if (RelationIsAccessibleInLogicalDecoding(rel))
+					xlrec.flags |= VISIBILITYMAP_XLOG_CATALOG_REL;
+				XLogBeginInsert();
+				XLogRegisterData((char *) &xlrec, SizeOfHeapVisible);
+
+				XLogRegisterBuffer(0, vmbuffer, 0);
+
+				flags = REGBUF_STANDARD;
+				if (!XLogHintBitIsNeeded())
+					flags |= REGBUF_NO_IMAGE;
+				XLogRegisterBuffer(1, buf, flags);
+
+				recptr = XLogInsert(RM_HEAP2_ID, XLOG_HEAP2_VISIBLE);
+
+				if (XLogHintBitIsNeeded())
+					PageSetLSN(page, recptr);
+				PageSetLSN(BufferGetPage(vmbuffer), recptr);
+			}
+
+			LockBuffer(vmbuffer, BUFFER_LOCK_UNLOCK);
 		}
 		else if ((all_visible_according_to_vm && !page_all_visible &&
 				 visibilitymap_get_status(vacrel->rel, blkno, &vmbuffer) != 0) ||
@@ -1888,6 +1948,7 @@ lazy_scan_prune(LVRelState *vacrel,
 								VISIBILITYMAP_VALID_BITS);
 		}
 	}
+	END_CRIT_SECTION();
 
 }
 
