@@ -1291,6 +1291,8 @@ lazy_scan_prune(LVRelState *vacrel,
 	uint8 visiflags = 0;
 	// TODO: same one?
 	TransactionId visiconflictid = InvalidTransactionId;
+	bool became_all_visible = false;
+	bool became_all_frozen = false;
 
 	// TODO: add in vacuum error phase for this prune freeze vacuum combo (for update_vacuum_error_info)
 	bool do_freeze;
@@ -1298,7 +1300,6 @@ lazy_scan_prune(LVRelState *vacrel,
 	bool vacuum_now = false;
 	// TODO: can we consolidate pruning and freezing conflict horizons?
 	TransactionId frzsnapshotConflictHorizon = InvalidTransactionId;
-
 
 	Assert(BufferGetBlockNumber(buf) == blkno);
 
@@ -1719,39 +1720,30 @@ lazy_scan_prune(LVRelState *vacrel,
 
 	if (vacuum_now)
 	{
-		TransactionId visibility_cutoff_xid;
-		bool		all_frozen;
-		/*
-		* Now that we have removed the LP_DEAD items from the page, once again
-		* check if the page has become all-visible.  The page is already marked
-		* dirty, exclusively locked, and, if needed, a full page image has been
-		* emitted.
-		*/
-		Assert(!PageIsAllVisible(page));
-		if (heap_page_is_all_visible(vacrel, buf, &visibility_cutoff_xid,
-									&all_frozen))
-		{
-			visiflags = VISIBILITYMAP_ALL_VISIBLE;
-
-			if (all_frozen)
-			{
-				Assert(!TransactionIdIsValid(visibility_cutoff_xid));
-				visiflags |= VISIBILITYMAP_ALL_FROZEN;
-			}
-
-			PageSetAllVisible(page);
-			visibilitymap_set(vacrel->rel, blkno, buf, InvalidXLogRecPtr,
-							vmbuffer, visibility_cutoff_xid, visiflags);
-		}
-
+		became_all_visible = heap_page_is_all_visible(vacrel, buf, &visiconflictid,
+									&became_all_frozen);
 		vacrel->dead_items->num_items = 0;
 	}
 
-	else
+	if (vacuum_now && became_all_visible)
+	{
+		visiflags = VISIBILITYMAP_ALL_VISIBLE;
+
+		if (became_all_frozen)
+		{
+			Assert(!TransactionIdIsValid(visiconflictid));
+			visiflags |= VISIBILITYMAP_ALL_FROZEN;
+		}
+
+		PageSetAllVisible(page);
+		visibilitymap_set(vacrel->rel, blkno, buf, InvalidXLogRecPtr,
+						vmbuffer, visiconflictid, visiflags);
+	}
+
+	
+	if (!vacuum_now)
 	{
 		bool page_all_visible;
-		bool became_all_visible;
-		bool became_all_frozen;
 		/* (vacrel->nindexes > 0 || lpdead_items == 0) */
 		if (lpdead_items > 0)
 		{
@@ -3233,6 +3225,8 @@ dead_items_cleanup(LVRelState *vacrel)
  * assertion calls us to verify that everybody still agrees.  Be sure to avoid
  * introducing new side-effects here.
  */
+// TODO: can I refactor this such that I don't need to do this again here
+// maybe state machine stuff?
 static bool
 heap_page_is_all_visible(LVRelState *vacrel, Buffer buf,
 						 TransactionId *visibility_cutoff_xid,
