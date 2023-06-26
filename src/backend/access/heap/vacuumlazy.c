@@ -1725,19 +1725,24 @@ lazy_scan_prune(LVRelState *vacrel,
 		vacrel->dead_items->num_items = 0;
 	}
 
+	if (vacuum_now && became_all_frozen)
+	{
+		Assert(!TransactionIdIsValid(visiconflictid));
+		visiflags |= VISIBILITYMAP_ALL_FROZEN;
+	}
+
 	if (vacuum_now && became_all_visible)
 	{
-		visiflags = VISIBILITYMAP_ALL_VISIBLE;
-
-		if (became_all_frozen)
-		{
-			Assert(!TransactionIdIsValid(visiconflictid));
-			visiflags |= VISIBILITYMAP_ALL_FROZEN;
-		}
-
+		visiflags |= VISIBILITYMAP_ALL_VISIBLE;
 		PageSetAllVisible(page);
-		visibilitymap_set(vacrel->rel, blkno, buf, InvalidXLogRecPtr,
-						vmbuffer, visiconflictid, visiflags);
+		MarkBufferDirty(buf);
+	}
+	if (vacuum_now && became_all_visible)
+	{
+		vm_modified = visibilitymap_set_soft(vacrel->rel, blkno, buf, InvalidXLogRecPtr,
+							vmbuffer, visiconflictid, visiflags);
+		if (!vm_modified)
+			LockBuffer(vmbuffer, BUFFER_LOCK_UNLOCK);
 	}
 
 	
@@ -1820,7 +1825,7 @@ lazy_scan_prune(LVRelState *vacrel,
 		}
 	}
 
-	if (RelationNeedsWAL(rel) && !vacuum_now && vm_modified)
+	if (RelationNeedsWAL(rel) && vm_modified)
 	{
 		xl_heap_visible xlrec;
 		XLogRecPtr	recptr;
