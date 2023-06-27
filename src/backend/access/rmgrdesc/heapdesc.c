@@ -179,42 +179,54 @@ heap2_desc(StringInfo buf, XLogReaderState *record)
 	{
 		xl_heap_prune *xlrec = (xl_heap_prune *) rec;
 
-		appendStringInfo(buf, "snapshotConflictHorizon: %u, nredirected: %u, ndead: %u",
+		appendStringInfo(buf, "snapshotConflictHorizon: %u, nredirected: %u, ndead: %u, nunused: %u, nplans: %u",
 						 xlrec->snapshotConflictHorizon,
 						 xlrec->nredirected,
-						 xlrec->ndead);
+						 xlrec->ndead,
+						 xlrec->nunused,
+						 xlrec->nplans);
 
 		if (XLogRecHasBlockData(record, 0))
 		{
-			OffsetNumber *end;
 			OffsetNumber *redirected;
 			OffsetNumber *nowdead;
 			OffsetNumber *nowunused;
 			int			nredirected;
-			int			nunused;
+			int			nunused, ndead;
 			Size		datalen;
+			xl_heap_freeze_plan *plans;
+			OffsetNumber *frz_offsets;
 
 			redirected = (OffsetNumber *) XLogRecGetBlockData(record, 0,
 															  &datalen);
 
 			nredirected = xlrec->nredirected;
-			end = (OffsetNumber *) ((char *) redirected + datalen);
-			nowdead = redirected + (nredirected * 2);
-			nowunused = nowdead + xlrec->ndead;
-			nunused = (end - nowunused);
-			Assert(nunused >= 0);
+			ndead = xlrec->ndead;
+			nunused = xlrec->nunused;
 
-			appendStringInfo(buf, ", nunused: %d", nunused);
+			nowdead = redirected + (nredirected * 2);
+			nowunused = nowdead + ndead;
+			plans = (xl_heap_freeze_plan *) nowunused + nunused;
+			frz_offsets = (OffsetNumber *) ((char *) plans +
+										(xlrec->nplans *
+										sizeof(xl_heap_freeze_plan)));
+
 
 			appendStringInfoString(buf, ", redirected:");
 			array_desc(buf, redirected, sizeof(OffsetNumber) * 2,
 					   nredirected, &redirect_elem_desc, NULL);
+
 			appendStringInfoString(buf, ", dead:");
-			array_desc(buf, nowdead, sizeof(OffsetNumber), xlrec->ndead,
+			array_desc(buf, nowdead, sizeof(OffsetNumber), ndead,
 					   &offset_elem_desc, NULL);
+
 			appendStringInfoString(buf, ", unused:");
 			array_desc(buf, nowunused, sizeof(OffsetNumber), nunused,
 					   &offset_elem_desc, NULL);
+
+			appendStringInfoString(buf, ", plans:");
+			array_desc(buf, plans, sizeof(xl_heap_freeze_plan), xlrec->nplans,
+					   &plan_elem_desc, &frz_offsets);
 		}
 	}
 	else if (info == XLOG_HEAP2_VACUUM)

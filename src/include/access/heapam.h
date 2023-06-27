@@ -392,4 +392,5 @@ extern int	heap_log_freeze_plan(HeapTupleFreeze *tuples, int ntuples,
 								 xl_heap_freeze_plan *plans_out,
 								 OffsetNumber *offsets_out);
 
+
 #endif							/* HEAPAM_H */

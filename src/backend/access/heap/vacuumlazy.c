@@ -1475,7 +1475,8 @@ lazy_scan_prune(LVRelState *vacrel,
 		tuples_frozen = 0;		/* avoid miscounts in instrumentation */
 	}
 
-	if (do_freeze && tuples_frozen > 0)
+	do_freeze = do_freeze && tuples_frozen > 0;
+	if (do_freeze)
 	{
 		vacrel->frozen_pages++;
 
@@ -1611,13 +1612,6 @@ lazy_scan_prune(LVRelState *vacrel,
 		PageClearFull(page);
 	}
 
-	if (do_freeze && tuples_frozen > 0)
-	{
-		/* Execute all freeze plans for page as a single atomic action */
-		heap_freeze_execute_prepared(vacrel->rel, buf,
-										frzsnapshotConflictHorizon,
-										frozen, tuples_frozen);
-	}
 
 	vacrel->offnum = InvalidOffsetNumber;
 
@@ -1671,32 +1665,47 @@ lazy_scan_prune(LVRelState *vacrel,
 		pgstat_progress_update_param(PROGRESS_VACUUM_NUM_DEAD_TUPLES,
 									vacrel->dead_items->num_items);
 	}
+	if (do_freeze )
+	{
+		/* Execute all freeze plans for page as a single atomic action */
+		heap_freeze_execute_prepared(vacrel->rel, buf,
+										frzsnapshotConflictHorizon,
+										frozen, tuples_frozen);
+	}
 
-	if (do_prune || (do_freeze && tuples_frozen > 0) || vacuum_now)
+	if (do_prune || do_freeze  || vacuum_now)
 		MarkBufferDirty(buf);
 	else
 		MarkBufferDirtyHint(buf, true);
 
-	if (RelationNeedsWAL(rel) && do_prune)
+	if (RelationNeedsWAL(rel))
 	{
 		xl_heap_prune xlrec;
 		XLogRecPtr	recptr;
+		xl_heap_freeze_plan plans[MaxHeapTuplesPerPage];
+		OffsetNumber frz_offsets[MaxHeapTuplesPerPage];
+		int			nplans = 0;
 
 		xlrec.isCatalogRel = RelationIsAccessibleInLogicalDecoding(rel);
-		xlrec.snapshotConflictHorizon = prstate.snapshotConflictHorizon;
+		// TODO: which one should I use
+		if (do_prune)
+			xlrec.snapshotConflictHorizon = prstate.snapshotConflictHorizon;
+		else
+			xlrec.snapshotConflictHorizon = frzsnapshotConflictHorizon;
+
 		xlrec.nredirected = prstate.nredirected;
 		xlrec.ndead = prstate.ndead;
+		xlrec.nunused = prstate.nunused;
+
+		if (do_freeze && nplans > 0)
+			nplans = heap_log_freeze_plan(frozen, tuples_frozen, plans, frz_offsets);
+		xlrec.nplans = nplans;
 
 		XLogBeginInsert();
 		XLogRegisterData((char *) &xlrec, SizeOfHeapPrune);
 
 		XLogRegisterBuffer(0, buf, REGBUF_STANDARD);
 
-		/*
-			* The OffsetNumber arrays are not actually in the buffer, but we
-			* pretend that they are.  When XLogInsert stores the whole
-			* buffer, the offset arrays need not be stored too.
-			*/
 		if (prstate.nredirected > 0)
 			XLogRegisterBufData(0, (char *) prstate.redirected,
 								prstate.nredirected *
@@ -1710,45 +1719,19 @@ lazy_scan_prune(LVRelState *vacrel,
 			XLogRegisterBufData(0, (char *) prstate.nowunused,
 								prstate.nunused * sizeof(OffsetNumber));
 
+		if (do_freeze && nplans > 0)
+		{
+			XLogRegisterBufData(0, (char *) plans,
+								nplans * sizeof(xl_heap_freeze_plan));
+
+			XLogRegisterBufData(0, (char *) frz_offsets,
+								tuples_frozen * sizeof(OffsetNumber));
+		}
+
 		recptr = XLogInsert(RM_HEAP2_ID, XLOG_HEAP2_PRUNE);
 
 		PageSetLSN(page, recptr);
 	}
-
-	if (RelationNeedsWAL(rel) && do_freeze && tuples_frozen > 0)
-	{
-		xl_heap_freeze_plan plans[MaxHeapTuplesPerPage];
-		OffsetNumber offsets[MaxHeapTuplesPerPage];
-		int			nplans;
-		xl_heap_freeze_page xlrec;
-		XLogRecPtr	recptr;
-
-		/* Prepare deduplicated representation for use in WAL record */
-		nplans = heap_log_freeze_plan(frozen, tuples_frozen, plans, offsets);
-
-		xlrec.snapshotConflictHorizon = frzsnapshotConflictHorizon;
-		xlrec.isCatalogRel = RelationIsAccessibleInLogicalDecoding(rel);
-		xlrec.nplans = nplans;
-
-		XLogBeginInsert();
-		XLogRegisterData((char *) &xlrec, SizeOfHeapFreezePage);
-
-		/*
-		* The freeze plan array and offset array are not actually in the
-		* buffer, but pretend that they are.  When XLogInsert stores the
-		* whole buffer, the arrays need not be stored too.
-		*/
-		XLogRegisterBuffer(0, buf, REGBUF_STANDARD);
-		XLogRegisterBufData(0, (char *) plans,
-							nplans * sizeof(xl_heap_freeze_plan));
-		XLogRegisterBufData(0, (char *) offsets,
-							tuples_frozen * sizeof(OffsetNumber));
-
-		recptr = XLogInsert(RM_HEAP2_ID, XLOG_HEAP2_FREEZE_PAGE);
-
-		PageSetLSN(page, recptr);
-	}
-
 
 	if (vacuum_now)
 	{

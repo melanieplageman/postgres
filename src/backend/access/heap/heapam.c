@@ -6642,10 +6642,18 @@ heap_execute_freeze_tuple(HeapTupleHeader tuple, HeapTupleFreeze *frz)
 	HeapTupleHeaderSetXmax(tuple, frz->xmax);
 
 	if (frz->frzflags & XLH_FREEZE_XVAC)
+	{
+		if (!((tuple)->t_infomask & HEAP_MOVED))
+			elog(NOTICE, "MELANIE: frzflags: %d", frz->frzflags);
 		HeapTupleHeaderSetXvac(tuple, FrozenTransactionId);
+	}
 
 	if (frz->frzflags & XLH_INVALID_XVAC)
+	{
+		if (!((tuple)->t_infomask & HEAP_MOVED))
+			elog(NOTICE, "MELANIE: frzflags: %d", frz->frzflags);
 		HeapTupleHeaderSetXvac(tuple, InvalidTransactionId);
+	}
 
 	tuple->t_infomask = frz->t_infomask;
 	tuple->t_infomask2 = frz->t_infomask2;
@@ -8693,7 +8701,6 @@ heap_xlog_prune(XLogReaderState *record)
 	if (action == BLK_NEEDS_REDO)
 	{
 		Page		page = (Page) BufferGetPage(buffer);
-		OffsetNumber *end;
 		OffsetNumber *redirected;
 		OffsetNumber *nowdead;
 		OffsetNumber *nowunused;
@@ -8701,22 +8708,55 @@ heap_xlog_prune(XLogReaderState *record)
 		int			ndead;
 		int			nunused;
 		Size		datalen;
-
-		redirected = (OffsetNumber *) XLogRecGetBlockData(record, 0, &datalen);
+		xl_heap_freeze_plan *plans;
+		OffsetNumber *frz_offsets;
+		int			curoff = 0;
 
 		nredirected = xlrec->nredirected;
 		ndead = xlrec->ndead;
-		end = (OffsetNumber *) ((char *) redirected + datalen);
+		nunused = xlrec->nunused;
+
+		redirected = (OffsetNumber *) XLogRecGetBlockData(record, 0, &datalen);
 		nowdead = redirected + (nredirected * 2);
 		nowunused = nowdead + ndead;
-		nunused = (end - nowunused);
-		Assert(nunused >= 0);
+		plans = (xl_heap_freeze_plan *) nowunused + nunused;
+		frz_offsets = (OffsetNumber *) ((char *) plans +
+									(xlrec->nplans *
+									 sizeof(xl_heap_freeze_plan)));
 
 		/* Update all line pointers per the record, and repair fragmentation */
-		heap_page_prune_execute(buffer,
-								redirected, nredirected,
-								nowdead, ndead,
-								nowunused, nunused);
+		if (nredirected > 0 || ndead > 0 || nunused > 0)
+			heap_page_prune_execute(buffer,
+									redirected, nredirected,
+									nowdead, ndead,
+									nowunused, nunused);
+
+		for (int p = 0; p < xlrec->nplans; p++)
+		{
+			HeapTupleFreeze frz;
+
+			/*
+			 * Convert freeze plan representation from WAL record into
+			 * per-tuple format used by heap_execute_freeze_tuple
+			 */
+			frz.xmax = plans[p].xmax;
+			frz.t_infomask2 = plans[p].t_infomask2;
+			frz.t_infomask = plans[p].t_infomask;
+			frz.frzflags = plans[p].frzflags;
+			frz.offset = InvalidOffsetNumber;	/* unused, but be tidy */
+
+			for (int i = 0; i < plans[p].ntuples; i++)
+			{
+				OffsetNumber offset = frz_offsets[curoff++];
+				ItemId		lp;
+				HeapTupleHeader tuple;
+
+				lp = PageGetItemId(page, offset);
+				tuple = (HeapTupleHeader) PageGetItem(page, lp);
+				heap_execute_freeze_tuple(tuple, &frz);
+			}
+		}
+
 
 		/*
 		 * Note: we don't worry about updating the page's prunability hints.

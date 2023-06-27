@@ -367,6 +367,8 @@ heap_page_prune(Relation relation, Buffer buffer,
 			xlrec.snapshotConflictHorizon = prstate.snapshotConflictHorizon;
 			xlrec.nredirected = prstate.nredirected;
 			xlrec.ndead = prstate.ndead;
+			xlrec.nunused = prstate.nunused;
+			xlrec.nplans = 0;
 
 			XLogBeginInsert();
 			XLogRegisterData((char *) &xlrec, SizeOfHeapPrune);

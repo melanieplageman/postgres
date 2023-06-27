@@ -245,6 +245,8 @@ typedef struct xl_heap_prune
 	TransactionId snapshotConflictHorizon;
 	uint16		nredirected;
 	uint16		ndead;
+	uint16		nunused;
+	uint16		nplans;
 	bool		isCatalogRel;	/* to handle recovery conflict during logical
 								 * decoding on standby */
 	/* OFFSET NUMBERS are in the block reference 0 */
