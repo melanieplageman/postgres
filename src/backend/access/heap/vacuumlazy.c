@@ -1815,6 +1815,10 @@ lazy_scan_prune(LVRelState *vacrel,
 		vm_became_all_visible = prunestate->all_visible && !all_visible_according_to_vm;
 		if (vm_became_all_visible)
 			visiconflictid = prunestate->visibility_cutoff_xid;
+
+		if (became_all_frozen && prunestate->all_visible && all_visible_according_to_vm)
+			visiconflictid = InvalidTransactionId;
+
 		if (prunestate->all_visible && !page_all_visible)
 			page_became_all_visible = true;
 	}
@@ -1826,9 +1830,6 @@ lazy_scan_prune(LVRelState *vacrel,
 	}
 	if (became_all_frozen)
 		visiflags |= VISIBILITYMAP_ALL_FROZEN;
-
-	if (!vacuum_now && became_all_frozen && prunestate->all_visible && all_visible_according_to_vm)
-		visiconflictid = InvalidTransactionId;
 
 	if ((!vacuum_now && prunestate->all_visible) || (vacuum_now && vm_became_all_visible))
 		visiflags |= VISIBILITYMAP_ALL_VISIBLE;
