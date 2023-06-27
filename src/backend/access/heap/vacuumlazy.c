@@ -1737,9 +1737,10 @@ lazy_scan_prune(LVRelState *vacrel,
 	{
 		became_all_frozen = prunestate->all_frozen && !VM_ALL_FROZEN(vacrel->rel, blkno, &vmbuffer);
 		vm_became_all_visible = prunestate->all_visible && !all_visible_according_to_vm;
+		if (vm_became_all_visible)
+			visiconflictid = prunestate->visibility_cutoff_xid;
 		if (prunestate->all_visible && !page_all_visible)
 			page_became_all_visible = true;
-
 	}
 
 	if (page_became_all_visible)
@@ -1758,8 +1759,37 @@ lazy_scan_prune(LVRelState *vacrel,
 			LockBuffer(vmbuffer, BUFFER_LOCK_UNLOCK);
 	}
 
-	if (!vacuum_now && vm_became_all_visible)
-		visiconflictid = prunestate->visibility_cutoff_xid;
+	if (became_all_frozen)
+		visiflags |= VISIBILITYMAP_ALL_FROZEN;
+
+	if (!vacuum_now && became_all_frozen && prunestate->all_visible && all_visible_according_to_vm)
+		visiconflictid = InvalidTransactionId;
+
+	if (!vacuum_now )
+	{
+		if (vm_became_all_visible ||
+				(became_all_frozen && prunestate->all_visible && all_visible_according_to_vm))
+		{
+			vm_modified = visibilitymap_set_soft(vacrel->rel, blkno, buf, InvalidXLogRecPtr,
+							  vmbuffer, visiconflictid, visiflags);
+			if (!vm_modified)
+				LockBuffer(vmbuffer, BUFFER_LOCK_UNLOCK);
+		}
+
+	}
+
+	if (!vacuum_now && ((all_visible_according_to_vm && !page_all_visible &&
+				visibilitymap_get_status(vacrel->rel, blkno, &vmbuffer) != 0) ||
+			(!prunestate->all_visible && page_all_visible)))
+	{
+		visibilitymap_clear(vacrel->rel, blkno, vmbuffer,
+							VISIBILITYMAP_VALID_BITS);
+	}
+	if (!vacuum_now && !prunestate->all_visible && page_all_visible)
+	{
+		PageClearAllVisible(page);
+		MarkBufferDirty(buf);
+	}
 
 	if (!vacuum_now && prunestate->all_visible)
 	{
@@ -1773,39 +1803,6 @@ lazy_scan_prune(LVRelState *vacrel,
 		Assert(!TransactionIdIsValid(cutoff) ||
 			cutoff == prunestate->visibility_cutoff_xid);
 #endif
-	}
-
-	if (became_all_frozen)
-		visiflags |= VISIBILITYMAP_ALL_FROZEN;
-
-	if (!vacuum_now && !prunestate->all_visible && page_all_visible)
-	{
-		PageClearAllVisible(page);
-		MarkBufferDirty(buf);
-	}
-
-	if (!vacuum_now )
-	{
-		if (!vacuum_now && became_all_frozen && prunestate->all_visible && all_visible_according_to_vm)
-			visiconflictid = InvalidTransactionId;
-
-
-		if (vm_became_all_visible ||
-				(became_all_frozen && prunestate->all_visible && all_visible_according_to_vm))
-		{
-			vm_modified = visibilitymap_set_soft(vacrel->rel, blkno, buf, InvalidXLogRecPtr,
-							  vmbuffer, visiconflictid, visiflags);
-			if (!vm_modified)
-				LockBuffer(vmbuffer, BUFFER_LOCK_UNLOCK);
-		}
-
-		if ((all_visible_according_to_vm && !page_all_visible &&
-				 visibilitymap_get_status(vacrel->rel, blkno, &vmbuffer) != 0) ||
-				(!prunestate->all_visible && page_all_visible))
-		{
-			visibilitymap_clear(vacrel->rel, blkno, vmbuffer,
-								VISIBILITYMAP_VALID_BITS);
-		}
 	}
 
 	if (RelationNeedsWAL(rel) && vm_modified)
