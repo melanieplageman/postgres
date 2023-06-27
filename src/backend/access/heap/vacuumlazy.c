@@ -1824,10 +1824,18 @@ lazy_scan_prune(LVRelState *vacrel,
 		PageSetAllVisible(page);
 		MarkBufferDirty(buf);
 	}
+	if (became_all_frozen)
+		visiflags |= VISIBILITYMAP_ALL_FROZEN;
+
+	if (!vacuum_now && became_all_frozen && prunestate->all_visible && all_visible_according_to_vm)
+		visiconflictid = InvalidTransactionId;
+
 	if ((!vacuum_now && prunestate->all_visible) || (vacuum_now && vm_became_all_visible))
 		visiflags |= VISIBILITYMAP_ALL_VISIBLE;
 
-	if (vacuum_now && vm_became_all_visible)
+
+	if (vm_became_all_visible ||
+			(became_all_frozen && prunestate->all_visible && all_visible_according_to_vm))
 	{
 		vm_modified = visibilitymap_set_soft(vacrel->rel, blkno, buf, InvalidXLogRecPtr,
 							vmbuffer, visiconflictid, visiflags);
@@ -1835,24 +1843,6 @@ lazy_scan_prune(LVRelState *vacrel,
 			LockBuffer(vmbuffer, BUFFER_LOCK_UNLOCK);
 	}
 
-	if (became_all_frozen)
-		visiflags |= VISIBILITYMAP_ALL_FROZEN;
-
-	if (!vacuum_now && became_all_frozen && prunestate->all_visible && all_visible_according_to_vm)
-		visiconflictid = InvalidTransactionId;
-
-	if (!vacuum_now)
-	{
-		if (vm_became_all_visible ||
-				(became_all_frozen && prunestate->all_visible && all_visible_according_to_vm))
-		{
-			vm_modified = visibilitymap_set_soft(vacrel->rel, blkno, buf, InvalidXLogRecPtr,
-							  vmbuffer, visiconflictid, visiflags);
-			if (!vm_modified)
-				LockBuffer(vmbuffer, BUFFER_LOCK_UNLOCK);
-		}
-
-	}
 
 	if (!vacuum_now && ((all_visible_according_to_vm && !page_all_visible &&
 				visibilitymap_get_status(vacrel->rel, blkno, &vmbuffer) != 0) ||
