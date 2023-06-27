@@ -1262,6 +1262,7 @@ lazy_scan_new_or_empty(LVRelState *vacrel, Buffer buf, BlockNumber blkno,
  */
 // TODO: is it okay to just get the visibility map status again instead of passing this parameter
 // TODO: figure out what I can clean up and make new WAL
+// TODO: put back heap_page_is_all_visible() assert
 static void
 lazy_scan_prune(LVRelState *vacrel,
 				Buffer buf,
@@ -1287,7 +1288,6 @@ lazy_scan_prune(LVRelState *vacrel,
 	PruneState	prstate;
 	Oid tableoid = RelationGetRelid(rel);
 
-	bool marked_dirty = false;
 	bool vm_modified = false;
 	uint8 visiflags = 0;
 	// TODO: same one?
@@ -1865,20 +1865,6 @@ lazy_scan_prune(LVRelState *vacrel,
 	{
 		PageClearAllVisible(page);
 		MarkBufferDirty(buf);
-	}
-
-	if (!vacuum_now && prunestate->all_visible)
-	{
-#ifdef USE_ASSERT_CHECKING
-		TransactionId cutoff;
-		bool		all_frozen;
-
-		if (!heap_page_is_all_visible(vacrel, buf, &cutoff, &all_frozen))
-			Assert(false);
-
-		Assert(!TransactionIdIsValid(cutoff) ||
-			cutoff == prunestate->visibility_cutoff_xid);
-#endif
 	}
 
 	START_CRIT_SECTION();
