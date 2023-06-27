@@ -1291,7 +1291,8 @@ lazy_scan_prune(LVRelState *vacrel,
 	uint8 visiflags = 0;
 	// TODO: same one?
 	TransactionId visiconflictid = InvalidTransactionId;
-	bool became_all_visible = false;
+	bool vm_became_all_visible = false;
+	bool page_became_all_visible = false;
 	bool became_all_frozen = false;
 	bool page_all_visible = false;
 
@@ -1718,34 +1719,47 @@ lazy_scan_prune(LVRelState *vacrel,
 
 		PageSetLSN(page, recptr);
 	}
+		// TODO: should we check visibility map status here before finally doing this
+		// TODO: what if it became all frozen but it wasn't already all
+		// visible, do we still use invalidtransactionid as the
+		// snapshotconflictid
 
+	page_all_visible = PageIsAllVisible(page);
 	if (vacuum_now)
 	{
-		became_all_visible = heap_page_is_all_visible(vacrel, buf, &visiconflictid,
+		vm_became_all_visible = heap_page_is_all_visible(vacrel, buf, &visiconflictid,
 									&became_all_frozen);
 		vacrel->dead_items->num_items = 0;
+		if (vm_became_all_visible)
+			page_became_all_visible = true;
 	}
 	else
 	{
 		became_all_frozen = prunestate->all_frozen && !VM_ALL_FROZEN(vacrel->rel, blkno, &vmbuffer);
+		vm_became_all_visible = prunestate->all_visible && !all_visible_according_to_vm;
+		if (prunestate->all_visible && !page_all_visible)
+			page_became_all_visible = true;
 
 	}
-	if (became_all_frozen)
-		visiflags |= VISIBILITYMAP_ALL_FROZEN;
 
-	if (vacuum_now && became_all_visible)
+	if (page_became_all_visible)
 	{
-		visiflags |= VISIBILITYMAP_ALL_VISIBLE;
 		PageSetAllVisible(page);
 		MarkBufferDirty(buf);
 	}
-	if (vacuum_now && became_all_visible)
+	if ((!vacuum_now && prunestate->all_visible) || (vacuum_now && vm_became_all_visible))
+		visiflags |= VISIBILITYMAP_ALL_VISIBLE;
+
+	if (vacuum_now && vm_became_all_visible)
 	{
 		vm_modified = visibilitymap_set_soft(vacrel->rel, blkno, buf, InvalidXLogRecPtr,
 							vmbuffer, visiconflictid, visiflags);
 		if (!vm_modified)
 			LockBuffer(vmbuffer, BUFFER_LOCK_UNLOCK);
 	}
+
+	if (!vacuum_now && vm_became_all_visible)
+		visiconflictid = prunestate->visibility_cutoff_xid;
 
 	if (!vacuum_now && prunestate->all_visible)
 	{
@@ -1761,16 +1775,9 @@ lazy_scan_prune(LVRelState *vacrel,
 #endif
 	}
 
-	page_all_visible = PageIsAllVisible(page);
+	if (became_all_frozen)
+		visiflags |= VISIBILITYMAP_ALL_FROZEN;
 
-	if (!vacuum_now && prunestate->all_visible)
-		visiflags |= VISIBILITYMAP_ALL_VISIBLE;
-
-	if (!vacuum_now && prunestate->all_visible && !page_all_visible)
-	{
-		PageSetAllVisible(page);
-		MarkBufferDirty(buf);
-	}
 	if (!vacuum_now && !prunestate->all_visible && page_all_visible)
 	{
 		PageClearAllVisible(page);
@@ -1779,20 +1786,11 @@ lazy_scan_prune(LVRelState *vacrel,
 
 	if (!vacuum_now )
 	{
-
-		// TODO: should we check visibility map status here before finally doing this
-		became_all_visible = prunestate->all_visible && !all_visible_according_to_vm;
-		// TODO: what if it became all frozen but it wasn't already all
-		// visible, do we still use invalidtransactionid as the
-		// snapshotconflictid
-
-		if (became_all_frozen && prunestate->all_visible && all_visible_according_to_vm)
+		if (!vacuum_now && became_all_frozen && prunestate->all_visible && all_visible_according_to_vm)
 			visiconflictid = InvalidTransactionId;
 
-		if (became_all_visible)
-			visiconflictid = prunestate->visibility_cutoff_xid;
 
-		if (became_all_visible ||
+		if (vm_became_all_visible ||
 				(became_all_frozen && prunestate->all_visible && all_visible_according_to_vm))
 		{
 			vm_modified = visibilitymap_set_soft(vacrel->rel, blkno, buf, InvalidXLogRecPtr,
