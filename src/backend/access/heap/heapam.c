@@ -6642,18 +6642,10 @@ heap_execute_freeze_tuple(HeapTupleHeader tuple, HeapTupleFreeze *frz)
 	HeapTupleHeaderSetXmax(tuple, frz->xmax);
 
 	if (frz->frzflags & XLH_FREEZE_XVAC)
-	{
-		if (!((tuple)->t_infomask & HEAP_MOVED))
-			elog(NOTICE, "MELANIE: frzflags: %d", frz->frzflags);
 		HeapTupleHeaderSetXvac(tuple, FrozenTransactionId);
-	}
 
 	if (frz->frzflags & XLH_INVALID_XVAC)
-	{
-		if (!((tuple)->t_infomask & HEAP_MOVED))
-			elog(NOTICE, "MELANIE: frzflags: %d", frz->frzflags);
 		HeapTupleHeaderSetXvac(tuple, InvalidTransactionId);
-	}
 
 	tuple->t_infomask = frz->t_infomask;
 	tuple->t_infomask2 = frz->t_infomask2;
