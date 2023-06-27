@@ -1659,16 +1659,14 @@ lazy_scan_prune(LVRelState *vacrel,
 		vacrel->nonempty_pages = blkno + 1;
 
 	vacrel->lpdead_items += lpdead_items;
-
 	vacuum_now = vacrel->nindexes == 0 && lpdead_items > 0;
-	if (vacuum_now)
+	if (lpdead_items > 0)
 	{
 		vacrel->lpdead_item_pages++;
 		prunestate->all_visible = false;
 		Assert(vacrel->dead_items->num_items <= vacrel->dead_items->max_items);
 		pgstat_progress_update_param(PROGRESS_VACUUM_NUM_DEAD_TUPLES,
-									 vacrel->dead_items->num_items);
-		pgstat_progress_update_param(PROGRESS_VACUUM_HEAP_BLKS_VACUUMED, blkno);
+									vacrel->dead_items->num_items);
 	}
 
 	if (do_prune || (do_freeze && tuples_frozen > 0) || vacuum_now)
@@ -1678,6 +1676,8 @@ lazy_scan_prune(LVRelState *vacrel,
 
 	if (vacuum_now)
 	{
+		pgstat_progress_update_param(PROGRESS_VACUUM_HEAP_BLKS_VACUUMED, blkno);
+
 		for (int i = 0; i < vacrel->dead_items->num_items; i++)
 		{
 			BlockNumber tblk;
@@ -1745,20 +1745,10 @@ lazy_scan_prune(LVRelState *vacrel,
 			LockBuffer(vmbuffer, BUFFER_LOCK_UNLOCK);
 	}
 
-	
 	if (!vacuum_now)
 	{
 		bool page_all_visible;
-		/* (vacrel->nindexes > 0 || lpdead_items == 0) */
-		if (lpdead_items > 0)
-		{
-			prunestate->all_visible = false;
-			vacrel->lpdead_item_pages++;
-			Assert(vacrel->dead_items->num_items <= vacrel->dead_items->max_items);
-			pgstat_progress_update_param(PROGRESS_VACUUM_NUM_DEAD_TUPLES,
-										vacrel->dead_items->num_items);
-		}
-		else if (prunestate->all_visible)
+		if (prunestate->all_visible)
 		{
 #ifdef USE_ASSERT_CHECKING
 			TransactionId cutoff;
