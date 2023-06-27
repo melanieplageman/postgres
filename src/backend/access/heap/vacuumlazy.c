@@ -1287,6 +1287,7 @@ lazy_scan_prune(LVRelState *vacrel,
 	PruneState	prstate;
 	Oid tableoid = RelationGetRelid(rel);
 
+	bool marked_dirty = false;
 	bool vm_modified = false;
 	uint8 visiflags = 0;
 	// TODO: same one?
@@ -1676,167 +1677,6 @@ lazy_scan_prune(LVRelState *vacrel,
 	else
 		MarkBufferDirtyHint(buf, true);
 
-	if (vacuum_now)
-	{
-		pgstat_progress_update_param(PROGRESS_VACUUM_HEAP_BLKS_VACUUMED, blkno);
-
-		for (int i = 0; i < vacrel->dead_items->num_items; i++)
-		{
-			BlockNumber tblk;
-			OffsetNumber toff;
-			ItemId		itemid;
-
-			tblk = ItemPointerGetBlockNumber(&vacrel->dead_items->items[i]);
-			if (tblk != blkno)
-				break;				/* past end of tuples for this block */
-			toff = ItemPointerGetOffsetNumber(&vacrel->dead_items->items[i]);
-			itemid = PageGetItemId(page, toff);
-
-			Assert(ItemIdIsDead(itemid) && !ItemIdHasStorage(itemid));
-			ItemIdSetUnused(itemid);
-			vac_unused[vac_nunused++] = toff;
-		}
-
-		Assert(vac_nunused > 0);
-		/* Attempt to truncate line pointer array now */
-		PageTruncateLinePointerArray(page);
-	}
-
-	if (RelationNeedsWAL(rel) && vacuum_now)
-	{
-		xl_heap_vacuum xlrec;
-		XLogRecPtr	recptr;
-
-		xlrec.nunused = vac_nunused;
-
-		XLogBeginInsert();
-		XLogRegisterData((char *) &xlrec, SizeOfHeapVacuum);
-
-		XLogRegisterBuffer(0, buf, REGBUF_STANDARD);
-		XLogRegisterBufData(0, (char *) vac_unused, vac_nunused * sizeof(OffsetNumber));
-
-		recptr = XLogInsert(RM_HEAP2_ID, XLOG_HEAP2_VACUUM);
-
-		PageSetLSN(page, recptr);
-	}
-		// TODO: should we check visibility map status here before finally doing this
-		// TODO: what if it became all frozen but it wasn't already all
-		// visible, do we still use invalidtransactionid as the
-		// snapshotconflictid
-
-	page_all_visible = PageIsAllVisible(page);
-	if (vacuum_now)
-	{
-		vm_became_all_visible = heap_page_is_all_visible(vacrel, buf, &visiconflictid,
-									&became_all_frozen);
-		vacrel->dead_items->num_items = 0;
-		if (vm_became_all_visible)
-			page_became_all_visible = true;
-	}
-	else
-	{
-		became_all_frozen = prunestate->all_frozen && !VM_ALL_FROZEN(vacrel->rel, blkno, &vmbuffer);
-		vm_became_all_visible = prunestate->all_visible && !all_visible_according_to_vm;
-		if (vm_became_all_visible)
-			visiconflictid = prunestate->visibility_cutoff_xid;
-		if (prunestate->all_visible && !page_all_visible)
-			page_became_all_visible = true;
-	}
-
-	if (page_became_all_visible)
-	{
-		PageSetAllVisible(page);
-		MarkBufferDirty(buf);
-	}
-	if ((!vacuum_now && prunestate->all_visible) || (vacuum_now && vm_became_all_visible))
-		visiflags |= VISIBILITYMAP_ALL_VISIBLE;
-
-	if (vacuum_now && vm_became_all_visible)
-	{
-		vm_modified = visibilitymap_set_soft(vacrel->rel, blkno, buf, InvalidXLogRecPtr,
-							vmbuffer, visiconflictid, visiflags);
-		if (!vm_modified)
-			LockBuffer(vmbuffer, BUFFER_LOCK_UNLOCK);
-	}
-
-	if (became_all_frozen)
-		visiflags |= VISIBILITYMAP_ALL_FROZEN;
-
-	if (!vacuum_now && became_all_frozen && prunestate->all_visible && all_visible_according_to_vm)
-		visiconflictid = InvalidTransactionId;
-
-	if (!vacuum_now )
-	{
-		if (vm_became_all_visible ||
-				(became_all_frozen && prunestate->all_visible && all_visible_according_to_vm))
-		{
-			vm_modified = visibilitymap_set_soft(vacrel->rel, blkno, buf, InvalidXLogRecPtr,
-							  vmbuffer, visiconflictid, visiflags);
-			if (!vm_modified)
-				LockBuffer(vmbuffer, BUFFER_LOCK_UNLOCK);
-		}
-
-	}
-
-	if (!vacuum_now && ((all_visible_according_to_vm && !page_all_visible &&
-				visibilitymap_get_status(vacrel->rel, blkno, &vmbuffer) != 0) ||
-			(!prunestate->all_visible && page_all_visible)))
-	{
-		visibilitymap_clear(vacrel->rel, blkno, vmbuffer,
-							VISIBILITYMAP_VALID_BITS);
-	}
-	if (!vacuum_now && !prunestate->all_visible && page_all_visible)
-	{
-		PageClearAllVisible(page);
-		MarkBufferDirty(buf);
-	}
-
-	if (!vacuum_now && prunestate->all_visible)
-	{
-#ifdef USE_ASSERT_CHECKING
-		TransactionId cutoff;
-		bool		all_frozen;
-
-		if (!heap_page_is_all_visible(vacrel, buf, &cutoff, &all_frozen))
-			Assert(false);
-
-		Assert(!TransactionIdIsValid(cutoff) ||
-			cutoff == prunestate->visibility_cutoff_xid);
-#endif
-	}
-
-	if (RelationNeedsWAL(rel) && vm_modified)
-	{
-		xl_heap_visible xlrec;
-		XLogRecPtr	recptr;
-		uint8		flags;
-
-		Assert(BufferIsValid(buf));
-		Assert(BufferIsValid(vmbuffer));
-
-		xlrec.snapshotConflictHorizon = visiconflictid;
-		xlrec.flags = visiflags;
-		if (RelationIsAccessibleInLogicalDecoding(rel))
-			xlrec.flags |= VISIBILITYMAP_XLOG_CATALOG_REL;
-		XLogBeginInsert();
-		XLogRegisterData((char *) &xlrec, SizeOfHeapVisible);
-
-		XLogRegisterBuffer(0, vmbuffer, 0);
-
-		flags = REGBUF_STANDARD;
-		if (!XLogHintBitIsNeeded())
-			flags |= REGBUF_NO_IMAGE;
-		XLogRegisterBuffer(1, buf, flags);
-
-		recptr = XLogInsert(RM_HEAP2_ID, XLOG_HEAP2_VISIBLE);
-
-		if (XLogHintBitIsNeeded())
-			PageSetLSN(page, recptr);
-		PageSetLSN(BufferGetPage(vmbuffer), recptr);
-
-		LockBuffer(vmbuffer, BUFFER_LOCK_UNLOCK);
-	}
-
 	if (RelationNeedsWAL(rel) && do_prune)
 	{
 		xl_heap_prune xlrec;
@@ -1908,6 +1748,172 @@ lazy_scan_prune(LVRelState *vacrel,
 
 		PageSetLSN(page, recptr);
 	}
+
+
+	if (vacuum_now)
+	{
+		pgstat_progress_update_param(PROGRESS_VACUUM_HEAP_BLKS_VACUUMED, blkno);
+
+		for (int i = 0; i < vacrel->dead_items->num_items; i++)
+		{
+			BlockNumber tblk;
+			OffsetNumber toff;
+			ItemId		itemid;
+
+			tblk = ItemPointerGetBlockNumber(&vacrel->dead_items->items[i]);
+			if (tblk != blkno)
+				break;				/* past end of tuples for this block */
+			toff = ItemPointerGetOffsetNumber(&vacrel->dead_items->items[i]);
+			itemid = PageGetItemId(page, toff);
+
+			Assert(ItemIdIsDead(itemid) && !ItemIdHasStorage(itemid));
+			ItemIdSetUnused(itemid);
+			vac_unused[vac_nunused++] = toff;
+		}
+
+		Assert(vac_nunused > 0);
+		/* Attempt to truncate line pointer array now */
+		PageTruncateLinePointerArray(page);
+	}
+
+
+	if (RelationNeedsWAL(rel) && vacuum_now)
+	{
+		xl_heap_vacuum xlrec;
+		XLogRecPtr	recptr;
+
+		xlrec.nunused = vac_nunused;
+
+		XLogBeginInsert();
+		XLogRegisterData((char *) &xlrec, SizeOfHeapVacuum);
+
+		XLogRegisterBuffer(0, buf, REGBUF_STANDARD);
+		XLogRegisterBufData(0, (char *) vac_unused, vac_nunused * sizeof(OffsetNumber));
+
+		recptr = XLogInsert(RM_HEAP2_ID, XLOG_HEAP2_VACUUM);
+
+		PageSetLSN(page, recptr);
+	}
+		// TODO: should we check visibility map status here before finally doing this
+		// TODO: what if it became all frozen but it wasn't already all
+		// visible, do we still use invalidtransactionid as the
+		// snapshotconflictid
+
+	END_CRIT_SECTION();
+	page_all_visible = PageIsAllVisible(page);
+	if (vacuum_now)
+	{
+		vm_became_all_visible = heap_page_is_all_visible(vacrel, buf, &visiconflictid,
+									&became_all_frozen);
+		vacrel->dead_items->num_items = 0;
+		if (vm_became_all_visible)
+			page_became_all_visible = true;
+	}
+	else
+	{
+		became_all_frozen = prunestate->all_frozen && !VM_ALL_FROZEN(vacrel->rel, blkno, &vmbuffer);
+		vm_became_all_visible = prunestate->all_visible && !all_visible_according_to_vm;
+		if (vm_became_all_visible)
+			visiconflictid = prunestate->visibility_cutoff_xid;
+		if (prunestate->all_visible && !page_all_visible)
+			page_became_all_visible = true;
+	}
+
+	if (page_became_all_visible)
+	{
+		PageSetAllVisible(page);
+		MarkBufferDirty(buf);
+	}
+	if ((!vacuum_now && prunestate->all_visible) || (vacuum_now && vm_became_all_visible))
+		visiflags |= VISIBILITYMAP_ALL_VISIBLE;
+
+	if (vacuum_now && vm_became_all_visible)
+	{
+		vm_modified = visibilitymap_set_soft(vacrel->rel, blkno, buf, InvalidXLogRecPtr,
+							vmbuffer, visiconflictid, visiflags);
+		if (!vm_modified)
+			LockBuffer(vmbuffer, BUFFER_LOCK_UNLOCK);
+	}
+
+	if (became_all_frozen)
+		visiflags |= VISIBILITYMAP_ALL_FROZEN;
+
+	if (!vacuum_now && became_all_frozen && prunestate->all_visible && all_visible_according_to_vm)
+		visiconflictid = InvalidTransactionId;
+
+	if (!vacuum_now)
+	{
+		if (vm_became_all_visible ||
+				(became_all_frozen && prunestate->all_visible && all_visible_according_to_vm))
+		{
+			vm_modified = visibilitymap_set_soft(vacrel->rel, blkno, buf, InvalidXLogRecPtr,
+							  vmbuffer, visiconflictid, visiflags);
+			if (!vm_modified)
+				LockBuffer(vmbuffer, BUFFER_LOCK_UNLOCK);
+		}
+
+	}
+
+	if (!vacuum_now && ((all_visible_according_to_vm && !page_all_visible &&
+				visibilitymap_get_status(vacrel->rel, blkno, &vmbuffer) != 0) ||
+			(!prunestate->all_visible && page_all_visible)))
+	{
+		visibilitymap_clear(vacrel->rel, blkno, vmbuffer,
+							VISIBILITYMAP_VALID_BITS);
+	}
+	if (!vacuum_now && !prunestate->all_visible && page_all_visible)
+	{
+		PageClearAllVisible(page);
+		MarkBufferDirty(buf);
+	}
+
+	if (!vacuum_now && prunestate->all_visible)
+	{
+#ifdef USE_ASSERT_CHECKING
+		TransactionId cutoff;
+		bool		all_frozen;
+
+		if (!heap_page_is_all_visible(vacrel, buf, &cutoff, &all_frozen))
+			Assert(false);
+
+		Assert(!TransactionIdIsValid(cutoff) ||
+			cutoff == prunestate->visibility_cutoff_xid);
+#endif
+	}
+
+	START_CRIT_SECTION();
+	if (RelationNeedsWAL(rel) && vm_modified)
+	{
+		xl_heap_visible xlrec;
+		XLogRecPtr	recptr;
+		uint8		flags;
+
+		Assert(BufferIsValid(buf));
+		Assert(BufferIsValid(vmbuffer));
+
+		xlrec.snapshotConflictHorizon = visiconflictid;
+		xlrec.flags = visiflags;
+		if (RelationIsAccessibleInLogicalDecoding(rel))
+			xlrec.flags |= VISIBILITYMAP_XLOG_CATALOG_REL;
+		XLogBeginInsert();
+		XLogRegisterData((char *) &xlrec, SizeOfHeapVisible);
+
+		XLogRegisterBuffer(0, vmbuffer, 0);
+
+		flags = REGBUF_STANDARD;
+		if (!XLogHintBitIsNeeded())
+			flags |= REGBUF_NO_IMAGE;
+		XLogRegisterBuffer(1, buf, flags);
+
+		recptr = XLogInsert(RM_HEAP2_ID, XLOG_HEAP2_VISIBLE);
+
+		if (XLogHintBitIsNeeded())
+			PageSetLSN(page, recptr);
+		PageSetLSN(BufferGetPage(vmbuffer), recptr);
+
+	}
+	if (vm_modified)
+		LockBuffer(vmbuffer, BUFFER_LOCK_UNLOCK);
 
 	END_CRIT_SECTION();
 }
