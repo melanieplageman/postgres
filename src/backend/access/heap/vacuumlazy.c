@@ -1725,12 +1725,13 @@ lazy_scan_prune(LVRelState *vacrel,
 									&became_all_frozen);
 		vacrel->dead_items->num_items = 0;
 	}
-
-	if (vacuum_now && became_all_frozen)
+	else
 	{
-		Assert(!TransactionIdIsValid(visiconflictid));
-		visiflags |= VISIBILITYMAP_ALL_FROZEN;
+		became_all_frozen = prunestate->all_frozen && !VM_ALL_FROZEN(vacrel->rel, blkno, &vmbuffer);
+
 	}
+	if (became_all_frozen)
+		visiflags |= VISIBILITYMAP_ALL_FROZEN;
 
 	if (vacuum_now && became_all_visible)
 	{
@@ -1761,11 +1762,6 @@ lazy_scan_prune(LVRelState *vacrel,
 	}
 
 	page_all_visible = PageIsAllVisible(page);
-	if (!vacuum_now && prunestate->all_frozen)
-	{
-		Assert(!TransactionIdIsValid(prunestate->visibility_cutoff_xid));
-		visiflags |= VISIBILITYMAP_ALL_FROZEN;
-	}
 
 	if (!vacuum_now && prunestate->all_visible)
 		visiflags |= VISIBILITYMAP_ALL_VISIBLE;
@@ -1789,7 +1785,6 @@ lazy_scan_prune(LVRelState *vacrel,
 		// TODO: what if it became all frozen but it wasn't already all
 		// visible, do we still use invalidtransactionid as the
 		// snapshotconflictid
-		became_all_frozen = prunestate->all_frozen && !VM_ALL_FROZEN(vacrel->rel, blkno, &vmbuffer);
 
 		if (became_all_frozen && prunestate->all_visible && all_visible_according_to_vm)
 			visiconflictid = InvalidTransactionId;
