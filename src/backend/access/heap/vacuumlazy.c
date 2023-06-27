@@ -1293,6 +1293,7 @@ lazy_scan_prune(LVRelState *vacrel,
 	TransactionId visiconflictid = InvalidTransactionId;
 	bool became_all_visible = false;
 	bool became_all_frozen = false;
+	bool page_all_visible = false;
 
 	// TODO: add in vacuum error phase for this prune freeze vacuum combo (for update_vacuum_error_info)
 	bool do_freeze;
@@ -1745,44 +1746,43 @@ lazy_scan_prune(LVRelState *vacrel,
 			LockBuffer(vmbuffer, BUFFER_LOCK_UNLOCK);
 	}
 
-	if (!vacuum_now)
+	if (!vacuum_now && prunestate->all_visible)
 	{
-		bool page_all_visible;
-		if (prunestate->all_visible)
-		{
 #ifdef USE_ASSERT_CHECKING
-			TransactionId cutoff;
-			bool		all_frozen;
+		TransactionId cutoff;
+		bool		all_frozen;
 
-			if (!heap_page_is_all_visible(vacrel, buf, &cutoff, &all_frozen))
-				Assert(false);
+		if (!heap_page_is_all_visible(vacrel, buf, &cutoff, &all_frozen))
+			Assert(false);
 
-			Assert(!TransactionIdIsValid(cutoff) ||
-				cutoff == prunestate->visibility_cutoff_xid);
+		Assert(!TransactionIdIsValid(cutoff) ||
+			cutoff == prunestate->visibility_cutoff_xid);
 #endif
-		}
+	}
 
-		page_all_visible = PageIsAllVisible(page);
+	page_all_visible = PageIsAllVisible(page);
+	if (!vacuum_now && prunestate->all_frozen)
+	{
+		Assert(!TransactionIdIsValid(prunestate->visibility_cutoff_xid));
+		visiflags |= VISIBILITYMAP_ALL_FROZEN;
+	}
 
-		if (prunestate->all_frozen)
-		{
-			Assert(!TransactionIdIsValid(prunestate->visibility_cutoff_xid));
-			visiflags |= VISIBILITYMAP_ALL_FROZEN;
-		}
+	if (!vacuum_now && prunestate->all_visible)
+		visiflags |= VISIBILITYMAP_ALL_VISIBLE;
 
-		if (prunestate->all_visible)
-			visiflags |= VISIBILITYMAP_ALL_VISIBLE;
+	if (!vacuum_now && prunestate->all_visible && !page_all_visible)
+	{
+		PageSetAllVisible(page);
+		MarkBufferDirty(buf);
+	}
+	if (!vacuum_now && !prunestate->all_visible && page_all_visible)
+	{
+		PageClearAllVisible(page);
+		MarkBufferDirty(buf);
+	}
 
-		if (!prunestate->all_visible && page_all_visible)
-		{
-			PageClearAllVisible(page);
-			MarkBufferDirty(buf);
-		}
-		else if (prunestate->all_visible && !page_all_visible)
-		{
-			PageSetAllVisible(page);
-			MarkBufferDirty(buf);
-		}
+	if (!vacuum_now )
+	{
 
 		// TODO: should we check visibility map status here before finally doing this
 		became_all_visible = prunestate->all_visible && !all_visible_according_to_vm;
