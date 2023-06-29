@@ -1665,7 +1665,7 @@ lazy_scan_prune(LVRelState *vacrel,
 		pgstat_progress_update_param(PROGRESS_VACUUM_NUM_DEAD_TUPLES,
 									vacrel->dead_items->num_items);
 	}
-	if (do_freeze )
+	if (do_freeze)
 	{
 		/* Execute all freeze plans for page as a single atomic action */
 		heap_freeze_execute_prepared(vacrel->rel, buf,
@@ -1697,7 +1697,7 @@ lazy_scan_prune(LVRelState *vacrel,
 		xlrec.ndead = prstate.ndead;
 		xlrec.nunused = prstate.nunused;
 
-		if (do_freeze && nplans > 0)
+		if (do_freeze)
 			nplans = heap_log_freeze_plan(frozen, tuples_frozen, plans, frz_offsets);
 		xlrec.nplans = nplans;
 
