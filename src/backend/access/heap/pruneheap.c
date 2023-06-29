@@ -964,19 +964,6 @@ heap_page_prune_execute(Buffer buffer,
 	{
 		OffsetNumber off = *offnum++;
 		ItemId		lp = PageGetItemId(page, off);
-
-#ifdef USE_ASSERT_CHECKING
-
-		/*
-		 * Only heap-only tuples can become LP_UNUSED during pruning.  They
-		 * don't need to be left in place as LP_DEAD items until VACUUM gets
-		 * around to doing index vacuuming.
-		 */
-		Assert(ItemIdHasStorage(lp) && ItemIdIsNormal(lp));
-		htup = (HeapTupleHeader) PageGetItem(page, lp);
-		Assert(HeapTupleHeaderIsHeapOnly(htup));
-#endif
-
 		ItemIdSetUnused(lp);
 	}
 

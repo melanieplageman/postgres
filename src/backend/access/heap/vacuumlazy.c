@@ -1657,6 +1657,12 @@ lazy_scan_prune(LVRelState *vacrel,
 
 	vacrel->lpdead_items += lpdead_items;
 	vacuum_now = vacrel->nindexes == 0 && lpdead_items > 0;
+	if (do_prune || do_freeze  || vacuum_now)
+		MarkBufferDirty(buf);
+
+	if (((PageHeader) page)->pd_prune_xid != prstate.new_prune_xid || PageIsFull(page))
+		MarkBufferDirtyHint(buf, true);
+
 	if (lpdead_items > 0)
 	{
 		vacrel->lpdead_item_pages++;
@@ -1671,66 +1677,6 @@ lazy_scan_prune(LVRelState *vacrel,
 		heap_freeze_execute_prepared(vacrel->rel, buf,
 										frzsnapshotConflictHorizon,
 										frozen, tuples_frozen);
-	}
-
-	if (do_prune || do_freeze  || vacuum_now)
-		MarkBufferDirty(buf);
-	else
-		MarkBufferDirtyHint(buf, true);
-
-	if (RelationNeedsWAL(rel))
-	{
-		xl_heap_prune xlrec;
-		XLogRecPtr	recptr;
-		xl_heap_freeze_plan plans[MaxHeapTuplesPerPage];
-		OffsetNumber frz_offsets[MaxHeapTuplesPerPage];
-		int			nplans = 0;
-
-		xlrec.isCatalogRel = RelationIsAccessibleInLogicalDecoding(rel);
-		// TODO: which one should I use
-		if (do_prune)
-			xlrec.snapshotConflictHorizon = prstate.snapshotConflictHorizon;
-		else
-			xlrec.snapshotConflictHorizon = frzsnapshotConflictHorizon;
-
-		xlrec.nredirected = prstate.nredirected;
-		xlrec.ndead = prstate.ndead;
-		xlrec.nunused = prstate.nunused;
-
-		if (do_freeze)
-			nplans = heap_log_freeze_plan(frozen, tuples_frozen, plans, frz_offsets);
-		xlrec.nplans = nplans;
-
-		XLogBeginInsert();
-		XLogRegisterData((char *) &xlrec, SizeOfHeapPrune);
-
-		XLogRegisterBuffer(0, buf, REGBUF_STANDARD);
-
-		if (prstate.nredirected > 0)
-			XLogRegisterBufData(0, (char *) prstate.redirected,
-								prstate.nredirected *
-								sizeof(OffsetNumber) * 2);
-
-		if (prstate.ndead > 0)
-			XLogRegisterBufData(0, (char *) prstate.nowdead,
-								prstate.ndead * sizeof(OffsetNumber));
-
-		if (prstate.nunused > 0)
-			XLogRegisterBufData(0, (char *) prstate.nowunused,
-								prstate.nunused * sizeof(OffsetNumber));
-
-		if (do_freeze && nplans > 0)
-		{
-			XLogRegisterBufData(0, (char *) plans,
-								nplans * sizeof(xl_heap_freeze_plan));
-
-			XLogRegisterBufData(0, (char *) frz_offsets,
-								tuples_frozen * sizeof(OffsetNumber));
-		}
-
-		recptr = XLogInsert(RM_HEAP2_ID, XLOG_HEAP2_PRUNE);
-
-		PageSetLSN(page, recptr);
 	}
 
 	if (vacuum_now)
@@ -1760,24 +1706,79 @@ lazy_scan_prune(LVRelState *vacrel,
 	}
 
 
-	if (RelationNeedsWAL(rel) && vacuum_now)
+	if (RelationNeedsWAL(rel))
 	{
-		xl_heap_vacuum xlrec;
+		xl_heap_prune xlrec;
 		XLogRecPtr	recptr;
+		xl_heap_freeze_plan plans[MaxHeapTuplesPerPage];
+		OffsetNumber frz_offsets[MaxHeapTuplesPerPage];
+		// TODO: do this more efficiently
+		OffsetNumber unused_offsets[MaxHeapTuplesPerPage];
+		OffsetNumber *cur_unused = unused_offsets;
+		uint16 nunused_total = 0;
+		int			nplans = 0;
 
-		xlrec.nunused = vac_nunused;
+		xlrec.isCatalogRel = RelationIsAccessibleInLogicalDecoding(rel);
+		// TODO: which one should I use
+		if (do_prune)
+			xlrec.snapshotConflictHorizon = prstate.snapshotConflictHorizon;
+		else
+			xlrec.snapshotConflictHorizon = frzsnapshotConflictHorizon;
+
+		xlrec.nredirected = prstate.nredirected;
+		xlrec.ndead = prstate.ndead;
+		if (do_prune)
+		{
+			nunused_total += prstate.nunused;
+			memcpy(cur_unused, prstate.nowunused, prstate.nunused);
+			cur_unused += prstate.nunused;
+		}
+		if (vacuum_now)
+		{
+			nunused_total += vac_nunused;
+			memcpy(cur_unused, vac_unused, vac_nunused);
+			cur_unused += vac_nunused;
+		}
+		xlrec.nunused = nunused_total;
+
+		if (do_freeze)
+			nplans = heap_log_freeze_plan(frozen, tuples_frozen, plans, frz_offsets);
+		xlrec.nplans = nplans;
 
 		XLogBeginInsert();
-		XLogRegisterData((char *) &xlrec, SizeOfHeapVacuum);
+		XLogRegisterData((char *) &xlrec, SizeOfHeapPrune);
 
 		XLogRegisterBuffer(0, buf, REGBUF_STANDARD);
-		XLogRegisterBufData(0, (char *) vac_unused, vac_nunused * sizeof(OffsetNumber));
 
-		recptr = XLogInsert(RM_HEAP2_ID, XLOG_HEAP2_VACUUM);
+		if (prstate.nredirected > 0)
+			XLogRegisterBufData(0, (char *) prstate.redirected,
+								prstate.nredirected *
+								sizeof(OffsetNumber) * 2);
+
+		if (prstate.ndead > 0)
+			XLogRegisterBufData(0, (char *) prstate.nowdead,
+								prstate.ndead * sizeof(OffsetNumber));
+
+		if (nunused_total > 0)
+		{
+			XLogRegisterBufData(0, (char *) unused_offsets,
+								nunused_total * sizeof(OffsetNumber));
+		}
+
+		if (do_freeze && nplans > 0)
+		{
+			XLogRegisterBufData(0, (char *) plans,
+								nplans * sizeof(xl_heap_freeze_plan));
+
+			XLogRegisterBufData(0, (char *) frz_offsets,
+								tuples_frozen * sizeof(OffsetNumber));
+		}
+
+		recptr = XLogInsert(RM_HEAP2_ID, XLOG_HEAP2_PRUNE);
 
 		PageSetLSN(page, recptr);
 	}
-		// TODO: should we check visibility map status here before finally doing this
+
 		// TODO: what if it became all frozen but it wasn't already all
 		// visible, do we still use invalidtransactionid as the
 		// snapshotconflictid
@@ -1870,7 +1871,6 @@ lazy_scan_prune(LVRelState *vacrel,
 		if (XLogHintBitIsNeeded())
 			PageSetLSN(page, recptr);
 		PageSetLSN(BufferGetPage(vmbuffer), recptr);
-
 	}
 	if (vm_modified)
 		LockBuffer(vmbuffer, BUFFER_LOCK_UNLOCK);
