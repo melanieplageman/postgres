@@ -1727,16 +1727,17 @@ lazy_scan_prune(LVRelState *vacrel,
 
 		xlrec.nredirected = prstate.nredirected;
 		xlrec.ndead = prstate.ndead;
+		// TODO: does the number dead need to be adjusted because we've vacuumed since we set this
 		if (do_prune)
 		{
 			nunused_total += prstate.nunused;
-			memcpy(cur_unused, prstate.nowunused, prstate.nunused);
+			memcpy(cur_unused, prstate.nowunused, sizeof(OffsetNumber) * prstate.nunused);
 			cur_unused += prstate.nunused;
 		}
 		if (vacuum_now)
 		{
 			nunused_total += vac_nunused;
-			memcpy(cur_unused, vac_unused, vac_nunused);
+			memcpy(cur_unused, vac_unused, sizeof(OffsetNumber) * vac_nunused);
 			cur_unused += vac_nunused;
 		}
 		xlrec.nunused = nunused_total;
