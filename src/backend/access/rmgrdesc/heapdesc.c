@@ -206,7 +206,7 @@ heap2_desc(StringInfo buf, XLogReaderState *record)
 
 			nowdead = redirected + (nredirected * 2);
 			nowunused = nowdead + ndead;
-			plans = (xl_heap_freeze_plan *) nowunused + nunused;
+			plans = (xl_heap_freeze_plan *) (nowunused + nunused);
 			frz_offsets = (OffsetNumber *) ((char *) plans +
 										(xlrec->nplans *
 										sizeof(xl_heap_freeze_plan)));
