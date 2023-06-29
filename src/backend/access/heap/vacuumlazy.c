@@ -1705,6 +1705,61 @@ lazy_scan_prune(LVRelState *vacrel,
 		PageTruncateLinePointerArray(page);
 	}
 
+	page_all_visible = PageIsAllVisible(page);
+	if (vacuum_now)
+	{
+		vm_became_all_visible = heap_page_is_all_visible(vacrel, buf, &visiconflictid,
+									&became_all_frozen);
+		vacrel->dead_items->num_items = 0;
+		if (vm_became_all_visible)
+			page_became_all_visible = true;
+	}
+	else
+	{
+		became_all_frozen = prunestate->all_frozen && !VM_ALL_FROZEN(vacrel->rel, blkno, &vmbuffer);
+		vm_became_all_visible = prunestate->all_visible && !all_visible_according_to_vm;
+		if (vm_became_all_visible)
+			visiconflictid = prunestate->visibility_cutoff_xid;
+
+		if (became_all_frozen && prunestate->all_visible && all_visible_according_to_vm)
+			visiconflictid = InvalidTransactionId;
+
+		if (prunestate->all_visible && !page_all_visible)
+			page_became_all_visible = true;
+	}
+
+	if (page_became_all_visible)
+	{
+		PageSetAllVisible(page);
+		MarkBufferDirty(buf);
+	}
+	if (became_all_frozen)
+		visiflags |= VISIBILITYMAP_ALL_FROZEN;
+
+	if ((!vacuum_now && prunestate->all_visible) || (vacuum_now && vm_became_all_visible))
+		visiflags |= VISIBILITYMAP_ALL_VISIBLE;
+
+	if (vm_became_all_visible ||
+			(became_all_frozen && prunestate->all_visible && all_visible_according_to_vm))
+	{
+		vm_modified = visibilitymap_set_soft(vacrel->rel, blkno, buf, InvalidXLogRecPtr,
+							vmbuffer, visiconflictid, visiflags);
+		if (!vm_modified)
+			LockBuffer(vmbuffer, BUFFER_LOCK_UNLOCK);
+	}
+
+	if (!vacuum_now && ((all_visible_according_to_vm && !page_all_visible &&
+				visibilitymap_get_status(vacrel->rel, blkno, &vmbuffer) != 0) ||
+			(!prunestate->all_visible && page_all_visible)))
+	{
+		visibilitymap_clear(vacrel->rel, blkno, vmbuffer,
+							VISIBILITYMAP_VALID_BITS);
+	}
+	if (!vacuum_now && !prunestate->all_visible && page_all_visible)
+	{
+		PageClearAllVisible(page);
+		MarkBufferDirty(buf);
+	}
 
 	if (RelationNeedsWAL(rel))
 	{
@@ -1784,66 +1839,11 @@ lazy_scan_prune(LVRelState *vacrel,
 		// visible, do we still use invalidtransactionid as the
 		// snapshotconflictid
 
-	END_CRIT_SECTION();
-	page_all_visible = PageIsAllVisible(page);
-	if (vacuum_now)
-	{
-		vm_became_all_visible = heap_page_is_all_visible(vacrel, buf, &visiconflictid,
-									&became_all_frozen);
-		vacrel->dead_items->num_items = 0;
-		if (vm_became_all_visible)
-			page_became_all_visible = true;
-	}
-	else
-	{
-		became_all_frozen = prunestate->all_frozen && !VM_ALL_FROZEN(vacrel->rel, blkno, &vmbuffer);
-		vm_became_all_visible = prunestate->all_visible && !all_visible_according_to_vm;
-		if (vm_became_all_visible)
-			visiconflictid = prunestate->visibility_cutoff_xid;
+	// TODO: previously, we called heap_page_is_all_visible() here after
+	// vacuuming. do we need to get fresh visibility information or is it okay
+	// to just use what we stored in htsv array and check if any of the changes
+	// we did caused the page to become all visible or all frozen
 
-		if (became_all_frozen && prunestate->all_visible && all_visible_according_to_vm)
-			visiconflictid = InvalidTransactionId;
-
-		if (prunestate->all_visible && !page_all_visible)
-			page_became_all_visible = true;
-	}
-
-	if (page_became_all_visible)
-	{
-		PageSetAllVisible(page);
-		MarkBufferDirty(buf);
-	}
-	if (became_all_frozen)
-		visiflags |= VISIBILITYMAP_ALL_FROZEN;
-
-	if ((!vacuum_now && prunestate->all_visible) || (vacuum_now && vm_became_all_visible))
-		visiflags |= VISIBILITYMAP_ALL_VISIBLE;
-
-
-	if (vm_became_all_visible ||
-			(became_all_frozen && prunestate->all_visible && all_visible_according_to_vm))
-	{
-		vm_modified = visibilitymap_set_soft(vacrel->rel, blkno, buf, InvalidXLogRecPtr,
-							vmbuffer, visiconflictid, visiflags);
-		if (!vm_modified)
-			LockBuffer(vmbuffer, BUFFER_LOCK_UNLOCK);
-	}
-
-
-	if (!vacuum_now && ((all_visible_according_to_vm && !page_all_visible &&
-				visibilitymap_get_status(vacrel->rel, blkno, &vmbuffer) != 0) ||
-			(!prunestate->all_visible && page_all_visible)))
-	{
-		visibilitymap_clear(vacrel->rel, blkno, vmbuffer,
-							VISIBILITYMAP_VALID_BITS);
-	}
-	if (!vacuum_now && !prunestate->all_visible && page_all_visible)
-	{
-		PageClearAllVisible(page);
-		MarkBufferDirty(buf);
-	}
-
-	START_CRIT_SECTION();
 	if (RelationNeedsWAL(rel) && vm_modified)
 	{
 		xl_heap_visible xlrec;
