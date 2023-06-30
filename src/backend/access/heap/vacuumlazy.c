@@ -1814,7 +1814,7 @@ lazy_scan_prune(LVRelState *vacrel,
 		// visi record did
 		XLogRegisterBuffer(0, buf, REGBUF_STANDARD);
 		if (vm_modified)
-			XLogRegisterBuffer(0, vmbuffer, 0);
+			XLogRegisterBuffer(1, vmbuffer, 0);
 
 		if (prstate.nredirected > 0)
 			XLogRegisterBufData(0, (char *) prstate.redirected,
