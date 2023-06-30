@@ -1774,11 +1774,17 @@ lazy_scan_prune(LVRelState *vacrel,
 		int			nplans = 0;
 
 		xlrec.isCatalogRel = RelationIsAccessibleInLogicalDecoding(rel);
-		// TODO: which one should I use
+		xlrec.visiflags = visiflags;
+		if (vm_modified && xlrec.isCatalogRel)
+			xlrec.visiflags |= VISIBILITYMAP_XLOG_CATALOG_REL;
+
+		// *************TODO: which one should I use
 		if (do_prune)
 			xlrec.snapshotConflictHorizon = prstate.snapshotConflictHorizon;
-		else
+		else if (do_freeze)
 			xlrec.snapshotConflictHorizon = frzsnapshotConflictHorizon;
+		else
+			xlrec.snapshotConflictHorizon = visiconflictid;
 
 		xlrec.nredirected = prstate.nredirected;
 		xlrec.ndead = prstate.ndead;
@@ -1804,7 +1810,11 @@ lazy_scan_prune(LVRelState *vacrel,
 		XLogBeginInsert();
 		XLogRegisterData((char *) &xlrec, SizeOfHeapPrune);
 
+		// TODO: do I need to do REGBUF_NO_IMAGE if hint bit is not needed like
+		// visi record did
 		XLogRegisterBuffer(0, buf, REGBUF_STANDARD);
+		if (vm_modified)
+			XLogRegisterBuffer(0, vmbuffer, 0);
 
 		if (prstate.nredirected > 0)
 			XLogRegisterBufData(0, (char *) prstate.redirected,
@@ -1833,6 +1843,8 @@ lazy_scan_prune(LVRelState *vacrel,
 		recptr = XLogInsert(RM_HEAP2_ID, XLOG_HEAP2_PRUNE);
 
 		PageSetLSN(page, recptr);
+		if (vm_modified)
+			PageSetLSN(BufferGetPage(vmbuffer), recptr);
 	}
 
 		// TODO: what if it became all frozen but it wasn't already all
@@ -1844,35 +1856,6 @@ lazy_scan_prune(LVRelState *vacrel,
 	// to just use what we stored in htsv array and check if any of the changes
 	// we did caused the page to become all visible or all frozen
 
-	if (RelationNeedsWAL(rel) && vm_modified)
-	{
-		xl_heap_visible xlrec;
-		XLogRecPtr	recptr;
-		uint8		flags;
-
-		Assert(BufferIsValid(buf));
-		Assert(BufferIsValid(vmbuffer));
-
-		xlrec.snapshotConflictHorizon = visiconflictid;
-		xlrec.flags = visiflags;
-		if (RelationIsAccessibleInLogicalDecoding(rel))
-			xlrec.flags |= VISIBILITYMAP_XLOG_CATALOG_REL;
-		XLogBeginInsert();
-		XLogRegisterData((char *) &xlrec, SizeOfHeapVisible);
-
-		XLogRegisterBuffer(0, vmbuffer, 0);
-
-		flags = REGBUF_STANDARD;
-		if (!XLogHintBitIsNeeded())
-			flags |= REGBUF_NO_IMAGE;
-		XLogRegisterBuffer(1, buf, flags);
-
-		recptr = XLogInsert(RM_HEAP2_ID, XLOG_HEAP2_VISIBLE);
-
-		if (XLogHintBitIsNeeded())
-			PageSetLSN(page, recptr);
-		PageSetLSN(BufferGetPage(vmbuffer), recptr);
-	}
 	if (vm_modified)
 		LockBuffer(vmbuffer, BUFFER_LOCK_UNLOCK);
 

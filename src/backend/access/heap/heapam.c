@@ -8672,8 +8672,11 @@ heap_xlog_prune(XLogReaderState *record)
 	RelFileLocator rlocator;
 	BlockNumber blkno;
 	XLogRedoAction action;
+	Buffer		vmbuffer = InvalidBuffer;
 
 	XLogRecGetBlockTag(record, 0, &rlocator, NULL, &blkno);
+	// TODO: prob need something like this
+	/* Assert((xlrec->flags & VISIBILITYMAP_XLOG_VALID_BITS) == xlrec->flags); */
 
 	/*
 	 * We're about to remove tuples. In Hot Standby mode, ensure that there's
@@ -8749,6 +8752,9 @@ heap_xlog_prune(XLogReaderState *record)
 			}
 		}
 
+		if ((xlrec->visiflags & VISIBILITYMAP_ALL_VISIBLE) != 0)
+			PageSetAllVisible(page);
+
 
 		/*
 		 * Note: we don't worry about updating the page's prunability hints.
@@ -8776,6 +8782,44 @@ heap_xlog_prune(XLogReaderState *record)
 		 */
 		XLogRecordPageWithFreeSpace(rlocator, blkno, freespace);
 	}
+
+	/*
+	 * Even if we skipped the heap page update due to the LSN interlock, it's
+	 * still safe to update the visibility map.  Any WAL record that clears
+	 * the visibility map bit does so before checking the page LSN, so any
+	 * bits that need to be cleared will still be cleared.
+	 */
+	if (XLogReadBufferForRedoExtended(record, 0, RBM_ZERO_ON_ERROR, false,
+									  &vmbuffer) == BLK_NEEDS_REDO)
+	{
+		Page		vmpage = BufferGetPage(vmbuffer);
+		Relation	reln;
+		uint8		vmbits;
+
+		/* initialize the page if it was read as zeros */
+		if (PageIsNew(vmpage))
+			PageInit(vmpage, BLCKSZ, 0);
+
+		/* remove VISIBILITYMAP_XLOG_* */
+		vmbits = xlrec->visiflags & VISIBILITYMAP_VALID_BITS;
+
+		/*
+		 * XLogReadBufferForRedoExtended locked the buffer. But
+		 * visibilitymap_set will handle locking itself.
+		 */
+		LockBuffer(vmbuffer, BUFFER_LOCK_UNLOCK);
+
+		reln = CreateFakeRelcacheEntry(rlocator);
+		visibilitymap_pin(reln, blkno, &vmbuffer);
+
+		visibilitymap_set(reln, blkno, InvalidBuffer, lsn, vmbuffer,
+						  xlrec->snapshotConflictHorizon, vmbits);
+
+		ReleaseBuffer(vmbuffer);
+		FreeFakeRelcacheEntry(reln);
+	}
+	else if (BufferIsValid(vmbuffer))
+		UnlockReleaseBuffer(vmbuffer);
 }
 
 /*

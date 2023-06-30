@@ -243,6 +243,7 @@ typedef struct xl_heap_update
 typedef struct xl_heap_prune
 {
 	TransactionId snapshotConflictHorizon;
+	uint8		visiflags;
 	uint16		nredirected;
 	uint16		ndead;
 	uint16		nunused;
