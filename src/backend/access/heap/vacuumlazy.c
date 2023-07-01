@@ -1283,7 +1283,6 @@ lazy_scan_prune(LVRelState *vacrel,
 	OffsetNumber vac_unused[MaxHeapTuplesPerPage];
 	int			vac_nunused = 0;
 	HeapPageFreeze pagefrz;
-	int64		fpi_before = pgWalUsage.wal_fpi;
 	HeapTupleFreeze frozen[MaxHeapTuplesPerPage];
 	PruneState	prstate;
 	Oid tableoid = RelationGetRelid(rel);
@@ -1442,9 +1441,10 @@ lazy_scan_prune(LVRelState *vacrel,
 
 	vacrel->offnum = InvalidOffsetNumber;
 
+	// TODO: Pruning isnt separte so it can't have made an FPI. do we need
+	// additional criteria related to this?
 	do_freeze = pagefrz.freeze_required || tuples_frozen == 0 ||
-		(prunestate->all_visible && prunestate->all_frozen &&
-		 fpi_before != pgWalUsage.wal_fpi);
+		(prunestate->all_visible && prunestate->all_frozen);
 
 	/*
 	 * Freeze the page when heap_prepare_freeze_tuple indicates that at least
@@ -1468,7 +1468,6 @@ lazy_scan_prune(LVRelState *vacrel,
 		 * Page requires "no freeze" processing.  It might be set all-visible
 		 * in the visibility map, but it can never be set all-frozen.
 		 */
-		// TODO: what are these
 		vacrel->NewRelfrozenXid = pagefrz.NoFreezePageRelfrozenXid;
 		vacrel->NewRelminMxid = pagefrz.NoFreezePageRelminMxid;
 		prunestate->all_frozen = false;
@@ -1761,6 +1760,7 @@ lazy_scan_prune(LVRelState *vacrel,
 		MarkBufferDirty(buf);
 	}
 
+	// TODO: if we changed nothing, do we still need to emit WAL?
 	if (RelationNeedsWAL(rel))
 	{
 		xl_heap_prune xlrec;
