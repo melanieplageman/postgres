@@ -1581,18 +1581,6 @@ lazy_scan_prune(LVRelState *vacrel,
 	vm_became_all_visible = all_visible && !all_visible_according_to_vm;
 	became_all_frozen = all_frozen && !all_frozen_according_to_vm;
 
-	if (do_freeze)
-	{
-		if (all_visible && all_frozen)
-			visibility_cutoff_xid = prstate.snapshotConflictHorizon;
-		else
-		{
-			visibility_cutoff_xid = vacrel->cutoffs.OldestXmin;
-			if (visibility_cutoff_xid > 0)
-				TransactionIdRetreat(visibility_cutoff_xid);
-		}
-	}
-
 	if (do_prune || do_freeze || vacuum_now ||
 			(all_visible && !page_all_visible) || (!all_visible && page_all_visible))
 		MarkBufferDirty(buf);
@@ -1613,8 +1601,7 @@ lazy_scan_prune(LVRelState *vacrel,
 	if (vm_became_all_visible ||
 			(became_all_frozen && all_visible && all_visible_according_to_vm))
 	{
-		vm_modified = visibilitymap_set_and_lock(vacrel->rel, blkno, buf, InvalidXLogRecPtr,
-							vmbuffer, InvalidTransactionId, visiflags);
+		vm_modified = visibilitymap_set_and_lock(vacrel->rel, blkno, buf, vmbuffer, visiflags);
 		if (!vm_modified)
 			LockBuffer(vmbuffer, BUFFER_LOCK_UNLOCK);
 	}
@@ -1625,6 +1612,18 @@ lazy_scan_prune(LVRelState *vacrel,
 							VISIBILITYMAP_VALID_BITS);
 		if (!vm_modified)
 			LockBuffer(vmbuffer, BUFFER_LOCK_UNLOCK);
+	}
+
+	if (do_freeze)
+	{
+		if (all_visible && all_frozen)
+			visibility_cutoff_xid = prstate.snapshotConflictHorizon;
+		else
+		{
+			visibility_cutoff_xid = vacrel->cutoffs.OldestXmin;
+			if (visibility_cutoff_xid > 0)
+				TransactionIdRetreat(visibility_cutoff_xid);
+		}
 	}
 
 	if (RelationNeedsWAL(rel) && (do_prune || vacuum_now || vm_modified || do_freeze))

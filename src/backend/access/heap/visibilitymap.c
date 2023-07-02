@@ -259,8 +259,7 @@ visibilitymap_pin_ok(BlockNumber heapBlk, Buffer vmbuf)
 
 bool
 visibilitymap_set_and_lock(Relation rel, BlockNumber heapBlk, Buffer heapBuf,
-				  XLogRecPtr recptr, Buffer vmBuf, TransactionId cutoff_xid,
-				  uint8 flags)
+				  Buffer vmBuf, uint8 flags)
 {
 	BlockNumber mapBlock = HEAPBLK_TO_MAPBLOCK(heapBlk);
 	uint32		mapByte = HEAPBLK_TO_MAPBYTE(heapBlk);
@@ -272,7 +271,6 @@ visibilitymap_set_and_lock(Relation rel, BlockNumber heapBlk, Buffer heapBuf,
 	elog(DEBUG1, "vm_set %s %d", RelationGetRelationName(rel), heapBlk);
 #endif
 
-	Assert(InRecovery || XLogRecPtrIsInvalid(recptr));
 	Assert(InRecovery || PageIsAllVisible((Page) BufferGetPage(heapBuf)));
 	Assert((flags & VISIBILITYMAP_VALID_BITS) == flags);
 
