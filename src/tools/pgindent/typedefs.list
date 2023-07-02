@@ -1192,6 +1192,7 @@ IndexVacuumInfo
 IndxInfo
 InferClause
 InferenceElem
+InflightSyncEntry
 InfoItem
 InhInfo
 InheritableSocket
@@ -2720,6 +2721,7 @@ SyncRepConfigData
 SyncRepStandbyData
 SyncRequestHandler
 SyncRequestType
+SyncState
 SysFKRelationship
 SysScanDesc
 SyscacheCallbackFunction
