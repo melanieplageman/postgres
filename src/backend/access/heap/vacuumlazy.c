@@ -1466,6 +1466,7 @@ lazy_scan_prune(LVRelState *vacrel,
 
 	do_prune = prstate.nredirected > 0 || prstate.ndead > 0 || prstate.nunused > 0;
 
+	// TODO: this is a very long critical section
 	START_CRIT_SECTION();
 
 	if (do_prune)
@@ -1480,7 +1481,6 @@ lazy_scan_prune(LVRelState *vacrel,
 			((PageHeader) page)->pd_prune_xid = prstate.new_prune_xid;
 			new_prune_xid_found = true;
 		}
-
 	}
 
 	for (offnum = FirstOffsetNumber;
@@ -1554,8 +1554,8 @@ lazy_scan_prune(LVRelState *vacrel,
 		Assert(vac_nunused > 0);
 		PageTruncateLinePointerArray(page);
 
-		all_visible = heap_page_is_all_visible(vacrel, buf, &prstate.snapshotConflictHorizon,
-									&all_frozen);
+		all_visible = heap_page_is_all_visible(vacrel, buf,
+				&prstate.snapshotConflictHorizon, &all_frozen);
 		vacrel->dead_items->num_items = 0;
 	}
 
@@ -1645,7 +1645,8 @@ lazy_scan_prune(LVRelState *vacrel,
 		xlrec.nplans = nplans;
 		xlrec.nredirected = prstate.nredirected;
 		xlrec.ndead = prstate.ndead;
-		// TODO: does the number dead need to be adjusted because we've vacuumed since we set this
+		// TODO: is it okay that vacuum set additional tuples that were dead unused? do the numbers
+		// of dead and unused need to be adjusted if we vacuumed now?
 		if (do_prune)
 		{
 			nunused_total += prstate.nunused;
@@ -1662,12 +1663,12 @@ lazy_scan_prune(LVRelState *vacrel,
 
 		XLogBeginInsert();
 		XLogRegisterData((char *) &xlrec, SizeOfHeapPrune);
-
 		XLogRegisterBuffer(0, buf, REGBUF_STANDARD);
+
 		if (vm_modified)
 			XLogRegisterBuffer(1, vmbuffer, 0);
 
-		if (do_freeze && nplans > 0)
+		if (nplans > 0)
 		{
 			XLogRegisterBufData(0, (char *) plans,
 								nplans * sizeof(xl_heap_freeze_plan));
@@ -1688,7 +1689,7 @@ lazy_scan_prune(LVRelState *vacrel,
 								nunused_total * sizeof(OffsetNumber));
 		}
 
-		if (do_freeze && nplans > 0)
+		if (nplans > 0)
 		{
 			XLogRegisterBufData(0, (char *) frz_offsets,
 								tuples_frozen * sizeof(OffsetNumber));
