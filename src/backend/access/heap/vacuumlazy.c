@@ -1613,7 +1613,7 @@ lazy_scan_prune(LVRelState *vacrel,
 	if (vm_became_all_visible ||
 			(became_all_frozen && all_visible && all_visible_according_to_vm))
 	{
-		vm_modified = visibilitymap_set_soft(vacrel->rel, blkno, buf, InvalidXLogRecPtr,
+		vm_modified = visibilitymap_set_and_lock(vacrel->rel, blkno, buf, InvalidXLogRecPtr,
 							vmbuffer, InvalidTransactionId, visiflags);
 		if (!vm_modified)
 			LockBuffer(vmbuffer, BUFFER_LOCK_UNLOCK);
@@ -1621,11 +1621,13 @@ lazy_scan_prune(LVRelState *vacrel,
 
 	if (!all_visible && all_visible_according_to_vm)
 	{
-		visibilitymap_clear(vacrel->rel, blkno, vmbuffer,
+		vm_modified = visibilitymap_clear_and_lock(vacrel->rel, blkno, vmbuffer,
 							VISIBILITYMAP_VALID_BITS);
+		if (!vm_modified)
+			LockBuffer(vmbuffer, BUFFER_LOCK_UNLOCK);
 	}
 
-	if (RelationNeedsWAL(rel) && (do_prune || vacuum_now || vm_became_all_visible || do_freeze))
+	if (RelationNeedsWAL(rel) && (do_prune || vacuum_now || vm_modified || do_freeze))
 	{
 		xl_heap_prune xlrec;
 		XLogRecPtr	recptr;

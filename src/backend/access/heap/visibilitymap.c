@@ -173,6 +173,42 @@ visibilitymap_clear(Relation rel, BlockNumber heapBlk, Buffer vmbuf, uint8 flags
 	return cleared;
 }
 
+bool
+visibilitymap_clear_and_lock(Relation rel, BlockNumber heapBlk, Buffer vmbuf, uint8 flags)
+{
+	BlockNumber mapBlock = HEAPBLK_TO_MAPBLOCK(heapBlk);
+	int			mapByte = HEAPBLK_TO_MAPBYTE(heapBlk);
+	int			mapOffset = HEAPBLK_TO_OFFSET(heapBlk);
+	uint8		mask = flags << mapOffset;
+	char	   *map;
+	bool		cleared = false;
+
+	/* Must never clear all_visible bit while leaving all_frozen bit set */
+	Assert(flags & VISIBILITYMAP_VALID_BITS);
+	Assert(flags != VISIBILITYMAP_ALL_VISIBLE);
+
+#ifdef TRACE_VISIBILITYMAP
+	elog(DEBUG1, "vm_clear %s %d", RelationGetRelationName(rel), heapBlk);
+#endif
+
+	if (!BufferIsValid(vmbuf) || BufferGetBlockNumber(vmbuf) != mapBlock)
+		elog(ERROR, "wrong buffer passed to visibilitymap_clear");
+
+	LockBuffer(vmbuf, BUFFER_LOCK_EXCLUSIVE);
+	map = PageGetContents(BufferGetPage(vmbuf));
+
+	if (map[mapByte] & mask)
+	{
+		map[mapByte] &= ~mask;
+
+		MarkBufferDirty(vmbuf);
+		cleared = true;
+	}
+
+	return cleared;
+}
+
+
 /*
  *	visibilitymap_pin - pin a map page for setting a bit
  *
@@ -222,7 +258,7 @@ visibilitymap_pin_ok(BlockNumber heapBlk, Buffer vmbuf)
 }
 
 bool
-visibilitymap_set_soft(Relation rel, BlockNumber heapBlk, Buffer heapBuf,
+visibilitymap_set_and_lock(Relation rel, BlockNumber heapBlk, Buffer heapBuf,
 				  XLogRecPtr recptr, Buffer vmBuf, TransactionId cutoff_xid,
 				  uint8 flags)
 {
