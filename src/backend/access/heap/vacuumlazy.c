@@ -225,7 +225,6 @@ typedef struct LVSavedErrInfo
 static void lazy_scan_heap(LVRelState *vacrel);
 static BlockNumber lazy_scan_skip(LVRelState *vacrel, Buffer *vmbuffer,
 								  BlockNumber next_block,
-								  bool *next_unskippable_allvis,
 								  uint8 *mapbits,
 								  bool *skipping_current_range);
 static bool lazy_scan_new_or_empty(LVRelState *vacrel, Buffer buf,
@@ -233,7 +232,7 @@ static bool lazy_scan_new_or_empty(LVRelState *vacrel, Buffer buf,
 								   bool sharelock, Buffer vmbuffer);
 static void lazy_scan_prune(LVRelState *vacrel, Buffer buf,
 							BlockNumber blkno, Page page, Buffer vmbuffer,
-							bool all_visible_according_to_vm, uint8 mapbits);
+							uint8 mapbits);
 static bool lazy_scan_noprune(LVRelState *vacrel, Buffer buf,
 							  BlockNumber blkno, Page page,
 							  bool *hastup, bool *recordfreespace);
@@ -814,8 +813,7 @@ lazy_scan_heap(LVRelState *vacrel)
 	VacDeadItems *dead_items = vacrel->dead_items;
 	uint8		mapbits = 0;
 	Buffer		vmbuffer = InvalidBuffer;
-	bool		next_unskippable_allvis,
-				skipping_current_range,
+	bool		skipping_current_range,
 				recordfreespace;
 	const int	initprog_index[] = {
 		PROGRESS_VACUUM_PHASE,
@@ -831,21 +829,17 @@ lazy_scan_heap(LVRelState *vacrel)
 	pgstat_progress_update_multi_param(3, initprog_index, initprog_val);
 
 	next_unskippable_block = lazy_scan_skip(vacrel, &vmbuffer, 0,
-											&next_unskippable_allvis,
 											&mapbits,
 											&skipping_current_range);
 	for (blkno = 0; blkno < rel_pages; blkno++)
 	{
 		Buffer		buf;
 		Page		page;
-		bool		all_visible_according_to_vm;
 
 		if (blkno == next_unskippable_block)
 		{
-			all_visible_according_to_vm = next_unskippable_allvis;
 			next_unskippable_block = lazy_scan_skip(vacrel, &vmbuffer,
 													blkno + 1,
-													&next_unskippable_allvis,
 													&mapbits,
 													&skipping_current_range);
 
@@ -857,8 +851,6 @@ lazy_scan_heap(LVRelState *vacrel)
 
 			if (skipping_current_range)
 				continue;
-
-			all_visible_according_to_vm = true;
 		}
 
 		vacrel->scanned_pages++;
@@ -926,7 +918,7 @@ lazy_scan_heap(LVRelState *vacrel)
 		if (lazy_scan_new_or_empty(vacrel, buf, blkno, page, false, vmbuffer))
 			continue;
 
-		lazy_scan_prune(vacrel, buf, blkno, page, vmbuffer, all_visible_according_to_vm, mapbits);
+		lazy_scan_prune(vacrel, buf, blkno, page, vmbuffer, mapbits);
 
 		// TODO: ***** MUST FIX FSM vacuuming and recording to use prior criteria *********
 		if (blkno - next_fsm_block_to_vacuum >= VACUUM_FSM_EVERY_PAGES)
@@ -1007,15 +999,13 @@ lazy_scan_heap(LVRelState *vacrel)
  */
 static BlockNumber
 lazy_scan_skip(LVRelState *vacrel, Buffer *vmbuffer, BlockNumber next_block,
-			   bool *next_unskippable_allvis, uint8 *mapbits,
-			   bool *skipping_current_range)
+			   uint8 *mapbits, bool *skipping_current_range)
 {
 	BlockNumber rel_pages = vacrel->rel_pages,
 				next_unskippable_block = next_block,
 				nskippable_blocks = 0;
 	bool		skipsallvis = false;
 
-	*next_unskippable_allvis = true;
 	while (next_unskippable_block < rel_pages)
 	{
 		*mapbits = visibilitymap_get_status(vacrel->rel,
@@ -1025,7 +1015,6 @@ lazy_scan_skip(LVRelState *vacrel, Buffer *vmbuffer, BlockNumber next_block,
 		if ((*mapbits & VISIBILITYMAP_ALL_VISIBLE) == 0)
 		{
 			Assert((*mapbits & VISIBILITYMAP_ALL_FROZEN) == 0);
-			*next_unskippable_allvis = false;
 			break;
 		}
 
@@ -1045,11 +1034,7 @@ lazy_scan_skip(LVRelState *vacrel, Buffer *vmbuffer, BlockNumber next_block,
 
 		/* DISABLE_PAGE_SKIPPING makes all skipping unsafe */
 		if (!vacrel->skipwithvm)
-		{
-			/* Caller shouldn't rely on all_visible_according_to_vm */
-			*next_unskippable_allvis = false;
 			break;
-		}
 
 		/*
 		 * Aggressive VACUUM caller can't skip pages just because they are
@@ -1255,7 +1240,6 @@ lazy_scan_prune(LVRelState *vacrel,
 				BlockNumber blkno,
 				Page page,
 				Buffer vmbuffer,
-				bool all_visible_according_to_vm,
 				uint8 mapbits)
 {
 	Relation	rel = vacrel->rel;
@@ -1279,6 +1263,7 @@ lazy_scan_prune(LVRelState *vacrel,
 	bool vm_became_all_visible = false;
 	bool became_all_frozen = false;
 	bool page_all_visible = PageIsAllVisible(page);
+	bool all_visible_according_to_vm = ((mapbits & VISIBILITYMAP_ALL_VISIBLE) != 0);
 	bool all_frozen_according_to_vm = ((mapbits & VISIBILITYMAP_ALL_FROZEN) != 0);
 
 	// TODO: add in vacuum error phase for this prune freeze vacuum combo (for update_vacuum_error_info)
@@ -1289,6 +1274,9 @@ lazy_scan_prune(LVRelState *vacrel,
 	bool hastup = false;
 	bool all_visible = true;
 	bool all_frozen = true;
+
+	if (!vacrel->skipwithvm)
+		all_visible_according_to_vm = false;
 
 	Assert(BufferGetBlockNumber(buf) == blkno);
 
