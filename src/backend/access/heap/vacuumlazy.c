@@ -1270,6 +1270,7 @@ lazy_scan_prune(LVRelState *vacrel,
 	bool vm_modified = false;
 	uint8 visiflags = 0;
 	bool page_all_visible = PageIsAllVisible(page);
+	bool new_prune_xid_found = false;
 	bool all_visible_according_to_vm = ((mapbits & VISIBILITYMAP_ALL_VISIBLE) != 0);
 	bool all_frozen_according_to_vm = ((mapbits & VISIBILITYMAP_ALL_FROZEN) != 0);
 
@@ -1458,12 +1459,12 @@ lazy_scan_prune(LVRelState *vacrel,
 
 	vacrel->offnum = InvalidOffsetNumber;
 
-	do_prune = prstate.nredirected > 0 || prstate.ndead > 0 || prstate.nunused > 0;
-
 	vacrel->tuples_deleted += tuples_deleted;
 	vacrel->tuples_frozen += tuples_frozen;
 	vacrel->live_tuples += live_tuples;
 	vacrel->recently_dead_tuples += recently_dead_tuples;
+
+	do_prune = prstate.nredirected > 0 || prstate.ndead > 0 || prstate.nunused > 0;
 
 	START_CRIT_SECTION();
 
@@ -1474,15 +1475,13 @@ lazy_scan_prune(LVRelState *vacrel,
 								prstate.nowdead, prstate.ndead,
 								prstate.nowunused, prstate.nunused);
 
-	}
+		if (((PageHeader) page)->pd_prune_xid != prstate.new_prune_xid)
+		{
+			((PageHeader) page)->pd_prune_xid = prstate.new_prune_xid;
+			new_prune_xid_found = true;
+		}
 
-	if (do_prune || (((PageHeader) page)->pd_prune_xid != prstate.new_prune_xid || PageIsFull(page)))
-	{
-		((PageHeader) page)->pd_prune_xid = prstate.new_prune_xid;
-		PageClearFull(page);
 	}
-
-	vacrel->offnum = InvalidOffsetNumber;
 
 	for (offnum = FirstOffsetNumber;
 		 offnum <= maxoff;
@@ -1519,7 +1518,6 @@ lazy_scan_prune(LVRelState *vacrel,
 		vacrel->nonempty_pages = blkno + 1;
 
 	vacrel->lpdead_items += lpdead_items;
-	vacuum_now = vacrel->nindexes == 0 && lpdead_items > 0;
 
 	if (lpdead_items > 0)
 	{
@@ -1529,6 +1527,8 @@ lazy_scan_prune(LVRelState *vacrel,
 		pgstat_progress_update_param(PROGRESS_VACUUM_NUM_DEAD_TUPLES,
 									vacrel->dead_items->num_items);
 	}
+
+	vacuum_now = vacrel->nindexes == 0 && lpdead_items > 0;
 
 	if (vacuum_now)
 	{
@@ -1575,13 +1575,16 @@ lazy_scan_prune(LVRelState *vacrel,
 	if (do_prune || do_freeze || vacuum_now ||
 			(all_visible && !page_all_visible) || (!all_visible && page_all_visible))
 		MarkBufferDirty(buf);
-	else if (((PageHeader) page)->pd_prune_xid != prstate.new_prune_xid || PageIsFull(page))
+	else if (new_prune_xid_found || PageIsFull(page))
 		MarkBufferDirtyHint(buf, true);
 
 	if (all_visible && !page_all_visible)
 		PageSetAllVisible(page);
 	else if (!all_visible && page_all_visible)
 		PageClearAllVisible(page);
+
+	if (do_prune || new_prune_xid_found || PageIsFull(page))
+		PageClearFull(page);
 
 	if ((all_visible && !all_visible_according_to_vm) ||
 		(all_visible && all_frozen && !all_frozen_according_to_vm))
