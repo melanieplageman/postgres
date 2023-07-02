@@ -1289,19 +1289,17 @@ lazy_scan_prune(LVRelState *vacrel,
 
 	bool vm_modified = false;
 	uint8 visiflags = 0;
-	// TODO: same one?
-	TransactionId visiconflictid = InvalidTransactionId;
 	bool vm_became_all_visible = false;
 	bool page_became_all_visible = false;
 	bool became_all_frozen = false;
 	bool page_all_visible = false;
+	bool emit_visi = false;
 
 	// TODO: add in vacuum error phase for this prune freeze vacuum combo (for update_vacuum_error_info)
 	bool do_freeze;
 	bool do_prune;
 	bool vacuum_now = false;
-	// TODO: can we consolidate pruning and freezing conflict horizons?
-	TransactionId frzsnapshotConflictHorizon = InvalidTransactionId;
+	TransactionId visibility_cutoff_xid = InvalidTransactionId;
 
 	Assert(BufferGetBlockNumber(buf) == blkno);
 
@@ -1318,7 +1316,6 @@ lazy_scan_prune(LVRelState *vacrel,
 	prunestate->hastup = false;
 	prunestate->all_visible = true;
 	prunestate->all_frozen = true;
-	prunestate->visibility_cutoff_xid = InvalidTransactionId;
 
 	/*
 	 * maxoff might be reduced following line pointer array truncation in
@@ -1417,9 +1414,9 @@ lazy_scan_prune(LVRelState *vacrel,
 						break;
 					}
 
-					if (TransactionIdFollows(xmin, prunestate->visibility_cutoff_xid) &&
+					if (TransactionIdFollows(xmin, visibility_cutoff_xid) &&
 						TransactionIdIsNormal(xmin))
-						prunestate->visibility_cutoff_xid = xmin;
+						visibility_cutoff_xid = xmin;
 				}
 				break;
 			case HEAPTUPLE_RECENTLY_DEAD:
@@ -1479,24 +1476,6 @@ lazy_scan_prune(LVRelState *vacrel,
 	{
 		vacrel->frozen_pages++;
 
-		/*
-			* We can use visibility_cutoff_xid as our cutoff for conflicts
-			* when the whole page is eligible to become all-frozen in the VM
-			* once we're done with it.  Otherwise we generate a conservative
-			* cutoff by stepping back from OldestXmin.
-			*/
-		if (prunestate->all_visible && prunestate->all_frozen)
-		{
-			/* Using same cutoff when setting VM is now unnecessary */
-			frzsnapshotConflictHorizon = prunestate->visibility_cutoff_xid;
-			prunestate->visibility_cutoff_xid = InvalidTransactionId;
-		}
-		else
-		{
-			/* Avoids false conflicts when hot_standby_feedback in use */
-			frzsnapshotConflictHorizon = vacrel->cutoffs.OldestXmin;
-			TransactionIdRetreat(frzsnapshotConflictHorizon);
-		}
 
 		/*
 		* Perform xmin/xmax XID status sanity checks before critical section.
@@ -1674,7 +1653,6 @@ lazy_scan_prune(LVRelState *vacrel,
 	{
 		/* Execute all freeze plans for page as a single atomic action */
 		heap_freeze_execute_prepared(vacrel->rel, buf,
-										frzsnapshotConflictHorizon,
 										frozen, tuples_frozen);
 	}
 
@@ -1707,7 +1685,7 @@ lazy_scan_prune(LVRelState *vacrel,
 	page_all_visible = PageIsAllVisible(page);
 	if (vacuum_now)
 	{
-		vm_became_all_visible = heap_page_is_all_visible(vacrel, buf, &visiconflictid,
+		vm_became_all_visible = heap_page_is_all_visible(vacrel, buf, &prstate.snapshotConflictHorizon,
 									&became_all_frozen);
 		vacrel->dead_items->num_items = 0;
 		if (vm_became_all_visible)
@@ -1718,13 +1696,21 @@ lazy_scan_prune(LVRelState *vacrel,
 		became_all_frozen = prunestate->all_frozen && !VM_ALL_FROZEN(vacrel->rel, blkno, &vmbuffer);
 		vm_became_all_visible = prunestate->all_visible && !all_visible_according_to_vm;
 		if (vm_became_all_visible)
-			visiconflictid = prunestate->visibility_cutoff_xid;
-
-		if (became_all_frozen && prunestate->all_visible && all_visible_according_to_vm)
-			visiconflictid = InvalidTransactionId;
+			emit_visi = true;
 
 		if (prunestate->all_visible && !page_all_visible)
 			page_became_all_visible = true;
+	}
+	if (do_freeze)
+	{
+		if (prunestate->all_visible && prunestate->all_frozen)
+			visibility_cutoff_xid = prstate.snapshotConflictHorizon;
+		else
+		{
+			visibility_cutoff_xid = vacrel->cutoffs.OldestXmin;
+			if (visibility_cutoff_xid > 0)
+				TransactionIdRetreat(visibility_cutoff_xid);
+		}
 	}
 
 	if (page_became_all_visible)
@@ -1742,7 +1728,7 @@ lazy_scan_prune(LVRelState *vacrel,
 			(became_all_frozen && prunestate->all_visible && all_visible_according_to_vm))
 	{
 		vm_modified = visibilitymap_set_soft(vacrel->rel, blkno, buf, InvalidXLogRecPtr,
-							vmbuffer, visiconflictid, visiflags);
+							vmbuffer, InvalidTransactionId, visiflags);
 		if (!vm_modified)
 			LockBuffer(vmbuffer, BUFFER_LOCK_UNLOCK);
 	}
@@ -1760,8 +1746,7 @@ lazy_scan_prune(LVRelState *vacrel,
 		MarkBufferDirty(buf);
 	}
 
-	// TODO: if we changed nothing, do we still need to emit WAL?
-	if (RelationNeedsWAL(rel))
+	if (RelationNeedsWAL(rel) && (do_prune || vacuum_now || emit_visi || do_freeze))
 	{
 		xl_heap_prune xlrec;
 		XLogRecPtr	recptr;
@@ -1778,13 +1763,13 @@ lazy_scan_prune(LVRelState *vacrel,
 		if (vm_modified && xlrec.isCatalogRel)
 			xlrec.visiflags |= VISIBILITYMAP_XLOG_CATALOG_REL;
 
-		// *************TODO: which one should I use
-		if (do_prune)
+		if ((do_prune || vacuum_now) && (emit_visi || do_freeze))
+			xlrec.snapshotConflictHorizon = Max(prstate.snapshotConflictHorizon,
+					visibility_cutoff_xid);
+		else if (do_prune || vacuum_now)
 			xlrec.snapshotConflictHorizon = prstate.snapshotConflictHorizon;
-		else if (do_freeze)
-			xlrec.snapshotConflictHorizon = frzsnapshotConflictHorizon;
 		else
-			xlrec.snapshotConflictHorizon = visiconflictid;
+			xlrec.snapshotConflictHorizon = visibility_cutoff_xid;
 
 		xlrec.nredirected = prstate.nredirected;
 		xlrec.ndead = prstate.ndead;
