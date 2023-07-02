@@ -1572,12 +1572,6 @@ lazy_scan_prune(LVRelState *vacrel,
 		all_frozen_according_to_vm = ((mapbits & VISIBILITYMAP_ALL_FROZEN) != 0);
 	}
 
-	if (do_prune || do_freeze || vacuum_now ||
-			(all_visible && !page_all_visible) || (!all_visible && page_all_visible))
-		MarkBufferDirty(buf);
-	else if (new_prune_xid_found || PageIsFull(page))
-		MarkBufferDirtyHint(buf, true);
-
 	if (all_visible && !page_all_visible)
 		PageSetAllVisible(page);
 	else if (!all_visible && page_all_visible)
@@ -1585,6 +1579,12 @@ lazy_scan_prune(LVRelState *vacrel,
 
 	if (do_prune || new_prune_xid_found || PageIsFull(page))
 		PageClearFull(page);
+
+	if (do_prune || do_freeze || vacuum_now ||
+			(all_visible && !page_all_visible) || (!all_visible && page_all_visible))
+		MarkBufferDirty(buf);
+	else if (new_prune_xid_found || PageIsFull(page))
+		MarkBufferDirtyHint(buf, true);
 
 	if ((all_visible && !all_visible_according_to_vm) ||
 		(all_visible && all_frozen && !all_frozen_according_to_vm))
