@@ -1388,7 +1388,8 @@ lazy_scan_prune(LVRelState *vacrel,
 
 	if (do_freeze)
 	{
-		// TODO: why do we still want to set these when tuples_frozen == 0
+		// TODO: why do we still want to set these when tuples_frozen == 0 if
+		// the page isnt already all-frozen
 		vacrel->NewRelfrozenXid = pagefrz.FreezePageRelfrozenXid;
 		vacrel->NewRelminMxid = pagefrz.FreezePageRelminMxid;
 	}
