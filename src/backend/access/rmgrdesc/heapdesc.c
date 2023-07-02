@@ -193,7 +193,7 @@ heap2_desc(StringInfo buf, XLogReaderState *record)
 			OffsetNumber *nowdead;
 			OffsetNumber *nowunused;
 			int			nredirected;
-			int			nunused, ndead;
+			int			nunused, ndead, nplans;
 			Size		datalen;
 			xl_heap_freeze_plan *plans;
 			OffsetNumber *frz_offsets;
@@ -201,17 +201,17 @@ heap2_desc(StringInfo buf, XLogReaderState *record)
 			redirected = (OffsetNumber *) XLogRecGetBlockData(record, 0,
 															  &datalen);
 
+			nplans = xlrec->nplans;
 			nredirected = xlrec->nredirected;
 			ndead = xlrec->ndead;
 			nunused = xlrec->nunused;
 
+			plans = (xl_heap_freeze_plan *) XLogRecGetBlockData(record, 0, &datalen);
+			redirected = (OffsetNumber *) ((char *) plans +
+										(nplans * sizeof(xl_heap_freeze_plan)));
 			nowdead = redirected + (nredirected * 2);
 			nowunused = nowdead + ndead;
-			plans = (xl_heap_freeze_plan *) (nowunused + nunused);
-			frz_offsets = (OffsetNumber *) ((char *) plans +
-										(xlrec->nplans *
-										sizeof(xl_heap_freeze_plan)));
-
+			frz_offsets = nowunused + nunused;
 
 			appendStringInfoString(buf, ", redirected:");
 			array_desc(buf, redirected, sizeof(OffsetNumber) * 2,
@@ -226,7 +226,7 @@ heap2_desc(StringInfo buf, XLogReaderState *record)
 					   &offset_elem_desc, NULL);
 
 			appendStringInfoString(buf, ", plans:");
-			array_desc(buf, plans, sizeof(xl_heap_freeze_plan), xlrec->nplans,
+			array_desc(buf, plans, sizeof(xl_heap_freeze_plan), nplans,
 					   &plan_elem_desc, &frz_offsets);
 		}
 	}

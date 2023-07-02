@@ -1658,6 +1658,9 @@ lazy_scan_prune(LVRelState *vacrel,
 		else
 			xlrec.snapshotConflictHorizon = visibility_cutoff_xid;
 
+		if (do_freeze)
+			nplans = heap_log_freeze_plan(frozen, tuples_frozen, plans, frz_offsets);
+		xlrec.nplans = nplans;
 		xlrec.nredirected = prstate.nredirected;
 		xlrec.ndead = prstate.ndead;
 		// TODO: does the number dead need to be adjusted because we've vacuumed since we set this
@@ -1675,10 +1678,6 @@ lazy_scan_prune(LVRelState *vacrel,
 		}
 		xlrec.nunused = nunused_total;
 
-		if (do_freeze)
-			nplans = heap_log_freeze_plan(frozen, tuples_frozen, plans, frz_offsets);
-		xlrec.nplans = nplans;
-
 		XLogBeginInsert();
 		XLogRegisterData((char *) &xlrec, SizeOfHeapPrune);
 
@@ -1687,6 +1686,12 @@ lazy_scan_prune(LVRelState *vacrel,
 		XLogRegisterBuffer(0, buf, REGBUF_STANDARD);
 		if (vm_modified)
 			XLogRegisterBuffer(1, vmbuffer, 0);
+
+		if (do_freeze && nplans > 0)
+		{
+			XLogRegisterBufData(0, (char *) plans,
+								nplans * sizeof(xl_heap_freeze_plan));
+		}
 
 		if (prstate.nredirected > 0)
 			XLogRegisterBufData(0, (char *) prstate.redirected,
@@ -1705,9 +1710,6 @@ lazy_scan_prune(LVRelState *vacrel,
 
 		if (do_freeze && nplans > 0)
 		{
-			XLogRegisterBufData(0, (char *) plans,
-								nplans * sizeof(xl_heap_freeze_plan));
-
 			XLogRegisterBufData(0, (char *) frz_offsets,
 								tuples_frozen * sizeof(OffsetNumber));
 		}

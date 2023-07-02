@@ -8701,22 +8701,23 @@ heap_xlog_prune(XLogReaderState *record)
 		int			nredirected;
 		int			ndead;
 		int			nunused;
+		int			nplans;
 		Size		datalen;
 		xl_heap_freeze_plan *plans;
 		OffsetNumber *frz_offsets;
 		int			curoff = 0;
 
+		nplans = xlrec->nplans;
 		nredirected = xlrec->nredirected;
 		ndead = xlrec->ndead;
 		nunused = xlrec->nunused;
 
-		redirected = (OffsetNumber *) XLogRecGetBlockData(record, 0, &datalen);
+		plans = (xl_heap_freeze_plan *) XLogRecGetBlockData(record, 0, &datalen);
+		redirected = (OffsetNumber *) ((char *) plans +
+									(nplans * sizeof(xl_heap_freeze_plan)));
 		nowdead = redirected + (nredirected * 2);
 		nowunused = nowdead + ndead;
-		plans = (xl_heap_freeze_plan *) (nowunused + nunused);
-		frz_offsets = (OffsetNumber *) ((char *) plans +
-									(xlrec->nplans *
-									 sizeof(xl_heap_freeze_plan)));
+		frz_offsets = nowunused + nunused;
 
 		/* Update all line pointers per the record, and repair fragmentation */
 		if (nredirected > 0 || ndead > 0 || nunused > 0)
@@ -8725,7 +8726,7 @@ heap_xlog_prune(XLogReaderState *record)
 									nowdead, ndead,
 									nowunused, nunused);
 
-		for (int p = 0; p < xlrec->nplans; p++)
+		for (int p = 0; p < nplans; p++)
 		{
 			HeapTupleFreeze frz;
 
