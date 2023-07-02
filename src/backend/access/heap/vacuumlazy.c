@@ -1531,11 +1531,7 @@ lazy_scan_prune(LVRelState *vacrel,
 
 	vacrel->lpdead_items += lpdead_items;
 	vacuum_now = vacrel->nindexes == 0 && lpdead_items > 0;
-	if (do_prune || do_freeze  || vacuum_now)
-		MarkBufferDirty(buf);
 
-	if (((PageHeader) page)->pd_prune_xid != prstate.new_prune_xid || PageIsFull(page))
-		MarkBufferDirtyHint(buf, true);
 
 	if (lpdead_items > 0)
 	{
@@ -1606,12 +1602,14 @@ lazy_scan_prune(LVRelState *vacrel,
 				TransactionIdRetreat(visibility_cutoff_xid);
 		}
 	}
+	if (do_prune || do_freeze || vacuum_now || page_became_all_visible)
+		MarkBufferDirty(buf);
+	else if (((PageHeader) page)->pd_prune_xid != prstate.new_prune_xid || PageIsFull(page))
+		MarkBufferDirtyHint(buf, true);
 
 	if (page_became_all_visible)
-	{
 		PageSetAllVisible(page);
-		MarkBufferDirty(buf);
-	}
+
 	if (became_all_frozen)
 		visiflags |= VISIBILITYMAP_ALL_FROZEN;
 
@@ -1725,15 +1723,6 @@ lazy_scan_prune(LVRelState *vacrel,
 		if (vm_modified)
 			PageSetLSN(BufferGetPage(vmbuffer), recptr);
 	}
-
-		// TODO: what if it became all frozen but it wasn't already all
-		// visible, do we still use invalidtransactionid as the
-		// snapshotconflictid
-
-	// TODO: previously, we called heap_page_is_all_visible() here after
-	// vacuuming. do we need to get fresh visibility information or is it okay
-	// to just use what we stored in htsv array and check if any of the changes
-	// we did caused the page to become all visible or all frozen
 
 	if (vm_modified)
 		LockBuffer(vmbuffer, BUFFER_LOCK_UNLOCK);
