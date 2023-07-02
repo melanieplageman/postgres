@@ -1317,14 +1317,8 @@ lazy_scan_prune(LVRelState *vacrel,
 	prunestate->all_visible = true;
 	prunestate->all_frozen = true;
 
-	/*
-	 * maxoff might be reduced following line pointer array truncation in
-	 * heap_page_prune.  That's safe for us to ignore, since the reclaimed
-	 * space will continue to look like LP_UNUSED items below.
-	 */
 	maxoff = PageGetMaxOffsetNumber(page);
 
-	/* Initialize (or reset) page-level state */
 	pagefrz.freeze_required = false;
 	pagefrz.FreezePageRelfrozenXid = vacrel->NewRelfrozenXid;
 	pagefrz.FreezePageRelminMxid = vacrel->NewRelminMxid;
@@ -1336,15 +1330,6 @@ lazy_scan_prune(LVRelState *vacrel,
 	live_tuples = 0;
 	recently_dead_tuples = 0;
 
-	/*
-	 * Prune all HOT-update chains in this page.
-	 *
-	 * We count tuples removed by the pruning step as tuples_deleted.  Its
-	 * final value can be thought of as the number of tuples that have been
-	 * deleted from the table.  It should not be confused with lpdead_items;
-	 * lpdead_items's final value can be thought of as the number of tuples
-	 * that were deleted from indexes.
-	 */
 	for (offnum = maxoff;
 		 offnum >= FirstOffsetNumber;
 		 offnum = OffsetNumberPrev(offnum))
@@ -1355,7 +1340,6 @@ lazy_scan_prune(LVRelState *vacrel,
 		HeapTupleHeader htup;
 		itemid = PageGetItemId(page, offnum);
 
-		/* Nothing to do if slot doesn't contain a tuple */
 		if (!ItemIdIsNormal(itemid))
 		{
 			prstate.htsv[offnum] = -1;
@@ -1376,19 +1360,10 @@ lazy_scan_prune(LVRelState *vacrel,
 		if (prstate.htsv[offnum] == HEAPTUPLE_DEAD)
 			continue;
 
-		/* Tuple with storage -- consider need to freeze */
 		if (heap_prepare_freeze_tuple(tup.t_data, &vacrel->cutoffs, &pagefrz,
 									  &frozen[tuples_frozen], &totally_frozen))
-		{
-			/* Save prepared freeze plan for later */
 			frozen[tuples_frozen++].offset = offnum;
-		}
 
-		/*
-		 * If any tuple isn't either totally frozen already or eligible to
-		 * become totally frozen (according to its freeze plan), then the page
-		 * definitely cannot be set all-frozen in the visibility map later on
-		 */
 		if (!totally_frozen)
 			prunestate->all_frozen = false;
 
@@ -1443,47 +1418,24 @@ lazy_scan_prune(LVRelState *vacrel,
 	do_freeze = pagefrz.freeze_required || tuples_frozen == 0 ||
 		(prunestate->all_visible && prunestate->all_frozen);
 
-	/*
-	 * Freeze the page when heap_prepare_freeze_tuple indicates that at least
-	 * one XID/MXID from before FreezeLimit/MultiXactCutoff is present.  Also
-	 * freeze when pruning generated an FPI, if doing so means that we set the
-	 * page all-frozen afterwards (might not happen until final heap pass).
-	 */
 	if (do_freeze)
 	{
-		/*
-		 * We're freezing the page.  Our final NewRelfrozenXid doesn't need to
-		 * be affected by the XIDs that are just about to be frozen anyway.
-		 */
 		// TODO: why do we still want to set these when tuples_frozen == 0
 		vacrel->NewRelfrozenXid = pagefrz.FreezePageRelfrozenXid;
 		vacrel->NewRelminMxid = pagefrz.FreezePageRelminMxid;
 	}
 	else
 	{
-		/*
-		 * Page requires "no freeze" processing.  It might be set all-visible
-		 * in the visibility map, but it can never be set all-frozen.
-		 */
 		vacrel->NewRelfrozenXid = pagefrz.NoFreezePageRelfrozenXid;
 		vacrel->NewRelminMxid = pagefrz.NoFreezePageRelminMxid;
 		prunestate->all_frozen = false;
-		tuples_frozen = 0;		/* avoid miscounts in instrumentation */
+		tuples_frozen = 0;
 	}
 
 	do_freeze = do_freeze && tuples_frozen > 0;
 	if (do_freeze)
 	{
 		vacrel->frozen_pages++;
-
-
-		/*
-		* Perform xmin/xmax XID status sanity checks before critical section.
-		*
-		* heap_prepare_freeze_tuple doesn't perform these checks directly because
-		* pg_xact lookups are relatively expensive.  They shouldn't be repeated
-		* by successive VACUUMs that each decide against freezing the same page.
-		*/
 		for (int i = 0; i < tuples_frozen; i++)
 		{
 			HeapTupleFreeze *frz = frozen + i;
@@ -1492,7 +1444,6 @@ lazy_scan_prune(LVRelState *vacrel,
 
 			htup = (HeapTupleHeader) PageGetItem(page, itemid);
 
-			/* Deliberately avoid relying on tuple hint bits here */
 			if (frz->checkflags & HEAP_FREEZE_CHECK_XMIN_COMMITTED)
 			{
 				TransactionId xmin = HeapTupleHeaderGetRawXmin(htup);
@@ -1505,11 +1456,6 @@ lazy_scan_prune(LVRelState *vacrel,
 											xmin)));
 			}
 
-			/*
-			* TransactionIdDidAbort won't work reliably in the presence of XIDs
-			* left behind by transactions that were in progress during a crash,
-			* so we can only check that xmax didn't commit
-			*/
 			if (frz->checkflags & HEAP_FREEZE_CHECK_XMAX_ABORTED)
 			{
 				TransactionId xmax = HeapTupleHeaderGetRawXmax(htup);
@@ -1524,24 +1470,20 @@ lazy_scan_prune(LVRelState *vacrel,
 		}
 	}
 
-	/* Scan the page */
 	for (offnum = FirstOffsetNumber;
 		 offnum <= maxoff;
 		 offnum = OffsetNumberNext(offnum))
 	{
 		ItemId		itemid;
-		/* Ignore items already processed as part of an earlier chain */
 		if (prstate.marked[offnum])
 			continue;
 
 		vacrel->offnum = offnum;
 
-		/* Nothing to do if slot is empty or already dead */
 		itemid = PageGetItemId(page, offnum);
 		if (!ItemIdIsUsed(itemid) || ItemIdIsDead(itemid))
 			continue;
 
-		/* Process this item or chain of items */
 		tuples_deleted += heap_prune_chain(buf, offnum, &prstate);
 	}
 
@@ -1554,16 +1496,10 @@ lazy_scan_prune(LVRelState *vacrel,
 	vacrel->live_tuples += live_tuples;
 	vacrel->recently_dead_tuples += recently_dead_tuples;
 
-	/* Any error while applying the changes is critical */
 	START_CRIT_SECTION();
 
-	/* Have we found any prunable items? */
 	if (do_prune)
 	{
-		/*
-		 * Apply the planned item changes, then repair page fragmentation, and
-		 * update the page's hint bit about whether it has free line pointers.
-		 */
 		heap_page_prune_execute(buf,
 								prstate.redirected, prstate.nredirected,
 								prstate.nowdead, prstate.ndead,
@@ -1573,23 +1509,9 @@ lazy_scan_prune(LVRelState *vacrel,
 
 	if (do_prune || (((PageHeader) page)->pd_prune_xid != prstate.new_prune_xid || PageIsFull(page)))
 	{
-		/*
-		 * Update the page's pd_prune_xid field to either zero, or the lowest
-		 * XID of any soon-prunable tuple.
-		 */
-		/*
-		 * If we didn't prune anything, but have found a new value for the
-		 * pd_prune_xid field, update it and mark the buffer dirty. This is
-		 * treated as a non-WAL-logged hint.
-		 *
-		 * Also clear the "page is full" flag if it is set, since there's no
-		 * point in repeating the prune/defrag process until something else
-		 * happens to the page.
-		 */
 		((PageHeader) page)->pd_prune_xid = prstate.new_prune_xid;
 		PageClearFull(page);
 	}
-
 
 	vacrel->offnum = InvalidOffsetNumber;
 
@@ -1599,20 +1521,14 @@ lazy_scan_prune(LVRelState *vacrel,
 	{
 		ItemId		itemid;
 
-		/*
-		 * Set the offset number so that we can display it along with any
-		 * error that occurred while processing this tuple.
-		 */
 		vacrel->offnum = offnum;
 		itemid = PageGetItemId(page, offnum);
 
 		if (!ItemIdIsUsed(itemid))
 			continue;
 
-		/* Redirect items mustn't be touched */
 		if (ItemIdIsRedirected(itemid))
 		{
-			/* page makes rel truncation unsafe */
 			prunestate->hastup = true;
 			continue;
 		}
@@ -1627,7 +1543,7 @@ lazy_scan_prune(LVRelState *vacrel,
 			continue;
 		}
 
-		prunestate->hastup = true;	/* page makes rel truncation unsafe */
+		prunestate->hastup = true;
 	}
 
 	if (prunestate->hastup)
@@ -1651,7 +1567,6 @@ lazy_scan_prune(LVRelState *vacrel,
 	}
 	if (do_freeze)
 	{
-		/* Execute all freeze plans for page as a single atomic action */
 		heap_freeze_execute_prepared(vacrel->rel, buf,
 										frozen, tuples_frozen);
 	}
@@ -1668,7 +1583,7 @@ lazy_scan_prune(LVRelState *vacrel,
 
 			tblk = ItemPointerGetBlockNumber(&vacrel->dead_items->items[i]);
 			if (tblk != blkno)
-				break;				/* past end of tuples for this block */
+				break;
 			toff = ItemPointerGetOffsetNumber(&vacrel->dead_items->items[i]);
 			itemid = PageGetItemId(page, toff);
 
@@ -1678,7 +1593,6 @@ lazy_scan_prune(LVRelState *vacrel,
 		}
 
 		Assert(vac_nunused > 0);
-		/* Attempt to truncate line pointer array now */
 		PageTruncateLinePointerArray(page);
 	}
 
