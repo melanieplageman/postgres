@@ -1231,8 +1231,6 @@ lazy_scan_new_or_empty(LVRelState *vacrel, Buffer buf, BlockNumber blkno,
  * line pointers, and that every remaining item with tuple storage is
  * considered as a candidate for freezing.
  */
-// TODO: is it okay to just get the visibility map status again instead of passing this parameter
-// TODO: figure out what I can clean up and make new WAL
 // TODO: put back heap_page_is_all_visible() assert
 static void
 lazy_scan_prune(LVRelState *vacrel,
@@ -1242,21 +1240,32 @@ lazy_scan_prune(LVRelState *vacrel,
 				Buffer vmbuffer,
 				uint8 mapbits)
 {
+	PruneState	prstate;
+
+	HeapPageFreeze pagefrz;
+	HeapTupleFreeze frozen[MaxHeapTuplesPerPage];
+
+	OffsetNumber offnum, maxoff;
+	int tuples_deleted, live_tuples, recently_dead_tuples;
+
 	Relation	rel = vacrel->rel;
-	OffsetNumber offnum,
-				maxoff;
-	int			tuples_deleted,
-				tuples_frozen,
-				lpdead_items,
-				live_tuples,
-				recently_dead_tuples;
+	Oid tableoid = RelationGetRelid(rel);
+
+	int tuples_frozen = 0;
+	int lpdead_items = 0;
 
 	OffsetNumber vac_unused[MaxHeapTuplesPerPage];
 	int			vac_nunused = 0;
-	HeapPageFreeze pagefrz;
-	HeapTupleFreeze frozen[MaxHeapTuplesPerPage];
-	PruneState	prstate;
-	Oid tableoid = RelationGetRelid(rel);
+
+	// TODO: add back in vacuum error phase (for update_vacuum_error_info)
+	bool hastup = false;
+	bool all_visible = true;
+	bool all_frozen = true;
+
+	bool do_freeze = false;
+	bool do_prune = false;
+	bool vacuum_now = false;
+	TransactionId visibility_cutoff_xid = InvalidTransactionId;
 
 	bool vm_modified = false;
 	uint8 visiflags = 0;
@@ -1264,19 +1273,12 @@ lazy_scan_prune(LVRelState *vacrel,
 	bool all_visible_according_to_vm = ((mapbits & VISIBILITYMAP_ALL_VISIBLE) != 0);
 	bool all_frozen_according_to_vm = ((mapbits & VISIBILITYMAP_ALL_FROZEN) != 0);
 
-	// TODO: add in vacuum error phase for this prune freeze vacuum combo (for update_vacuum_error_info)
-	bool do_freeze;
-	bool do_prune;
-	bool vacuum_now = false;
-	TransactionId visibility_cutoff_xid = InvalidTransactionId;
-	bool hastup = false;
-	bool all_visible = true;
-	bool all_frozen = true;
-
 	if (!vacrel->skipwithvm)
 		all_visible_according_to_vm = false;
 
 	Assert(BufferGetBlockNumber(buf) == blkno);
+
+	tuples_deleted = live_tuples = recently_dead_tuples = 0;
 
 	prstate.new_prune_xid = InvalidTransactionId;
 	prstate.rel = rel;
@@ -1288,19 +1290,13 @@ lazy_scan_prune(LVRelState *vacrel,
 	prstate.nredirected = prstate.ndead = prstate.nunused = 0;
 	memset(prstate.marked, 0, sizeof(prstate.marked));
 
-
-	maxoff = PageGetMaxOffsetNumber(page);
-
 	pagefrz.freeze_required = false;
 	pagefrz.FreezePageRelfrozenXid = vacrel->NewRelfrozenXid;
 	pagefrz.FreezePageRelminMxid = vacrel->NewRelminMxid;
 	pagefrz.NoFreezePageRelfrozenXid = vacrel->NewRelfrozenXid;
 	pagefrz.NoFreezePageRelminMxid = vacrel->NewRelminMxid;
-	tuples_deleted = 0;
-	tuples_frozen = 0;
-	lpdead_items = 0;
-	live_tuples = 0;
-	recently_dead_tuples = 0;
+
+	maxoff = PageGetMaxOffsetNumber(page);
 
 	for (offnum = maxoff;
 		 offnum >= FirstOffsetNumber;
@@ -1663,8 +1659,6 @@ lazy_scan_prune(LVRelState *vacrel,
 		XLogBeginInsert();
 		XLogRegisterData((char *) &xlrec, SizeOfHeapPrune);
 
-		// TODO: do I need to do REGBUF_NO_IMAGE if hint bit is not needed like
-		// visi record did
 		XLogRegisterBuffer(0, buf, REGBUF_STANDARD);
 		if (vm_modified)
 			XLogRegisterBuffer(1, vmbuffer, 0);
