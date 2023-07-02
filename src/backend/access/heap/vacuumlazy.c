@@ -1524,7 +1524,6 @@ lazy_scan_prune(LVRelState *vacrel,
 	vacrel->lpdead_items += lpdead_items;
 	vacuum_now = vacrel->nindexes == 0 && lpdead_items > 0;
 
-
 	if (lpdead_items > 0)
 	{
 		vacrel->lpdead_item_pages++;
@@ -1557,13 +1556,7 @@ lazy_scan_prune(LVRelState *vacrel,
 
 		Assert(vac_nunused > 0);
 		PageTruncateLinePointerArray(page);
-	}
 
-	if (do_freeze)
-		heap_freeze_execute_prepared(vacrel->rel, buf, frozen, tuples_frozen);
-
-	if (vacuum_now)
-	{
 		all_visible = heap_page_is_all_visible(vacrel, buf, &prstate.snapshotConflictHorizon,
 									&all_frozen);
 		vacrel->dead_items->num_items = 0;
@@ -1610,6 +1603,8 @@ lazy_scan_prune(LVRelState *vacrel,
 
 	if (do_freeze)
 	{
+		heap_freeze_execute_prepared(vacrel->rel, buf, frozen, tuples_frozen);
+
 		if (all_visible && all_frozen)
 			visibility_cutoff_xid = prstate.snapshotConflictHorizon;
 		else
