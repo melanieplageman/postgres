@@ -1539,11 +1539,6 @@ lazy_scan_prune(LVRelState *vacrel,
 		pgstat_progress_update_param(PROGRESS_VACUUM_NUM_DEAD_TUPLES,
 									vacrel->dead_items->num_items);
 	}
-	if (do_freeze)
-	{
-		heap_freeze_execute_prepared(vacrel->rel, buf,
-										frozen, tuples_frozen);
-	}
 
 	if (vacuum_now)
 	{
@@ -1570,6 +1565,8 @@ lazy_scan_prune(LVRelState *vacrel,
 		PageTruncateLinePointerArray(page);
 	}
 
+	if (do_freeze)
+		heap_freeze_execute_prepared(vacrel->rel, buf, frozen, tuples_frozen);
 	if (vacuum_now)
 	{
 		all_visible = heap_page_is_all_visible(vacrel, buf, &prstate.snapshotConflictHorizon,
