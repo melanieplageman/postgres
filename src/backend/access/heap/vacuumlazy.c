@@ -1260,8 +1260,6 @@ lazy_scan_prune(LVRelState *vacrel,
 
 	bool vm_modified = false;
 	uint8 visiflags = 0;
-	bool vm_became_all_visible = false;
-	bool became_all_frozen = false;
 	bool page_all_visible = PageIsAllVisible(page);
 	bool all_visible_according_to_vm = ((mapbits & VISIBILITYMAP_ALL_VISIBLE) != 0);
 	bool all_frozen_according_to_vm = ((mapbits & VISIBILITYMAP_ALL_FROZEN) != 0);
@@ -1571,15 +1569,18 @@ lazy_scan_prune(LVRelState *vacrel,
 		vacrel->dead_items->num_items = 0;
 	}
 
+	if (all_frozen)
+		visiflags |= VISIBILITYMAP_ALL_FROZEN;
+
+	if (all_visible)
+		visiflags |= VISIBILITYMAP_ALL_VISIBLE;
+
 	if (!all_visible && all_visible_according_to_vm)
 	{
 		mapbits = visibilitymap_get_status(vacrel->rel, blkno, &vmbuffer);
 		all_visible_according_to_vm = ((mapbits & VISIBILITYMAP_ALL_VISIBLE) != 0);
 		all_frozen_according_to_vm = ((mapbits & VISIBILITYMAP_ALL_FROZEN) != 0);
 	}
-
-	vm_became_all_visible = all_visible && !all_visible_according_to_vm;
-	became_all_frozen = all_frozen && !all_frozen_according_to_vm;
 
 	if (do_prune || do_freeze || vacuum_now ||
 			(all_visible && !page_all_visible) || (!all_visible && page_all_visible))
@@ -1592,21 +1593,14 @@ lazy_scan_prune(LVRelState *vacrel,
 	else if (!all_visible && page_all_visible)
 		PageClearAllVisible(page);
 
-	if (all_frozen)
-		visiflags |= VISIBILITYMAP_ALL_FROZEN;
-
-	if (all_visible)
-		visiflags |= VISIBILITYMAP_ALL_VISIBLE;
-
-	if (vm_became_all_visible ||
-			(became_all_frozen && all_visible && all_visible_according_to_vm))
+	if ((all_visible && !all_visible_according_to_vm) ||
+		(all_visible && all_frozen && !all_frozen_according_to_vm))
 	{
 		vm_modified = visibilitymap_set_and_lock(vacrel->rel, blkno, buf, vmbuffer, visiflags);
 		if (!vm_modified)
 			LockBuffer(vmbuffer, BUFFER_LOCK_UNLOCK);
 	}
-
-	if (!all_visible && all_visible_according_to_vm)
+	else if (!all_visible && all_visible_according_to_vm)
 	{
 		vm_modified = visibilitymap_clear_and_lock(vacrel->rel, blkno, vmbuffer,
 							VISIBILITYMAP_VALID_BITS);
@@ -1643,7 +1637,7 @@ lazy_scan_prune(LVRelState *vacrel,
 		if (vm_modified && xlrec.isCatalogRel)
 			xlrec.visiflags |= VISIBILITYMAP_XLOG_CATALOG_REL;
 
-		if ((do_prune || vacuum_now) && (vm_became_all_visible || do_freeze))
+		if ((do_prune || vacuum_now) && (vm_modified || do_freeze))
 			xlrec.snapshotConflictHorizon = Max(prstate.snapshotConflictHorizon,
 					visibility_cutoff_xid);
 		else if (do_prune || vacuum_now)
