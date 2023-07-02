@@ -212,23 +212,6 @@ typedef struct LVRelState
 	int64		missed_dead_tuples; /* # removable, but not removed */
 } LVRelState;
 
-/*
- * State returned by lazy_scan_prune()
- */
-typedef struct LVPagePruneState
-{
-	bool		hastup;			/* Page prevents rel truncation? */
-
-	/*
-	 * State describes the proper VM bit states to set for the page following
-	 * pruning and freezing.  all_visible implies !has_lpdead_items, but don't
-	 * trust all_frozen result unless all_visible is also set to true.
-	 */
-	bool		all_visible;	/* Every item visible to all? */
-	bool		all_frozen;		/* provided all_visible is also true */
-	TransactionId visibility_cutoff_xid;	/* For recovery conflicts */
-} LVPagePruneState;
-
 /* Struct for saving and restoring vacuum error information. */
 typedef struct LVSavedErrInfo
 {
@@ -249,7 +232,7 @@ static bool lazy_scan_new_or_empty(LVRelState *vacrel, Buffer buf,
 								   bool sharelock, Buffer vmbuffer);
 static void lazy_scan_prune(LVRelState *vacrel, Buffer buf,
 							BlockNumber blkno, Page page, Buffer vmbuffer,
-							LVPagePruneState *prunestate, bool all_visible_according_to_vm);
+							bool all_visible_according_to_vm);
 static bool lazy_scan_noprune(LVRelState *vacrel, Buffer buf,
 							  BlockNumber blkno, Page page,
 							  bool *hastup, bool *recordfreespace);
@@ -853,8 +836,6 @@ lazy_scan_heap(LVRelState *vacrel)
 		Buffer		buf;
 		Page		page;
 		bool		all_visible_according_to_vm;
-		// TODO: seems like we don't need prunestate here anymore
-		LVPagePruneState prunestate;
 
 		if (blkno == next_unskippable_block)
 		{
@@ -941,8 +922,7 @@ lazy_scan_heap(LVRelState *vacrel)
 		if (lazy_scan_new_or_empty(vacrel, buf, blkno, page, false, vmbuffer))
 			continue;
 
-		lazy_scan_prune(vacrel, buf, blkno, page, vmbuffer,
-				&prunestate, all_visible_according_to_vm);
+		lazy_scan_prune(vacrel, buf, blkno, page, vmbuffer, all_visible_according_to_vm);
 
 		// TODO: ***** MUST FIX FSM vacuuming and recording to use prior criteria *********
 		if (blkno - next_fsm_block_to_vacuum >= VACUUM_FSM_EVERY_PAGES)
@@ -1269,7 +1249,7 @@ lazy_scan_prune(LVRelState *vacrel,
 				BlockNumber blkno,
 				Page page,
 				Buffer vmbuffer,
-				LVPagePruneState *prunestate, bool all_visible_according_to_vm)
+				bool all_visible_according_to_vm)
 {
 	Relation	rel = vacrel->rel;
 	OffsetNumber offnum,
@@ -1300,6 +1280,9 @@ lazy_scan_prune(LVRelState *vacrel,
 	bool do_prune;
 	bool vacuum_now = false;
 	TransactionId visibility_cutoff_xid = InvalidTransactionId;
+	bool hastup = false;
+	bool all_visible = true;
+	bool all_frozen = true;
 
 	Assert(BufferGetBlockNumber(buf) == blkno);
 
@@ -1313,9 +1296,6 @@ lazy_scan_prune(LVRelState *vacrel,
 	prstate.nredirected = prstate.ndead = prstate.nunused = 0;
 	memset(prstate.marked, 0, sizeof(prstate.marked));
 
-	prunestate->hastup = false;
-	prunestate->all_visible = true;
-	prunestate->all_frozen = true;
 
 	maxoff = PageGetMaxOffsetNumber(page);
 
@@ -1365,19 +1345,19 @@ lazy_scan_prune(LVRelState *vacrel,
 			frozen[tuples_frozen++].offset = offnum;
 
 		if (!totally_frozen)
-			prunestate->all_frozen = false;
+			all_frozen = false;
 
 		switch ((HTSV_Result) prstate.htsv[offnum])
 		{
 			case HEAPTUPLE_LIVE:
 				live_tuples++;
-				if (prunestate->all_visible)
+				if (all_visible)
 				{
 					TransactionId xmin;
 
 					if (!HeapTupleHeaderXminCommitted(tup.t_data))
 					{
-						prunestate->all_visible = false;
+						all_visible = false;
 						break;
 					}
 
@@ -1385,7 +1365,7 @@ lazy_scan_prune(LVRelState *vacrel,
 					if (!TransactionIdPrecedes(xmin,
 											   vacrel->cutoffs.OldestXmin))
 					{
-						prunestate->all_visible = false;
+						all_visible = false;
 						break;
 					}
 
@@ -1396,13 +1376,13 @@ lazy_scan_prune(LVRelState *vacrel,
 				break;
 			case HEAPTUPLE_RECENTLY_DEAD:
 				recently_dead_tuples++;
-				prunestate->all_visible = false;
+				all_visible = false;
 				break;
 			case HEAPTUPLE_INSERT_IN_PROGRESS:
-				prunestate->all_visible = false;
+				all_visible = false;
 				break;
 			case HEAPTUPLE_DELETE_IN_PROGRESS:
-				prunestate->all_visible = false;
+				all_visible = false;
 				live_tuples++;
 				break;
 			default:
@@ -1416,7 +1396,7 @@ lazy_scan_prune(LVRelState *vacrel,
 	// TODO: Pruning isnt separte so it can't have made an FPI. do we need
 	// additional criteria related to this?
 	do_freeze = pagefrz.freeze_required || tuples_frozen == 0 ||
-		(prunestate->all_visible && prunestate->all_frozen);
+		(all_visible && all_frozen);
 
 	if (do_freeze)
 	{
@@ -1428,7 +1408,7 @@ lazy_scan_prune(LVRelState *vacrel,
 	{
 		vacrel->NewRelfrozenXid = pagefrz.NoFreezePageRelfrozenXid;
 		vacrel->NewRelminMxid = pagefrz.NoFreezePageRelminMxid;
-		prunestate->all_frozen = false;
+		all_frozen = false;
 		tuples_frozen = 0;
 	}
 
@@ -1529,7 +1509,7 @@ lazy_scan_prune(LVRelState *vacrel,
 
 		if (ItemIdIsRedirected(itemid))
 		{
-			prunestate->hastup = true;
+			hastup = true;
 			continue;
 		}
 
@@ -1543,10 +1523,10 @@ lazy_scan_prune(LVRelState *vacrel,
 			continue;
 		}
 
-		prunestate->hastup = true;
+		hastup = true;
 	}
 
-	if (prunestate->hastup)
+	if (hastup)
 		vacrel->nonempty_pages = blkno + 1;
 
 	vacrel->lpdead_items += lpdead_items;
@@ -1560,7 +1540,7 @@ lazy_scan_prune(LVRelState *vacrel,
 	if (lpdead_items > 0)
 	{
 		vacrel->lpdead_item_pages++;
-		prunestate->all_visible = false;
+		all_visible = false;
 		Assert(vacrel->dead_items->num_items <= vacrel->dead_items->max_items);
 		pgstat_progress_update_param(PROGRESS_VACUUM_NUM_DEAD_TUPLES,
 									vacrel->dead_items->num_items);
@@ -1607,17 +1587,17 @@ lazy_scan_prune(LVRelState *vacrel,
 	}
 	else
 	{
-		became_all_frozen = prunestate->all_frozen && !VM_ALL_FROZEN(vacrel->rel, blkno, &vmbuffer);
-		vm_became_all_visible = prunestate->all_visible && !all_visible_according_to_vm;
+		became_all_frozen = all_frozen && !VM_ALL_FROZEN(vacrel->rel, blkno, &vmbuffer);
+		vm_became_all_visible = all_visible && !all_visible_according_to_vm;
 		if (vm_became_all_visible)
 			emit_visi = true;
 
-		if (prunestate->all_visible && !page_all_visible)
+		if (all_visible && !page_all_visible)
 			page_became_all_visible = true;
 	}
 	if (do_freeze)
 	{
-		if (prunestate->all_visible && prunestate->all_frozen)
+		if (all_visible && all_frozen)
 			visibility_cutoff_xid = prstate.snapshotConflictHorizon;
 		else
 		{
@@ -1635,11 +1615,11 @@ lazy_scan_prune(LVRelState *vacrel,
 	if (became_all_frozen)
 		visiflags |= VISIBILITYMAP_ALL_FROZEN;
 
-	if ((!vacuum_now && prunestate->all_visible) || (vacuum_now && vm_became_all_visible))
+	if ((!vacuum_now && all_visible) || (vacuum_now && vm_became_all_visible))
 		visiflags |= VISIBILITYMAP_ALL_VISIBLE;
 
 	if (vm_became_all_visible ||
-			(became_all_frozen && prunestate->all_visible && all_visible_according_to_vm))
+			(became_all_frozen && all_visible && all_visible_according_to_vm))
 	{
 		vm_modified = visibilitymap_set_soft(vacrel->rel, blkno, buf, InvalidXLogRecPtr,
 							vmbuffer, InvalidTransactionId, visiflags);
@@ -1649,12 +1629,12 @@ lazy_scan_prune(LVRelState *vacrel,
 
 	if (!vacuum_now && ((all_visible_according_to_vm && !page_all_visible &&
 				visibilitymap_get_status(vacrel->rel, blkno, &vmbuffer) != 0) ||
-			(!prunestate->all_visible && page_all_visible)))
+			(!all_visible && page_all_visible)))
 	{
 		visibilitymap_clear(vacrel->rel, blkno, vmbuffer,
 							VISIBILITYMAP_VALID_BITS);
 	}
-	if (!vacuum_now && !prunestate->all_visible && page_all_visible)
+	if (!vacuum_now && !all_visible && page_all_visible)
 	{
 		PageClearAllVisible(page);
 		MarkBufferDirty(buf);
