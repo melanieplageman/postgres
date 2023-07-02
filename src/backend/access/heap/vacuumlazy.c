@@ -1270,9 +1270,8 @@ lazy_scan_prune(LVRelState *vacrel,
 	bool vm_modified = false;
 	uint8 visiflags = 0;
 	bool vm_became_all_visible = false;
-	bool page_became_all_visible = false;
 	bool became_all_frozen = false;
-	bool page_all_visible = false;
+	bool page_all_visible = PageIsAllVisible(page);
 
 	// TODO: add in vacuum error phase for this prune freeze vacuum combo (for update_vacuum_error_info)
 	bool do_freeze;
@@ -1571,22 +1570,18 @@ lazy_scan_prune(LVRelState *vacrel,
 		PageTruncateLinePointerArray(page);
 	}
 
-	page_all_visible = PageIsAllVisible(page);
 	if (vacuum_now)
 	{
-		vm_became_all_visible = heap_page_is_all_visible(vacrel, buf, &prstate.snapshotConflictHorizon,
+		all_visible = heap_page_is_all_visible(vacrel, buf, &prstate.snapshotConflictHorizon,
 									&became_all_frozen);
 		vacrel->dead_items->num_items = 0;
-		if (vm_became_all_visible)
-			page_became_all_visible = true;
 	}
 	else
 	{
 		became_all_frozen = all_frozen && !VM_ALL_FROZEN(vacrel->rel, blkno, &vmbuffer);
 		vm_became_all_visible = all_visible && !all_visible_according_to_vm;
-		if (all_visible && !page_all_visible)
-			page_became_all_visible = true;
 	}
+
 	if (do_freeze)
 	{
 		if (all_visible && all_frozen)
@@ -1600,12 +1595,12 @@ lazy_scan_prune(LVRelState *vacrel,
 	}
 
 	if (do_prune || do_freeze || vacuum_now ||
-			page_became_all_visible || (!all_visible && page_all_visible))
+			(all_visible && !page_all_visible) || (!all_visible && page_all_visible))
 		MarkBufferDirty(buf);
 	else if (((PageHeader) page)->pd_prune_xid != prstate.new_prune_xid || PageIsFull(page))
 		MarkBufferDirtyHint(buf, true);
 
-	if (page_became_all_visible)
+	if (all_visible && !page_all_visible)
 		PageSetAllVisible(page);
 	else if (!all_visible && page_all_visible)
 		PageClearAllVisible(page);
