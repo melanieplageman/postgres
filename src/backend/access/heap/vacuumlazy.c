@@ -226,13 +226,14 @@ static void lazy_scan_heap(LVRelState *vacrel);
 static BlockNumber lazy_scan_skip(LVRelState *vacrel, Buffer *vmbuffer,
 								  BlockNumber next_block,
 								  bool *next_unskippable_allvis,
+								  uint8 *mapbits,
 								  bool *skipping_current_range);
 static bool lazy_scan_new_or_empty(LVRelState *vacrel, Buffer buf,
 								   BlockNumber blkno, Page page,
 								   bool sharelock, Buffer vmbuffer);
 static void lazy_scan_prune(LVRelState *vacrel, Buffer buf,
 							BlockNumber blkno, Page page, Buffer vmbuffer,
-							bool all_visible_according_to_vm);
+							bool all_visible_according_to_vm, uint8 mapbits);
 static bool lazy_scan_noprune(LVRelState *vacrel, Buffer buf,
 							  BlockNumber blkno, Page page,
 							  bool *hastup, bool *recordfreespace);
@@ -811,6 +812,7 @@ lazy_scan_heap(LVRelState *vacrel)
 				next_unskippable_block,
 				next_fsm_block_to_vacuum = 0;
 	VacDeadItems *dead_items = vacrel->dead_items;
+	uint8		mapbits = 0;
 	Buffer		vmbuffer = InvalidBuffer;
 	bool		next_unskippable_allvis,
 				skipping_current_range,
@@ -830,6 +832,7 @@ lazy_scan_heap(LVRelState *vacrel)
 
 	next_unskippable_block = lazy_scan_skip(vacrel, &vmbuffer, 0,
 											&next_unskippable_allvis,
+											&mapbits,
 											&skipping_current_range);
 	for (blkno = 0; blkno < rel_pages; blkno++)
 	{
@@ -843,6 +846,7 @@ lazy_scan_heap(LVRelState *vacrel)
 			next_unskippable_block = lazy_scan_skip(vacrel, &vmbuffer,
 													blkno + 1,
 													&next_unskippable_allvis,
+													&mapbits,
 													&skipping_current_range);
 
 			Assert(next_unskippable_block >= blkno + 1);
@@ -922,7 +926,7 @@ lazy_scan_heap(LVRelState *vacrel)
 		if (lazy_scan_new_or_empty(vacrel, buf, blkno, page, false, vmbuffer))
 			continue;
 
-		lazy_scan_prune(vacrel, buf, blkno, page, vmbuffer, all_visible_according_to_vm);
+		lazy_scan_prune(vacrel, buf, blkno, page, vmbuffer, all_visible_according_to_vm, mapbits);
 
 		// TODO: ***** MUST FIX FSM vacuuming and recording to use prior criteria *********
 		if (blkno - next_fsm_block_to_vacuum >= VACUUM_FSM_EVERY_PAGES)
@@ -1003,7 +1007,8 @@ lazy_scan_heap(LVRelState *vacrel)
  */
 static BlockNumber
 lazy_scan_skip(LVRelState *vacrel, Buffer *vmbuffer, BlockNumber next_block,
-			   bool *next_unskippable_allvis, bool *skipping_current_range)
+			   bool *next_unskippable_allvis, uint8 *mapbits,
+			   bool *skipping_current_range)
 {
 	BlockNumber rel_pages = vacrel->rel_pages,
 				next_unskippable_block = next_block,
@@ -1013,16 +1018,17 @@ lazy_scan_skip(LVRelState *vacrel, Buffer *vmbuffer, BlockNumber next_block,
 	*next_unskippable_allvis = true;
 	while (next_unskippable_block < rel_pages)
 	{
-		uint8		mapbits = visibilitymap_get_status(vacrel->rel,
+		*mapbits = visibilitymap_get_status(vacrel->rel,
 													   next_unskippable_block,
 													   vmbuffer);
 
-		if ((mapbits & VISIBILITYMAP_ALL_VISIBLE) == 0)
+		if ((*mapbits & VISIBILITYMAP_ALL_VISIBLE) == 0)
 		{
-			Assert((mapbits & VISIBILITYMAP_ALL_FROZEN) == 0);
+			Assert((*mapbits & VISIBILITYMAP_ALL_FROZEN) == 0);
 			*next_unskippable_allvis = false;
 			break;
 		}
+
 
 		/*
 		 * Caller must scan the last page to determine whether it has tuples
@@ -1050,7 +1056,7 @@ lazy_scan_skip(LVRelState *vacrel, Buffer *vmbuffer, BlockNumber next_block,
 		 * all-visible.  They may still skip all-frozen pages, which can't
 		 * contain XIDs < OldestXmin (XIDs that aren't already frozen by now).
 		 */
-		if ((mapbits & VISIBILITYMAP_ALL_FROZEN) == 0)
+		if ((*mapbits & VISIBILITYMAP_ALL_FROZEN) == 0)
 		{
 			if (vacrel->aggressive)
 				break;
@@ -1249,7 +1255,8 @@ lazy_scan_prune(LVRelState *vacrel,
 				BlockNumber blkno,
 				Page page,
 				Buffer vmbuffer,
-				bool all_visible_according_to_vm)
+				bool all_visible_according_to_vm,
+				uint8 mapbits)
 {
 	Relation	rel = vacrel->rel;
 	OffsetNumber offnum,
@@ -1272,6 +1279,7 @@ lazy_scan_prune(LVRelState *vacrel,
 	bool vm_became_all_visible = false;
 	bool became_all_frozen = false;
 	bool page_all_visible = PageIsAllVisible(page);
+	bool all_frozen_according_to_vm = ((mapbits & VISIBILITYMAP_ALL_FROZEN) != 0);
 
 	// TODO: add in vacuum error phase for this prune freeze vacuum combo (for update_vacuum_error_info)
 	bool do_freeze;
@@ -1567,17 +1575,16 @@ lazy_scan_prune(LVRelState *vacrel,
 
 	if (do_freeze)
 		heap_freeze_execute_prepared(vacrel->rel, buf, frozen, tuples_frozen);
+
 	if (vacuum_now)
 	{
 		all_visible = heap_page_is_all_visible(vacrel, buf, &prstate.snapshotConflictHorizon,
 									&became_all_frozen);
 		vacrel->dead_items->num_items = 0;
 	}
-	else
-	{
-		became_all_frozen = all_frozen && !VM_ALL_FROZEN(vacrel->rel, blkno, &vmbuffer);
-		vm_became_all_visible = all_visible && !all_visible_according_to_vm;
-	}
+
+	vm_became_all_visible = all_visible && !all_visible_according_to_vm;
+	became_all_frozen = all_frozen && !all_frozen_according_to_vm;
 
 	if (do_freeze)
 	{
@@ -1617,9 +1624,9 @@ lazy_scan_prune(LVRelState *vacrel,
 			LockBuffer(vmbuffer, BUFFER_LOCK_UNLOCK);
 	}
 
-	if (!vacuum_now && ((all_visible_according_to_vm && !page_all_visible &&
+	if ((all_visible_according_to_vm && !page_all_visible &&
 				visibilitymap_get_status(vacrel->rel, blkno, &vmbuffer) != 0) ||
-			(!all_visible && page_all_visible)))
+			(!all_visible && page_all_visible))
 	{
 		visibilitymap_clear(vacrel->rel, blkno, vmbuffer,
 							VISIBILITYMAP_VALID_BITS);
