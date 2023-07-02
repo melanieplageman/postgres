@@ -1273,7 +1273,6 @@ lazy_scan_prune(LVRelState *vacrel,
 	bool page_became_all_visible = false;
 	bool became_all_frozen = false;
 	bool page_all_visible = false;
-	bool emit_visi = false;
 
 	// TODO: add in vacuum error phase for this prune freeze vacuum combo (for update_vacuum_error_info)
 	bool do_freeze;
@@ -1585,9 +1584,6 @@ lazy_scan_prune(LVRelState *vacrel,
 	{
 		became_all_frozen = all_frozen && !VM_ALL_FROZEN(vacrel->rel, blkno, &vmbuffer);
 		vm_became_all_visible = all_visible && !all_visible_according_to_vm;
-		if (vm_became_all_visible)
-			emit_visi = true;
-
 		if (all_visible && !page_all_visible)
 			page_became_all_visible = true;
 	}
@@ -1602,13 +1598,17 @@ lazy_scan_prune(LVRelState *vacrel,
 				TransactionIdRetreat(visibility_cutoff_xid);
 		}
 	}
-	if (do_prune || do_freeze || vacuum_now || page_became_all_visible)
+
+	if (do_prune || do_freeze || vacuum_now ||
+			page_became_all_visible || (!all_visible && page_all_visible))
 		MarkBufferDirty(buf);
 	else if (((PageHeader) page)->pd_prune_xid != prstate.new_prune_xid || PageIsFull(page))
 		MarkBufferDirtyHint(buf, true);
 
 	if (page_became_all_visible)
 		PageSetAllVisible(page);
+	else if (!all_visible && page_all_visible)
+		PageClearAllVisible(page);
 
 	if (became_all_frozen)
 		visiflags |= VISIBILITYMAP_ALL_FROZEN;
@@ -1632,13 +1632,8 @@ lazy_scan_prune(LVRelState *vacrel,
 		visibilitymap_clear(vacrel->rel, blkno, vmbuffer,
 							VISIBILITYMAP_VALID_BITS);
 	}
-	if (!vacuum_now && !all_visible && page_all_visible)
-	{
-		PageClearAllVisible(page);
-		MarkBufferDirty(buf);
-	}
 
-	if (RelationNeedsWAL(rel) && (do_prune || vacuum_now || emit_visi || do_freeze))
+	if (RelationNeedsWAL(rel) && (do_prune || vacuum_now || vm_became_all_visible || do_freeze))
 	{
 		xl_heap_prune xlrec;
 		XLogRecPtr	recptr;
@@ -1655,7 +1650,7 @@ lazy_scan_prune(LVRelState *vacrel,
 		if (vm_modified && xlrec.isCatalogRel)
 			xlrec.visiflags |= VISIBILITYMAP_XLOG_CATALOG_REL;
 
-		if ((do_prune || vacuum_now) && (emit_visi || do_freeze))
+		if ((do_prune || vacuum_now) && (vm_became_all_visible || do_freeze))
 			xlrec.snapshotConflictHorizon = Max(prstate.snapshotConflictHorizon,
 					visibility_cutoff_xid);
 		else if (do_prune || vacuum_now)
