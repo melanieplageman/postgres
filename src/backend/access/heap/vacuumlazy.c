@@ -1233,6 +1233,7 @@ lazy_scan_new_or_empty(LVRelState *vacrel, Buffer buf, BlockNumber blkno,
  */
 // TODO: put back heap_page_is_all_visible() assert
 // TODO: add back in vacuum error phase (for update_vacuum_error_info)
+// TODO: can't use FPI criteria to decide whether or not to freeze. need new freeze criteria
 static void
 lazy_scan_prune(LVRelState *vacrel,
 				Buffer buf,
@@ -1298,7 +1299,7 @@ lazy_scan_prune(LVRelState *vacrel,
 		 offnum >= FirstOffsetNumber;
 		 offnum = OffsetNumberPrev(offnum))
 	{
-		bool totally_frozen;
+		bool tuple_frozen;
 		HeapTupleData tup;
 		ItemId itemid = PageGetItemId(page, offnum);
 
@@ -1322,10 +1323,10 @@ lazy_scan_prune(LVRelState *vacrel,
 			continue;
 
 		if (heap_prepare_freeze_tuple(tup.t_data, &vacrel->cutoffs, &pagefrz,
-									  &frozen[tuples_frozen], &totally_frozen))
+									  &frozen[tuples_frozen], &tuple_frozen))
 			frozen[tuples_frozen++].offset = offnum;
 
-		if (!totally_frozen)
+		if (!tuple_frozen)
 			all_frozen = false;
 
 		switch ((HTSV_Result) prstate.htsv[offnum])
@@ -1373,8 +1374,6 @@ lazy_scan_prune(LVRelState *vacrel,
 
 	vacrel->offnum = InvalidOffsetNumber;
 
-	// TODO: Pruning isnt separte so it can't have made an FPI. do we need
-	// additional criteria related to this?
 	do_freeze = pagefrz.freeze_required || tuples_frozen == 0 ||
 		(all_visible && all_frozen);
 
