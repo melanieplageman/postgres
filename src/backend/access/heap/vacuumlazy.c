@@ -1234,6 +1234,9 @@ lazy_scan_new_or_empty(LVRelState *vacrel, Buffer buf, BlockNumber blkno,
 // TODO: put back heap_page_is_all_visible() assert
 // TODO: add back in vacuum error phase (for update_vacuum_error_info)
 // TODO: can't use FPI criteria to decide whether or not to freeze. need new freeze criteria
+// TODO: if you can't freeze anything, won't you still potentially find older unfreezable xids
+// TODO: want to get rid of NoFreezePageRelfrozenXid and FreezeRelfrozenXid but not sure how given multixacts
+// TODO: shorten the critical section
 static void
 lazy_scan_prune(LVRelState *vacrel,
 				Buffer buf,
@@ -1374,28 +1377,15 @@ lazy_scan_prune(LVRelState *vacrel,
 
 	vacrel->offnum = InvalidOffsetNumber;
 
-	do_freeze = pagefrz.freeze_required || tuples_frozen == 0 ||
-		(all_visible && all_frozen);
+	do_freeze = pagefrz.freeze_required ||
+		(all_visible && all_frozen && tuples_frozen > 0);
 
 	if (do_freeze)
 	{
-		// TODO: why do we still want to set these when tuples_frozen == 0 if
-		// the page isnt already all-frozen
 		vacrel->NewRelfrozenXid = pagefrz.FreezePageRelfrozenXid;
 		vacrel->NewRelminMxid = pagefrz.FreezePageRelminMxid;
-	}
-	else
-	{
-		vacrel->NewRelfrozenXid = pagefrz.NoFreezePageRelfrozenXid;
-		vacrel->NewRelminMxid = pagefrz.NoFreezePageRelminMxid;
-		all_frozen = false;
-		tuples_frozen = 0;
-	}
-
-	do_freeze = do_freeze && tuples_frozen > 0;
-	if (do_freeze)
-	{
 		vacrel->frozen_pages++;
+
 		for (int i = 0; i < tuples_frozen; i++)
 		{
 			HeapTupleFreeze *frz = frozen + i;
@@ -1429,12 +1419,18 @@ lazy_scan_prune(LVRelState *vacrel,
 			}
 		}
 	}
+	else
+	{
+		vacrel->NewRelfrozenXid = pagefrz.NoFreezePageRelfrozenXid;
+		vacrel->NewRelminMxid = pagefrz.NoFreezePageRelminMxid;
+	}
 
 	for (offnum = FirstOffsetNumber;
 		 offnum <= maxoff;
 		 offnum = OffsetNumberNext(offnum))
 	{
 		ItemId		itemid;
+
 		if (prstate.marked[offnum])
 			continue;
 
@@ -1456,7 +1452,6 @@ lazy_scan_prune(LVRelState *vacrel,
 
 	do_prune = prstate.nredirected > 0 || prstate.ndead > 0 || prstate.nunused > 0;
 
-	// TODO: this is a very long critical section
 	START_CRIT_SECTION();
 
 	if (do_prune)
@@ -1579,14 +1574,19 @@ lazy_scan_prune(LVRelState *vacrel,
 	if ((all_visible && !all_visible_according_to_vm) ||
 		(all_visible && all_frozen && !all_frozen_according_to_vm))
 	{
-		vm_modified = visibilitymap_set_and_lock(vacrel->rel, blkno, buf, vmbuffer, visiflags);
+		vm_modified = visibilitymap_set_and_lock(vacrel->rel, blkno, buf,
+				vmbuffer, visiflags);
 		if (!vm_modified)
 			LockBuffer(vmbuffer, BUFFER_LOCK_UNLOCK);
 	}
-	else if (!all_visible && all_visible_according_to_vm)
+	else if ((!all_visible && all_visible_according_to_vm) ||
+			(!all_frozen && all_frozen_according_to_vm))
 	{
-		vm_modified = visibilitymap_clear_and_lock(vacrel->rel, blkno, vmbuffer,
-							VISIBILITYMAP_VALID_BITS);
+		uint8 clear_flags = VISIBILITYMAP_VALID_BITS;
+		if (all_visible)
+			clear_flags = VISIBILITYMAP_ALL_FROZEN;
+		vm_modified = visibilitymap_clear_and_lock(vacrel->rel, blkno,
+				vmbuffer, clear_flags);
 		if (!vm_modified)
 			LockBuffer(vmbuffer, BUFFER_LOCK_UNLOCK);
 	}
@@ -1659,10 +1659,8 @@ lazy_scan_prune(LVRelState *vacrel,
 			XLogRegisterBuffer(1, vmbuffer, 0);
 
 		if (nplans > 0)
-		{
 			XLogRegisterBufData(0, (char *) plans,
 								nplans * sizeof(xl_heap_freeze_plan));
-		}
 
 		if (prstate.nredirected > 0)
 			XLogRegisterBufData(0, (char *) prstate.redirected,
@@ -1674,20 +1672,17 @@ lazy_scan_prune(LVRelState *vacrel,
 								prstate.ndead * sizeof(OffsetNumber));
 
 		if (nunused_total > 0)
-		{
 			XLogRegisterBufData(0, (char *) unused_offsets,
 								nunused_total * sizeof(OffsetNumber));
-		}
 
 		if (nplans > 0)
-		{
 			XLogRegisterBufData(0, (char *) frz_offsets,
 								tuples_frozen * sizeof(OffsetNumber));
-		}
 
 		recptr = XLogInsert(RM_HEAP2_ID, XLOG_HEAP2_PRUNE);
 
 		PageSetLSN(page, recptr);
+
 		if (vm_modified)
 			PageSetLSN(BufferGetPage(vmbuffer), recptr);
 	}
