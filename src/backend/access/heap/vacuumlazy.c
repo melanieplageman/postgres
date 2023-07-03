@@ -1211,6 +1211,116 @@ lazy_scan_new_or_empty(LVRelState *vacrel, Buffer buf, BlockNumber blkno,
 	return false;
 }
 
+static void prep_vacuum(LVRelState *vacrel, Page page, BlockNumber blkno, bool *all_visible)
+{
+	bool hastup = false;
+	OffsetNumber offnum, maxoff;
+	int lpdead_items = 0;
+
+	maxoff = PageGetMaxOffsetNumber(page);
+	// TODO: perhaps we can do this case after the critical section?
+	// is probably fine except for needing to know all_visible
+	for (offnum = FirstOffsetNumber;
+		offnum <= maxoff;
+		offnum = OffsetNumberNext(offnum))
+	{
+		ItemId		itemid;
+
+		vacrel->offnum = offnum;
+		itemid = PageGetItemId(page, offnum);
+
+		if (!ItemIdIsUsed(itemid))
+			continue;
+
+		if (ItemIdIsRedirected(itemid))
+		{
+			hastup = true;
+			continue;
+		}
+
+		if (ItemIdIsDead(itemid))
+		{
+			ItemPointerData tmp;
+			ItemPointerSetBlockNumber(&tmp, blkno);
+			ItemPointerSetOffsetNumber(&tmp, offnum);
+			vacrel->dead_items->items[vacrel->dead_items->num_items++] = tmp;
+			lpdead_items++;
+			continue;
+		}
+
+		hastup = true;
+	}
+
+	if (hastup)
+		vacrel->nonempty_pages = blkno + 1;
+
+	if (lpdead_items > 0)
+	{
+		*all_visible = false;
+		vacrel->lpdead_item_pages++;
+		vacrel->lpdead_items += lpdead_items;
+		Assert(vacrel->dead_items->num_items <= vacrel->dead_items->max_items);
+		pgstat_progress_update_param(PROGRESS_VACUUM_NUM_DEAD_TUPLES,
+									vacrel->dead_items->num_items);
+	}
+}
+
+static void snap_vacuum(LVRelState *vacrel, PruneState *prstate, Buffer buf, Page page, BlockNumber blkno,
+		bool *all_visible, bool *all_frozen, OffsetNumber *vac_unused, int *vac_nunused)
+{
+	// TODO: be sure we don't try and call lazy_vacuum_heap_page() later
+	OffsetNumber offnum, maxoff;
+	bool hastup = false;
+
+	maxoff = PageGetMaxOffsetNumber(page);
+
+	pgstat_progress_update_param(PROGRESS_VACUUM_HEAP_BLKS_VACUUMED, blkno);
+
+	for (offnum = FirstOffsetNumber;
+		offnum <= maxoff;
+		offnum = OffsetNumberNext(offnum))
+	{
+		ItemId		itemid;
+
+		vacrel->offnum = offnum;
+		itemid = PageGetItemId(page, offnum);
+
+		if (!ItemIdIsUsed(itemid))
+			continue;
+
+		if (ItemIdIsRedirected(itemid))
+		{
+			hastup = true;
+			continue;
+		}
+
+		if (ItemIdIsDead(itemid))
+		{
+			Assert(!ItemIdHasStorage(itemid));
+			ItemIdSetUnused(itemid);
+			vac_unused[(*vac_nunused)++] = offnum;
+			continue;
+		}
+
+		hastup = true;
+	}
+	if (hastup)
+		vacrel->nonempty_pages = blkno + 1;
+
+	// TODO: this can probably be an assert
+	vacrel->dead_items->num_items = 0;
+	// TODO: check if we do this in non-snap vac case
+	// TODO: shouldn't prune report its murder count
+	if ((*vac_nunused) == 0)
+		return;
+	PageTruncateLinePointerArray(page);
+
+
+	*all_visible = heap_page_is_all_visible(vacrel, buf,
+			&prstate->snapshotConflictHorizon, all_frozen);
+
+}
+
 /*
  *	lazy_scan_prune() -- lazy_scan_heap() pruning and freezing.
  *
@@ -1256,12 +1366,10 @@ lazy_scan_prune(LVRelState *vacrel,
 	Oid tableoid = RelationGetRelid(rel);
 
 	int tuples_frozen = 0;
-	int lpdead_items = 0;
 
 	OffsetNumber vac_unused[MaxHeapTuplesPerPage];
 	int			vac_nunused = 0;
 
-	bool hastup = false;
 	bool all_visible = true;
 	bool all_frozen = true;
 
@@ -1377,6 +1485,7 @@ lazy_scan_prune(LVRelState *vacrel,
 
 	vacrel->offnum = InvalidOffsetNumber;
 
+	// TODO: figure out if I should move this based on whether or not I change all_visible during snap vacuum
 	do_freeze = pagefrz.freeze_required ||
 		(all_visible && all_frozen && tuples_frozen > 0);
 
@@ -1461,6 +1570,7 @@ lazy_scan_prune(LVRelState *vacrel,
 								prstate.nowdead, prstate.ndead,
 								prstate.nowunused, prstate.nunused);
 
+		// TODO: reorder this
 		if (((PageHeader) page)->pd_prune_xid != prstate.new_prune_xid)
 		{
 			((PageHeader) page)->pd_prune_xid = prstate.new_prune_xid;
@@ -1468,81 +1578,16 @@ lazy_scan_prune(LVRelState *vacrel,
 		}
 	}
 
-	for (offnum = FirstOffsetNumber;
-		 offnum <= maxoff;
-		 offnum = OffsetNumberNext(offnum))
-	{
-		ItemId		itemid;
+	if (vacrel->nindexes > 0)
+		prep_vacuum(vacrel, page, blkno, &all_visible);
+	else
+	// TODO: use prunestate nunused and nowunused
+		snap_vacuum(vacrel, &prstate, buf, page, blkno, &all_visible, &all_frozen, vac_unused, &vac_nunused);
 
-		vacrel->offnum = offnum;
-		itemid = PageGetItemId(page, offnum);
+	// TODO: check if I still need this criteria and if it is right
+	vacuum_now = vac_nunused > 0;
 
-		if (!ItemIdIsUsed(itemid))
-			continue;
-
-		if (ItemIdIsRedirected(itemid))
-		{
-			hastup = true;
-			continue;
-		}
-
-		if (ItemIdIsDead(itemid))
-		{
-			ItemPointerData tmp;
-			ItemPointerSetBlockNumber(&tmp, blkno);
-			ItemPointerSetOffsetNumber(&tmp, offnum);
-			vacrel->dead_items->items[vacrel->dead_items->num_items++] = tmp;
-			lpdead_items++;
-			continue;
-		}
-
-		hastup = true;
-	}
-
-	if (hastup)
-		vacrel->nonempty_pages = blkno + 1;
-
-	vacrel->lpdead_items += lpdead_items;
-
-	if (lpdead_items > 0)
-	{
-		vacrel->lpdead_item_pages++;
-		all_visible = false;
-		Assert(vacrel->dead_items->num_items <= vacrel->dead_items->max_items);
-		pgstat_progress_update_param(PROGRESS_VACUUM_NUM_DEAD_TUPLES,
-									vacrel->dead_items->num_items);
-	}
-
-	vacuum_now = vacrel->nindexes == 0 && lpdead_items > 0;
-
-	if (vacuum_now)
-	{
-		pgstat_progress_update_param(PROGRESS_VACUUM_HEAP_BLKS_VACUUMED, blkno);
-
-		for (int i = 0; i < vacrel->dead_items->num_items; i++)
-		{
-			BlockNumber tblk;
-			OffsetNumber toff;
-			ItemId		itemid;
-
-			tblk = ItemPointerGetBlockNumber(&vacrel->dead_items->items[i]);
-			if (tblk != blkno)
-				break;
-			toff = ItemPointerGetOffsetNumber(&vacrel->dead_items->items[i]);
-			itemid = PageGetItemId(page, toff);
-
-			Assert(ItemIdIsDead(itemid) && !ItemIdHasStorage(itemid));
-			ItemIdSetUnused(itemid);
-			vac_unused[vac_nunused++] = toff;
-		}
-
-		Assert(vac_nunused > 0);
-		PageTruncateLinePointerArray(page);
-
-		all_visible = heap_page_is_all_visible(vacrel, buf,
-				&prstate.snapshotConflictHorizon, &all_frozen);
-		vacrel->dead_items->num_items = 0;
-	}
+	vacrel->offnum = InvalidOffsetNumber;
 
 	if (all_frozen)
 		visiflags |= VISIBILITYMAP_ALL_FROZEN;
