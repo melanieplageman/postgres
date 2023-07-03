@@ -1211,15 +1211,16 @@ lazy_scan_new_or_empty(LVRelState *vacrel, Buffer buf, BlockNumber blkno,
 	return false;
 }
 
-static void prep_vacuum(LVRelState *vacrel, Page page, BlockNumber blkno, bool *all_visible)
+static void
+prep_vacuum(LVRelState *vacrel, BlockNumber blkno, Page page, bool *all_visible)
 {
-	bool hastup = false;
+	// TODO: perhaps we can do this case after the critical section?
+	// is probably fine except for needing to know all_visible
 	OffsetNumber offnum, maxoff;
+	bool hastup = false;
 	int lpdead_items = 0;
 
 	maxoff = PageGetMaxOffsetNumber(page);
-	// TODO: perhaps we can do this case after the critical section?
-	// is probably fine except for needing to know all_visible
 	for (offnum = FirstOffsetNumber;
 		offnum <= maxoff;
 		offnum = OffsetNumberNext(offnum))
@@ -1265,9 +1266,9 @@ static void prep_vacuum(LVRelState *vacrel, Page page, BlockNumber blkno, bool *
 	}
 }
 
-// TODO: get the order of the parameters right
-static int snap_vacuum(LVRelState *vacrel, PruneState *prstate, Buffer buf, Page page, BlockNumber blkno,
-		bool *all_visible, bool *all_frozen)
+static int
+snap_vacuum(LVRelState *vacrel, PruneState *prstate, Buffer buf,
+		BlockNumber blkno, Page page, bool *all_visible, bool *all_frozen)
 {
 	// TODO: be sure we don't try and call lazy_vacuum_heap_page() later
 	OffsetNumber offnum, maxoff;
@@ -1312,7 +1313,6 @@ static int snap_vacuum(LVRelState *vacrel, PruneState *prstate, Buffer buf, Page
 
 	// TODO: this can probably be an assert
 	vacrel->dead_items->num_items = 0;
-	// TODO: check if we do this in non-snap vac case
 	// TODO: shouldn't prune report its murder count
 	if (reaped == 0)
 		return reaped;
@@ -1344,10 +1344,8 @@ static int snap_vacuum(LVRelState *vacrel, PruneState *prstate, Buffer buf, Page
  * line pointers, and that every remaining item with tuple storage is
  * considered as a candidate for freezing.
  */
-// TODO: put back heap_page_is_all_visible() assert
 // TODO: add back in vacuum error phase (for update_vacuum_error_info)
 // TODO: can't use FPI criteria to decide whether or not to freeze. need new freeze criteria
-// TODO: if you can't freeze anything, won't you still potentially find older unfreezable xids
 // TODO: want to get rid of NoFreezePageRelfrozenXid and FreezeRelfrozenXid but not sure how given multixacts
 // TODO: shorten the critical section
 // TODO: *** decide if it is okay to set items from normal/redirect to unused if we do a snap vacuum
@@ -1574,9 +1572,9 @@ lazy_scan_prune(LVRelState *vacrel,
 	}
 
 	if (vacrel->nindexes > 0)
-		prep_vacuum(vacrel, page, blkno, &all_visible);
+		prep_vacuum(vacrel, blkno, page, &all_visible);
 	else
-		do_prune = snap_vacuum(vacrel, &prstate, buf, page, blkno, &all_visible, &all_frozen) > 0;
+		do_prune = snap_vacuum(vacrel, &prstate, buf, blkno, page, &all_visible, &all_frozen) > 0;
 
 	vacrel->offnum = InvalidOffsetNumber;
 
