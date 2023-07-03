@@ -1275,6 +1275,8 @@ snap_vacuum(LVRelState *vacrel, PruneState *prstate, Buffer buf,
 	bool hastup = false;
 	int reaped = 0;
 
+	Assert(vacrel->dead_items->num_items == 0);
+
 	maxoff = PageGetMaxOffsetNumber(page);
 
 	pgstat_progress_update_param(PROGRESS_VACUUM_HEAP_BLKS_VACUUMED, blkno);
@@ -1311,8 +1313,6 @@ snap_vacuum(LVRelState *vacrel, PruneState *prstate, Buffer buf,
 	if (hastup)
 		vacrel->nonempty_pages = blkno + 1;
 
-	// TODO: this can probably be an assert
-	vacrel->dead_items->num_items = 0;
 	// TODO: shouldn't prune report its murder count
 	if (reaped == 0)
 		return reaped;
