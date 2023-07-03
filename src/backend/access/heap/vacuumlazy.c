@@ -1265,12 +1265,13 @@ static void prep_vacuum(LVRelState *vacrel, Page page, BlockNumber blkno, bool *
 	}
 }
 
-static void snap_vacuum(LVRelState *vacrel, PruneState *prstate, Buffer buf, Page page, BlockNumber blkno,
-		bool *all_visible, bool *all_frozen, OffsetNumber *vac_unused, int *vac_nunused)
+static int snap_vacuum(LVRelState *vacrel, PruneState *prstate, Buffer buf, Page page, BlockNumber blkno,
+		bool *all_visible, bool *all_frozen)
 {
 	// TODO: be sure we don't try and call lazy_vacuum_heap_page() later
 	OffsetNumber offnum, maxoff;
 	bool hastup = false;
+	int reaped = 0;
 
 	maxoff = PageGetMaxOffsetNumber(page);
 
@@ -1298,7 +1299,8 @@ static void snap_vacuum(LVRelState *vacrel, PruneState *prstate, Buffer buf, Pag
 		{
 			Assert(!ItemIdHasStorage(itemid));
 			ItemIdSetUnused(itemid);
-			vac_unused[(*vac_nunused)++] = offnum;
+			prstate->nowunused[prstate->nunused++] = offnum;
+			reaped++;
 			continue;
 		}
 
@@ -1311,14 +1313,14 @@ static void snap_vacuum(LVRelState *vacrel, PruneState *prstate, Buffer buf, Pag
 	vacrel->dead_items->num_items = 0;
 	// TODO: check if we do this in non-snap vac case
 	// TODO: shouldn't prune report its murder count
-	if ((*vac_nunused) == 0)
-		return;
+	if (reaped == 0)
+		return reaped;
 	PageTruncateLinePointerArray(page);
-
 
 	*all_visible = heap_page_is_all_visible(vacrel, buf,
 			&prstate->snapshotConflictHorizon, all_frozen);
 
+	return reaped;
 }
 
 /*
@@ -1366,9 +1368,6 @@ lazy_scan_prune(LVRelState *vacrel,
 	Oid tableoid = RelationGetRelid(rel);
 
 	int tuples_frozen = 0;
-
-	OffsetNumber vac_unused[MaxHeapTuplesPerPage];
-	int			vac_nunused = 0;
 
 	bool all_visible = true;
 	bool all_frozen = true;
@@ -1581,11 +1580,8 @@ lazy_scan_prune(LVRelState *vacrel,
 	if (vacrel->nindexes > 0)
 		prep_vacuum(vacrel, page, blkno, &all_visible);
 	else
-	// TODO: use prunestate nunused and nowunused
-		snap_vacuum(vacrel, &prstate, buf, page, blkno, &all_visible, &all_frozen, vac_unused, &vac_nunused);
-
-	// TODO: check if I still need this criteria and if it is right
-	vacuum_now = vac_nunused > 0;
+	// TODO: check if I still need vacuum_now and if it is right
+		vacuum_now = snap_vacuum(vacrel, &prstate, buf, page, blkno, &all_visible, &all_frozen) > 0;
 
 	vacrel->offnum = InvalidOffsetNumber;
 
@@ -1657,7 +1653,6 @@ lazy_scan_prune(LVRelState *vacrel,
 		XLogRecPtr	recptr;
 		xl_heap_freeze_plan plans[MaxHeapTuplesPerPage];
 		OffsetNumber frz_offsets[MaxHeapTuplesPerPage];
-		OffsetNumber all_unused[MaxHeapTuplesPerPage];
 
 		xlrec.isCatalogRel = RelationIsAccessibleInLogicalDecoding(rel);
 		xlrec.visiflags = visiflags;
@@ -1678,19 +1673,9 @@ lazy_scan_prune(LVRelState *vacrel,
 		xlrec.nredirected = prstate.nredirected;
 		xlrec.ndead = prstate.ndead;
 
-		xlrec.nunused = 0;
+		xlrec.nunused = prstate.nunused;
 		// TODO: is it okay that vacuum set additional tuples that were dead unused? do the numbers
 		// of dead and unused need to be adjusted if we vacuumed now?
-		if (do_prune)
-		{
-			for (int i = 0; i < prstate.nunused; i++)
-				all_unused[xlrec.nunused++] = prstate.nowunused[i];
-		}
-		if (vacuum_now)
-		{
-			for (int i = 0; i < vac_nunused; i++)
-				all_unused[xlrec.nunused++] = vac_unused[i];
-		}
 
 		XLogBeginInsert();
 		XLogRegisterData((char *) &xlrec, SizeOfHeapPrune);
@@ -1712,8 +1697,8 @@ lazy_scan_prune(LVRelState *vacrel,
 			XLogRegisterBufData(0, (char *) prstate.nowdead,
 								prstate.ndead * sizeof(OffsetNumber));
 
-		if (xlrec.nunused > 0)
-			XLogRegisterBufData(0, (char *) all_unused,
+		if (prstate.nunused > 0)
+			XLogRegisterBufData(0, (char *) prstate.nowunused,
 								xlrec.nunused * sizeof(OffsetNumber));
 
 		if (xlrec.nplans > 0)
