@@ -1232,6 +1232,7 @@ lazy_scan_new_or_empty(LVRelState *vacrel, Buffer buf, BlockNumber blkno,
  * considered as a candidate for freezing.
  */
 // TODO: put back heap_page_is_all_visible() assert
+// TODO: add back in vacuum error phase (for update_vacuum_error_info)
 static void
 lazy_scan_prune(LVRelState *vacrel,
 				Buffer buf,
@@ -1241,12 +1242,11 @@ lazy_scan_prune(LVRelState *vacrel,
 				uint8 mapbits)
 {
 	PruneState	prstate;
-
 	HeapPageFreeze pagefrz;
 	HeapTupleFreeze frozen[MaxHeapTuplesPerPage];
 
 	OffsetNumber offnum, maxoff;
-	int tuples_deleted, live_tuples, recently_dead_tuples;
+	int tuples_deleted = 0, live_tuples = 0, recently_dead_tuples = 0;
 
 	Relation	rel = vacrel->rel;
 	Oid tableoid = RelationGetRelid(rel);
@@ -1257,29 +1257,24 @@ lazy_scan_prune(LVRelState *vacrel,
 	OffsetNumber vac_unused[MaxHeapTuplesPerPage];
 	int			vac_nunused = 0;
 
-	// TODO: add back in vacuum error phase (for update_vacuum_error_info)
 	bool hastup = false;
 	bool all_visible = true;
 	bool all_frozen = true;
 
-	bool do_freeze = false;
-	bool do_prune = false;
-	bool vacuum_now = false;
+	bool do_freeze = false, do_prune = false, vacuum_now = false;
 	TransactionId visibility_cutoff_xid = InvalidTransactionId;
 
 	bool vm_modified = false;
 	uint8 visiflags = 0;
 	bool page_all_visible = PageIsAllVisible(page);
 	bool new_prune_xid_found = false;
-	bool all_visible_according_to_vm = ((mapbits & VISIBILITYMAP_ALL_VISIBLE) != 0);
-	bool all_frozen_according_to_vm = ((mapbits & VISIBILITYMAP_ALL_FROZEN) != 0);
+	bool all_visible_according_to_vm = mapbits & VISIBILITYMAP_ALL_VISIBLE;
+	bool all_frozen_according_to_vm = mapbits & VISIBILITYMAP_ALL_FROZEN;
 
 	if (!vacrel->skipwithvm)
 		all_visible_according_to_vm = false;
 
 	Assert(BufferGetBlockNumber(buf) == blkno);
-
-	tuples_deleted = live_tuples = recently_dead_tuples = 0;
 
 	prstate.new_prune_xid = InvalidTransactionId;
 	prstate.rel = rel;
@@ -1304,10 +1299,8 @@ lazy_scan_prune(LVRelState *vacrel,
 		 offnum = OffsetNumberPrev(offnum))
 	{
 		bool totally_frozen;
-		ItemId		itemid;
 		HeapTupleData tup;
-		HeapTupleHeader htup;
-		itemid = PageGetItemId(page, offnum);
+		ItemId itemid = PageGetItemId(page, offnum);
 
 		if (!ItemIdIsNormal(itemid))
 		{
@@ -1315,8 +1308,7 @@ lazy_scan_prune(LVRelState *vacrel,
 			continue;
 		}
 
-		htup = (HeapTupleHeader) PageGetItem(page, itemid);
-		tup.t_data = htup;
+		tup.t_data = (HeapTupleHeader) PageGetItem(page, itemid);
 		tup.t_tableOid = tableoid;
 		tup.t_len = ItemIdGetLength(itemid);
 		ItemPointerSet(&(tup.t_self), blkno, offnum);
@@ -1377,7 +1369,6 @@ lazy_scan_prune(LVRelState *vacrel,
 			default:
 				elog(ERROR, "unexpected HeapTupleSatisfiesVacuum result");
 		}
-
 	}
 
 	vacrel->offnum = InvalidOffsetNumber;
