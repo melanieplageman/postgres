@@ -1569,12 +1569,10 @@ lazy_scan_prune(LVRelState *vacrel,
 								prstate.nowdead, prstate.ndead,
 								prstate.nowunused, prstate.nunused);
 
-		// TODO: reorder this
 		if (((PageHeader) page)->pd_prune_xid != prstate.new_prune_xid)
-		{
-			((PageHeader) page)->pd_prune_xid = prstate.new_prune_xid;
 			new_prune_xid_found = true;
-		}
+
+		((PageHeader) page)->pd_prune_xid = prstate.new_prune_xid;
 	}
 
 	if (vacrel->nindexes > 0)
