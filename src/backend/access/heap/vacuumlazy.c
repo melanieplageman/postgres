@@ -1553,8 +1553,8 @@ lazy_scan_prune(LVRelState *vacrel,
 	if (!all_visible && all_visible_according_to_vm)
 	{
 		mapbits = visibilitymap_get_status(vacrel->rel, blkno, &vmbuffer);
-		all_visible_according_to_vm = ((mapbits & VISIBILITYMAP_ALL_VISIBLE) != 0);
-		all_frozen_according_to_vm = ((mapbits & VISIBILITYMAP_ALL_FROZEN) != 0);
+		all_visible_according_to_vm = mapbits & VISIBILITYMAP_ALL_VISIBLE;
+		all_frozen_according_to_vm = mapbits & VISIBILITYMAP_ALL_FROZEN;
 	}
 
 	if (all_visible && !page_all_visible)
@@ -1605,17 +1605,14 @@ lazy_scan_prune(LVRelState *vacrel,
 		}
 	}
 
-	if (RelationNeedsWAL(rel) && (do_prune || vacuum_now || vm_modified || do_freeze))
+	if (RelationNeedsWAL(rel) &&
+			(do_prune || vacuum_now || vm_modified || do_freeze))
 	{
 		xl_heap_prune xlrec;
 		XLogRecPtr	recptr;
 		xl_heap_freeze_plan plans[MaxHeapTuplesPerPage];
 		OffsetNumber frz_offsets[MaxHeapTuplesPerPage];
-		// TODO: do this more efficiently
-		OffsetNumber unused_offsets[MaxHeapTuplesPerPage];
-		OffsetNumber *cur_unused = unused_offsets;
-		uint16 nunused_total = 0;
-		int			nplans = 0;
+		OffsetNumber all_unused[MaxHeapTuplesPerPage];
 
 		xlrec.isCatalogRel = RelationIsAccessibleInLogicalDecoding(rel);
 		xlrec.visiflags = visiflags;
@@ -1630,26 +1627,25 @@ lazy_scan_prune(LVRelState *vacrel,
 		else
 			xlrec.snapshotConflictHorizon = visibility_cutoff_xid;
 
+		xlrec.nplans = 0;
 		if (do_freeze)
-			nplans = heap_log_freeze_plan(frozen, tuples_frozen, plans, frz_offsets);
-		xlrec.nplans = nplans;
+			xlrec.nplans = heap_log_freeze_plan(frozen, tuples_frozen, plans, frz_offsets);
 		xlrec.nredirected = prstate.nredirected;
 		xlrec.ndead = prstate.ndead;
+
+		xlrec.nunused = 0;
 		// TODO: is it okay that vacuum set additional tuples that were dead unused? do the numbers
 		// of dead and unused need to be adjusted if we vacuumed now?
 		if (do_prune)
 		{
-			nunused_total += prstate.nunused;
-			memcpy(cur_unused, prstate.nowunused, sizeof(OffsetNumber) * prstate.nunused);
-			cur_unused += prstate.nunused;
+			for (int i = 0; i < prstate.nunused; i++)
+				all_unused[xlrec.nunused++] = prstate.nowunused[i];
 		}
 		if (vacuum_now)
 		{
-			nunused_total += vac_nunused;
-			memcpy(cur_unused, vac_unused, sizeof(OffsetNumber) * vac_nunused);
-			cur_unused += vac_nunused;
+			for (int i = 0; i < vac_nunused; i++)
+				all_unused[xlrec.nunused++] = vac_unused[i];
 		}
-		xlrec.nunused = nunused_total;
 
 		XLogBeginInsert();
 		XLogRegisterData((char *) &xlrec, SizeOfHeapPrune);
@@ -1658,9 +1654,9 @@ lazy_scan_prune(LVRelState *vacrel,
 		if (vm_modified)
 			XLogRegisterBuffer(1, vmbuffer, 0);
 
-		if (nplans > 0)
+		if (xlrec.nplans > 0)
 			XLogRegisterBufData(0, (char *) plans,
-								nplans * sizeof(xl_heap_freeze_plan));
+								xlrec.nplans * sizeof(xl_heap_freeze_plan));
 
 		if (prstate.nredirected > 0)
 			XLogRegisterBufData(0, (char *) prstate.redirected,
@@ -1671,11 +1667,11 @@ lazy_scan_prune(LVRelState *vacrel,
 			XLogRegisterBufData(0, (char *) prstate.nowdead,
 								prstate.ndead * sizeof(OffsetNumber));
 
-		if (nunused_total > 0)
-			XLogRegisterBufData(0, (char *) unused_offsets,
-								nunused_total * sizeof(OffsetNumber));
+		if (xlrec.nunused > 0)
+			XLogRegisterBufData(0, (char *) all_unused,
+								xlrec.nunused * sizeof(OffsetNumber));
 
-		if (nplans > 0)
+		if (xlrec.nplans > 0)
 			XLogRegisterBufData(0, (char *) frz_offsets,
 								tuples_frozen * sizeof(OffsetNumber));
 
