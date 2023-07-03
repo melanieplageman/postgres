@@ -230,6 +230,12 @@ static BlockNumber lazy_scan_skip(LVRelState *vacrel, Buffer *vmbuffer,
 static bool lazy_scan_new_or_empty(LVRelState *vacrel, Buffer buf,
 								   BlockNumber blkno, Page page,
 								   bool sharelock, Buffer vmbuffer);
+
+static int prune_snap_reap(LVRelState *vacrel, PruneState *prstate, Buffer buf,
+		BlockNumber blkno, Page page, bool *all_visible, bool *all_frozen);
+
+static void catalog_dead_for_vacuum(LVRelState *vacrel, BlockNumber blkno,
+		Page page, bool *all_visible);
 static void lazy_scan_prune(LVRelState *vacrel, Buffer buf,
 							BlockNumber blkno, Page page, Buffer vmbuffer,
 							uint8 mapbits);
@@ -1211,11 +1217,15 @@ lazy_scan_new_or_empty(LVRelState *vacrel, Buffer buf, BlockNumber blkno,
 	return false;
 }
 
+/*
+ * TODO: We could have done this after the critical section except for needing
+ * to know if there are dead items before deciding on the real value of
+ * all_visible
+ */
 static void
-prep_vacuum(LVRelState *vacrel, BlockNumber blkno, Page page, bool *all_visible)
+catalog_dead_for_vacuum(LVRelState *vacrel, BlockNumber blkno, Page page,
+		bool *all_visible)
 {
-	// TODO: perhaps we can do this case after the critical section?
-	// is probably fine except for needing to know all_visible
 	OffsetNumber offnum, maxoff;
 	bool hastup = false;
 	int lpdead_items = 0;
@@ -1266,15 +1276,21 @@ prep_vacuum(LVRelState *vacrel, BlockNumber blkno, Page page, bool *all_visible)
 	}
 }
 
+/*
+ * Only meant to be done during pruning when we can skip preparing dead items
+ * for vacuum and instead reap them now. Returns the number reaped.
+ * TODO: potentially we could modify heap_prune_chain() logic to do this while
+ * pruning but not sure if it would require more branches that it is worth
+ */
 static int
-snap_vacuum(LVRelState *vacrel, PruneState *prstate, Buffer buf,
+prune_snap_reap(LVRelState *vacrel, PruneState *prstate, Buffer buf,
 		BlockNumber blkno, Page page, bool *all_visible, bool *all_frozen)
 {
-	// TODO: be sure we don't try and call lazy_vacuum_heap_page() later
 	OffsetNumber offnum, maxoff;
 	bool hastup = false;
 	int reaped = 0;
 
+	Assert(vacrel->nindexes == 0);
 	Assert(vacrel->dead_items->num_items == 0);
 
 	maxoff = PageGetMaxOffsetNumber(page);
@@ -1310,16 +1326,19 @@ snap_vacuum(LVRelState *vacrel, PruneState *prstate, Buffer buf,
 
 		hastup = true;
 	}
+
 	if (hastup)
 		vacrel->nonempty_pages = blkno + 1;
 
-	// TODO: shouldn't prune report its murder count
-	if (reaped == 0)
-		return reaped;
-	PageTruncateLinePointerArray(page);
+	// TODO: Before, when we prepped dead_items and vacuumed them in a separate
+	// pass, we reported them in stats. Do we want to report # reaped?
+	if (reaped > 0)
+	{
+		PageTruncateLinePointerArray(page);
 
-	*all_visible = heap_page_is_all_visible(vacrel, buf,
-			&prstate->snapshotConflictHorizon, all_frozen);
+		*all_visible = heap_page_is_all_visible(vacrel, buf,
+				&prstate->snapshotConflictHorizon, all_frozen);
+	}
 
 	return reaped;
 }
@@ -1572,9 +1591,10 @@ lazy_scan_prune(LVRelState *vacrel,
 	}
 
 	if (vacrel->nindexes > 0)
-		prep_vacuum(vacrel, blkno, page, &all_visible);
+		catalog_dead_for_vacuum(vacrel, blkno, page, &all_visible);
 	else
-		do_prune = snap_vacuum(vacrel, &prstate, buf, blkno, page, &all_visible, &all_frozen) > 0;
+		do_prune = prune_snap_reap(vacrel, &prstate, buf, blkno, page,
+					&all_visible, &all_frozen) > 0;
 
 	vacrel->offnum = InvalidOffsetNumber;
 
