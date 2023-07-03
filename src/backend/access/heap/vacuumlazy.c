@@ -1265,6 +1265,7 @@ static void prep_vacuum(LVRelState *vacrel, Page page, BlockNumber blkno, bool *
 	}
 }
 
+// TODO: get the order of the parameters right
 static int snap_vacuum(LVRelState *vacrel, PruneState *prstate, Buffer buf, Page page, BlockNumber blkno,
 		bool *all_visible, bool *all_frozen)
 {
@@ -1349,6 +1350,7 @@ static int snap_vacuum(LVRelState *vacrel, PruneState *prstate, Buffer buf, Page
 // TODO: if you can't freeze anything, won't you still potentially find older unfreezable xids
 // TODO: want to get rid of NoFreezePageRelfrozenXid and FreezeRelfrozenXid but not sure how given multixacts
 // TODO: shorten the critical section
+// TODO: *** decide if it is okay to set items from normal/redirect to unused if we do a snap vacuum
 static void
 lazy_scan_prune(LVRelState *vacrel,
 				Buffer buf,
@@ -1368,13 +1370,10 @@ lazy_scan_prune(LVRelState *vacrel,
 	Oid tableoid = RelationGetRelid(rel);
 
 	int tuples_frozen = 0;
+	bool all_visible = true, all_frozen = true;
+	bool do_freeze = false, do_prune = false;
 
-	bool all_visible = true;
-	bool all_frozen = true;
-
-	bool do_freeze = false, do_prune = false, vacuum_now = false;
 	TransactionId visibility_cutoff_xid = InvalidTransactionId;
-
 	bool vm_modified = false;
 	uint8 visiflags = 0;
 	bool page_all_visible = PageIsAllVisible(page);
@@ -1484,7 +1483,6 @@ lazy_scan_prune(LVRelState *vacrel,
 
 	vacrel->offnum = InvalidOffsetNumber;
 
-	// TODO: figure out if I should move this based on whether or not I change all_visible during snap vacuum
 	do_freeze = pagefrz.freeze_required ||
 		(all_visible && all_frozen && tuples_frozen > 0);
 
@@ -1578,8 +1576,7 @@ lazy_scan_prune(LVRelState *vacrel,
 	if (vacrel->nindexes > 0)
 		prep_vacuum(vacrel, page, blkno, &all_visible);
 	else
-	// TODO: check if I still need vacuum_now and if it is right
-		vacuum_now = snap_vacuum(vacrel, &prstate, buf, page, blkno, &all_visible, &all_frozen) > 0;
+		do_prune = snap_vacuum(vacrel, &prstate, buf, page, blkno, &all_visible, &all_frozen) > 0;
 
 	vacrel->offnum = InvalidOffsetNumber;
 
@@ -1604,7 +1601,7 @@ lazy_scan_prune(LVRelState *vacrel,
 	if (do_prune || new_prune_xid_found || PageIsFull(page))
 		PageClearFull(page);
 
-	if (do_prune || do_freeze || vacuum_now ||
+	if (do_prune || do_freeze ||
 			(all_visible && !page_all_visible) || (!all_visible && page_all_visible))
 		MarkBufferDirty(buf);
 	else if (new_prune_xid_found || PageIsFull(page))
@@ -1645,7 +1642,7 @@ lazy_scan_prune(LVRelState *vacrel,
 	}
 
 	if (RelationNeedsWAL(rel) &&
-			(do_prune || vacuum_now || vm_modified || do_freeze))
+			(do_prune || vm_modified || do_freeze))
 	{
 		xl_heap_prune xlrec;
 		XLogRecPtr	recptr;
@@ -1657,10 +1654,10 @@ lazy_scan_prune(LVRelState *vacrel,
 		if (vm_modified && xlrec.isCatalogRel)
 			xlrec.visiflags |= VISIBILITYMAP_XLOG_CATALOG_REL;
 
-		if ((do_prune || vacuum_now) && (vm_modified || do_freeze))
+		if (do_prune && (vm_modified || do_freeze))
 			xlrec.snapshotConflictHorizon = Max(prstate.snapshotConflictHorizon,
 					visibility_cutoff_xid);
-		else if (do_prune || vacuum_now)
+		else if (do_prune)
 			xlrec.snapshotConflictHorizon = prstate.snapshotConflictHorizon;
 		else
 			xlrec.snapshotConflictHorizon = visibility_cutoff_xid;
@@ -1672,8 +1669,6 @@ lazy_scan_prune(LVRelState *vacrel,
 		xlrec.ndead = prstate.ndead;
 
 		xlrec.nunused = prstate.nunused;
-		// TODO: is it okay that vacuum set additional tuples that were dead unused? do the numbers
-		// of dead and unused need to be adjusted if we vacuumed now?
 
 		XLogBeginInsert();
 		XLogRegisterData((char *) &xlrec, SizeOfHeapPrune);

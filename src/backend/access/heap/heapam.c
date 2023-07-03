@@ -8755,7 +8755,6 @@ heap_xlog_prune(XLogReaderState *record)
 		if ((xlrec->visiflags & VISIBILITYMAP_ALL_VISIBLE) != 0)
 			PageSetAllVisible(page);
 
-
 		/*
 		 * Note: we don't worry about updating the page's prunability hints.
 		 * At worst this will cause an extra prune cycle to occur soon.
