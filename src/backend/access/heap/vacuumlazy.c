@@ -1546,6 +1546,7 @@ lazy_scan_prune(LVRelState *vacrel,
 	{
 		vacrel->NewRelfrozenXid = pagefrz.NoFreezePageRelfrozenXid;
 		vacrel->NewRelminMxid = pagefrz.NoFreezePageRelminMxid;
+		tuples_frozen = 0;
 	}
 
 	for (offnum = FirstOffsetNumber;
@@ -1682,7 +1683,8 @@ lazy_scan_prune(LVRelState *vacrel,
 
 		xlrec.nplans = 0;
 		if (do_freeze)
-			xlrec.nplans = heap_log_freeze_plan(frozen, tuples_frozen, plans, frz_offsets);
+			xlrec.nplans =
+				heap_log_freeze_plan(frozen, tuples_frozen, plans, frz_offsets);
 		xlrec.nredirected = prstate.nredirected;
 		xlrec.ndead = prstate.ndead;
 
