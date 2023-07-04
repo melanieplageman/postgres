@@ -1647,6 +1647,7 @@ lazy_scan_prune(LVRelState *vacrel,
 
 	if (do_freeze)
 	{
+		Assert(tuples_frozen > 0);
 		heap_freeze_execute_prepared(vacrel->rel, buf, frozen, tuples_frozen);
 
 		if (all_visible && all_frozen)
