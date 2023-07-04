@@ -1438,7 +1438,7 @@ lazy_scan_prune(LVRelState *vacrel,
 		tup.t_data = (HeapTupleHeader) PageGetItem(page, itemid);
 		tup.t_tableOid = tableoid;
 		tup.t_len = ItemIdGetLength(itemid);
-		ItemPointerSet(&(tup.t_self), blkno, offnum);
+		ItemPointerSet(&tup.t_self, blkno, offnum);
 
 		vacrel->offnum = offnum;
 
@@ -1452,8 +1452,7 @@ lazy_scan_prune(LVRelState *vacrel,
 									  &frozen[tuples_frozen], &tuple_frozen))
 			frozen[tuples_frozen++].offset = offnum;
 
-		if (!tuple_frozen)
-			all_frozen = false;
+		all_frozen = all_frozen && tuple_frozen;
 
 		switch ((HTSV_Result) prstate.htsv[offnum])
 		{
