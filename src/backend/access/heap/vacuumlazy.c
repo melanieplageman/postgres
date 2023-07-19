@@ -1770,8 +1770,8 @@ retry:
 		prunestate->hastup = true;	/* page makes rel truncation unsafe */
 
 		/* Tuple with storage -- consider need to freeze */
-		if (heap_prepare_freeze_tuple(tuple.t_data, &vacrel->cutoffs, &pagefrz,
-									  &frozen[tuples_frozen], &totally_frozen))
+		if (heap_prepare_freeze_tuple(tuple.t_data, &vacrel->cutoffs, vacrel->vistest,
+					&pagefrz, &frozen[tuples_frozen], &totally_frozen))
 		{
 			/* Save prepared freeze plan for later */
 			frozen[tuples_frozen++].offset = offnum;

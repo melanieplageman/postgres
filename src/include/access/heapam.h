@@ -29,6 +29,7 @@
 #include "storage/shm_toc.h"
 #include "utils/relcache.h"
 #include "utils/snapshot.h"
+#include "utils/snapmgr.h"
 
 
 /* "options" flag bits for heap_insert */
@@ -259,6 +260,7 @@ extern TM_Result heap_lock_tuple(Relation relation, HeapTuple tuple,
 extern void heap_inplace_update(Relation relation, HeapTuple tuple);
 extern bool heap_prepare_freeze_tuple(HeapTupleHeader tuple,
 									  const VacuumCutoffs *cutoffs,
+									  GlobalVisState *vistest,
 									  HeapPageFreeze *pagefrz,
 									  HeapTupleFreeze *frz, bool *totally_frozen);
 extern void heap_freeze_execute_prepared(Relation rel, Buffer buffer,
