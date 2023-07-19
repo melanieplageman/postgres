@@ -272,6 +272,9 @@ typedef struct xl_heap_prune
  */
 typedef struct xl_heap_vacuum
 {
+	TransactionId snapshotConflictHorizon;
+	uint8		flags;
+	bool		isCatalogRel;
 	uint16		nunused;
 	/* OFFSET NUMBERS are in the block reference 0 */
 } xl_heap_vacuum;

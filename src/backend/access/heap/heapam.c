@@ -8792,10 +8792,26 @@ heap_xlog_vacuum(XLogReaderState *record)
 	Buffer		buffer;
 	BlockNumber blkno;
 	XLogRedoAction action;
+	RelFileLocator rlocator;
+	Buffer		vmbuffer = InvalidBuffer;
+	bool		update_vm = false;
+
+	XLogRecGetBlockTag(record, 0, &rlocator, NULL, &blkno);
+
+	if (InHotStandby)
+		ResolveRecoveryConflictWithSnapshot(xlrec->snapshotConflictHorizon,
+											xlrec->isCatalogRel,
+											rlocator);
 
 	/*
-	 * If we have a full-page image, restore it	(without using a cleanup lock)
-	 * and we're done.
+	 * We may wish to update the VM even if the heap page has been backed up.
+	 * MTODO: not sure what we want to do with the VM in the case of BLK_DONE.
+	 */
+	update_vm = (xlrec->flags & VISIBILITYMAP_VALID_BITS) != 0;
+
+	/*
+	 * If we have a full-page image, restore it	(without using a cleanup
+	 * lock).
 	 */
 	action = XLogReadBufferForRedoExtended(record, 0, RBM_NORMAL, false,
 										   &buffer);
@@ -8805,8 +8821,10 @@ heap_xlog_vacuum(XLogReaderState *record)
 		OffsetNumber *nowunused;
 		Size		datalen;
 		OffsetNumber *offnum;
+		bool		set_all_visible;
 
 		nowunused = (OffsetNumber *) XLogRecGetBlockData(record, 0, &datalen);
+		set_all_visible = (xlrec->flags & VISIBILITYMAP_ALL_VISIBLE) != 0;
 
 		/* Shouldn't be a record unless there's something to do */
 		Assert(xlrec->nunused > 0);
@@ -8825,6 +8843,9 @@ heap_xlog_vacuum(XLogReaderState *record)
 		/* Attempt to truncate line pointer array now */
 		PageTruncateLinePointerArray(page);
 
+		if (set_all_visible)
+			PageSetAllVisible(page);
+
 		PageSetLSN(page, lsn);
 		MarkBufferDirty(buffer);
 	}
@@ -8832,7 +8853,6 @@ heap_xlog_vacuum(XLogReaderState *record)
 	if (BufferIsValid(buffer))
 	{
 		Size		freespace = PageGetHeapFreeSpace(BufferGetPage(buffer));
-		RelFileLocator rlocator;
 
 		XLogRecGetBlockTag(record, 0, &rlocator, NULL, &blkno);
 
@@ -8849,6 +8869,38 @@ heap_xlog_vacuum(XLogReaderState *record)
 		 */
 		XLogRecordPageWithFreeSpace(rlocator, blkno, freespace);
 	}
+
+	if (update_vm && XLogReadBufferForRedoExtended(record, 0, RBM_ZERO_ON_ERROR,
+												   false, &vmbuffer) == BLK_NEEDS_REDO)
+	{
+		Page		vmpage = BufferGetPage(vmbuffer);
+		Relation	reln;
+		uint8		vmbits;
+
+		/* initialize the page if it was read as zeros */
+		if (PageIsNew(vmpage))
+			PageInit(vmpage, BLCKSZ, 0);
+
+		/* remove VISIBILITYMAP_XLOG_* */
+		vmbits = xlrec->flags & VISIBILITYMAP_VALID_BITS;
+
+		/*
+		 * XLogReadBufferForRedoExtended locked the buffer. But
+		 * visibilitymap_set will handle locking itself.
+		 */
+		LockBuffer(vmbuffer, BUFFER_LOCK_UNLOCK);
+
+		reln = CreateFakeRelcacheEntry(rlocator);
+		visibilitymap_pin(reln, blkno, &vmbuffer);
+
+		visibilitymap_set(reln, blkno, InvalidBuffer, lsn, vmbuffer,
+						  xlrec->snapshotConflictHorizon, vmbits);
+
+		ReleaseBuffer(vmbuffer);
+		FreeFakeRelcacheEntry(reln);
+	}
+	else if (BufferIsValid(vmbuffer))
+		UnlockReleaseBuffer(vmbuffer);
 }
 
 /*
