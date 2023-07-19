@@ -824,7 +824,7 @@ copy_table_data(Oid OIDNewHeap, Oid OIDOldHeap, Oid OIDOldIndex, bool verbose,
 	TupleDesc	oldTupDesc PG_USED_FOR_ASSERTS_ONLY;
 	TupleDesc	newTupDesc PG_USED_FOR_ASSERTS_ONLY;
 	VacuumParams params;
-	struct VacuumCutoffs cutoffs;
+	VacuumCutoffs cutoffs;
 	bool		use_sort;
 	double		num_tuples = 0,
 				tups_vacuumed = 0,

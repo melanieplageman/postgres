@@ -2932,6 +2932,7 @@ VacDeadItems
 VacErrPhase
 VacObjFilter
 VacOptValue
+VacuumCutoffs
 VacuumParams
 VacuumRelation
 VacuumStmt
