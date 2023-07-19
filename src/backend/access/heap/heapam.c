@@ -6368,6 +6368,7 @@ FreezeMultiXactId(MultiXactId multi, uint16 t_infomask,
 bool
 heap_prepare_freeze_tuple(HeapTupleHeader tuple,
 						  const VacuumCutoffs *cutoffs,
+						  GlobalVisState *vistest,
 						  HeapPageFreeze *pagefrz,
 						  HeapTupleFreeze *frz, bool *totally_frozen)
 {
@@ -6402,7 +6403,10 @@ heap_prepare_freeze_tuple(HeapTupleHeader tuple,
 									 xid, cutoffs->relfrozenxid)));
 
 		/* Will set freeze_xmin flags in freeze plan below */
-		freeze_xmin = TransactionIdPrecedes(xid, cutoffs->OldestXmin);
+		if (vistest)
+			freeze_xmin = GlobalVisTestIsRemovableXid(vistest, xid);
+		else
+			freeze_xmin = TransactionIdPrecedes(xid, cutoffs->OldestXmin);
 
 		/* Verify that xmin committed if and when freeze plan is executed */
 		if (freeze_xmin)
@@ -6417,7 +6421,10 @@ heap_prepare_freeze_tuple(HeapTupleHeader tuple,
 	if (TransactionIdIsNormal(xid))
 	{
 		Assert(TransactionIdPrecedesOrEquals(cutoffs->relfrozenxid, xid));
-		Assert(TransactionIdPrecedes(xid, cutoffs->OldestXmin));
+		if (vistest)
+			Assert(GlobalVisTestIsRemovableXid(vistest, xid));
+		else
+			Assert(TransactionIdPrecedes(xid, cutoffs->OldestXmin));
 
 		/*
 		 * For Xvac, we always freeze proactively.  This allows totally_frozen
@@ -6475,7 +6482,10 @@ heap_prepare_freeze_tuple(HeapTupleHeader tuple,
 			 * xmax will become an updater Xid (original MultiXact's updater
 			 * member Xid will be carried forward as a simple Xid in Xmax).
 			 */
-			Assert(!TransactionIdPrecedes(newxmax, cutoffs->OldestXmin));
+			if (vistest)
+				Assert(!GlobalVisTestIsRemovableXid(vistest, newxmax));
+			else
+				Assert(!TransactionIdPrecedes(newxmax, cutoffs->OldestXmin));
 
 			/*
 			 * NB -- some of these transformations are only valid because we
@@ -6541,7 +6551,10 @@ heap_prepare_freeze_tuple(HeapTupleHeader tuple,
 									 xid, cutoffs->relfrozenxid)));
 
 		/* Will set freeze_xmax flags in freeze plan below */
-		freeze_xmax = TransactionIdPrecedes(xid, cutoffs->OldestXmin);
+		if (vistest)
+			freeze_xmax = GlobalVisTestIsRemovableXid(vistest, xid);
+		else
+			freeze_xmax = TransactionIdPrecedes(xid, cutoffs->OldestXmin);
 
 		/*
 		 * Verify that xmax aborted if and when freeze plan is executed,
@@ -6943,7 +6956,7 @@ heap_freeze_tuple(HeapTupleHeader tuple,
 	pagefrz.NoFreezePageRelfrozenXid = FreezeLimit;
 	pagefrz.NoFreezePageRelminMxid = MultiXactCutoff;
 
-	do_freeze = heap_prepare_freeze_tuple(tuple, &cutoffs,
+	do_freeze = heap_prepare_freeze_tuple(tuple, &cutoffs, NULL,
 										  &pagefrz, &frz, &totally_frozen);
 
 	/*
