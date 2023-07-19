@@ -15,7 +15,9 @@
 #define TRANSAM_H
 
 #include "access/xlogdefs.h"
-
+#ifndef FRONTEND
+#include "port/atomics.h"
+#endif
 
 /* ----------------
  *		Special transaction ID values
@@ -206,6 +208,7 @@ FullTransactionIdAdvance(FullTransactionId *dest)
  * used just to generate useful messages when xidWarnLimit or xidStopLimit
  * are exceeded.
  */
+#ifndef FRONTEND
 typedef struct VariableCacheData
 {
 	/*
@@ -214,10 +217,13 @@ typedef struct VariableCacheData
 	Oid			nextOid;		/* next OID to assign */
 	uint32		oidCount;		/* OIDs available before must do XLOG work */
 
+	// TODO: make this so it is not an atomic and must be protected by a lock
+	// in frontend code will need to make frontend versions of the functions
+	// that access it
+	pg_atomic_uint64 nextXid;	/* next XID to assign */
 	/*
 	 * These fields are protected by XidGenLock.
 	 */
-	FullTransactionId nextXid;	/* next XID to assign */
 
 	TransactionId oldestXid;	/* cluster-wide minimum datfrozenxid */
 	TransactionId xidVacLimit;	/* start forcing autovacuums here */
@@ -256,6 +262,10 @@ typedef struct VariableCacheData
 
 typedef VariableCacheData *VariableCache;
 
+/* in transam/varsup.c */
+extern PGDLLIMPORT VariableCache ShmemVariableCache;
+#endif /* FRONTEND */
+
 
 /* ----------------
  *		extern declarations
@@ -265,8 +275,6 @@ typedef VariableCacheData *VariableCache;
 /* in transam/xact.c */
 extern bool TransactionStartedDuringRecovery(void);
 
-/* in transam/varsup.c */
-extern PGDLLIMPORT VariableCache ShmemVariableCache;
 
 /*
  * prototypes for functions in transam/transam.c
@@ -368,6 +376,35 @@ FullTransactionIdNewer(FullTransactionId a, FullTransactionId b)
 	if (FullTransactionIdFollows(a, b))
 		return a;
 	return b;
+}
+
+/*
+ * Frontend code doesn't need access to these and can't, currently, use atomics
+ */
+static inline FullTransactionId
+FullTransactionIdFromAtomicU64(pg_atomic_uint64 *ptr)
+{
+	FullTransactionId result;
+
+	result.value = pg_atomic_read_u64(ptr);
+
+	return result;
+}
+
+static inline void
+AtomicFullTransactionIdAdvance(pg_atomic_uint64 *id)
+{
+	FullTransactionId fullxid;
+	fullxid.value = pg_atomic_fetch_add_u64(id, 1) + 1;
+
+	/* see FullTransactionIdAdvance() */
+	if (FullTransactionIdPrecedes(fullxid, FirstNormalFullTransactionId))
+		return;
+
+	while (XidFromFullTransactionId(fullxid) < FirstNormalTransactionId)
+		fullxid.value++;
+
+	pg_atomic_write_u64(id, fullxid.value);
 }
 
 #endif							/* FRONTEND */

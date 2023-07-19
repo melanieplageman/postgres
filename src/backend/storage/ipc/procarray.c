@@ -1001,7 +1001,7 @@ MaintainLatestCompletedXidRecovery(TransactionId latestXid)
 	 * latestCompletedXid to be initialized in recovery. But in recovery it's
 	 * safe to access nextXid without a lock for the startup process.
 	 */
-	rel = ShmemVariableCache->nextXid;
+	rel = FullTransactionIdFromAtomicU64(&ShmemVariableCache->nextXid);
 	Assert(FullTransactionIdIsValid(ShmemVariableCache->nextXid));
 
 	if (!FullTransactionIdIsValid(cur_latest) ||
