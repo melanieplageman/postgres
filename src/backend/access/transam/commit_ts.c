@@ -673,7 +673,8 @@ ActivateCommitTs(void)
 	}
 	LWLockRelease(CommitTsLock);
 
-	xid = XidFromFullTransactionId(ShmemVariableCache->nextXid);
+	xid = XidFromFullTransactionId(
+			FullTransactionIdFromAtomicU64(&ShmemVariableCache->nextXid));
 	pageno = TransactionIdToCTsPage(xid);
 
 	/*

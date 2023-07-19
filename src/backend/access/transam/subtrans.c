@@ -261,7 +261,7 @@ StartupSUBTRANS(TransactionId oldestActiveXID)
 	LWLockAcquire(SubtransSLRULock, LW_EXCLUSIVE);
 
 	startPage = TransactionIdToPage(oldestActiveXID);
-	nextXid = ShmemVariableCache->nextXid;
+	nextXid = FullTransactionIdFromAtomicU64(&ShmemVariableCache->nextXid);
 	endPage = TransactionIdToPage(XidFromFullTransactionId(nextXid));
 
 	while (startPage != endPage)

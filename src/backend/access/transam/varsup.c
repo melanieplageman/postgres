@@ -77,7 +77,7 @@ GetNewTransactionId(bool isSubXact)
 
 	LWLockAcquire(XidGenLock, LW_EXCLUSIVE);
 
-	full_xid = ShmemVariableCache->nextXid;
+	full_xid = FullTransactionIdFromAtomicU64(&ShmemVariableCache->nextXid);
 	xid = XidFromFullTransactionId(full_xid);
 
 	/*----------
@@ -160,8 +160,7 @@ GetNewTransactionId(bool isSubXact)
 		}
 
 		/* Re-acquire lock and start over */
-		LWLockAcquire(XidGenLock, LW_EXCLUSIVE);
-		full_xid = ShmemVariableCache->nextXid;
+		full_xid = FullTransactionIdFromAtomicU64(&ShmemVariableCache->nextXid);
 		xid = XidFromFullTransactionId(full_xid);
 	}
 
@@ -184,7 +183,7 @@ GetNewTransactionId(bool isSubXact)
 	 * want the next incoming transaction to try it again.  We cannot assign
 	 * more XIDs until there is CLOG space for them.
 	 */
-	FullTransactionIdAdvance(&ShmemVariableCache->nextXid);
+	AtomicFullTransactionIdAdvance(&ShmemVariableCache->nextXid);
 
 	/*
 	 * We must store the new XID into the shared ProcArray before releasing
@@ -260,13 +259,7 @@ GetNewTransactionId(bool isSubXact)
 FullTransactionId
 ReadNextFullTransactionId(void)
 {
-	FullTransactionId fullXid;
-
-	LWLockAcquire(XidGenLock, LW_SHARED);
-	fullXid = ShmemVariableCache->nextXid;
-	LWLockRelease(XidGenLock);
-
-	return fullXid;
+	return FullTransactionIdFromAtomicU64(&ShmemVariableCache->nextXid);
 }
 
 /*
@@ -288,7 +281,8 @@ AdvanceNextFullTransactionIdPastXid(TransactionId xid)
 	Assert(AmStartupProcess() || !IsUnderPostmaster);
 
 	/* Fast return if this isn't an xid high enough to move the needle. */
-	next_xid = XidFromFullTransactionId(ShmemVariableCache->nextXid);
+	next_xid = XidFromFullTransactionId(
+			FullTransactionIdFromAtomicU64(&ShmemVariableCache->nextXid));
 	if (!TransactionIdFollowsOrEquals(xid, next_xid))
 		return;
 
@@ -301,18 +295,13 @@ AdvanceNextFullTransactionIdPastXid(TransactionId xid)
 	 * point in the WAL stream.
 	 */
 	TransactionIdAdvance(xid);
-	epoch = EpochFromFullTransactionId(ShmemVariableCache->nextXid);
+	epoch = EpochFromFullTransactionId(
+			FullTransactionIdFromAtomicU64(&ShmemVariableCache->nextXid));
 	if (unlikely(xid < next_xid))
 		++epoch;
 	newNextFullXid = FullTransactionIdFromEpochAndXid(epoch, xid);
 
-	/*
-	 * We still need to take a lock to modify the value when there are
-	 * concurrent readers.
-	 */
-	LWLockAcquire(XidGenLock, LW_EXCLUSIVE);
-	ShmemVariableCache->nextXid = newNextFullXid;
-	LWLockRelease(XidGenLock);
+	pg_atomic_write_u64(&ShmemVariableCache->nextXid, newNextFullXid.value);
 }
 
 /*
@@ -420,8 +409,9 @@ SetTransactionIdLimit(TransactionId oldest_datfrozenxid, Oid oldest_datoid)
 	ShmemVariableCache->xidStopLimit = xidStopLimit;
 	ShmemVariableCache->xidWrapLimit = xidWrapLimit;
 	ShmemVariableCache->oldestXidDB = oldest_datoid;
-	curXid = XidFromFullTransactionId(ShmemVariableCache->nextXid);
 	LWLockRelease(XidGenLock);
+	curXid = XidFromFullTransactionId(
+		FullTransactionIdFromAtomicU64(&ShmemVariableCache->nextXid));
 
 	/* Log the info */
 	ereport(DEBUG1,

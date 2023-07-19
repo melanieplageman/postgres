@@ -4716,7 +4716,7 @@ BootStrapXLOG(void)
 	checkPoint.time = (pg_time_t) time(NULL);
 	checkPoint.oldestActiveXid = InvalidTransactionId;
 
-	ShmemVariableCache->nextXid = checkPoint.nextXid;
+	pg_atomic_init_u64(&ShmemVariableCache->nextXid, checkPoint.nextXid.value);
 	ShmemVariableCache->nextOid = checkPoint.nextOid;
 	ShmemVariableCache->oidCount = 0;
 	MultiXactSetNextMXact(checkPoint.nextMulti, checkPoint.nextMultiOffset);
@@ -5182,7 +5182,7 @@ StartupXLOG(void)
 	checkPoint = ControlFile->checkPointCopy;
 
 	/* initialize shared memory variables from the checkpoint record */
-	ShmemVariableCache->nextXid = checkPoint.nextXid;
+	pg_atomic_init_u64(&ShmemVariableCache->nextXid, checkPoint.nextXid.value);
 	ShmemVariableCache->nextOid = checkPoint.nextOid;
 	ShmemVariableCache->oidCount = 0;
 	MultiXactSetNextMXact(checkPoint.nextMulti, checkPoint.nextMultiOffset);
@@ -5409,7 +5409,8 @@ StartupXLOG(void)
 			Assert(TransactionIdIsValid(oldestActiveXID));
 
 			/* Tell procarray about the range of xids it has to deal with */
-			ProcArrayInitRecovery(XidFromFullTransactionId(ShmemVariableCache->nextXid));
+			ProcArrayInitRecovery(XidFromFullTransactionId(
+						FullTransactionIdFromAtomicU64(&ShmemVariableCache->nextXid)));
 
 			/*
 			 * Startup subtrans only.  CLOG, MultiXact and commit timestamp
@@ -5683,7 +5684,8 @@ StartupXLOG(void)
 
 	/* also initialize latestCompletedXid, to nextXid - 1 */
 	LWLockAcquire(ProcArrayLock, LW_EXCLUSIVE);
-	ShmemVariableCache->latestCompletedXid = ShmemVariableCache->nextXid;
+	ShmemVariableCache->latestCompletedXid =
+		FullTransactionIdFromAtomicU64(&ShmemVariableCache->nextXid);
 	FullTransactionIdRetreat(&ShmemVariableCache->latestCompletedXid);
 	LWLockRelease(ProcArrayLock);
 
@@ -6644,7 +6646,8 @@ CreateCheckPoint(int flags)
 	 * there.
 	 */
 	LWLockAcquire(XidGenLock, LW_SHARED);
-	checkPoint.nextXid = ShmemVariableCache->nextXid;
+	checkPoint.nextXid =
+		FullTransactionIdFromAtomicU64(&ShmemVariableCache->nextXid);
 	checkPoint.oldestXid = ShmemVariableCache->oldestXid;
 	checkPoint.oldestXidDB = ShmemVariableCache->oldestXidDB;
 	LWLockRelease(XidGenLock);
@@ -7764,9 +7767,8 @@ xlog_redo(XLogReaderState *record)
 
 		memcpy(&checkPoint, XLogRecGetData(record), sizeof(CheckPoint));
 		/* In a SHUTDOWN checkpoint, believe the counters exactly */
-		LWLockAcquire(XidGenLock, LW_EXCLUSIVE);
-		ShmemVariableCache->nextXid = checkPoint.nextXid;
-		LWLockRelease(XidGenLock);
+		pg_atomic_write_u64(&ShmemVariableCache->nextXid, checkPoint.nextXid.value);
+
 		LWLockAcquire(OidGenLock, LW_EXCLUSIVE);
 		ShmemVariableCache->nextOid = checkPoint.nextOid;
 		ShmemVariableCache->oidCount = 0;
@@ -7861,11 +7863,10 @@ xlog_redo(XLogReaderState *record)
 
 		memcpy(&checkPoint, XLogRecGetData(record), sizeof(CheckPoint));
 		/* In an ONLINE checkpoint, treat the XID counter as a minimum */
-		LWLockAcquire(XidGenLock, LW_EXCLUSIVE);
-		if (FullTransactionIdPrecedes(ShmemVariableCache->nextXid,
+		if (FullTransactionIdPrecedes(
+					FullTransactionIdFromAtomicU64(&ShmemVariableCache->nextXid),
 									  checkPoint.nextXid))
-			ShmemVariableCache->nextXid = checkPoint.nextXid;
-		LWLockRelease(XidGenLock);
+			pg_atomic_write_u64(&ShmemVariableCache->nextXid, checkPoint.nextXid.value);
 
 		/*
 		 * We ignore the nextOid counter in an ONLINE checkpoint, preferring
