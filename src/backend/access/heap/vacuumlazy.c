@@ -162,7 +162,7 @@ typedef struct LVRelState
 	bool		do_rel_truncate;
 
 	/* VACUUM operation's cutoffs for freezing and pruning */
-	struct VacuumCutoffs cutoffs;
+	VacuumCutoffs cutoffs;
 	GlobalVisState *vistest;
 	/* Tracks oldest extant XID/MXID for setting relfrozenxid/relminmxid */
 	TransactionId NewRelfrozenXid;
