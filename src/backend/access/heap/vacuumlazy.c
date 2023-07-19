@@ -277,7 +277,8 @@ static BlockNumber count_nondeletable_pages(LVRelState *vacrel,
 static void dead_items_alloc(LVRelState *vacrel, int nworkers);
 static void dead_items_cleanup(LVRelState *vacrel);
 static bool heap_page_is_all_visible(LVRelState *vacrel, Buffer buf,
-									 TransactionId *visibility_cutoff_xid, bool *all_frozen);
+									 TransactionId *visibility_cutoff_xid, bool *all_frozen,
+									 bool *to_be_reaped);
 static void update_relstats_all_indexes(LVRelState *vacrel);
 static void vacuum_error_callback(void *arg);
 static void update_vacuum_error_info(LVRelState *vacrel,
@@ -1883,7 +1884,7 @@ retry:
 		TransactionId cutoff;
 		bool		all_frozen;
 
-		if (!heap_page_is_all_visible(vacrel, buf, &cutoff, &all_frozen))
+		if (!heap_page_is_all_visible(vacrel, buf, &cutoff, &all_frozen, NULL))
 			Assert(false);
 
 		Assert(!TransactionIdIsValid(cutoff) ||
@@ -2527,12 +2528,18 @@ lazy_vacuum_heap_page(LVRelState *vacrel, BlockNumber blkno, Buffer buffer,
 	VacDeadItems *dead_items = vacrel->dead_items;
 	Page		page = BufferGetPage(buffer);
 	OffsetNumber unused[MaxHeapTuplesPerPage];
+	bool		to_be_reaped[MaxHeapTuplesPerPage + 1];
 	int			nunused = 0;
 	TransactionId visibility_cutoff_xid;
-	bool		all_frozen;
+	bool		all_frozen,
+				all_visible;
 	LVSavedErrInfo saved_err_info;
+	uint8		flags = 0;
+	bool		vm_modified = false;
 
 	Assert(vacrel->nindexes == 0 || vacrel->do_index_vacuuming);
+
+	memset(to_be_reaped, 0, sizeof(to_be_reaped));
 
 	pgstat_progress_update_param(PROGRESS_VACUUM_HEAP_BLKS_VACUUMED, blkno);
 
@@ -2540,6 +2547,33 @@ lazy_vacuum_heap_page(LVRelState *vacrel, BlockNumber blkno, Buffer buffer,
 	update_vacuum_error_info(vacrel, &saved_err_info,
 							 VACUUM_ERRCB_PHASE_VACUUM_HEAP, blkno,
 							 InvalidOffsetNumber);
+
+	for (int i = index; i < dead_items->num_items; i++)
+	{
+		BlockNumber tblk;
+		OffsetNumber toff;
+
+		tblk = ItemPointerGetBlockNumber(&dead_items->items[i]);
+		if (tblk != blkno)
+			break;				/* past end of tuples for this block */
+		toff = ItemPointerGetOffsetNumber(&dead_items->items[i]);
+		to_be_reaped[toff] = true;
+	}
+
+	all_visible = heap_page_is_all_visible(vacrel, buffer,
+										   &visibility_cutoff_xid, &all_frozen, to_be_reaped);
+
+	if (all_visible)
+	{
+		PageSetAllVisible(page);
+		flags |= VISIBILITYMAP_ALL_VISIBLE;
+
+		if (all_frozen)
+		{
+			Assert(!TransactionIdIsValid(visibility_cutoff_xid));
+			flags |= VISIBILITYMAP_ALL_FROZEN;
+		}
+	}
 
 	START_CRIT_SECTION();
 
@@ -2570,6 +2604,10 @@ lazy_vacuum_heap_page(LVRelState *vacrel, BlockNumber blkno, Buffer buffer,
 	 */
 	MarkBufferDirty(buffer);
 
+	if (all_visible)
+		vm_modified = visibilitymap_set_and_lock(vacrel->rel, blkno, buffer,
+												 vmbuffer, flags);
+
 	/* XLOG stuff */
 	if (RelationNeedsWAL(vacrel->rel))
 	{
@@ -2577,6 +2615,11 @@ lazy_vacuum_heap_page(LVRelState *vacrel, BlockNumber blkno, Buffer buffer,
 		XLogRecPtr	recptr;
 
 		xlrec.nunused = nunused;
+		xlrec.isCatalogRel = RelationIsAccessibleInLogicalDecoding(vacrel->rel);
+		xlrec.flags = flags;
+		if (vm_modified && xlrec.isCatalogRel)
+			xlrec.flags |= VISIBILITYMAP_XLOG_CATALOG_REL;
+		xlrec.snapshotConflictHorizon = visibility_cutoff_xid;
 
 		XLogBeginInsert();
 		XLogRegisterData((char *) &xlrec, SizeOfHeapVacuum);
@@ -2584,41 +2627,24 @@ lazy_vacuum_heap_page(LVRelState *vacrel, BlockNumber blkno, Buffer buffer,
 		XLogRegisterBuffer(0, buffer, REGBUF_STANDARD);
 		XLogRegisterBufData(0, (char *) unused, nunused * sizeof(OffsetNumber));
 
+		if (vm_modified)
+		{
+			Assert(BufferIsValid(vmbuffer));
+			XLogRegisterBuffer(1, vmbuffer, 0);
+		}
+
 		recptr = XLogInsert(RM_HEAP2_ID, XLOG_HEAP2_VACUUM);
 
 		PageSetLSN(page, recptr);
+
+		if (vm_modified)
+			PageSetLSN(BufferGetPage(vmbuffer), recptr);
 	}
 
-	/*
-	 * End critical section, so we safely can do visibility tests (which
-	 * possibly need to perform IO and allocate memory!). If we crash now the
-	 * page (including the corresponding vm bit) might not be marked all
-	 * visible, but that's fine. A later vacuum will fix that.
-	 */
+	if (vm_modified)
+		LockBuffer(vmbuffer, BUFFER_LOCK_UNLOCK);
+
 	END_CRIT_SECTION();
-
-	/*
-	 * Now that we have removed the LP_DEAD items from the page, once again
-	 * check if the page has become all-visible.  The page is already marked
-	 * dirty, exclusively locked, and, if needed, a full page image has been
-	 * emitted.
-	 */
-	Assert(!PageIsAllVisible(page));
-	if (heap_page_is_all_visible(vacrel, buffer, &visibility_cutoff_xid,
-								 &all_frozen))
-	{
-		uint8		flags = VISIBILITYMAP_ALL_VISIBLE;
-
-		if (all_frozen)
-		{
-			Assert(!TransactionIdIsValid(visibility_cutoff_xid));
-			flags |= VISIBILITYMAP_ALL_FROZEN;
-		}
-
-		PageSetAllVisible(page);
-		visibilitymap_set(vacrel->rel, blkno, buffer, InvalidXLogRecPtr,
-						  vmbuffer, visibility_cutoff_xid, flags);
-	}
 
 	/* Revert to the previous phase information for error traceback */
 	restore_vacuum_error_info(vacrel, &saved_err_info);
@@ -3289,7 +3315,7 @@ dead_items_cleanup(LVRelState *vacrel)
 static bool
 heap_page_is_all_visible(LVRelState *vacrel, Buffer buf,
 						 TransactionId *visibility_cutoff_xid,
-						 bool *all_frozen)
+						 bool *all_frozen, bool *to_be_reaped)
 {
 	Page		page = BufferGetPage(buf);
 	BlockNumber blockno = BufferGetBlockNumber(buf);
@@ -3317,6 +3343,13 @@ heap_page_is_all_visible(LVRelState *vacrel, Buffer buf,
 
 		/* Unused or redirect line pointers are of no interest */
 		if (!ItemIdIsUsed(itemid) || ItemIdIsRedirected(itemid))
+			continue;
+
+		/*
+		 * We can skip considering tuples we are about to reap when
+		 * determining if the page is all visible and all frozen.
+		 */
+		if (to_be_reaped && to_be_reaped[offnum])
 			continue;
 
 		ItemPointerSet(&(tuple.t_self), blockno, offnum);

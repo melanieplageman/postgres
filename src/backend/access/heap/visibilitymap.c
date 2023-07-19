@@ -221,6 +221,55 @@ visibilitymap_pin_ok(BlockNumber heapBlk, Buffer vmbuf)
 	return BufferIsValid(vmbuf) && BufferGetBlockNumber(vmbuf) == mapBlock;
 }
 
+
+/*
+ * If the visibility map is modified, it is returned locked. Otherwise the lock
+ * is released.
+ */
+bool
+visibilitymap_set_and_lock(Relation rel, BlockNumber heapBlk, Buffer heapBuf,
+						   Buffer vmBuf, uint8 flags)
+{
+	BlockNumber mapBlock = HEAPBLK_TO_MAPBLOCK(heapBlk);
+	uint32		mapByte = HEAPBLK_TO_MAPBYTE(heapBlk);
+	uint8		mapOffset = HEAPBLK_TO_OFFSET(heapBlk);
+	Page		page;
+	uint8	   *map;
+
+#ifdef TRACE_VISIBILITYMAP
+	elog(DEBUG1, "vm_set %s %d", RelationGetRelationName(rel), heapBlk);
+#endif
+
+	Assert(InRecovery || PageIsAllVisible((Page) BufferGetPage(heapBuf)));
+	Assert((flags & VISIBILITYMAP_VALID_BITS) == flags);
+
+	/* Must never set all_frozen bit without also setting all_visible bit */
+	Assert(flags != VISIBILITYMAP_ALL_FROZEN);
+
+	/* Check that we have the right heap page pinned, if present */
+	if (BufferIsValid(heapBuf) && BufferGetBlockNumber(heapBuf) != heapBlk)
+		elog(ERROR, "wrong heap buffer passed to visibilitymap_set");
+
+	/* Check that we have the right VM page pinned */
+	if (!BufferIsValid(vmBuf) || BufferGetBlockNumber(vmBuf) != mapBlock)
+		elog(ERROR, "wrong VM buffer passed to visibilitymap_set");
+
+	page = BufferGetPage(vmBuf);
+	map = (uint8 *) PageGetContents(page);
+	LockBuffer(vmBuf, BUFFER_LOCK_EXCLUSIVE);
+
+	if (flags == (map[mapByte] >> mapOffset & VISIBILITYMAP_VALID_BITS))
+	{
+		LockBuffer(vmBuf, BUFFER_LOCK_UNLOCK);
+		return false;
+	}
+
+	map[mapByte] |= (flags << mapOffset);
+	MarkBufferDirty(vmBuf);
+
+	return true;
+}
+
 /*
  *	visibilitymap_set - set bit(s) on a previously pinned page
  *
