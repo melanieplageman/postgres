@@ -221,7 +221,10 @@ heap2_desc(StringInfo buf, XLogReaderState *record)
 	{
 		xl_heap_vacuum *xlrec = (xl_heap_vacuum *) rec;
 
-		appendStringInfo(buf, "nunused: %u", xlrec->nunused);
+		appendStringInfo(buf, "snapshotConflictHorizon: %u, flags: 0x%02X, nunused: %u",
+						 xlrec->snapshotConflictHorizon,
+						 xlrec->flags,
+						 xlrec->nunused);
 
 		if (XLogRecHasBlockData(record, 0))
 		{
