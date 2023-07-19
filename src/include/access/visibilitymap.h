@@ -34,6 +34,10 @@ extern bool visibilitymap_pin_ok(BlockNumber heapBlk, Buffer vmbuf);
 extern void visibilitymap_set(Relation rel, BlockNumber heapBlk, Buffer heapBuf,
 							  XLogRecPtr recptr, Buffer vmBuf, TransactionId cutoff_xid,
 							  uint8 flags);
+
+extern bool
+visibilitymap_set_and_lock(Relation rel, BlockNumber heapBlk, Buffer heapBuf,
+				  Buffer vmBuf, uint8 flags);
 extern uint8 visibilitymap_get_status(Relation rel, BlockNumber heapBlk, Buffer *vmbuf);
 extern void visibilitymap_count(Relation rel, BlockNumber *all_visible, BlockNumber *all_frozen);
 extern BlockNumber visibilitymap_prepare_truncate(Relation rel,
