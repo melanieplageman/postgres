@@ -6017,7 +6017,7 @@ heap_inplace_update(Relation relation, HeapTuple tuple)
  */
 static TransactionId
 FreezeMultiXactId(MultiXactId multi, uint16 t_infomask,
-				  const struct VacuumCutoffs *cutoffs, uint16 *flags,
+				  const VacuumCutoffs *cutoffs, uint16 *flags,
 				  HeapPageFreeze *pagefrz)
 {
 	TransactionId newxmax;
@@ -6367,7 +6367,7 @@ FreezeMultiXactId(MultiXactId multi, uint16 t_infomask,
  */
 bool
 heap_prepare_freeze_tuple(HeapTupleHeader tuple,
-						  const struct VacuumCutoffs *cutoffs,
+						  const VacuumCutoffs *cutoffs,
 						  HeapPageFreeze *pagefrz,
 						  HeapTupleFreeze *frz, bool *totally_frozen)
 {
@@ -6927,7 +6927,7 @@ heap_freeze_tuple(HeapTupleHeader tuple,
 	HeapTupleFreeze frz;
 	bool		do_freeze;
 	bool		totally_frozen;
-	struct VacuumCutoffs cutoffs;
+	VacuumCutoffs cutoffs;
 	HeapPageFreeze pagefrz;
 
 	cutoffs.relfrozenxid = relfrozenxid;
@@ -7382,7 +7382,7 @@ heap_tuple_needs_eventual_freeze(HeapTupleHeader tuple)
  */
 bool
 heap_tuple_should_freeze(HeapTupleHeader tuple,
-						 const struct VacuumCutoffs *cutoffs,
+						 const VacuumCutoffs *cutoffs,
 						 TransactionId *NoFreezePageRelfrozenXid,
 						 MultiXactId *NoFreezePageRelminMxid)
 {

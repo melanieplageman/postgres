@@ -241,7 +241,7 @@ typedef struct VacuumParams
  * VacuumCutoffs is immutable state that describes the cutoffs used by VACUUM.
  * Established at the beginning of each VACUUM operation.
  */
-struct VacuumCutoffs
+typedef struct VacuumCutoffs
 {
 	/*
 	 * Existing pg_class fields at start of VACUUM
@@ -274,7 +274,7 @@ struct VacuumCutoffs
 	 */
 	TransactionId FreezeLimit;
 	MultiXactId MultiXactCutoff;
-};
+} VacuumCutoffs;
 
 /*
  * VacDeadItems stores TIDs whose index tuples are deleted by index vacuuming.
