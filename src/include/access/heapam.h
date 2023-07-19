@@ -20,6 +20,7 @@
 #include "access/skey.h"
 #include "access/table.h"		/* for backward compatibility */
 #include "access/tableam.h"
+#include "commands/vacuum.h"
 #include "nodes/lockoptions.h"
 #include "nodes/primnodes.h"
 #include "storage/bufpage.h"
@@ -38,7 +39,6 @@
 
 typedef struct BulkInsertStateData *BulkInsertState;
 struct TupleTableSlot;
-struct VacuumCutoffs;
 
 #define MaxLockTupleMode	LockTupleExclusive
 
@@ -258,7 +258,7 @@ extern TM_Result heap_lock_tuple(Relation relation, HeapTuple tuple,
 
 extern void heap_inplace_update(Relation relation, HeapTuple tuple);
 extern bool heap_prepare_freeze_tuple(HeapTupleHeader tuple,
-									  const struct VacuumCutoffs *cutoffs,
+									  const VacuumCutoffs *cutoffs,
 									  HeapPageFreeze *pagefrz,
 									  HeapTupleFreeze *frz, bool *totally_frozen);
 extern void heap_freeze_execute_prepared(Relation rel, Buffer buffer,
@@ -268,7 +268,7 @@ extern bool heap_freeze_tuple(HeapTupleHeader tuple,
 							  TransactionId relfrozenxid, TransactionId relminmxid,
 							  TransactionId FreezeLimit, TransactionId MultiXactCutoff);
 extern bool heap_tuple_should_freeze(HeapTupleHeader tuple,
-									 const struct VacuumCutoffs *cutoffs,
+									 const VacuumCutoffs *cutoffs,
 									 TransactionId *NoFreezePageRelfrozenXid,
 									 MultiXactId *NoFreezePageRelminMxid);
 extern bool heap_tuple_needs_eventual_freeze(HeapTupleHeader tuple);

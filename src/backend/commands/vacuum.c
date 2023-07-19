@@ -1073,7 +1073,7 @@ get_all_vacuum_rels(MemoryContext vac_context, int options)
  */
 bool
 vacuum_get_cutoffs(Relation rel, const VacuumParams *params,
-				   struct VacuumCutoffs *cutoffs)
+				   VacuumCutoffs *cutoffs)
 {
 	int			freeze_min_age,
 				multixact_freeze_min_age,
@@ -1259,7 +1259,7 @@ vacuum_get_cutoffs(Relation rel, const VacuumParams *params,
  * When we return true, VACUUM caller triggers the failsafe.
  */
 bool
-vacuum_xid_failsafe_check(const struct VacuumCutoffs *cutoffs)
+vacuum_xid_failsafe_check(const VacuumCutoffs *cutoffs)
 {
 	TransactionId relfrozenxid = cutoffs->relfrozenxid;
 	MultiXactId relminmxid = cutoffs->relminmxid;
