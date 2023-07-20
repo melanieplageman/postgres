@@ -6703,6 +6703,7 @@ heap_freeze_execute_prepared(Relation rel, Buffer buffer,
 		ItemId		itemid = PageGetItemId(page, frz->offset);
 		HeapTupleHeader htup;
 
+		Assert(ItemIdIsNormal(itemid));
 		htup = (HeapTupleHeader) PageGetItem(page, itemid);
 
 		/* Deliberately avoid relying on tuple hint bits here */
