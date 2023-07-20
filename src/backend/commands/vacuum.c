@@ -1059,6 +1059,31 @@ get_all_vacuum_rels(MemoryContext vac_context, int options)
 	return vacrels;
 }
 
+// TODO: should I not update vacuumcutoffs in place since otherwise it is
+// expected const?
+void
+lazy_update_freeze_limit(VacuumCutoffs *cutoffs, GlobalVisState *vistest)
+{
+	TransactionId nextXID;
+	int			freeze_min_age = vacuum_freeze_min_age;
+
+	Assert(vistest);
+	Assert(cutoffs);
+
+	if (TransactionIdIsValid(cutoffs->FreezeLimit))
+		return;
+
+	freeze_min_age = Min(freeze_min_age, autovacuum_freeze_max_age / 2);
+	Assert(freeze_min_age >= 0);
+
+	nextXID = ReadNextTransactionId();
+	cutoffs->FreezeLimit = nextXID - freeze_min_age;
+	if (!TransactionIdIsNormal(cutoffs->FreezeLimit))
+		cutoffs->FreezeLimit = FirstNormalTransactionId;
+	if (!GlobalVisTestIsRemovableXid(vistest, cutoffs->FreezeLimit))
+		cutoffs->FreezeLimit = GlobalVisTestNonRemovableHorizon(vistest);
+}
+
 /*
  * vacuum_get_cutoffs() -- compute OldestXmin and freeze cutoff points
  *
