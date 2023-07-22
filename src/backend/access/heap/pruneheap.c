@@ -423,6 +423,7 @@ heap_page_prune(Relation rel, Buffer buf, BlockNumber blkno, Page page,
 			}
 		}
 	}
+	else if (prstate.nfrozen == 0 && prstate.all_frozen);
 	else
 	{
 		prstate.nfrozen = 0;
