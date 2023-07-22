@@ -531,10 +531,14 @@ heap_page_prune(Relation rel, Buffer buf, BlockNumber blkno, Page page,
 	if (RelationNeedsWAL(rel) &&
 		(do_prune || vm_modified || do_freeze))
 	{
+		uint8	info = XLOG_HEAP2_PRUNE;
 		xl_heap_prune xlrec;
 		XLogRecPtr	recptr;
 		xl_heap_freeze_plan plans[MaxHeapTuplesPerPage];
 		OffsetNumber frz_offsets[MaxHeapTuplesPerPage];
+
+		if (!opportunistic)
+			info |= XLOG_HEAP2_BYVACUUM;
 
 		xlrec.isCatalogRel = RelationIsAccessibleInLogicalDecoding(rel);
 		xlrec.flags = visiflags;
@@ -588,7 +592,7 @@ heap_page_prune(Relation rel, Buffer buf, BlockNumber blkno, Page page,
 			XLogRegisterBufData(0, (char *) frz_offsets,
 								prstate.nfrozen * sizeof(OffsetNumber));
 
-		recptr = XLogInsert(RM_HEAP2_ID, XLOG_HEAP2_PRUNE);
+		recptr = XLogInsert(RM_HEAP2_ID, info);
 
 		PageSetLSN(page, recptr);
 
