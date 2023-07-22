@@ -395,14 +395,16 @@ static inline void
 AtomicFullTransactionIdAdvance(pg_atomic_uint64 *id)
 {
 	FullTransactionId fullxid;
-	fullxid.value = pg_atomic_fetch_add_u64(id, 1) + 1;
+	fullxid.value = pg_atomic_read_u64(id);
+
+	fullxid.value++;
 
 	/* see FullTransactionIdAdvance() */
-	if (FullTransactionIdPrecedes(fullxid, FirstNormalFullTransactionId))
-		return;
-
-	while (XidFromFullTransactionId(fullxid) < FirstNormalTransactionId)
-		fullxid.value++;
+	if (!FullTransactionIdPrecedes(fullxid, FirstNormalFullTransactionId))
+	{
+		while (XidFromFullTransactionId(fullxid) < FirstNormalTransactionId)
+			fullxid.value++;
+	}
 
 	pg_atomic_write_u64(id, fullxid.value);
 }
