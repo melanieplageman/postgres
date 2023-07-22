@@ -385,7 +385,7 @@ heap_page_prune(Relation rel, Buffer buf, BlockNumber blkno, Page page,
 
 	do_freeze = (pagefrz->freeze_required ||
 				 (prstate.all_visible && prstate.all_frozen && prstate.nfrozen > 0 &&
-					!XLogCheckBufferNeedsBackup(buf)));
+					(do_prune || !XLogCheckBufferNeedsBackup(buf))));
 
 	if (opportunistic && !do_prune)
 		do_freeze = false;
