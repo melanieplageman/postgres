@@ -497,18 +497,6 @@ heap_page_prune(Relation rel, Buffer buf, BlockNumber blkno, Page page,
 			if (!vm_modified)
 				LockBuffer(vmbuffer, BUFFER_LOCK_UNLOCK);
 		}
-		else if ((!prstate.all_visible && all_visible_according_to_vm) ||
-				 (!prstate.all_frozen && all_frozen_according_to_vm))
-		{
-			uint8		clear_flags = VISIBILITYMAP_VALID_BITS;
-
-			if (prstate.all_visible)
-				clear_flags = VISIBILITYMAP_ALL_FROZEN;
-			vm_modified = visibilitymap_clear_and_lock(rel, blkno,
-													   vmbuffer, clear_flags);
-			if (!vm_modified)
-				LockBuffer(vmbuffer, BUFFER_LOCK_UNLOCK);
-		}
 	}
 	else
 		vm_modified = false;
