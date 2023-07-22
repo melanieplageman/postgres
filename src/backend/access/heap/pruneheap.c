@@ -569,7 +569,12 @@ heap_page_prune(Relation rel, Buffer buf, BlockNumber blkno, Page page,
 		XLogRegisterBuffer(0, buf, REGBUF_STANDARD);
 
 		if (vm_modified)
-			XLogRegisterBuffer(1, vmbuffer, 0);
+		{
+			uint8 bufflags = REGBUF_STANDARD;
+			if (!XLogHintBitIsNeeded())
+				bufflags |= REGBUF_NO_IMAGE;
+			XLogRegisterBuffer(1, vmbuffer, bufflags);
+		}
 
 		if (xlrec.nplans > 0)
 			XLogRegisterBufData(0, (char *) plans,
