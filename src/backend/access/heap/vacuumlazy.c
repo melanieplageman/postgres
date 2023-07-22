@@ -1386,7 +1386,7 @@ lazy_scan_prune(LVRelState *vacrel,
 	vacrel->tuples_deleted += prune_result.nunused;
 	vacrel->tuples_frozen += prune_result.nfrozen;
 
-	if (prune_result.nfrozen > 0 || prune_result.page_frozen)
+	if (prune_result.nfrozen > 0)
 	{
 		vacrel->NewRelfrozenXid = pagefrz.FreezePageRelfrozenXid;
 		vacrel->NewRelminMxid = pagefrz.FreezePageRelminMxid;

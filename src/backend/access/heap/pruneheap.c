@@ -471,10 +471,7 @@ heap_page_prune(Relation rel, Buffer buf, BlockNumber blkno, Page page,
 	if (BufferIsValid(vmbuffer))
 	{
 		if (prstate.all_frozen)
-		{
 			visiflags |= VISIBILITYMAP_ALL_FROZEN;
-			result->page_frozen = true;
-		}
 
 		if (prstate.all_visible)
 		{

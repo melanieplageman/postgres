@@ -197,7 +197,6 @@ typedef struct HeapPageFreeze
 
 typedef struct PruneResult
 {
-	bool		page_frozen;
 	bool		page_all_visible;
 	int			recently_dead_tuples;
 	int			live_tuples;
