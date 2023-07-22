@@ -2098,7 +2098,12 @@ lazy_vacuum_heap_page(LVRelState *vacrel, BlockNumber blkno, Buffer buffer,
 		XLogRegisterBufData(0, (char *) unused, nunused * sizeof(OffsetNumber));
 
 		if (vm_modified)
-			XLogRegisterBuffer(1, vmbuffer, 0);
+		{
+			uint8 bufflags = REGBUF_STANDARD;
+			if (!XLogHintBitIsNeeded())
+				bufflags |= REGBUF_NO_IMAGE;
+			XLogRegisterBuffer(1, vmbuffer, bufflags);
+		}
 
 		recptr = XLogInsert(RM_HEAP2_ID, XLOG_HEAP2_VACUUM);
 
