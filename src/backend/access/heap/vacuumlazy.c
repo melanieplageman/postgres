@@ -1092,7 +1092,6 @@ lazy_scan_skip(LVRelState *vacrel, Buffer *vmbuffer, BlockNumber blkno,
 	 *
 	 * Implement this by always treating the last block as unsafe to skip.
 	 */
-	Assert(vacrel->rel_pages > 0);
 	for (next_block = blkno; next_block < vacrel->rel_pages; next_block++)
 	{
 		*vmbits = visibilitymap_get_status(vacrel->rel, next_block, vmbuffer);
