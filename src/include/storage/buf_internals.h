@@ -431,6 +431,8 @@ extern BlockNumber ExtendBufferedRelLocal(ExtendBufferedWhat eb,
 										  Buffer *buffers,
 										  uint32 *extended_by);
 extern void MarkLocalBufferDirty(Buffer buffer);
+
+extern bool LocalBufferIsProbablyDirty(Buffer buffer);
 extern void DropRelationLocalBuffers(RelFileLocator rlocator,
 									 ForkNumber forkNum,
 									 BlockNumber firstDelBlock);

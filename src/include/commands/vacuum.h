@@ -24,6 +24,7 @@
 #include "storage/buf.h"
 #include "storage/lock.h"
 #include "utils/relcache.h"
+#include "utils/snapmgr.h"
 
 /*
  * Flags for amparallelvacuumoptions to control the participation of bulkdelete
@@ -338,9 +339,11 @@ extern void vac_update_relstats(Relation relation,
 								bool *frozenxid_updated,
 								bool *minmulti_updated,
 								bool in_outer_xact);
+
+extern void lazy_update_freeze_limit(VacuumCutoffs *cutoffs, GlobalVisState *vistest);
 extern bool vacuum_get_cutoffs(Relation rel, const VacuumParams *params,
-							   struct VacuumCutoffs *cutoffs);
-extern bool vacuum_xid_failsafe_check(const struct VacuumCutoffs *cutoffs);
+							   VacuumCutoffs *cutoffs);
+extern bool vacuum_xid_failsafe_check(const VacuumCutoffs *cutoffs);
 extern void vac_update_datfrozenxid(void);
 extern void vacuum_delay_point(void);
 extern bool vacuum_is_relation_owner(Oid relid, Form_pg_class reltuple,
