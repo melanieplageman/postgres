@@ -458,18 +458,20 @@ heap_page_prune(Relation rel, Buffer buf, BlockNumber blkno, Page page,
 	if (do_prune || new_prune_xid_found || page_full)
 		PageClearFull(page);
 
+	if (opportunistic && !do_prune)
+	{
+		if (new_prune_xid_found || page_full)
+			MarkBufferDirtyHint(buf, true);
+		END_CRIT_SECTION();
+		return prstate.hastup;
+	}
+
 	if (do_prune || do_freeze ||
 		(prstate.all_visible && !page_all_visible) ||
 		(!prstate.all_visible && page_all_visible))
 		MarkBufferDirty(buf);
 	else if (new_prune_xid_found || page_full)
 		MarkBufferDirtyHint(buf, true);
-
-	if (opportunistic && !do_prune)
-	{
-		END_CRIT_SECTION();
-		return prstate.hastup;
-	}
 
 	if (prstate.all_visible && !page_all_visible)
 		PageSetAllVisible(page);
@@ -491,16 +493,7 @@ heap_page_prune(Relation rel, Buffer buf, BlockNumber blkno, Page page,
 		if (prstate.all_visible)
 			visiflags |= VISIBILITYMAP_ALL_VISIBLE;
 
-		// TODO: put back relevant pieces of super-long comments that used to be around here
-		if ((prstate.all_visible && !all_visible_according_to_vm) ||
-			(prstate.all_visible && prstate.all_frozen && !all_frozen_according_to_vm))
-		{
-			vm_modified = visibilitymap_set_and_lock(rel, blkno, buf,
-													 vmbuffer, visiflags);
-			if (!vm_modified)
-				LockBuffer(vmbuffer, BUFFER_LOCK_UNLOCK);
-		}
-		else if ((!prstate.all_visible && page_all_visible) ||
+		if ((!prstate.all_visible && page_all_visible) ||
 				(all_visible_according_to_vm && !page_all_visible &&
 				(((vmbits = visibilitymap_get_status(rel, blkno, &vmbuffer)) & VISIBILITYMAP_ALL_VISIBLE) != 0)))
 		{
@@ -519,6 +512,17 @@ heap_page_prune(Relation rel, Buffer buf, BlockNumber blkno, Page page,
 			visiflags = 0;
 		}
 
+		// TODO: put back relevant pieces of super long comments that used to be around here
+		// TODO: is it okay to use the value of all_frozen_according_to_vm coming from vmbits at start?
+		// if so, do it in master too
+		else if ((prstate.all_visible && !all_visible_according_to_vm) ||
+			(prstate.all_visible && prstate.all_frozen && !all_frozen_according_to_vm))
+		{
+			vm_modified = visibilitymap_set_and_lock(rel, blkno, buf,
+													 vmbuffer, visiflags);
+			if (!vm_modified)
+				LockBuffer(vmbuffer, BUFFER_LOCK_UNLOCK);
+		}
 		/* could have changed */
 		result->page_all_visible = prstate.all_visible;
 	}

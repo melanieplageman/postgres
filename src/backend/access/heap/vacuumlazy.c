@@ -1072,10 +1072,17 @@ lazy_scan_skip(LVRelState *vacrel, Buffer *vmbuffer, BlockNumber blkno,
 			   uint8 *vmbits, BlockNumber *vmbits_blkno)
 {
 	BlockNumber next_block;
+	BlockNumber first_blkno = blkno;
+	uint8 first_vmbits;
 	bool skipsallvis = false;
 
 	if (vacrel->rel_pages == 0)
 		return 0;
+
+	*vmbits = visibilitymap_get_status(vacrel->rel, blkno, vmbuffer);
+	*vmbits_blkno = blkno;
+
+	first_vmbits = *vmbits;
 
 	/*
 	 * DISABLE_PAGE_SKIPPING makes all skipping unsafe
@@ -1090,13 +1097,11 @@ lazy_scan_skip(LVRelState *vacrel, Buffer *vmbuffer, BlockNumber blkno,
 	 * Implement this by always treating the last block as unsafe to skip.
 	 */
 	if (!vacrel->skipwithvm || blkno == vacrel->rel_pages - 1)
-	{
-		*vmbits = visibilitymap_get_status(vacrel->rel, blkno, vmbuffer);
-		*vmbits_blkno = blkno;
 		return blkno;
-	}
 
-	for (next_block = blkno; next_block < vacrel->rel_pages; next_block++)
+	next_block = blkno + 1;
+
+	for (; next_block < vacrel->rel_pages; next_block++)
 	{
 		*vmbits = visibilitymap_get_status(vacrel->rel, next_block, vmbuffer);
 		*vmbits_blkno = next_block;
@@ -1139,8 +1144,8 @@ lazy_scan_skip(LVRelState *vacrel, Buffer *vmbuffer, BlockNumber blkno,
 	 */
 	if (next_block - blkno < SKIP_PAGES_THRESHOLD)
 	{
-		*vmbits = visibilitymap_get_status(vacrel->rel, blkno, vmbuffer);
-		*vmbits_blkno = blkno;
+		*vmbits = first_vmbits;
+		*vmbits_blkno = first_blkno;
 		return blkno;
 	}
 
@@ -1349,7 +1354,8 @@ lazy_scan_prune(LVRelState *vacrel,
 		TransactionId cutoff;
 		bool		all_frozen;
 
-		Assert(heap_page_is_all_visible(vacrel, buf, &cutoff, &all_frozen, NULL));
+		Assert(heap_page_is_all_visible(vacrel, buf, &cutoff,
+					&all_frozen, NULL));
 	}
 #endif
 
