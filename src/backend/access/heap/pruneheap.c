@@ -71,7 +71,7 @@ typedef struct
 	// up marking them once we follow a HOT chain. An alternative to this is to
 	// do a separate loop to prepare freeze those normal tuples not redirected
 	// to or to skip freezing redirect tuples when executing the freeze plans.
-	bool		frz_attempted[MaxHeapTuplesPerPage + 1];
+	bool		attempt_frz[MaxHeapTuplesPerPage + 1];
 
 	/*
 	 * Tuple visibility is only computed once for each tuple, for correctness
@@ -302,7 +302,7 @@ heap_page_prune(Relation rel, Buffer buf, BlockNumber blkno, Page page,
 	prstate.nredirected = prstate.ndead = prstate.nunused = 0;
 	prstate.result = result;
 	memset(prstate.marked, 0, sizeof(prstate.marked));
-	memset(prstate.frz_attempted, 0, sizeof(prstate.frz_attempted));
+	memset(prstate.attempt_frz, 0, sizeof(prstate.attempt_frz));
 
 	maxoff = PageGetMaxOffsetNumber(page);
 
@@ -334,8 +334,6 @@ heap_page_prune(Relation rel, Buffer buf, BlockNumber blkno, Page page,
 		 offnum <= maxoff;
 		 offnum = OffsetNumberNext(offnum))
 	{
-		HeapTupleHeader htup;
-		bool		tuple_frozen;
 		ItemId		itemid = PageGetItemId(page, offnum);
 
 		if (!ItemIdIsUsed(itemid))
@@ -360,36 +358,71 @@ heap_page_prune(Relation rel, Buffer buf, BlockNumber blkno, Page page,
 						 dead_items, opportunistic);
 
 		if (!ItemIdIsNormal(itemid) || prstate.marked[offnum] ||
-			prstate.frz_attempted[offnum] ||
 			prstate.htsv[offnum] == HEAPTUPLE_DEAD ||
 			prstate.htsv[offnum] == -1)
 			continue;
 
+		prstate.attempt_frz[offnum] = true;
+	}
+
+	do_prune = prstate.nredirected > 0 || prstate.ndead > 0 || prstate.nunused > 0;
+
+	if (opportunistic && !do_prune)
+	{
+		TransactionId current_prune_xid = ((PageHeader) page)->pd_prune_xid;
+		((PageHeader) page)->pd_prune_xid = prstate.new_prune_xid;
+
+		result->nunused = prstate.nunused;
+		result->nfrozen = 0;
+		result->page_all_visible = prstate.all_visible;
+
+		if (current_prune_xid != prstate.new_prune_xid ||
+				PageIsFull(page))
+		{
+			START_CRIT_SECTION();
+			PageClearFull(page);
+			MarkBufferDirtyHint(buf, true);
+			END_CRIT_SECTION();
+		}
+
+		return prstate.hastup;
+	}
+
+	for (offnum = FirstOffsetNumber;
+		offnum <= maxoff;
+		offnum = OffsetNumberNext(offnum))
+	{
+		HeapTupleHeader htup;
+		bool		tuple_frozen;
+		ItemId		itemid;
+
+		if (!prstate.attempt_frz[offnum])
+			continue;
+
+		itemid = PageGetItemId(page, offnum);
 		htup = (HeapTupleHeader) PageGetItem(page, itemid);
 		if ((heap_prepare_freeze_tuple(htup, pagefrz,
-									   &prstate.frozen[prstate.nfrozen], &tuple_frozen,
-									   prstate.vistest, opportunistic)))
+									&prstate.frozen[prstate.nfrozen], &tuple_frozen,
+									prstate.vistest, opportunistic)))
 		{
 			prstate.frozen[prstate.nfrozen++].offset = offnum;
 		}
 
-		prstate.frz_attempted[offnum] = true;
 		prstate.all_frozen = prstate.all_frozen && tuple_frozen;
 	}
 
-	*off_loc = InvalidOffsetNumber;
-
-	if (!prstate.all_visible)
-		prstate.all_frozen = false;
-
-	do_prune = prstate.nredirected > 0 || prstate.ndead > 0 || prstate.nunused > 0;
-
 	do_freeze = (pagefrz->freeze_required ||
-				 (prstate.all_visible && prstate.all_frozen && prstate.nfrozen > 0 &&
+				(prstate.all_visible && prstate.all_frozen && prstate.nfrozen > 0 &&
 					(do_prune || !XLogCheckBufferNeedsBackup(buf))));
 
-	if (opportunistic && !do_prune)
-		do_freeze = false;
+	*off_loc = InvalidOffsetNumber;
+
+	/*
+	 * Instead of checking all_visible while preparing to freeze all of the
+	 * tuples, just set all_frozen to false here if all_visible is false.
+	 */
+	if (!prstate.all_visible)
+		prstate.all_frozen = false;
 
 	if (do_freeze)
 	{
@@ -440,15 +473,14 @@ heap_page_prune(Relation rel, Buffer buf, BlockNumber blkno, Page page,
 
 	START_CRIT_SECTION();
 
+	((PageHeader) page)->pd_prune_xid = prstate.new_prune_xid;
+
 	if (do_prune)
 	{
 		heap_page_prune_execute(buf,
 								prstate.redirected, prstate.nredirected,
 								prstate.nowdead, prstate.ndead,
 								prstate.nowunused, prstate.nunused);
-
-
-		((PageHeader) page)->pd_prune_xid = prstate.new_prune_xid;
 	}
 
 	/* refresh these values if on-access pruning */
@@ -457,14 +489,6 @@ heap_page_prune(Relation rel, Buffer buf, BlockNumber blkno, Page page,
 
 	if (do_prune || new_prune_xid_found || page_full)
 		PageClearFull(page);
-
-	if (opportunistic && !do_prune)
-	{
-		if (new_prune_xid_found || page_full)
-			MarkBufferDirtyHint(buf, true);
-		END_CRIT_SECTION();
-		return prstate.hastup;
-	}
 
 	if (do_prune || do_freeze ||
 		(prstate.all_visible && !page_all_visible) ||
@@ -1006,10 +1030,6 @@ static void
 heap_prune_record_redirect(PruneState *prstate, Page page, HeapPageFreeze *pagefrz,
 						   OffsetNumber offnum, OffsetNumber rdoffnum, bool opportunistic)
 {
-	HeapTupleHeader htup;
-	ItemId		itemid;
-	bool		tuple_frozen;
-
 	Assert(prstate->nredirected < MaxHeapTuplesPerPage);
 	prstate->redirected[prstate->nredirected * 2] = offnum;
 	prstate->redirected[prstate->nredirected * 2 + 1] = rdoffnum;
@@ -1019,22 +1039,11 @@ heap_prune_record_redirect(PruneState *prstate, Page page, HeapPageFreeze *pagef
 	Assert(!prstate->marked[rdoffnum]);
 	prstate->marked[rdoffnum] = true;
 	prstate->hastup = true;
-	if (prstate->frz_attempted[rdoffnum] ||
-		prstate->htsv[rdoffnum] == HEAPTUPLE_DEAD ||
+	if (prstate->htsv[rdoffnum] == HEAPTUPLE_DEAD ||
 		prstate->htsv[rdoffnum] == -1)
 		return;
 
-	itemid = PageGetItemId(page, rdoffnum);
-	htup = (HeapTupleHeader) PageGetItem(page, itemid);
-	if ((heap_prepare_freeze_tuple(htup, pagefrz,
-								   &prstate->frozen[prstate->nfrozen], &tuple_frozen,
-								   prstate->vistest, opportunistic)))
-	{
-		prstate->frozen[prstate->nfrozen++].offset = rdoffnum;
-	}
-
-	prstate->frz_attempted[rdoffnum] = true;
-	prstate->all_frozen = prstate->all_frozen && tuple_frozen;
+	prstate->attempt_frz[rdoffnum] = true;
 }
 
 /* Record line pointer to be marked dead */
