@@ -102,8 +102,8 @@ static void heap_prune_record_redirect(PruneState *prstate, Page page, HeapPageF
 static void heap_prune_record_dead(PruneState *prstate, OffsetNumber offnum, VacDeadItems *dead_items);
 static void heap_prune_record_unused(PruneState *prstate, OffsetNumber offnum);
 static void page_verify_redirects(Page page);
-static void
-			catalog_dead_item_for_vacuum(VacDeadItems *dead_items, BlockNumber blkno, OffsetNumber offnum);
+static void catalog_dead_item_for_vacuum(VacDeadItems *dead_items,
+		BlockNumber blkno, OffsetNumber offnum);
 
 /*
  * Optionally prune and repair fragmentation in the specified page.
@@ -285,6 +285,7 @@ heap_page_prune(Relation rel, Buffer buf, BlockNumber blkno, Page page,
 	Oid			tableoid = RelationGetRelid(rel);
 
 	bool		page_all_visible = PageIsAllVisible(page);
+	bool		page_full = PageIsFull(page);
 
 	Assert(BufferGetBlockNumber(buf) == blkno);
 	Assert(off_loc);
@@ -432,9 +433,10 @@ heap_page_prune(Relation rel, Buffer buf, BlockNumber blkno, Page page,
 
 	result->nunused = prstate.nunused;
 	result->nfrozen = prstate.nfrozen;
+	result->page_all_visible = prstate.all_visible;
 
-	if (opportunistic && !do_prune)
-		return prstate.hastup;
+	if (((PageHeader) page)->pd_prune_xid != prstate.new_prune_xid)
+		new_prune_xid_found = true;
 
 	START_CRIT_SECTION();
 
@@ -445,48 +447,51 @@ heap_page_prune(Relation rel, Buffer buf, BlockNumber blkno, Page page,
 								prstate.nowdead, prstate.ndead,
 								prstate.nowunused, prstate.nunused);
 
-		if (((PageHeader) page)->pd_prune_xid != prstate.new_prune_xid)
-			new_prune_xid_found = true;
 
 		((PageHeader) page)->pd_prune_xid = prstate.new_prune_xid;
 	}
 
-	do_prune = prstate.nunused > 0 || do_prune;
+	/* refresh these values if on-access pruning */
+	page_all_visible = PageIsAllVisible(page);
+	page_full = PageIsFull(page);
 
-	if (prstate.all_visible && !page_all_visible)
-		PageSetAllVisible(page);
-	else if (!prstate.all_visible && page_all_visible)
-		PageClearAllVisible(page);
-
-	if (do_prune || new_prune_xid_found || PageIsFull(page))
+	if (do_prune || new_prune_xid_found || page_full)
 		PageClearFull(page);
 
 	if (do_prune || do_freeze ||
 		(prstate.all_visible && !page_all_visible) ||
 		(!prstate.all_visible && page_all_visible))
 		MarkBufferDirty(buf);
-	else if (new_prune_xid_found || PageIsFull(page))
+	else if (new_prune_xid_found || page_full)
 		MarkBufferDirtyHint(buf, true);
 
-	// TODO: gross. should we try and get the vmbuffer for opp pruning case?
+	if (opportunistic && !do_prune)
+	{
+		END_CRIT_SECTION();
+		return prstate.hastup;
+	}
+
+	if (prstate.all_visible && !page_all_visible)
+		PageSetAllVisible(page);
+	else if (!prstate.all_visible && page_all_visible)
+	{
+		// TODO: add back in commment
+		Assert(prstate.ndead > 0);
+		elog(WARNING, "page containing LP_DEAD items is marked as all-visible in relation \"%s\" page %u",
+				RelationGetRelationName(rel), blkno);
+		PageClearAllVisible(page);
+	}
+
+	// TODO: should we try and get the vmbuffer for opp pruning case?
 	if (BufferIsValid(vmbuffer))
 	{
 		if (prstate.all_frozen)
 			visiflags |= VISIBILITYMAP_ALL_FROZEN;
 
 		if (prstate.all_visible)
-		{
 			visiflags |= VISIBILITYMAP_ALL_VISIBLE;
-			result->page_all_visible = true;
-		}
 
-		if (!prstate.all_visible && all_visible_according_to_vm)
-		{
-			vmbits = visibilitymap_get_status(rel, blkno, &vmbuffer);
-			all_visible_according_to_vm = vmbits & VISIBILITYMAP_ALL_VISIBLE;
-			all_frozen_according_to_vm = vmbits & VISIBILITYMAP_ALL_FROZEN;
-		}
-
+		// TODO: put back relevant pieces of super-long comments that used to be around here
 		if ((prstate.all_visible && !all_visible_according_to_vm) ||
 			(prstate.all_visible && prstate.all_frozen && !all_frozen_according_to_vm))
 		{
@@ -495,6 +500,27 @@ heap_page_prune(Relation rel, Buffer buf, BlockNumber blkno, Page page,
 			if (!vm_modified)
 				LockBuffer(vmbuffer, BUFFER_LOCK_UNLOCK);
 		}
+		else if ((!prstate.all_visible && page_all_visible) ||
+				(all_visible_according_to_vm && !page_all_visible &&
+				(((vmbits = visibilitymap_get_status(rel, blkno, &vmbuffer)) & VISIBILITYMAP_ALL_VISIBLE) != 0)))
+		{
+			// TODO: construct a better error message
+			elog(WARNING, "unexpected combination for page: %u in relation: \"%s\". page visibility: %d. visimap status for page: %u. %u LP_DEAD items.",
+				 blkno, RelationGetRelationName(rel),
+				 page_all_visible, vmbits, prstate.ndead);
+
+			vm_modified = visibilitymap_clear_and_lock(rel, blkno, vmbuffer,
+								VISIBILITYMAP_VALID_BITS);
+
+			if (!vm_modified)
+				LockBuffer(vmbuffer, BUFFER_LOCK_UNLOCK);
+
+			prstate.all_visible = prstate.all_frozen = false;
+			visiflags = 0;
+		}
+
+		/* could have changed */
+		result->page_all_visible = prstate.all_visible;
 	}
 	else
 		vm_modified = false;

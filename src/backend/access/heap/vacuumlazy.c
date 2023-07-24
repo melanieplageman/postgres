@@ -828,6 +828,7 @@ lazy_scan_heap(LVRelState *vacrel)
 	initprog_val[2] = dead_items->max_items;
 	pgstat_progress_update_multi_param(3, initprog_index, initprog_val);
 
+	// TODO: should lazy_scan_heap() just return if vacrel->rel_pages is 0?
 	/* Set up an initial range of skippable blocks using the visibility map */
 	blkno = lazy_scan_skip(vacrel, &vmbuffer, 0,
 											&vmbits,
@@ -1072,6 +1073,9 @@ lazy_scan_skip(LVRelState *vacrel, Buffer *vmbuffer, BlockNumber blkno,
 {
 	BlockNumber next_block;
 	bool skipsallvis = false;
+
+	if (vacrel->rel_pages == 0)
+		return 0;
 
 	/*
 	 * DISABLE_PAGE_SKIPPING makes all skipping unsafe
