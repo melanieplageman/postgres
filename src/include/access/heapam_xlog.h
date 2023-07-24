@@ -59,6 +59,8 @@
 #define XLOG_HEAP2_LOCK_UPDATED 0x60
 #define XLOG_HEAP2_NEW_CID		0x70
 
+#define XLOG_HEAP2_BYVACUUM		0x80
+
 /*
  * xl_heap_insert/xl_heap_multi_insert flag values, 8 bits are available.
  */

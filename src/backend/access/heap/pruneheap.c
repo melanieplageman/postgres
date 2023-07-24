@@ -625,6 +625,9 @@ heap_page_prune(Relation rel, Buffer buf, BlockNumber blkno, Page page,
 
 		Assert(BufferIsValid(buf));
 
+		if (!opportunistic)
+			info |= XLOG_HEAP2_BYVACUUM;
+
 		xlrec.isCatalogRel = RelationIsAccessibleInLogicalDecoding(rel);
 		xlrec.flags = vmflags;
 		if (vm_modified && xlrec.isCatalogRel)
