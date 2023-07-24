@@ -838,8 +838,6 @@ lazy_scan_heap(LVRelState *vacrel)
 		Page		page;
 		int			nreaped = 0;
 
-		/* Current range is too small to skip -- just scan the page */
-
 		vacrel->scanned_pages++;
 
 		/* Report as block scanned, update error traceback information */
@@ -867,6 +865,9 @@ lazy_scan_heap(LVRelState *vacrel)
 		 * dead_items TIDs, pause and do a cycle of vacuuming before we tackle
 		 * this page.
 		 */
+		// TODO: I don't understand how this could help since we would have
+		// done lazy_vacuum() if we had dead_itmes on the previous block.
+		// perhaps for the first block? if so we could do it outside the loop.
 		Assert(dead_items->max_items >= MaxHeapTuplesPerPage);
 		if (dead_items->max_items - dead_items->num_items < MaxHeapTuplesPerPage)
 		{
@@ -977,6 +978,7 @@ lazy_scan_heap(LVRelState *vacrel)
 		 * were pruned some time earlier.  Also considers freezing XIDs in the
 		 * tuple headers of remaining items with storage.
 		 */
+		// TODO: move this message to a debug ifdef or remove.
 		if (blkno != vmbits_blkno)
 			elog(WARNING, "Passing vmmap from wrong block. blkno is %u, vmmap is from block %u", blkno, vmbits_blkno);
 		nreaped = lazy_scan_prune(vacrel, buf, blkno, page, vmbuffer, vmbits);
@@ -993,10 +995,7 @@ lazy_scan_heap(LVRelState *vacrel)
 		RecordPageWithFreeSpace(vacrel->rel, blkno, PageGetHeapFreeSpace(page));
 
 	next:
-		/*
-		 * Can't skip this page safely.  Must scan the page.  But
-		 * determine the next skippable range after the page first.
-		 */
+
 		next_blkno = lazy_scan_skip(vacrel, &vmbuffer,
 												blkno + 1,
 												&vmbits,
@@ -1074,15 +1073,9 @@ lazy_scan_skip(LVRelState *vacrel, Buffer *vmbuffer, BlockNumber blkno,
 	BlockNumber next_block;
 	bool skipsallvis = false;
 
-	/* DISABLE_PAGE_SKIPPING makes all skipping unsafe */
-	if (!vacrel->skipwithvm)
-	{
-		*vmbits = visibilitymap_get_status(vacrel->rel, blkno, vmbuffer);
-		*vmbits_blkno = blkno;
-		return blkno;
-	}
-
 	/*
+	 * DISABLE_PAGE_SKIPPING makes all skipping unsafe
+	 *
 	 * Caller must scan the last page to determine whether it has tuples
 	 * (caller must have the opportunity to set vacrel->nonempty_pages).
 	 * This rule avoids having lazy_truncate_heap() take access-exclusive
@@ -1092,6 +1085,13 @@ lazy_scan_skip(LVRelState *vacrel, Buffer *vmbuffer, BlockNumber blkno,
 	 *
 	 * Implement this by always treating the last block as unsafe to skip.
 	 */
+	if (!vacrel->skipwithvm || blkno == vacrel->rel_pages - 1)
+	{
+		*vmbits = visibilitymap_get_status(vacrel->rel, blkno, vmbuffer);
+		*vmbits_blkno = blkno;
+		return blkno;
+	}
+
 	for (next_block = blkno; next_block < vacrel->rel_pages; next_block++)
 	{
 		*vmbits = visibilitymap_get_status(vacrel->rel, next_block, vmbuffer);
