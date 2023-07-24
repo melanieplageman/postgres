@@ -931,6 +931,7 @@ heap_page_prune(Relation relation, Buffer buffer,
 		xl_heap_prune xlrec;
 		XLogRecPtr	recptr;
 		uint8		heapbuf_flags = REGBUF_STANDARD;
+		uint8		info = XLOG_HEAP2_PRUNE;
 		TransactionId conflict_ids[3] =
 		{InvalidTransactionId, InvalidTransactionId, InvalidTransactionId};
 
@@ -938,6 +939,9 @@ heap_page_prune(Relation relation, Buffer buffer,
 		OffsetNumber frz_offsets[MaxHeapTuplesPerPage];
 
 		xlrec.isCatalogRel = RelationIsAccessibleInLogicalDecoding(relation);
+
+		if (!on_access)
+			info |= XLOG_HEAP2_BYVACUUM;
 
 		xlrec.flags = vmflags;
 		if (vm_modified && xlrec.isCatalogRel)
@@ -1039,7 +1043,7 @@ heap_page_prune(Relation relation, Buffer buffer,
 								presult->nfrozen * sizeof(OffsetNumber));
 
 
-		recptr = XLogInsert(RM_HEAP2_ID, XLOG_HEAP2_PRUNE);
+		recptr = XLogInsert(RM_HEAP2_ID, info);
 
 		/*
 		 * If we are modifying the heap page or if we are modifying the
