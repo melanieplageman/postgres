@@ -178,6 +178,7 @@
 #vacuum_cost_page_miss = 2		# 0-10000 credits
 #vacuum_cost_page_dirty = 20		# 0-10000 credits
 #vacuum_cost_limit = 200		# 1-10000 credits
+#vacuum_disable_freeze = false
 
 # - Background Writer -
 

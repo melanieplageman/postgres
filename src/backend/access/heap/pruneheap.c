@@ -428,6 +428,9 @@ heap_page_prune(Relation rel, Buffer buf, BlockNumber blkno, Page page,
 				 (prstate.all_visible && prstate.all_frozen && prstate.nfrozen > 0 &&
 				  (do_prune || (BufferIsProbablyDirty(buf) && !XLogCheckBufferNeedsBackup(buf)))));
 
+	// MTODO: remove this. for development only.
+	do_freeze = do_freeze && !VacuumDisableFreeze;
+
 	*off_loc = InvalidOffsetNumber;
 
 	/*

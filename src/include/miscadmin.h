@@ -284,6 +284,7 @@ extern PGDLLIMPORT int64 VacuumPageDirty;
 
 extern PGDLLIMPORT int VacuumCostBalance;
 extern PGDLLIMPORT bool VacuumCostActive;
+extern PGDLLIMPORT bool VacuumDisableFreeze;
 
 
 /* in tcop/postgres.c */

@@ -1170,6 +1170,16 @@ struct config_bool ConfigureNamesBool[] =
 	},
 
 	{
+		{"vacuum_disable_freeze", PGC_USERSET, RESOURCES_VACUUM_DELAY,
+			gettext_noop("disable freezing for development"),
+			NULL
+		},
+		&VacuumDisableFreeze,
+		false,
+		NULL, NULL, NULL
+	},
+
+	{
 		{"wal_log_hints", PGC_POSTMASTER, WAL_SETTINGS,
 			gettext_noop("Writes full pages to WAL when first modified after a checkpoint, even for a non-critical modification."),
 			NULL
@@ -2432,6 +2442,7 @@ struct config_int ConfigureNamesInt[] =
 		200, 1, 10000,
 		NULL, NULL, NULL
 	},
+
 
 	{
 		{"autovacuum_vacuum_cost_limit", PGC_SIGHUP, AUTOVACUUM,
