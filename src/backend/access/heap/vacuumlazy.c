@@ -248,7 +248,7 @@ static BlockNumber lazy_scan_skip(LVRelState *vacrel, Buffer *vmbuffer,
 static bool lazy_scan_new_or_empty(LVRelState *vacrel, Buffer buf,
 								   BlockNumber blkno, Page page,
 								   bool sharelock, Buffer vmbuffer);
-static void lazy_scan_prune(LVRelState *vacrel, Buffer buf,
+static bool lazy_scan_prune(LVRelState *vacrel, Buffer buf,
 							BlockNumber blkno, Page page,
 							Buffer vmbuffer, uint8 vmbits, LVPagePruneState *prunestate);
 static bool lazy_scan_noprune(LVRelState *vacrel, Buffer buf,
@@ -832,6 +832,8 @@ lazy_scan_heap(LVRelState *vacrel)
 	VacDeadItems *dead_items = vacrel->dead_items;
 	Buffer		vmbuffer = InvalidBuffer;
 	uint8		vmbits = 0;
+	bool		freed_space = false;
+	int64		lpdead_before;
 	const int	initprog_index[] = {
 		PROGRESS_VACUUM_PHASE,
 		PROGRESS_VACUUM_TOTAL_HEAP_BLKS,
@@ -984,6 +986,8 @@ lazy_scan_heap(LVRelState *vacrel)
 			goto next;
 		}
 
+		lpdead_before = vacrel->lpdead_items;
+
 		/*
 		 * Prune, freeze, and count tuples.
 		 *
@@ -994,69 +998,55 @@ lazy_scan_heap(LVRelState *vacrel)
 		 * tuple headers of remaining items with storage.
 		 */
 		Assert(blkno == vmbits_blkno);
-		lazy_scan_prune(vacrel, buf, blkno, page, vmbuffer, vmbits, &prunestate);
-
-		if (vacrel->nindexes == 0 && prunestate.has_lpdead_items)
-		{
-			/*
-			 * Periodically perform FSM vacuuming to make newly-freed space
-			 * visible on upper FSM pages.  Note we have not yet performed FSM
-			 * processing for blkno.
-			 */
-			if (blkno - next_fsm_block_to_vacuum >= VACUUM_FSM_EVERY_PAGES)
-			{
-				FreeSpaceMapVacuumRange(vacrel->rel, next_fsm_block_to_vacuum,
-										blkno);
-				next_fsm_block_to_vacuum = blkno;
-			}
-
-			/*
-			 * Now perform FSM processing for blkno, and move on to next page.
-			 *
-			 * Our call to lazy_vacuum_heap_page() will have considered if
-			 * it's possible to set all_visible/all_frozen independently of
-			 * lazy_scan_prune().  Note that prunestate was invalidated by
-			 * lazy_vacuum_heap_page() call.
-			 */
-			UnlockReleaseBuffer(buf);
-			RecordPageWithFreeSpace(vacrel->rel, blkno, PageGetHeapFreeSpace(page));
-			goto next;
-		}
+		freed_space = lazy_scan_prune(vacrel, buf, blkno, page,
+									  vmbuffer, vmbits, &prunestate);
 
 		/*
 		 * Final steps for block: drop cleanup lock, record free space in the
-		 * FSM
+		 * FSM, if relevant.
+		 *
+		 * If we did free space and vacuumed away LP_DEAD items, periodically
+		 * perform FSM vacuuming to make newly-freed space visible on upper
+		 * FSM pages.
+		 *
+		 * MTODO: I'm not really sure why we wouldn't vacuum the FSM if we
+		 * freed space during pruning and have no indexes but did not have
+		 * LP_DEAD items that we reaped. (that is, ISTM we should remove the
+		 * lpdead criteria)
 		 */
-		if (prunestate.has_lpdead_items && vacrel->do_index_vacuuming)
+		if (freed_space && vacrel->nindexes == 0 &&
+			vacrel->lpdead_items > lpdead_before &&
+			(blkno - next_fsm_block_to_vacuum >= VACUUM_FSM_EVERY_PAGES))
 		{
-			/*
-			 * Wait until lazy_vacuum_heap_rel() to save free space.  This
-			 * doesn't just save us some cycles; it also allows us to record
-			 * any additional free space that lazy_vacuum_heap_page() will
-			 * make available in cases where it's possible to truncate the
-			 * page's line pointer array.
-			 *
-			 * Note: It's not in fact 100% certain that we really will call
-			 * lazy_vacuum_heap_rel() -- lazy_vacuum() might yet opt to skip
-			 * index vacuuming (and so must skip heap vacuuming).  This is
-			 * deemed okay because it only happens in emergencies, or when
-			 * there is very little free space anyway. (Besides, we start
-			 * recording free space in the FSM once index vacuuming has been
-			 * abandoned.)
-			 *
-			 * Note: The one-pass (no indexes) case is only supposed to make
-			 * it this far when there were no LP_DEAD items during pruning.
-			 */
-			Assert(vacrel->nindexes > 0);
-			UnlockReleaseBuffer(buf);
+			FreeSpaceMapVacuumRange(vacrel->rel, next_fsm_block_to_vacuum,
+									blkno);
+			next_fsm_block_to_vacuum = blkno;
 		}
-		else
-		{
-			Size		freespace = PageGetHeapFreeSpace(page);
 
-			UnlockReleaseBuffer(buf);
-			RecordPageWithFreeSpace(vacrel->rel, blkno, freespace);
-		}
+		UnlockReleaseBuffer(buf);
+
+
+		/*
+		 * If we won't call lazy_vacuum_heap_rel(), record the page's free
+		 * space now. Otherwise, wait until lazy_vacuum_heap_rel() to save
+		 * free space.  This doesn't just save us some cycles; it also allows
+		 * us to record any additional free space that lazy_vacuum_heap_page()
+		 * will make available in cases where it's possible to truncate the
+		 * page's line pointer array.
+		 *
+		 * Note: It's not in fact 100% certain that we really will call
+		 * lazy_vacuum_heap_rel() -- lazy_vacuum() might yet opt to skip index
+		 * vacuuming (and so must skip heap vacuuming).  This is deemed okay
+		 * because it only happens in emergencies, or when there is very
+		 * little free space anyway. (Besides, we start recording free space
+		 * in the FSM once index vacuuming has been abandoned.)
+		 *
+		 * Note: The one-pass (no indexes) case is only supposed to make it
+		 * this far when there were no LP_DEAD items during pruning.
+		 */
+		if (vacrel->nindexes == 0 ||
+			vacrel->lpdead_items == lpdead_before || !vacrel->do_index_vacuuming)
+			RecordPageWithFreeSpace(vacrel->rel, blkno, PageGetHeapFreeSpace(page));
 
 next:
 		next_blkno = lazy_scan_skip(vacrel, &vmbuffer,
@@ -1369,7 +1359,7 @@ lazy_scan_new_or_empty(LVRelState *vacrel, Buffer buf, BlockNumber blkno,
  * line pointers, and that every remaining item with tuple storage is
  * considered as a candidate for freezing.
  */
-static void
+static bool
 lazy_scan_prune(LVRelState *vacrel,
 				Buffer buf,
 				BlockNumber blkno,
@@ -1793,7 +1783,18 @@ retry:
 
 		/* Forget the LP_DEAD items that we just vacuumed */
 		dead_items->num_items = 0;
-		return;
+
+		/*
+		 * Our call to lazy_vacuum_heap_page() will have considered if it's
+		 * possible to set all_visible/all_frozen independently of
+		 * lazy_scan_prune(). So, we don't need to do the visibility map
+		 * processing below.
+		 *
+		 * We shouldn't have called lazy_vacuum_heap_page() if there were no
+		 * tuples to reap. Caller is responsible for FSM processing, so let
+		 * them know we have freed up some space.
+		 */
+		return true;
 	}
 
 	/*
@@ -1911,6 +1912,12 @@ retry:
 						  VISIBILITYMAP_ALL_VISIBLE |
 						  VISIBILITYMAP_ALL_FROZEN);
 	}
+
+	/*
+	 * If pruning deleted tuples, there is freespace which the caller can
+	 * record in the FSM.
+	 */
+	return tuples_deleted > 0;
 }
 
 /*
