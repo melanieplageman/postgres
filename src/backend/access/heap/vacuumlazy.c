@@ -250,7 +250,7 @@ static bool lazy_scan_new_or_empty(LVRelState *vacrel, Buffer buf,
 								   bool sharelock, Buffer vmbuffer);
 static void lazy_scan_prune(LVRelState *vacrel, Buffer buf,
 							BlockNumber blkno, Page page,
-							LVPagePruneState *prunestate);
+							Buffer vmbuffer, LVPagePruneState *prunestate);
 static bool lazy_scan_noprune(LVRelState *vacrel, Buffer buf,
 							  BlockNumber blkno, Page page,
 							  bool *hastup, bool *recordfreespace);
@@ -994,70 +994,43 @@ lazy_scan_heap(LVRelState *vacrel)
 		 * tuple headers of remaining items with storage.
 		 */
 		Assert(blkno == vmbits_blkno);
-		lazy_scan_prune(vacrel, buf, blkno, page, &prunestate);
+		lazy_scan_prune(vacrel, buf, blkno, page, vmbuffer, &prunestate);
 
-		Assert(!prunestate.all_visible || !prunestate.has_lpdead_items);
-
-		/* Remember the location of the last page with nonremovable tuples */
-		if (prunestate.hastup)
-			vacrel->nonempty_pages = blkno + 1;
-
-		if (vacrel->nindexes == 0)
+		if (vacrel->nindexes == 0 && prunestate.has_lpdead_items)
 		{
 			/*
-			 * Consider the need to do page-at-a-time heap vacuuming when
-			 * using the one-pass strategy now.
-			 *
-			 * The one-pass strategy will never call lazy_vacuum().  The steps
-			 * performed here can be thought of as the one-pass equivalent of
-			 * a call to lazy_vacuum().
+			 * Periodically perform FSM vacuuming to make newly-freed space
+			 * visible on upper FSM pages.  Note we have not yet performed FSM
+			 * processing for blkno.
 			 */
-			if (prunestate.has_lpdead_items)
+			if (blkno - next_fsm_block_to_vacuum >= VACUUM_FSM_EVERY_PAGES)
 			{
-				Size		freespace;
-
-				lazy_vacuum_heap_page(vacrel, blkno, buf, 0, vmbuffer);
-
-				/* Forget the LP_DEAD items that we just vacuumed */
-				dead_items->num_items = 0;
-
-				/*
-				 * Periodically perform FSM vacuuming to make newly-freed
-				 * space visible on upper FSM pages.  Note we have not yet
-				 * performed FSM processing for blkno.
-				 */
-				if (blkno - next_fsm_block_to_vacuum >= VACUUM_FSM_EVERY_PAGES)
-				{
-					FreeSpaceMapVacuumRange(vacrel->rel, next_fsm_block_to_vacuum,
-											blkno);
-					next_fsm_block_to_vacuum = blkno;
-				}
-
-				/*
-				 * Now perform FSM processing for blkno, and move on to next
-				 * page.
-				 *
-				 * Our call to lazy_vacuum_heap_page() will have considered if
-				 * it's possible to set all_visible/all_frozen independently
-				 * of lazy_scan_prune().  Note that prunestate was invalidated
-				 * by lazy_vacuum_heap_page() call.
-				 */
-				freespace = PageGetHeapFreeSpace(page);
-
-				UnlockReleaseBuffer(buf);
-				RecordPageWithFreeSpace(vacrel->rel, blkno, freespace);
-				goto next;
+				FreeSpaceMapVacuumRange(vacrel->rel, next_fsm_block_to_vacuum,
+										blkno);
+				next_fsm_block_to_vacuum = blkno;
 			}
 
 			/*
-			 * There was no call to lazy_vacuum_heap_page() because pruning
-			 * didn't encounter/create any LP_DEAD items that needed to be
-			 * vacuumed.  Prune state has not been invalidated, so proceed
-			 * with prunestate-driven visibility map and FSM steps (just like
-			 * the two-pass strategy).
+			 * Now perform FSM processing for blkno, and move on to next page.
+			 *
+			 * Our call to lazy_vacuum_heap_page() will have considered if
+			 * it's possible to set all_visible/all_frozen independently of
+			 * lazy_scan_prune().  Note that prunestate was invalidated by
+			 * lazy_vacuum_heap_page() call.
 			 */
-			Assert(dead_items->num_items == 0);
+			UnlockReleaseBuffer(buf);
+			RecordPageWithFreeSpace(vacrel->rel, blkno, PageGetHeapFreeSpace(page));
+			goto next;
 		}
+
+		/*
+		 * There was no call to lazy_vacuum_heap_page() because pruning didn't
+		 * encounter/create any LP_DEAD items that needed to be vacuumed.
+		 * Prune state has not been invalidated, so proceed with
+		 * prunestate-driven visibility map and FSM steps (just like the
+		 * two-pass strategy).
+		 */
+		Assert(vacrel->nindexes > 0 || dead_items->num_items == 0);
 
 		/*
 		 * Handle setting visibility map bit based on information from the VM
@@ -1518,7 +1491,7 @@ static void
 lazy_scan_prune(LVRelState *vacrel,
 				Buffer buf,
 				BlockNumber blkno,
-				Page page,
+				Page page, Buffer vmbuffer,
 				LVPagePruneState *prunestate)
 {
 	Relation	rel = vacrel->rel;
@@ -1537,6 +1510,7 @@ lazy_scan_prune(LVRelState *vacrel,
 	int64		fpi_before = pgWalUsage.wal_fpi;
 	OffsetNumber deadoffsets[MaxHeapTuplesPerPage];
 	HeapTupleFreeze frozen[MaxHeapTuplesPerPage];
+	VacDeadItems *dead_items = vacrel->dead_items;
 
 	Assert(BufferGetBlockNumber(buf) == blkno);
 
@@ -1879,7 +1853,6 @@ retry:
 	 */
 	if (lpdead_items > 0)
 	{
-		VacDeadItems *dead_items = vacrel->dead_items;
 		ItemPointerData tmp;
 
 		vacrel->lpdead_item_pages++;
@@ -1917,6 +1890,29 @@ retry:
 	vacrel->lpdead_items += lpdead_items;
 	vacrel->live_tuples += live_tuples;
 	vacrel->recently_dead_tuples += recently_dead_tuples;
+
+	Assert(!prunestate->all_visible || !prunestate->has_lpdead_items);
+
+	/* Remember the location of the last page with nonremovable tuples */
+	if (prunestate->hastup)
+		vacrel->nonempty_pages = blkno + 1;
+
+	if (vacrel->nindexes == 0 && prunestate->has_lpdead_items)
+	{
+		/*
+		 * Consider the need to do page-at-a-time heap vacuuming when using
+		 * the one-pass strategy now.
+		 *
+		 * The one-pass strategy will never call lazy_vacuum().  The steps
+		 * performed here can be thought of as the one-pass equivalent of a
+		 * call to lazy_vacuum().
+		 */
+		lazy_vacuum_heap_page(vacrel, blkno, buf, 0, vmbuffer);
+
+		/* Forget the LP_DEAD items that we just vacuumed */
+		dead_items->num_items = 0;
+	}
+
 }
 
 /*
