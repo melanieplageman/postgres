@@ -1535,30 +1535,24 @@ retry:
 				 */
 				if (prunestate.all_visible)
 				{
-					TransactionId xmin;
-
-					if (!HeapTupleHeaderXminCommitted(tuple.t_data))
-					{
-						prunestate.all_visible = false;
-						break;
-					}
-
 					/*
 					 * The inserter definitely committed. But is it old enough
 					 * that everyone sees it as committed?
 					 */
-					xmin = HeapTupleHeaderGetXmin(tuple.t_data);
-					if (!TransactionIdPrecedes(xmin,
-											   vacrel->cutoffs.OldestXmin))
-					{
-						prunestate.all_visible = false;
-						break;
-					}
+					TransactionId xmin = HeapTupleHeaderGetXmin(tuple.t_data);
 
-					/* Track newest xmin on page. */
-					if (TransactionIdFollows(xmin, prunestate.visibility_cutoff_xid) &&
-						TransactionIdIsNormal(xmin))
-						prunestate.visibility_cutoff_xid = xmin;
+					if (HeapTupleHeaderXminCommitted(tuple.t_data) &&
+						GlobalVisTestIsRemovableXid(vacrel->vistest, xmin))
+					{
+						/* alive and visible */
+						if (TransactionIdIsNormal(xmin) &&
+							TransactionIdFollows(xmin, prunestate.visibility_cutoff_xid))
+						{
+							prunestate.visibility_cutoff_xid = xmin;
+						}
+					}
+					else
+						prunestate.all_visible = false;
 				}
 				break;
 			case HEAPTUPLE_RECENTLY_DEAD:
