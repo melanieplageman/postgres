@@ -225,7 +225,6 @@ typedef struct LVPagePruneState
 	 * pruning and freezing.  all_visible implies !has_lpdead_items, but don't
 	 * trust all_frozen result unless all_visible is also set to true.
 	 */
-	bool		all_visible;	/* Every item visible to all? */
 	bool		all_frozen;		/* provided all_visible is also true */
 	TransactionId visibility_cutoff_xid;	/* For recovery conflicts */
 } LVPagePruneState;
@@ -1430,7 +1429,6 @@ retry:
 	 */
 	prunestate.hastup = false;
 	prunestate.has_lpdead_items = false;
-	prunestate.all_visible = true;
 	prunestate.all_frozen = true;
 	prunestate.visibility_cutoff_xid = InvalidTransactionId;
 
@@ -1518,21 +1516,8 @@ retry:
 		switch (res)
 		{
 			case HEAPTUPLE_LIVE:
-
-				/*
-				 * Is the tuple definitely visible to all transactions?
-				 *
-				 * NB: Like with per-tuple hint bits, we can't set the
-				 * PD_ALL_VISIBLE flag if the inserter committed
-				 * asynchronously. See SetHintBits for more info. Check that
-				 * the tuple is hinted xmin-committed because of that.
-				 */
-				if (prunestate.all_visible)
+				if (prune_result.all_visible)
 				{
-					/*
-					 * The inserter definitely committed. But is it old enough
-					 * that everyone sees it as committed?
-					 */
 					TransactionId xmin = HeapTupleHeaderGetXmin(tuple.t_data);
 
 					if (HeapTupleHeaderXminCommitted(tuple.t_data) &&
@@ -1545,20 +1530,13 @@ retry:
 							prunestate.visibility_cutoff_xid = xmin;
 						}
 					}
-					else
-						prunestate.all_visible = false;
 				}
 				break;
 			case HEAPTUPLE_RECENTLY_DEAD:
-				prunestate.all_visible = false;
 				break;
 			case HEAPTUPLE_INSERT_IN_PROGRESS:
-
-				prunestate.all_visible = false;
 				break;
 			case HEAPTUPLE_DELETE_IN_PROGRESS:
-				/* This is an expected case during concurrent vacuum */
-				prunestate.all_visible = false;
 				break;
 			default:
 				elog(ERROR, "unexpected HeapTupleSatisfiesVacuum result");
@@ -1599,7 +1577,7 @@ retry:
 	 * page all-frozen afterwards (might not happen until final heap pass).
 	 */
 	if (pagefrz.freeze_required || tuples_frozen == 0 ||
-		(prunestate.all_visible && prunestate.all_frozen &&
+		(prune_result.all_visible && prunestate.all_frozen &&
 		 fpi_before != pgWalUsage.wal_fpi))
 	{
 		/*
@@ -1637,7 +1615,7 @@ retry:
 			 * once we're done with it.  Otherwise we generate a conservative
 			 * cutoff by stepping back from OldestXmin.
 			 */
-			if (prunestate.all_visible && prunestate.all_frozen)
+			if (prune_result.all_visible && prunestate.all_frozen)
 			{
 				/* Using same cutoff when setting VM is now unnecessary */
 				snapshotConflictHorizon = prunestate.visibility_cutoff_xid;
@@ -1677,7 +1655,7 @@ retry:
 	 */
 #ifdef USE_ASSERT_CHECKING
 	/* Note that all_frozen value does not matter when !all_visible */
-	if (prunestate.all_visible && lpdead_items == 0)
+	if (prune_result.all_visible && lpdead_items == 0)
 	{
 		TransactionId cutoff;
 		bool		all_frozen;
@@ -1713,7 +1691,7 @@ retry:
 		 * Now that freezing has been finalized, unset all_visible.  It needs
 		 * to reflect the present state of things, as expected by our caller.
 		 */
-		prunestate.all_visible = false;
+		prune_result.all_visible = false;
 	}
 
 	/* Finally, add page-local counts to whole-VACUUM counts */
@@ -1723,7 +1701,7 @@ retry:
 	vacrel->live_tuples += prune_result.live_tuples;
 	vacrel->recently_dead_tuples += prune_result.recently_dead_tuples;
 
-	Assert(!prunestate.all_visible || !prunestate.has_lpdead_items);
+	Assert(!prune_result.all_visible || !prunestate.has_lpdead_items);
 
 	/* Remember the location of the last page with nonremovable tuples */
 	if (prunestate.hastup)
@@ -1788,7 +1766,7 @@ retry:
 	 * situation should only happen in rare cases after a crash, it is not
 	 * worth optimizing.
 	 */
-	if (prunestate.all_visible && !page_all_visible)
+	if (prune_result.all_visible && !page_all_visible)
 	{
 		PageSetAllVisible(page);
 		MarkBufferDirty(buf);
@@ -1816,7 +1794,7 @@ retry:
 		MarkBufferDirty(buf);
 	}
 
-	if (prunestate.all_visible)
+	if (prune_result.all_visible)
 	{
 		vmflags |= VISIBILITYMAP_ALL_VISIBLE;
 
@@ -1859,8 +1837,8 @@ retry:
 	 * all-frozen.  Note that all_frozen is only valid if all_visible is true,
 	 * so we must check both prunestate fields.
 	 */
-	else if ((prunestate.all_visible && !all_visible_according_to_vm) ||
-			 (prunestate.all_visible && prunestate.all_frozen &&
+	else if ((prune_result.all_visible && !all_visible_according_to_vm) ||
+			 (prune_result.all_visible && prunestate.all_frozen &&
 			  !all_frozen_according_to_vm &&
 			  !VM_ALL_FROZEN(rel, blkno, &vmbuffer)))
 	{

@@ -195,6 +195,7 @@ typedef struct HeapPageFreeze
 
 typedef struct PruneResult
 {
+	bool		all_visible;
 	int			ndeleted;
 	int			nnewlpdead;
 	int64		recently_dead_tuples;	/* # dead, but not yet removable */

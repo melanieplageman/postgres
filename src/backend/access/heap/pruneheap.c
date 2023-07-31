@@ -282,6 +282,7 @@ heap_page_prune(Relation relation, Buffer buffer,
 	prstate.vistest = vistest;
 	prstate.snapshotConflictHorizon = InvalidTransactionId;
 	prstate.result = result;
+	prstate.result->all_visible = true;
 	prstate.nredirected = prstate.ndead = prstate.nunused = 0;
 	memset(prstate.marked, 0, sizeof(prstate.marked));
 
@@ -513,8 +514,30 @@ heap_prune_satisfies_vacuum(PruneState *prstate, HeapTuple tup, Buffer buffer)
 			 */
 			prstate->result->live_tuples++;
 
+			/*
+			 * Is the tuple definitely visible to all transactions?
+			 *
+			 * NB: Like with per-tuple hint bits, we can't set the
+			 * PD_ALL_VISIBLE flag if the inserter committed asynchronously.
+			 * See SetHintBits for more info. Check that the tuple is hinted
+			 * xmin-committed because of that.
+			 */
+			if (prstate->result->all_visible)
+			{
+				/*
+				 * The inserter definitely committed. But is it old enough
+				 * that everyone sees it as committed?
+				 */
+				TransactionId xmin = HeapTupleHeaderGetXmin(tup->t_data);
+
+				if (!HeapTupleHeaderXminCommitted(tup->t_data) ||
+					!GlobalVisTestIsRemovableXid(prstate->vistest, xmin))
+					prstate->result->all_visible = false;
+			}
+
 			break;
 		case HEAPTUPLE_RECENTLY_DEAD:
+			prstate->result->all_visible = false;
 
 			/*
 			 * If tuple is recently dead then we must not remove it from the
@@ -524,6 +547,7 @@ heap_prune_satisfies_vacuum(PruneState *prstate, HeapTuple tup, Buffer buffer)
 			prstate->result->recently_dead_tuples++;
 			break;
 		case HEAPTUPLE_INSERT_IN_PROGRESS:
+			prstate->result->all_visible = false;
 
 			/*
 			 * We do not count these rows as live, because we expect the
@@ -534,6 +558,8 @@ heap_prune_satisfies_vacuum(PruneState *prstate, HeapTuple tup, Buffer buffer)
 			 */
 			break;
 		case HEAPTUPLE_DELETE_IN_PROGRESS:
+			/* This is an expected case during concurrent vacuum */
+			prstate->result->all_visible = false;
 
 			/*
 			 * Count such rows as live.  As above, we assume the deleting
