@@ -1727,11 +1727,8 @@ lazy_scan_prune(LVRelState *vacrel,
 	 * make everything safe for REDO was logged when the page's tuples were
 	 * frozen.
 	 */
-	if (prunestate.all_frozen)
-	{
+	if (!prunestate.all_frozen)
 		vm_conflict_horizon = prune_result.youngest_visible_xmin;
-		Assert(!TransactionIdIsValid(prune_result.youngest_visible_xmin));
-	}
 
 	/*
 	 * As of PostgreSQL 9.2, the visibility map bit should never be set if the
