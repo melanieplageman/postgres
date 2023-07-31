@@ -1420,7 +1420,6 @@ retry:
 	 * that were deleted from indexes.
 	 */
 	heap_page_prune(rel, buf, dead_items, vacrel->vistest,
-					InvalidTransactionId, 0,
 					&vacrel->offnum, &prune_result);
 
 	lpdead_items = dead_items->num_items - dead_items_before;

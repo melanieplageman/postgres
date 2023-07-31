@@ -295,8 +295,6 @@ extern void heap_page_prune_opt(Relation relation, Buffer buffer);
 extern void heap_page_prune(Relation relation, Buffer buffer,
 							VacDeadItems *dead_items,
 							struct GlobalVisState *vistest,
-							TransactionId old_snap_xmin,
-							TimestampTz old_snap_ts,
 							OffsetNumber *off_loc,
 							PruneResult *result);
 extern void heap_page_prune_execute(Buffer buffer,

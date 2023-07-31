@@ -37,18 +37,6 @@ typedef struct
 	/* tuple visibility test, initialized for the relation */
 	GlobalVisState *vistest;
 
-	/*
-	 * Thresholds set by TransactionIdLimitedForOldSnapshots() if they have
-	 * been computed (done on demand, and only if
-	 * OldSnapshotThresholdActive()). The first time a tuple is about to be
-	 * removed based on the limited horizon, old_snap_used is set to true, and
-	 * SetOldSnapshotThresholdTimestamp() is called. See
-	 * heap_prune_satisfies_vacuum().
-	 */
-	TimestampTz old_snap_ts;
-	TransactionId old_snap_xmin;
-	bool		old_snap_used;
-
 	TransactionId new_prune_xid;	/* new prune hint value for page */
 	TransactionId snapshotConflictHorizon;	/* latest xid removed */
 	int			nredirected;	/* numbers of entries in arrays below */
@@ -112,8 +100,6 @@ heap_page_prune_opt(Relation relation, Buffer buffer)
 	Page		page = BufferGetPage(buffer);
 	TransactionId prune_xid;
 	GlobalVisState *vistest;
-	TransactionId limited_xmin = InvalidTransactionId;
-	TimestampTz limited_ts = 0;
 	Size		minfree;
 	PruneResult prune_result;
 
@@ -163,18 +149,7 @@ heap_page_prune_opt(Relation relation, Buffer buffer)
 	vistest = GlobalVisTestFor(relation);
 
 	if (!GlobalVisTestIsRemovableXid(vistest, prune_xid))
-	{
-		if (!OldSnapshotThresholdActive())
-			return;
-
-		if (!TransactionIdLimitedForOldSnapshots(GlobalVisTestNonRemovableHorizon(vistest),
-												 relation,
-												 &limited_xmin, &limited_ts))
-			return;
-
-		if (!TransactionIdPrecedes(prune_xid, limited_xmin))
-			return;
-	}
+		return;
 
 	/*
 	 * We prune when a previous UPDATE failed to find enough space on the page
@@ -205,8 +180,8 @@ heap_page_prune_opt(Relation relation, Buffer buffer)
 		 */
 		if (PageIsFull(page) || PageGetHeapFreeSpace(page) < minfree)
 		{
-			heap_page_prune(relation, buffer, NULL, vistest, limited_xmin,
-							limited_ts, NULL, &prune_result);
+			heap_page_prune(relation, buffer, NULL, vistest,
+							NULL, &prune_result);
 
 			/*
 			 * Report the number of tuples reclaimed to pgstats.  This is
@@ -277,8 +252,6 @@ void
 heap_page_prune(Relation relation, Buffer buffer,
 				VacDeadItems *dead_items,
 				GlobalVisState *vistest,
-				TransactionId old_snap_xmin,
-				TimestampTz old_snap_ts,
 				OffsetNumber *off_loc,
 				PruneResult * result)
 {
@@ -303,9 +276,6 @@ heap_page_prune(Relation relation, Buffer buffer,
 	prstate.rel = relation;
 	prstate.blkno = BufferGetBlockNumber(buffer);
 	prstate.vistest = vistest;
-	prstate.old_snap_xmin = old_snap_xmin;
-	prstate.old_snap_ts = old_snap_ts;
-	prstate.old_snap_used = false;
 	prstate.snapshotConflictHorizon = InvalidTransactionId;
 	prstate.nredirected = prstate.ndead = prstate.nunused = 0;
 	memset(prstate.marked, 0, sizeof(prstate.marked));
@@ -519,52 +489,12 @@ heap_prune_satisfies_vacuum(PruneState *prstate, HeapTuple tup, Buffer buffer)
 		return res;
 
 	/*
-	 * If we are already relying on the limited xmin, there is no need to
-	 * delay doing so anymore.
-	 */
-	if (prstate->old_snap_used)
-	{
-		Assert(TransactionIdIsValid(prstate->old_snap_xmin));
-
-		if (TransactionIdPrecedes(dead_after, prstate->old_snap_xmin))
-			res = HEAPTUPLE_DEAD;
-		return res;
-	}
-
-	/*
 	 * First check if GlobalVisTestIsRemovableXid() is sufficient to find the
 	 * row dead. If not, and old_snapshot_threshold is enabled, try to use the
 	 * lowered horizon.
 	 */
 	if (GlobalVisTestIsRemovableXid(prstate->vistest, dead_after))
 		res = HEAPTUPLE_DEAD;
-	else if (OldSnapshotThresholdActive())
-	{
-		/* haven't determined limited horizon yet, requests */
-		if (!TransactionIdIsValid(prstate->old_snap_xmin))
-		{
-			TransactionId horizon =
-				GlobalVisTestNonRemovableHorizon(prstate->vistest);
-
-			TransactionIdLimitedForOldSnapshots(horizon, prstate->rel,
-												&prstate->old_snap_xmin,
-												&prstate->old_snap_ts);
-		}
-
-		if (TransactionIdIsValid(prstate->old_snap_xmin) &&
-			TransactionIdPrecedes(dead_after, prstate->old_snap_xmin))
-		{
-			/*
-			 * About to remove row based on snapshot_too_old. Need to raise
-			 * the threshold so problematic accesses would error.
-			 */
-			Assert(!prstate->old_snap_used);
-			SetOldSnapshotThresholdTimestamp(prstate->old_snap_ts,
-											 prstate->old_snap_xmin);
-			prstate->old_snap_used = true;
-			res = HEAPTUPLE_DEAD;
-		}
-	}
 
 	return res;
 }
