@@ -195,6 +195,7 @@ typedef struct HeapPageFreeze
 
 typedef struct PruneResult
 {
+	TransactionId youngest_visible_xmin;
 	bool		all_visible;
 	int			ndeleted;
 	int			nnewlpdead;

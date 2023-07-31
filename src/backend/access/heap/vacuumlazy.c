@@ -226,7 +226,6 @@ typedef struct LVPagePruneState
 	 * trust all_frozen result unless all_visible is also set to true.
 	 */
 	bool		all_frozen;		/* provided all_visible is also true */
-	TransactionId visibility_cutoff_xid;	/* For recovery conflicts */
 } LVPagePruneState;
 
 /* Struct for saving and restoring vacuum error information. */
@@ -1342,21 +1341,6 @@ lazy_scan_new_or_empty(LVRelState *vacrel, Buffer buf, BlockNumber blkno,
  *	lazy_scan_prune() -- lazy_scan_heap() pruning and freezing.
  *
  * Caller must hold pin and buffer cleanup lock on the buffer.
- *
- * Prior to PostgreSQL 14 there were very rare cases where heap_page_prune()
- * was allowed to disagree with our HeapTupleSatisfiesVacuum() call about
- * whether or not a tuple should be considered DEAD.  This happened when an
- * inserting transaction concurrently aborted (after our heap_page_prune()
- * call, before our HeapTupleSatisfiesVacuum() call).  There was rather a lot
- * of complexity just so we could deal with tuples that were DEAD to VACUUM,
- * but nevertheless were left with storage after pruning.
- *
- * The approach we take now is to restart pruning when the race condition is
- * detected.  This allows heap_page_prune() to prune the tuples inserted by
- * the now-aborted transaction.  This is a little crude, but it guarantees
- * that any items that make it into the dead_items array are simple LP_DEAD
- * line pointers, and that every remaining item with tuple storage is
- * considered as a candidate for freezing.
  */
 static bool
 lazy_scan_prune(LVRelState *vacrel,
@@ -1371,7 +1355,6 @@ lazy_scan_prune(LVRelState *vacrel,
 				maxoff;
 	ItemId		itemid;
 	HeapTupleData tuple;
-	HTSV_Result res;
 	int			tuples_frozen,
 				lpdead_items;
 	HeapPageFreeze pagefrz;
@@ -1395,8 +1378,6 @@ lazy_scan_prune(LVRelState *vacrel,
 	 * space will continue to look like LP_UNUSED items below.
 	 */
 	maxoff = PageGetMaxOffsetNumber(page);
-
-retry:
 
 	/* Initialize (or reset) page-level state */
 	pagefrz.freeze_required = false;
@@ -1430,7 +1411,6 @@ retry:
 	prunestate.hastup = false;
 	prunestate.has_lpdead_items = false;
 	prunestate.all_frozen = true;
-	prunestate.visibility_cutoff_xid = InvalidTransactionId;
 
 	for (offnum = FirstOffsetNumber;
 		 offnum <= maxoff;
@@ -1481,67 +1461,6 @@ retry:
 		tuple.t_data = (HeapTupleHeader) PageGetItem(page, itemid);
 		tuple.t_len = ItemIdGetLength(itemid);
 		tuple.t_tableOid = RelationGetRelid(rel);
-
-		/*
-		 * DEAD tuples are almost always pruned into LP_DEAD line pointers by
-		 * heap_page_prune(), but it's possible that the tuple state changed
-		 * since heap_page_prune() looked.  Handle that here by restarting.
-		 * (See comments at the top of function for a full explanation.)
-		 */
-		res = HeapTupleSatisfiesVacuum(&tuple, vacrel->cutoffs.OldestXmin,
-									   buf);
-
-		if (unlikely(res == HEAPTUPLE_DEAD))
-			goto retry;
-
-		/*
-		 * The criteria for counting a tuple as live in this block need to
-		 * match what analyze.c's acquire_sample_rows() does, otherwise VACUUM
-		 * and ANALYZE may produce wildly different reltuples values, e.g.
-		 * when there are many recently-dead tuples.
-		 *
-		 * The logic here is a bit simpler than acquire_sample_rows(), as
-		 * VACUUM can't run inside a transaction block, which makes some cases
-		 * impossible (e.g. in-progress insert from the same transaction).
-		 *
-		 * We treat LP_DEAD items (which are the closest thing to DEAD tuples
-		 * that might be seen here) differently, too: we assume that they'll
-		 * become LP_UNUSED before VACUUM finishes.  This difference is only
-		 * superficial.  VACUUM effectively agrees with ANALYZE about DEAD
-		 * items, in the end.  VACUUM won't remember LP_DEAD items, but only
-		 * because they're not supposed to be left behind when it is done.
-		 * (Cases where we bypass index vacuuming will violate this optimistic
-		 * assumption, but the overall impact of that should be negligible.)
-		 */
-		switch (res)
-		{
-			case HEAPTUPLE_LIVE:
-				if (prune_result.all_visible)
-				{
-					TransactionId xmin = HeapTupleHeaderGetXmin(tuple.t_data);
-
-					if (HeapTupleHeaderXminCommitted(tuple.t_data) &&
-						GlobalVisTestIsRemovableXid(vacrel->vistest, xmin))
-					{
-						/* alive and visible */
-						if (TransactionIdIsNormal(xmin) &&
-							TransactionIdFollows(xmin, prunestate.visibility_cutoff_xid))
-						{
-							prunestate.visibility_cutoff_xid = xmin;
-						}
-					}
-				}
-				break;
-			case HEAPTUPLE_RECENTLY_DEAD:
-				break;
-			case HEAPTUPLE_INSERT_IN_PROGRESS:
-				break;
-			case HEAPTUPLE_DELETE_IN_PROGRESS:
-				break;
-			default:
-				elog(ERROR, "unexpected HeapTupleSatisfiesVacuum result");
-				break;
-		}
 
 		prunestate.hastup = true;	/* page makes rel truncation unsafe */
 
@@ -1618,8 +1537,8 @@ retry:
 			if (prune_result.all_visible && prunestate.all_frozen)
 			{
 				/* Using same cutoff when setting VM is now unnecessary */
-				snapshotConflictHorizon = prunestate.visibility_cutoff_xid;
-				prunestate.visibility_cutoff_xid = InvalidTransactionId;
+				snapshotConflictHorizon = prune_result.youngest_visible_xmin;
+				prune_result.youngest_visible_xmin = InvalidTransactionId;
 			}
 			else
 			{
@@ -1664,7 +1583,7 @@ retry:
 			Assert(false);
 
 		Assert(!TransactionIdIsValid(cutoff) ||
-			   cutoff == prunestate.visibility_cutoff_xid);
+			   cutoff == prune_result.youngest_visible_xmin);
 	}
 #endif
 
@@ -1810,8 +1729,8 @@ retry:
 	 */
 	if (prunestate.all_frozen)
 	{
-		vm_conflict_horizon = prunestate.visibility_cutoff_xid;
-		Assert(!TransactionIdIsValid(prunestate.visibility_cutoff_xid));
+		vm_conflict_horizon = prune_result.youngest_visible_xmin;
+		Assert(!TransactionIdIsValid(prune_result.youngest_visible_xmin));
 	}
 
 	/*

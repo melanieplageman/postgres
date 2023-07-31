@@ -283,6 +283,7 @@ heap_page_prune(Relation relation, Buffer buffer,
 	prstate.snapshotConflictHorizon = InvalidTransactionId;
 	prstate.result = result;
 	prstate.result->all_visible = true;
+	prstate.result->youngest_visible_xmin = InvalidTransactionId;
 	prstate.nredirected = prstate.ndead = prstate.nunused = 0;
 	memset(prstate.marked, 0, sizeof(prstate.marked));
 
@@ -502,6 +503,25 @@ heap_prune_satisfies_vacuum(PruneState *prstate, HeapTuple tup, Buffer buffer)
 		res = HEAPTUPLE_DEAD;
 	}
 
+	/*
+	 * The criteria for counting a tuple as live in this block need to match
+	 * what analyze.c's acquire_sample_rows() does, otherwise VACUUM and
+	 * ANALYZE may produce wildly different reltuples values, e.g. when there
+	 * are many recently-dead tuples.
+	 *
+	 * The logic here is a bit simpler than acquire_sample_rows(), as VACUUM
+	 * can't run inside a transaction block, which makes some cases impossible
+	 * (e.g. in-progress insert from the same transaction).
+	 *
+	 * We treat LP_DEAD items (which are the closest thing to DEAD tuples that
+	 * might be seen here) differently, too: we assume that they'll become
+	 * LP_UNUSED before VACUUM finishes.  This difference is only superficial.
+	 * VACUUM effectively agrees with ANALYZE about DEAD items, in the end.
+	 * VACUUM won't remember LP_DEAD items, but only because they're not
+	 * supposed to be left behind when it is done. (Cases where we bypass
+	 * index vacuuming will violate this optimistic assumption, but the
+	 * overall impact of that should be negligible.)
+	 */
 	switch (res)
 	{
 		case HEAPTUPLE_DEAD:
@@ -530,12 +550,22 @@ heap_prune_satisfies_vacuum(PruneState *prstate, HeapTuple tup, Buffer buffer)
 				 */
 				TransactionId xmin = HeapTupleHeaderGetXmin(tup->t_data);
 
-				if (!HeapTupleHeaderXminCommitted(tup->t_data) ||
-					!GlobalVisTestIsRemovableXid(prstate->vistest, xmin))
+				if (HeapTupleHeaderXminCommitted(tup->t_data) &&
+					GlobalVisTestIsRemovableXid(prstate->vistest, xmin))
+				{
+					/* alive and visible */
+					if (TransactionIdIsNormal(xmin) &&
+						TransactionIdFollows(xmin, prstate->result->youngest_visible_xmin))
+					{
+						prstate->result->youngest_visible_xmin = xmin;
+					}
+				}
+				else
 					prstate->result->all_visible = false;
 			}
 
 			break;
+
 		case HEAPTUPLE_RECENTLY_DEAD:
 			prstate->result->all_visible = false;
 
