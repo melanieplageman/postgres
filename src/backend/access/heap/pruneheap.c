@@ -32,6 +32,7 @@
 typedef struct
 {
 	Relation	rel;
+	BlockNumber blkno;
 
 	/* tuple visibility test, initialized for the relation */
 	GlobalVisState *vistest;
@@ -83,11 +84,12 @@ static HTSV_Result heap_prune_satisfies_vacuum(PruneState *prstate,
 											   Buffer buffer);
 static int	heap_prune_chain(Buffer buffer,
 							 OffsetNumber rootoffnum,
-							 PruneState *prstate);
+							 PruneState *prstate, VacDeadItems *dead_items);
 static void heap_prune_record_prunable(PruneState *prstate, TransactionId xid);
 static void heap_prune_record_redirect(PruneState *prstate,
 									   OffsetNumber offnum, OffsetNumber rdoffnum);
-static void heap_prune_record_dead(PruneState *prstate, OffsetNumber offnum);
+static void heap_prune_record_dead(PruneState *prstate, OffsetNumber offnum,
+								   VacDeadItems *dead_items);
 static void heap_prune_record_unused(PruneState *prstate, OffsetNumber offnum);
 static void page_verify_redirects(Page page);
 
@@ -205,7 +207,7 @@ heap_page_prune_opt(Relation relation, Buffer buffer)
 			int			ndeleted,
 						nnewlpdead;
 
-			ndeleted = heap_page_prune(relation, buffer, vistest, limited_xmin,
+			ndeleted = heap_page_prune(relation, buffer, NULL, vistest, limited_xmin,
 									   limited_ts, &nnewlpdead, NULL);
 
 			/*
@@ -238,6 +240,18 @@ heap_page_prune_opt(Relation relation, Buffer buffer)
 	}
 }
 
+static void
+catalog_dead_item_for_vacuum(VacDeadItems *dead_items,
+							 BlockNumber blkno, OffsetNumber offnum)
+{
+	ItemPointerData tmp;
+
+	if (!dead_items)
+		return;
+	ItemPointerSetBlockNumber(&tmp, blkno);
+	ItemPointerSetOffsetNumber(&tmp, offnum);
+	dead_items->items[dead_items->num_items++] = tmp;
+}
 
 /*
  * Prune and repair fragmentation in the specified page.
@@ -263,6 +277,7 @@ heap_page_prune_opt(Relation relation, Buffer buffer)
  */
 int
 heap_page_prune(Relation relation, Buffer buffer,
+				VacDeadItems *dead_items,
 				GlobalVisState *vistest,
 				TransactionId old_snap_xmin,
 				TimestampTz old_snap_ts,
@@ -271,7 +286,6 @@ heap_page_prune(Relation relation, Buffer buffer,
 {
 	int			ndeleted = 0;
 	Page		page = BufferGetPage(buffer);
-	BlockNumber blockno = BufferGetBlockNumber(buffer);
 	OffsetNumber offnum,
 				maxoff;
 	PruneState	prstate;
@@ -290,6 +304,7 @@ heap_page_prune(Relation relation, Buffer buffer,
 	 */
 	prstate.new_prune_xid = InvalidTransactionId;
 	prstate.rel = relation;
+	prstate.blkno = BufferGetBlockNumber(buffer);
 	prstate.vistest = vistest;
 	prstate.old_snap_xmin = old_snap_xmin;
 	prstate.old_snap_ts = old_snap_ts;
@@ -338,7 +353,7 @@ heap_page_prune(Relation relation, Buffer buffer,
 		htup = (HeapTupleHeader) PageGetItem(page, itemid);
 		tup.t_data = htup;
 		tup.t_len = ItemIdGetLength(itemid);
-		ItemPointerSet(&(tup.t_self), blockno, offnum);
+		ItemPointerSet(&(tup.t_self), prstate.blkno, offnum);
 
 		/*
 		 * Set the offset number so that we can display it along with any
@@ -358,21 +373,23 @@ heap_page_prune(Relation relation, Buffer buffer,
 	{
 		ItemId		itemid;
 
-		/* Ignore items already processed as part of an earlier chain */
-		if (prstate.marked[offnum])
-			continue;
-
 		/* see preceding loop */
 		if (off_loc)
 			*off_loc = offnum;
 
 		/* Nothing to do if slot is empty or already dead */
 		itemid = PageGetItemId(page, offnum);
-		if (!ItemIdIsUsed(itemid) || ItemIdIsDead(itemid))
+		if (!ItemIdIsUsed(itemid))
 			continue;
 
+		if (ItemIdIsDead(itemid))
+		{
+			catalog_dead_item_for_vacuum(dead_items, prstate.blkno, offnum);
+			continue;
+		}
+
 		/* Process this item or chain of items */
-		ndeleted += heap_prune_chain(buffer, offnum, &prstate);
+		ndeleted += heap_prune_chain(buffer, offnum, &prstate, dead_items);
 	}
 
 	/* Clear the offset information once we have processed the given page. */
@@ -588,7 +605,8 @@ heap_prune_satisfies_vacuum(PruneState *prstate, HeapTuple tup, Buffer buffer)
  * Returns the number of tuples (to be) deleted from the page.
  */
 static int
-heap_prune_chain(Buffer buffer, OffsetNumber rootoffnum, PruneState *prstate)
+heap_prune_chain(Buffer buffer, OffsetNumber rootoffnum,
+				 PruneState *prstate, VacDeadItems *dead_items)
 {
 	int			ndeleted = 0;
 	Page		dp = (Page) BufferGetPage(buffer);
@@ -633,7 +651,7 @@ heap_prune_chain(Buffer buffer, OffsetNumber rootoffnum, PruneState *prstate)
 			 * gets there first will mark the tuple unused.
 			 */
 			if (prstate->htsv[rootoffnum] == HEAPTUPLE_DEAD &&
-				!HeapTupleHeaderIsHotUpdated(htup))
+				!HeapTupleHeaderIsHotUpdated(htup) && !prstate->marked[rootoffnum])
 			{
 				heap_prune_record_unused(prstate, rootoffnum);
 				HeapTupleHeaderAdvanceConflictHorizon(htup,
@@ -645,6 +663,10 @@ heap_prune_chain(Buffer buffer, OffsetNumber rootoffnum, PruneState *prstate)
 			return ndeleted;
 		}
 	}
+
+	/* Ignore items already processed as part of an earlier chain */
+	if (prstate->marked[rootoffnum])
+		return ndeleted;
 
 	/* Start from the root tuple */
 	offnum = rootoffnum;
@@ -832,7 +854,7 @@ heap_prune_chain(Buffer buffer, OffsetNumber rootoffnum, PruneState *prstate)
 		 * redirect the root to the correct chain member.
 		 */
 		if (i >= nchain)
-			heap_prune_record_dead(prstate, rootoffnum);
+			heap_prune_record_dead(prstate, rootoffnum, dead_items);
 		else
 			heap_prune_record_redirect(prstate, rootoffnum, chainitems[i]);
 	}
@@ -845,7 +867,7 @@ heap_prune_chain(Buffer buffer, OffsetNumber rootoffnum, PruneState *prstate)
 		 * redirect item.  We can clean up by setting the redirect item to
 		 * DEAD state.
 		 */
-		heap_prune_record_dead(prstate, rootoffnum);
+		heap_prune_record_dead(prstate, rootoffnum, dead_items);
 	}
 
 	return ndeleted;
@@ -882,13 +904,15 @@ heap_prune_record_redirect(PruneState *prstate,
 
 /* Record line pointer to be marked dead */
 static void
-heap_prune_record_dead(PruneState *prstate, OffsetNumber offnum)
+heap_prune_record_dead(PruneState *prstate, OffsetNumber offnum,
+					   VacDeadItems *dead_items)
 {
 	Assert(prstate->ndead < MaxHeapTuplesPerPage);
 	prstate->nowdead[prstate->ndead] = offnum;
 	prstate->ndead++;
 	Assert(!prstate->marked[offnum]);
 	prstate->marked[offnum] = true;
+	catalog_dead_item_for_vacuum(dead_items, prstate->blkno, offnum);
 }
 
 /* Record line pointer to be marked unused */

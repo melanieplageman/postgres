@@ -1380,7 +1380,6 @@ lazy_scan_prune(LVRelState *vacrel,
 	int			nnewlpdead;
 	HeapPageFreeze pagefrz;
 	int64		fpi_before = pgWalUsage.wal_fpi;
-	OffsetNumber deadoffsets[MaxHeapTuplesPerPage];
 	HeapTupleFreeze frozen[MaxHeapTuplesPerPage];
 	VacDeadItems *dead_items = vacrel->dead_items;
 	uint8		vmflags = 0;
@@ -1388,6 +1387,7 @@ lazy_scan_prune(LVRelState *vacrel,
 	bool		all_visible_according_to_vm = vmbits & VISIBILITYMAP_ALL_VISIBLE;
 	bool		all_frozen_according_to_vm = vmbits & VISIBILITYMAP_ALL_FROZEN;
 	TransactionId vm_conflict_horizon = InvalidTransactionId;
+	int			dead_items_before = dead_items->num_items;
 
 	Assert(BufferGetBlockNumber(buf) == blkno);
 
@@ -1421,9 +1421,11 @@ retry:
 	 * lpdead_items's final value can be thought of as the number of tuples
 	 * that were deleted from indexes.
 	 */
-	tuples_deleted = heap_page_prune(rel, buf, vacrel->vistest,
+	tuples_deleted = heap_page_prune(rel, buf, dead_items, vacrel->vistest,
 									 InvalidTransactionId, 0, &nnewlpdead,
 									 &vacrel->offnum);
+
+	lpdead_items = dead_items->num_items - dead_items_before;
 
 	/*
 	 * Now scan the page to collect LP_DEAD items and check for tuples
@@ -1475,7 +1477,6 @@ retry:
 			 * (This is another case where it's useful to anticipate that any
 			 * LP_DEAD items will become LP_UNUSED during the ongoing VACUUM.)
 			 */
-			deadoffsets[lpdead_items++] = offnum;
 			continue;
 		}
 
@@ -1730,18 +1731,8 @@ retry:
 	 */
 	if (lpdead_items > 0)
 	{
-		ItemPointerData tmp;
-
 		vacrel->lpdead_item_pages++;
 		prunestate.has_lpdead_items = true;
-
-		ItemPointerSetBlockNumber(&tmp, blkno);
-
-		for (int i = 0; i < lpdead_items; i++)
-		{
-			ItemPointerSetOffsetNumber(&tmp, deadoffsets[i]);
-			dead_items->items[dead_items->num_items++] = tmp;
-		}
 
 		Assert(dead_items->num_items <= dead_items->max_items);
 		pgstat_progress_update_param(PROGRESS_VACUUM_NUM_DEAD_TUPLES,
