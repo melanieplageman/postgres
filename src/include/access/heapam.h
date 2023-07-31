@@ -197,6 +197,8 @@ typedef struct PruneResult
 {
 	int			ndeleted;
 	int			nnewlpdead;
+	int64		recently_dead_tuples;	/* # dead, but not yet removable */
+	int64		live_tuples;	/* # live tuples remaining */
 }			PruneResult;
 
 /* ----------------

@@ -39,6 +39,8 @@ typedef struct
 
 	TransactionId new_prune_xid;	/* new prune hint value for page */
 	TransactionId snapshotConflictHorizon;	/* latest xid removed */
+	PruneResult *result;
+
 	int			nredirected;	/* numbers of entries in arrays below */
 	int			ndead;
 	int			nunused;
@@ -173,6 +175,8 @@ heap_page_prune_opt(Relation relation, Buffer buffer)
 		if (!ConditionalLockBufferForCleanup(buffer))
 			return;
 
+		memset(&prune_result, 0, sizeof(prune_result));
+
 		/*
 		 * Now that we have buffer lock, get accurate information about the
 		 * page's free space, and recheck the heuristic about whether to
@@ -277,6 +281,7 @@ heap_page_prune(Relation relation, Buffer buffer,
 	prstate.blkno = BufferGetBlockNumber(buffer);
 	prstate.vistest = vistest;
 	prstate.snapshotConflictHorizon = InvalidTransactionId;
+	prstate.result = result;
 	prstate.nredirected = prstate.ndead = prstate.nunused = 0;
 	memset(prstate.marked, 0, sizeof(prstate.marked));
 
@@ -485,16 +490,63 @@ heap_prune_satisfies_vacuum(PruneState *prstate, HeapTuple tup, Buffer buffer)
 
 	res = HeapTupleSatisfiesVacuumHorizon(tup, buffer, &dead_after);
 
-	if (res != HEAPTUPLE_RECENTLY_DEAD)
-		return res;
-
 	/*
 	 * First check if GlobalVisTestIsRemovableXid() is sufficient to find the
 	 * row dead. If not, and old_snapshot_threshold is enabled, try to use the
 	 * lowered horizon.
 	 */
-	if (GlobalVisTestIsRemovableXid(prstate->vistest, dead_after))
+	if (res == HEAPTUPLE_RECENTLY_DEAD &&
+		GlobalVisTestIsRemovableXid(prstate->vistest, dead_after))
+	{
 		res = HEAPTUPLE_DEAD;
+	}
+
+	switch (res)
+	{
+		case HEAPTUPLE_DEAD:
+			break;
+		case HEAPTUPLE_LIVE:
+
+			/*
+			 * Count it as live.  Not only is this natural, but it's also what
+			 * acquire_sample_rows() does.
+			 */
+			prstate->result->live_tuples++;
+
+			break;
+		case HEAPTUPLE_RECENTLY_DEAD:
+
+			/*
+			 * If tuple is recently dead then we must not remove it from the
+			 * relation.  (We only remove items that are LP_DEAD from
+			 * pruning.)
+			 */
+			prstate->result->recently_dead_tuples++;
+			break;
+		case HEAPTUPLE_INSERT_IN_PROGRESS:
+
+			/*
+			 * We do not count these rows as live, because we expect the
+			 * inserting transaction to update the counters at commit, and we
+			 * assume that will happen only after we report our results.  This
+			 * assumption is a bit shaky, but it is what acquire_sample_rows()
+			 * does, so be consistent.
+			 */
+			break;
+		case HEAPTUPLE_DELETE_IN_PROGRESS:
+
+			/*
+			 * Count such rows as live.  As above, we assume the deleting
+			 * transaction will commit and update the counters after we
+			 * report.
+			 */
+			prstate->result->live_tuples++;
+			break;
+		default:
+			elog(ERROR, "unexpected HeapTupleSatisfiesVacuum result");
+			break;
+	}
+
 
 	return res;
 }

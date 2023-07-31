@@ -1374,9 +1374,7 @@ lazy_scan_prune(LVRelState *vacrel,
 	HeapTupleData tuple;
 	HTSV_Result res;
 	int			tuples_frozen,
-				lpdead_items,
-				live_tuples,
-				recently_dead_tuples;
+				lpdead_items;
 	HeapPageFreeze pagefrz;
 	int64		fpi_before = pgWalUsage.wal_fpi;
 	HeapTupleFreeze frozen[MaxHeapTuplesPerPage];
@@ -1389,6 +1387,8 @@ lazy_scan_prune(LVRelState *vacrel,
 	int			dead_items_before = dead_items->num_items;
 
 	Assert(BufferGetBlockNumber(buf) == blkno);
+
+	memset(&prune_result, 0, sizeof(prune_result));
 
 	/*
 	 * maxoff might be reduced following line pointer array truncation in
@@ -1407,8 +1407,8 @@ retry:
 	pagefrz.NoFreezePageRelminMxid = vacrel->NewRelminMxid;
 	tuples_frozen = 0;
 	lpdead_items = 0;
-	live_tuples = 0;
-	recently_dead_tuples = 0;
+	prune_result.live_tuples = 0;
+	prune_result.recently_dead_tuples = 0;
 
 	/*
 	 * Prune all HOT-update chains in this page.
@@ -1520,12 +1520,6 @@ retry:
 			case HEAPTUPLE_LIVE:
 
 				/*
-				 * Count it as live.  Not only is this natural, but it's also
-				 * what acquire_sample_rows() does.
-				 */
-				live_tuples++;
-
-				/*
 				 * Is the tuple definitely visible to all transactions?
 				 *
 				 * NB: Like with per-tuple hint bits, we can't set the
@@ -1556,36 +1550,15 @@ retry:
 				}
 				break;
 			case HEAPTUPLE_RECENTLY_DEAD:
-
-				/*
-				 * If tuple is recently dead then we must not remove it from
-				 * the relation.  (We only remove items that are LP_DEAD from
-				 * pruning.)
-				 */
-				recently_dead_tuples++;
 				prunestate.all_visible = false;
 				break;
 			case HEAPTUPLE_INSERT_IN_PROGRESS:
 
-				/*
-				 * We do not count these rows as live, because we expect the
-				 * inserting transaction to update the counters at commit, and
-				 * we assume that will happen only after we report our
-				 * results.  This assumption is a bit shaky, but it is what
-				 * acquire_sample_rows() does, so be consistent.
-				 */
 				prunestate.all_visible = false;
 				break;
 			case HEAPTUPLE_DELETE_IN_PROGRESS:
 				/* This is an expected case during concurrent vacuum */
 				prunestate.all_visible = false;
-
-				/*
-				 * Count such rows as live.  As above, we assume the deleting
-				 * transaction will commit and update the counters after we
-				 * report.
-				 */
-				live_tuples++;
 				break;
 			default:
 				elog(ERROR, "unexpected HeapTupleSatisfiesVacuum result");
@@ -1747,8 +1720,8 @@ retry:
 	vacrel->tuples_deleted += prune_result.ndeleted;
 	vacrel->tuples_frozen += tuples_frozen;
 	vacrel->lpdead_items += lpdead_items;
-	vacrel->live_tuples += live_tuples;
-	vacrel->recently_dead_tuples += recently_dead_tuples;
+	vacrel->live_tuples += prune_result.live_tuples;
+	vacrel->recently_dead_tuples += prune_result.recently_dead_tuples;
 
 	Assert(!prunestate.all_visible || !prunestate.has_lpdead_items);
 
