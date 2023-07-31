@@ -1366,18 +1366,17 @@ lazy_scan_prune(LVRelState *vacrel,
 				Page page, Buffer vmbuffer, uint8 vmbits)
 {
 	LVPagePruneState prunestate;
+	PruneResult prune_result;
 	Relation	rel = vacrel->rel;
 	OffsetNumber offnum,
 				maxoff;
 	ItemId		itemid;
 	HeapTupleData tuple;
 	HTSV_Result res;
-	int			tuples_deleted,
-				tuples_frozen,
+	int			tuples_frozen,
 				lpdead_items,
 				live_tuples,
 				recently_dead_tuples;
-	int			nnewlpdead;
 	HeapPageFreeze pagefrz;
 	int64		fpi_before = pgWalUsage.wal_fpi;
 	HeapTupleFreeze frozen[MaxHeapTuplesPerPage];
@@ -1406,7 +1405,6 @@ retry:
 	pagefrz.FreezePageRelminMxid = vacrel->NewRelminMxid;
 	pagefrz.NoFreezePageRelfrozenXid = vacrel->NewRelfrozenXid;
 	pagefrz.NoFreezePageRelminMxid = vacrel->NewRelminMxid;
-	tuples_deleted = 0;
 	tuples_frozen = 0;
 	lpdead_items = 0;
 	live_tuples = 0;
@@ -1421,9 +1419,9 @@ retry:
 	 * lpdead_items's final value can be thought of as the number of tuples
 	 * that were deleted from indexes.
 	 */
-	tuples_deleted = heap_page_prune(rel, buf, dead_items, vacrel->vistest,
-									 InvalidTransactionId, 0, &nnewlpdead,
-									 &vacrel->offnum);
+	heap_page_prune(rel, buf, dead_items, vacrel->vistest,
+					InvalidTransactionId, 0,
+					&vacrel->offnum, &prune_result);
 
 	lpdead_items = dead_items->num_items - dead_items_before;
 
@@ -1753,7 +1751,7 @@ retry:
 	}
 
 	/* Finally, add page-local counts to whole-VACUUM counts */
-	vacrel->tuples_deleted += tuples_deleted;
+	vacrel->tuples_deleted += prune_result.ndeleted;
 	vacrel->tuples_frozen += tuples_frozen;
 	vacrel->lpdead_items += lpdead_items;
 	vacrel->live_tuples += live_tuples;
@@ -1909,7 +1907,7 @@ retry:
 	 * If pruning deleted tuples, there is freespace which the caller can
 	 * record in the FSM.
 	 */
-	return tuples_deleted > 0;
+	return prune_result.ndeleted > 0;
 }
 
 /*

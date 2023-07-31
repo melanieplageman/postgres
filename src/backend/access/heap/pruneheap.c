@@ -115,6 +115,7 @@ heap_page_prune_opt(Relation relation, Buffer buffer)
 	TransactionId limited_xmin = InvalidTransactionId;
 	TimestampTz limited_ts = 0;
 	Size		minfree;
+	PruneResult prune_result;
 
 	/*
 	 * We can't write WAL in recovery mode, so there's no point trying to
@@ -204,11 +205,8 @@ heap_page_prune_opt(Relation relation, Buffer buffer)
 		 */
 		if (PageIsFull(page) || PageGetHeapFreeSpace(page) < minfree)
 		{
-			int			ndeleted,
-						nnewlpdead;
-
-			ndeleted = heap_page_prune(relation, buffer, NULL, vistest, limited_xmin,
-									   limited_ts, &nnewlpdead, NULL);
+			heap_page_prune(relation, buffer, NULL, vistest, limited_xmin,
+							limited_ts, NULL, &prune_result);
 
 			/*
 			 * Report the number of tuples reclaimed to pgstats.  This is
@@ -224,9 +222,9 @@ heap_page_prune_opt(Relation relation, Buffer buffer)
 			 * tracks ndeleted, since it will set the same LP_DEAD items to
 			 * LP_UNUSED separately.
 			 */
-			if (ndeleted > nnewlpdead)
+			if (prune_result.ndeleted > prune_result.nnewlpdead)
 				pgstat_update_heap_dead_tuples(relation,
-											   ndeleted - nnewlpdead);
+											   prune_result.ndeleted - prune_result.nnewlpdead);
 		}
 
 		/* And release buffer lock */
@@ -275,16 +273,15 @@ catalog_dead_item_for_vacuum(VacDeadItems *dead_items,
  *
  * Returns the number of tuples deleted from the page during this call.
  */
-int
+void
 heap_page_prune(Relation relation, Buffer buffer,
 				VacDeadItems *dead_items,
 				GlobalVisState *vistest,
 				TransactionId old_snap_xmin,
 				TimestampTz old_snap_ts,
-				int *nnewlpdead,
-				OffsetNumber *off_loc)
+				OffsetNumber *off_loc,
+				PruneResult * result)
 {
-	int			ndeleted = 0;
 	Page		page = BufferGetPage(buffer);
 	OffsetNumber offnum,
 				maxoff;
@@ -389,7 +386,7 @@ heap_page_prune(Relation relation, Buffer buffer,
 		}
 
 		/* Process this item or chain of items */
-		ndeleted += heap_prune_chain(buffer, offnum, &prstate, dead_items);
+		result->ndeleted += heap_prune_chain(buffer, offnum, &prstate, dead_items);
 	}
 
 	/* Clear the offset information once we have processed the given page. */
@@ -490,9 +487,7 @@ heap_page_prune(Relation relation, Buffer buffer,
 	END_CRIT_SECTION();
 
 	/* Record number of newly-set-LP_DEAD items for caller */
-	*nnewlpdead = prstate.ndead;
-
-	return ndeleted;
+	result->nnewlpdead = prstate.ndead;
 }
 
 
