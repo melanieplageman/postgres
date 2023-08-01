@@ -217,7 +217,6 @@ typedef struct LVRelState
  */
 typedef struct LVPagePruneState
 {
-	bool		hastup;			/* Page prevents rel truncation? */
 	bool		has_lpdead_items;	/* includes existing LP_DEAD items */
 } LVPagePruneState;
 
@@ -1344,10 +1343,6 @@ lazy_scan_prune(LVRelState *vacrel,
 	LVPagePruneState prunestate;
 	PruneResult prune_result;
 	Relation	rel = vacrel->rel;
-	OffsetNumber offnum,
-				maxoff;
-	ItemId		itemid;
-	HeapTupleData tuple;
 	int			lpdead_items;
 	HeapPageFreeze pagefrz;
 	int64		fpi_before = pgWalUsage.wal_fpi;
@@ -1358,17 +1353,11 @@ lazy_scan_prune(LVRelState *vacrel,
 	bool		all_frozen_according_to_vm = vmbits & VISIBILITYMAP_ALL_FROZEN;
 	TransactionId vm_conflict_horizon = InvalidTransactionId;
 	int			dead_items_before = dead_items->num_items;
+	bool		hastup = false;
 
 	Assert(BufferGetBlockNumber(buf) == blkno);
 
 	memset(&prune_result, 0, sizeof(prune_result));
-
-	/*
-	 * maxoff might be reduced following line pointer array truncation in
-	 * heap_page_prune.  That's safe for us to ignore, since the reclaimed
-	 * space will continue to look like LP_UNUSED items below.
-	 */
-	maxoff = PageGetMaxOffsetNumber(page);
 
 	/* Initialize (or reset) page-level state */
 	pagefrz.freeze_required = false;
@@ -1391,8 +1380,8 @@ lazy_scan_prune(LVRelState *vacrel,
 	 * lpdead_items's final value can be thought of as the number of tuples
 	 * that were deleted from indexes.
 	 */
-	heap_page_prune(rel, buf, dead_items, vacrel->vistest, &pagefrz,
-					&vacrel->offnum, &prune_result, false);
+	hastup = heap_page_prune(rel, buf, dead_items, vacrel->vistest, &pagefrz,
+							 &vacrel->offnum, &prune_result, false);
 
 	lpdead_items = dead_items->num_items - dead_items_before;
 
@@ -1400,59 +1389,7 @@ lazy_scan_prune(LVRelState *vacrel,
 	 * Now scan the page to collect LP_DEAD items and check for tuples
 	 * requiring freezing among remaining tuples with storage
 	 */
-	prunestate.hastup = false;
 	prunestate.has_lpdead_items = false;
-
-	for (offnum = FirstOffsetNumber;
-		 offnum <= maxoff;
-		 offnum = OffsetNumberNext(offnum))
-	{
-		/*
-		 * Set the offset number so that we can display it along with any
-		 * error that occurred while processing this tuple.
-		 */
-		vacrel->offnum = offnum;
-		itemid = PageGetItemId(page, offnum);
-
-		if (!ItemIdIsUsed(itemid))
-			continue;
-
-		/* Redirect items mustn't be touched */
-		if (ItemIdIsRedirected(itemid))
-		{
-			/* page makes rel truncation unsafe */
-			prunestate.hastup = true;
-			continue;
-		}
-
-		if (ItemIdIsDead(itemid))
-		{
-			/*
-			 * Deliberately don't set hastup for LP_DEAD items.  We make the
-			 * soft assumption that any LP_DEAD items encountered here will
-			 * become LP_UNUSED later on, before count_nondeletable_pages is
-			 * reached.  If we don't make this assumption then rel truncation
-			 * will only happen every other VACUUM, at most.  Besides, VACUUM
-			 * must treat hastup/nonempty_pages as provisional no matter how
-			 * LP_DEAD items are handled (handled here, or handled later on).
-			 *
-			 * Also deliberately delay unsetting all_visible until just before
-			 * we return to lazy_scan_heap caller, as explained in full below.
-			 * (This is another case where it's useful to anticipate that any
-			 * LP_DEAD items will become LP_UNUSED during the ongoing VACUUM.)
-			 */
-			continue;
-		}
-
-		Assert(ItemIdIsNormal(itemid));
-
-		ItemPointerSet(&(tuple.t_self), blkno, offnum);
-		tuple.t_data = (HeapTupleHeader) PageGetItem(page, itemid);
-		tuple.t_len = ItemIdGetLength(itemid);
-		tuple.t_tableOid = RelationGetRelid(rel);
-
-		prunestate.hastup = true;	/* page makes rel truncation unsafe */
-	}
 
 	/*
 	 * We have now divided every item on the page into either an LP_DEAD item
@@ -1596,7 +1533,7 @@ lazy_scan_prune(LVRelState *vacrel,
 	Assert(!prune_result.all_visible || !prunestate.has_lpdead_items);
 
 	/* Remember the location of the last page with nonremovable tuples */
-	if (prunestate.hastup)
+	if (hastup)
 		vacrel->nonempty_pages = blkno + 1;
 
 	if (vacrel->nindexes == 0 && prunestate.has_lpdead_items)
@@ -3152,8 +3089,8 @@ heap_page_is_all_visible(LVRelState *vacrel, Buffer buf,
 			continue;
 
 		/*
-		 * We can skip considering tuples we are about to reap when determining
-		 * if the page is all visible and all frozen.
+		 * We can skip considering tuples we are about to reap when
+		 * determining if the page is all visible and all frozen.
 		 */
 		if (to_be_reaped && to_be_reaped[offnum])
 			continue;

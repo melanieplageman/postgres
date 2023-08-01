@@ -34,6 +34,7 @@ typedef struct
 {
 	Relation	rel;
 	BlockNumber blkno;
+	bool		hastup;			/* Page prevents rel truncation? */
 
 	/* tuple visibility test, initialized for the relation */
 	GlobalVisState *vistest;
@@ -260,7 +261,7 @@ catalog_dead_item_for_vacuum(VacDeadItems *dead_items,
  *
  * Returns the number of tuples deleted from the page during this call.
  */
-void
+bool
 heap_page_prune(Relation relation, Buffer buffer,
 				VacDeadItems *dead_items,
 				GlobalVisState *vistest,
@@ -295,9 +296,16 @@ heap_page_prune(Relation relation, Buffer buffer,
 	prstate.result->all_frozen = true;
 	prstate.result->youngest_visible_xmin = InvalidTransactionId;
 	prstate.nredirected = prstate.ndead = prstate.nunused = 0;
+	prstate.hastup = false;
 	memset(prstate.marked, 0, sizeof(prstate.marked));
 	memset(prstate.result->attempt_frz, 0, sizeof(prstate.result->attempt_frz));
 
+
+	/*
+	 * maxoff might be reduced following line pointer array truncation in
+	 * heap_page_prune.  That's safe for us to ignore, since the reclaimed
+	 * space will continue to look like LP_UNUSED items below.
+	 */
 	maxoff = PageGetMaxOffsetNumber(page);
 	tup.t_tableOid = RelationGetRelid(prstate.rel);
 
@@ -522,6 +530,7 @@ heap_page_prune(Relation relation, Buffer buffer,
 
 	/* Record number of newly-set-LP_DEAD items for caller */
 	result->nnewlpdead = prstate.ndead;
+	return prstate.hastup;
 }
 
 
@@ -582,6 +591,14 @@ heap_prune_satisfies_vacuum(PruneState *prstate, HeapTuple tup, Buffer buffer)
 	switch (res)
 	{
 		case HEAPTUPLE_DEAD:
+
+			/*
+			 *
+			 * Deliberately delay unsetting all_visible until just before we
+			 * return to lazy_scan_heap caller, as explained in full below.
+			 * (This is another case where it's useful to anticipate that any
+			 * LP_DEAD items will become LP_UNUSED during the ongoing VACUUM.)
+			 */
 			break;
 		case HEAPTUPLE_LIVE:
 
@@ -960,6 +977,19 @@ heap_prune_chain(Buffer buffer, OffsetNumber rootoffnum,
 		heap_prune_record_dead(prstate, rootoffnum, dead_items);
 	}
 
+	/*
+	 * rel truncation is unsafe. Deliberately don't set hastup for LP_DEAD
+	 * items.  We make the soft assumption that any LP_DEAD items encountered
+	 * here will become LP_UNUSED later on, before count_nondeletable_pages is
+	 * reached.  If we don't make this assumption then rel truncation will
+	 * only happen every other VACUUM, at most.  Besides, VACUUM must treat
+	 * hastup/nonempty_pages as provisional no matter how LP_DEAD items are
+	 * handled (handled here, or handled later on). MTODO: I think this misses
+	 * HOT tuples which are not redirected to and not dead
+	 */
+	if (!prstate->marked[rootoffnum])
+		prstate->hastup = true;
+
 	return ndeleted;
 }
 
@@ -990,6 +1020,8 @@ heap_prune_record_redirect(PruneState *prstate,
 	prstate->marked[offnum] = true;
 	Assert(!prstate->marked[rdoffnum]);
 	prstate->marked[rdoffnum] = true;
+	/* rel truncation is unsafe. */
+	prstate->hastup = true;
 	if (prstate->htsv[rdoffnum] == HEAPTUPLE_DEAD ||
 		prstate->htsv[rdoffnum] == -1)
 		return;
