@@ -14,6 +14,7 @@
 #ifndef HEAPAM_H
 #define HEAPAM_H
 
+#include "access/heapam_xlog.h"
 #include "access/relation.h"	/* for backward compatibility */
 #include "access/relscan.h"
 #include "access/sdir.h"
@@ -290,8 +291,9 @@ extern bool heap_prepare_freeze_tuple(HeapTupleHeader tuple,
 									  HeapPageFreeze *pagefrz,
 									  HeapTupleFreeze *frz, bool *totally_frozen);
 extern void heap_freeze_execute_prepared(Relation rel, Buffer buffer,
-										 TransactionId snapshotConflictHorizon,
 										 HeapTupleFreeze *tuples, int ntuples);
+extern int	heap_log_freeze_plan(HeapTupleFreeze *tuples, int ntuples,
+								 xl_heap_freeze_plan *plans_out, OffsetNumber *offsets_out);
 extern bool heap_freeze_tuple(HeapTupleHeader tuple,
 							  TransactionId relfrozenxid, TransactionId relminmxid,
 							  TransactionId FreezeLimit, TransactionId MultiXactCutoff);

@@ -647,8 +647,50 @@ heap_page_prune(Relation relation, Buffer buffer,
 				TransactionIdRetreat(frz_conflict_horizon);
 		}
 
-		heap_freeze_execute_prepared(relation, buffer, frz_conflict_horizon,
-									 result->frozen, result->nfrozen);
+		heap_freeze_execute_prepared(relation, buffer, result->frozen, result->nfrozen);
+	}
+
+	/*
+	 * Now WAL-log freezing if necessary. WAL-logs the changes so that VACUUM
+	 * can advance the rel's relfrozenxid later on without any risk of unsafe
+	 * pg_xact lookups, even following a hard crash (or when querying from a
+	 * standby).  We represent freezing by setting infomask bits in tuple
+	 * headers, but this shouldn't be thought of as a hint. See section on
+	 * buffer access rules in src/backend/storage/buffer/README.
+	 */
+	if (do_freeze && RelationNeedsWAL(relation))
+	{
+		xl_heap_freeze_plan plans[MaxHeapTuplesPerPage];
+		OffsetNumber offsets[MaxHeapTuplesPerPage];
+		int			nplans;
+		xl_heap_freeze_page xlrec;
+		XLogRecPtr	recptr;
+
+		/* Prepare deduplicated representation for use in WAL record */
+
+		nplans = heap_log_freeze_plan(result->frozen, result->nfrozen, plans, offsets);
+
+		xlrec.snapshotConflictHorizon = frz_conflict_horizon;
+		xlrec.isCatalogRel = RelationIsAccessibleInLogicalDecoding(relation);
+		xlrec.nplans = nplans;
+
+		XLogBeginInsert();
+		XLogRegisterData((char *) &xlrec, SizeOfHeapFreezePage);
+
+		/*
+		 * The freeze plan array and offset array are not actually in the
+		 * buffer, but pretend that they are.  When XLogInsert stores the
+		 * whole buffer, the arrays need not be stored too.
+		 */
+		XLogRegisterBuffer(0, buffer, REGBUF_STANDARD);
+		XLogRegisterBufData(0, (char *) plans,
+							nplans * sizeof(xl_heap_freeze_plan));
+		XLogRegisterBufData(0, (char *) offsets,
+							result->nfrozen * sizeof(OffsetNumber));
+
+		recptr = XLogInsert(RM_HEAP2_ID, XLOG_HEAP2_FREEZE_PAGE);
+
+		PageSetLSN(page, recptr);
 	}
 
 	END_CRIT_SECTION();
