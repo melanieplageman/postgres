@@ -582,47 +582,6 @@ heap_page_prune(Relation relation, Buffer buffer,
 	else if (new_prune_xid_found || page_full)
 		MarkBufferDirtyHint(buffer, true);
 
-	/*
-	 * Emit a WAL XLOG_HEAP2_PRUNE record showing what we did
-	 */
-	if (do_prune && RelationNeedsWAL(relation))
-	{
-		xl_heap_prune xlrec;
-		XLogRecPtr	recptr;
-
-		xlrec.isCatalogRel = RelationIsAccessibleInLogicalDecoding(relation);
-		xlrec.snapshotConflictHorizon = prstate.snapshotConflictHorizon;
-		xlrec.nredirected = prstate.nredirected;
-		xlrec.ndead = prstate.ndead;
-
-		XLogBeginInsert();
-		XLogRegisterData((char *) &xlrec, SizeOfHeapPrune);
-
-		XLogRegisterBuffer(0, buffer, REGBUF_STANDARD);
-
-		/*
-		 * The OffsetNumber arrays are not actually in the buffer, but we
-		 * pretend that they are.  When XLogInsert stores the whole buffer,
-		 * the offset arrays need not be stored too.
-		 */
-		if (prstate.nredirected > 0)
-			XLogRegisterBufData(0, (char *) prstate.redirected,
-								prstate.nredirected *
-								sizeof(OffsetNumber) * 2);
-
-		if (prstate.ndead > 0)
-			XLogRegisterBufData(0, (char *) prstate.nowdead,
-								prstate.ndead * sizeof(OffsetNumber));
-
-		if (prstate.nunused > 0)
-			XLogRegisterBufData(0, (char *) prstate.nowunused,
-								prstate.nunused * sizeof(OffsetNumber));
-
-		recptr = XLogInsert(RM_HEAP2_ID, XLOG_HEAP2_PRUNE);
-
-		PageSetLSN(BufferGetPage(buffer), recptr);
-	}
-
 	if (do_freeze)
 	{
 		Assert(result->nfrozen > 0);
@@ -651,46 +610,81 @@ heap_page_prune(Relation relation, Buffer buffer,
 	}
 
 	/*
-	 * Now WAL-log freezing if necessary. WAL-logs the changes so that VACUUM
-	 * can advance the rel's relfrozenxid later on without any risk of unsafe
-	 * pg_xact lookups, even following a hard crash (or when querying from a
-	 * standby).  We represent freezing by setting infomask bits in tuple
-	 * headers, but this shouldn't be thought of as a hint. See section on
-	 * buffer access rules in src/backend/storage/buffer/README.
+	 * Emit a WAL XLOG_HEAP2_PRUNE record showing what we did and WAL-log
+	 * freezing if necessary. WAL-logs the changes so that VACUUM can advance
+	 * the rel's relfrozenxid later on without any risk of unsafe pg_xact
+	 * lookups, even following a hard crash (or when querying from a standby).
+	 * We represent freezing by setting infomask bits in tuple headers, but
+	 * this shouldn't be thought of as a hint. See section on buffer access
+	 * rules in src/backend/storage/buffer/README.
 	 */
-	if (do_freeze && RelationNeedsWAL(relation))
+	if ((do_prune || do_freeze) && RelationNeedsWAL(relation))
 	{
-		xl_heap_freeze_plan plans[MaxHeapTuplesPerPage];
-		OffsetNumber offsets[MaxHeapTuplesPerPage];
-		int			nplans;
-		xl_heap_freeze_page xlrec;
+		xl_heap_prune xlrec;
 		XLogRecPtr	recptr;
+		uint8		heapbuf_flags = REGBUF_STANDARD;
 
-		/* Prepare deduplicated representation for use in WAL record */
+		xl_heap_freeze_plan plans[MaxHeapTuplesPerPage];
+		OffsetNumber frz_offsets[MaxHeapTuplesPerPage];
 
-		nplans = heap_log_freeze_plan(result->frozen, result->nfrozen, plans, offsets);
-
-		xlrec.snapshotConflictHorizon = frz_conflict_horizon;
 		xlrec.isCatalogRel = RelationIsAccessibleInLogicalDecoding(relation);
-		xlrec.nplans = nplans;
+
+		Assert(do_prune || do_freeze);
+
+		/* MTODO: change sch name to youngest_xmax_reaped */
+		if (do_prune && do_freeze)
+			xlrec.snapshotConflictHorizon = Max(prstate.snapshotConflictHorizon,
+												frz_conflict_horizon);
+		else if (do_prune)
+			xlrec.snapshotConflictHorizon = prstate.snapshotConflictHorizon;
+		else
+			xlrec.snapshotConflictHorizon = frz_conflict_horizon;
+
+		xlrec.nplans = 0;
+		/* Prepare deduplicated representation for use in WAL record */
+		if (do_freeze)
+			xlrec.nplans =
+				heap_log_freeze_plan(result->frozen, result->nfrozen, plans, frz_offsets);
+
+		xlrec.nredirected = prstate.nredirected;
+		xlrec.ndead = prstate.ndead;
+		xlrec.nunused = prstate.nunused;
 
 		XLogBeginInsert();
-		XLogRegisterData((char *) &xlrec, SizeOfHeapFreezePage);
+		XLogRegisterData((char *) &xlrec, SizeOfHeapPrune);
+
+		XLogRegisterBuffer(0, buffer, heapbuf_flags);
 
 		/*
-		 * The freeze plan array and offset array are not actually in the
-		 * buffer, but pretend that they are.  When XLogInsert stores the
+		 * The OffsetNumber arrays and freeze plan array are not actually in
+		 * the buffer, but pretend that they are.  When XLogInsert stores the
 		 * whole buffer, the arrays need not be stored too.
 		 */
-		XLogRegisterBuffer(0, buffer, REGBUF_STANDARD);
-		XLogRegisterBufData(0, (char *) plans,
-							nplans * sizeof(xl_heap_freeze_plan));
-		XLogRegisterBufData(0, (char *) offsets,
-							result->nfrozen * sizeof(OffsetNumber));
+		if (xlrec.nplans > 0)
+			XLogRegisterBufData(0, (char *) plans,
+								xlrec.nplans * sizeof(xl_heap_freeze_plan));
 
-		recptr = XLogInsert(RM_HEAP2_ID, XLOG_HEAP2_FREEZE_PAGE);
+		if (prstate.nredirected > 0)
+			XLogRegisterBufData(0, (char *) prstate.redirected,
+								prstate.nredirected *
+								sizeof(OffsetNumber) * 2);
 
-		PageSetLSN(page, recptr);
+		if (prstate.ndead > 0)
+			XLogRegisterBufData(0, (char *) prstate.nowdead,
+								prstate.ndead * sizeof(OffsetNumber));
+
+		if (prstate.nunused > 0)
+			XLogRegisterBufData(0, (char *) prstate.nowunused,
+								prstate.nunused * sizeof(OffsetNumber));
+
+		if (xlrec.nplans > 0)
+			XLogRegisterBufData(0, (char *) frz_offsets,
+								result->nfrozen * sizeof(OffsetNumber));
+
+
+		recptr = XLogInsert(RM_HEAP2_ID, XLOG_HEAP2_PRUNE);
+
+		PageSetLSN(BufferGetPage(buffer), recptr);
 	}
 
 	END_CRIT_SECTION();
