@@ -6678,54 +6678,6 @@ heap_freeze_execute_prepared(Relation rel, Buffer buffer,
 
 	Assert(ntuples > 0);
 
-	/*
-	 * Perform xmin/xmax XID status sanity checks before critical section.
-	 *
-	 * heap_prepare_freeze_tuple doesn't perform these checks directly because
-	 * pg_xact lookups are relatively expensive.  They shouldn't be repeated
-	 * by successive VACUUMs that each decide against freezing the same page.
-	 */
-	for (int i = 0; i < ntuples; i++)
-	{
-		HeapTupleFreeze *frz = tuples + i;
-		ItemId		itemid = PageGetItemId(page, frz->offset);
-		HeapTupleHeader htup;
-
-		htup = (HeapTupleHeader) PageGetItem(page, itemid);
-
-		/* Deliberately avoid relying on tuple hint bits here */
-		if (frz->checkflags & HEAP_FREEZE_CHECK_XMIN_COMMITTED)
-		{
-			TransactionId xmin = HeapTupleHeaderGetRawXmin(htup);
-
-			Assert(!HeapTupleHeaderXminFrozen(htup));
-			if (unlikely(!TransactionIdDidCommit(xmin)))
-				ereport(ERROR,
-						(errcode(ERRCODE_DATA_CORRUPTED),
-						 errmsg_internal("uncommitted xmin %u needs to be frozen",
-										 xmin)));
-		}
-
-		/*
-		 * TransactionIdDidAbort won't work reliably in the presence of XIDs
-		 * left behind by transactions that were in progress during a crash,
-		 * so we can only check that xmax didn't commit
-		 */
-		if (frz->checkflags & HEAP_FREEZE_CHECK_XMAX_ABORTED)
-		{
-			TransactionId xmax = HeapTupleHeaderGetRawXmax(htup);
-
-			Assert(TransactionIdIsNormal(xmax));
-			if (unlikely(TransactionIdDidCommit(xmax)))
-				ereport(ERROR,
-						(errcode(ERRCODE_DATA_CORRUPTED),
-						 errmsg_internal("cannot freeze committed xmax %u",
-										 xmax)));
-		}
-	}
-
-	START_CRIT_SECTION();
-
 	for (int i = 0; i < ntuples; i++)
 	{
 		HeapTupleFreeze *frz = tuples + i;
@@ -6735,8 +6687,6 @@ heap_freeze_execute_prepared(Relation rel, Buffer buffer,
 		htup = (HeapTupleHeader) PageGetItem(page, itemid);
 		heap_execute_freeze_tuple(htup, frz);
 	}
-
-	MarkBufferDirty(buffer);
 
 	/* Now WAL-log freezing if necessary */
 	if (RelationNeedsWAL(rel))
@@ -6772,8 +6722,6 @@ heap_freeze_execute_prepared(Relation rel, Buffer buffer,
 
 		PageSetLSN(page, recptr);
 	}
-
-	END_CRIT_SECTION();
 }
 
 /*

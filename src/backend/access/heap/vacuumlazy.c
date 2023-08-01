@@ -1345,7 +1345,6 @@ lazy_scan_prune(LVRelState *vacrel,
 	Relation	rel = vacrel->rel;
 	int			lpdead_items;
 	HeapPageFreeze pagefrz;
-	int64		fpi_before = pgWalUsage.wal_fpi;
 	VacDeadItems *dead_items = vacrel->dead_items;
 	uint8		vmflags = 0;
 	bool		page_all_visible = PageIsAllVisible(page);
@@ -1399,80 +1398,26 @@ lazy_scan_prune(LVRelState *vacrel,
 	 */
 	vacrel->offnum = InvalidOffsetNumber;
 
-	/*
-	 * Freeze the page when heap_prepare_freeze_tuple indicates that at least
-	 * one XID/MXID from before FreezeLimit/MultiXactCutoff is present.  Also
-	 * freeze when pruning generated an FPI, if doing so means that we set the
-	 * page all-frozen afterwards (might not happen until final heap pass).
-	 */
-	if (pagefrz.freeze_required || prune_result.nfrozen == 0 ||
-		(prune_result.all_visible && prune_result.all_frozen &&
-		 fpi_before != pgWalUsage.wal_fpi))
+	if (prune_result.nfrozen > 0)
 	{
 		/*
 		 * We're freezing the page.  Our final NewRelfrozenXid doesn't need to
-		 * be affected by the XIDs that are just about to be frozen anyway.
+		 * be affected by the XIDs that were frozen.
 		 */
 		vacrel->NewRelfrozenXid = pagefrz.FreezePageRelfrozenXid;
 		vacrel->NewRelminMxid = pagefrz.FreezePageRelminMxid;
-
-		if (prune_result.nfrozen == 0)
-		{
-			/*
-			 * We have no freeze plans to execute, so there's no added cost
-			 * from following the freeze path.  That's why it was chosen. This
-			 * is important in the case where the page only contains totally
-			 * frozen tuples at this point (perhaps only following pruning).
-			 * Such pages can be marked all-frozen in the VM by our caller,
-			 * even though none of its tuples were newly frozen here (note
-			 * that the "no freeze" path never sets pages all-frozen).
-			 *
-			 * We never increment the frozen_pages instrumentation counter
-			 * here, since it only counts pages with newly frozen tuples
-			 * (don't confuse that with pages newly set all-frozen in VM).
-			 */
-		}
-		else
-		{
-			TransactionId snapshotConflictHorizon;
-
-			vacrel->frozen_pages++;
-
-			/*
-			 * We can use visibility_cutoff_xid as our cutoff for conflicts
-			 * when the whole page is eligible to become all-frozen in the VM
-			 * once we're done with it.  Otherwise we generate a conservative
-			 * cutoff by stepping back from OldestXmin.
-			 */
-			if (prune_result.all_visible && prune_result.all_frozen)
-			{
-				/* Using same cutoff when setting VM is now unnecessary */
-				snapshotConflictHorizon = prune_result.youngest_visible_xmin;
-				prune_result.youngest_visible_xmin = InvalidTransactionId;
-			}
-			else
-			{
-				/* Avoids false conflicts when hot_standby_feedback in use */
-				snapshotConflictHorizon = vacrel->cutoffs.OldestXmin;
-				TransactionIdRetreat(snapshotConflictHorizon);
-			}
-
-			/* Execute all freeze plans for page as a single atomic action */
-			heap_freeze_execute_prepared(vacrel->rel, buf,
-										 snapshotConflictHorizon,
-										 prune_result.frozen, prune_result.nfrozen);
-		}
+		vacrel->frozen_pages++;
 	}
 	else
 	{
 		/*
-		 * Page requires "no freeze" processing.  It might be set all-visible
-		 * in the visibility map, but it can never be set all-frozen.
+		 * No tuples were newly frozen. Though we may still set a page
+		 * all_frozen, we never increment the frozen_pages instrumentation
+		 * counter here, since it only counts pages with newly frozen tuples
+		 * (don't confuse that with pages newly set all-frozen in VM).
 		 */
 		vacrel->NewRelfrozenXid = pagefrz.NoFreezePageRelfrozenXid;
 		vacrel->NewRelminMxid = pagefrz.NoFreezePageRelminMxid;
-		prune_result.all_frozen = false;
-		prune_result.nfrozen = 0;	/* avoid miscounts in instrumentation */
 	}
 
 	/*

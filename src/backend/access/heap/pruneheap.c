@@ -279,6 +279,7 @@ heap_page_prune(Relation relation, Buffer buffer,
 	bool		new_prune_xid_found = false;
 	bool		page_full = PageIsFull(page);
 	bool		page_all_visible = PageIsAllVisible(page);
+	TransactionId frz_conflict_horizon = InvalidTransactionId;
 
 	/*
 	 * Our strategy is to scan the page and make lists of items to change,
@@ -424,7 +425,6 @@ heap_page_prune(Relation relation, Buffer buffer,
 		return prstate.hastup;
 	}
 
-
 	/*
 	 * Calling heap_prepare_freeze_tuple() in a separate loop (instead of
 	 * during heap_prune_chain()) allows on-access pruning callers with
@@ -463,10 +463,86 @@ heap_page_prune(Relation relation, Buffer buffer,
 			prstate.result->all_frozen = false;
 	}
 
-
 	/* Clear the offset information once we have processed the given page. */
 	if (off_loc)
 		*off_loc = InvalidOffsetNumber;
+
+	/*
+	 * Freeze the page when heap_prepare_freeze_tuple indicates that at least
+	 * one XID/MXID from before FreezeLimit/MultiXactCutoff is present.  Also
+	 * freeze when pruning generated an FPI, if doing so means that we set the
+	 * page all-frozen afterwards (might not happen until final heap pass).
+	 */
+	do_freeze = (pagefrz->freeze_required ||
+				 (result->all_visible && result->all_frozen && result->nfrozen > 0 &&
+				  (do_prune || !XLogCheckBufferNeedsBackup(buffer))));
+
+	/*
+	 * Instead of checking all_visible while preparing to freeze all of the
+	 * tuples, just set all_frozen to false here if all_visible is false.
+	 */
+	if (!result->all_visible)
+		result->all_frozen = false;
+
+	if (do_freeze)
+	{
+		/*
+		 * Perform xmin/xmax XID status sanity checks before critical section.
+		 *
+		 * heap_prepare_freeze_tuple doesn't perform these checks directly
+		 * because pg_xact lookups are relatively expensive.  They shouldn't
+		 * be repeated by successive VACUUMs that each decide against freezing
+		 * the same page.
+		 */
+		for (int i = 0; i < result->nfrozen; i++)
+		{
+			HeapTupleFreeze *frz = result->frozen + i;
+			ItemId		itemid = PageGetItemId(page, frz->offset);
+			HeapTupleHeader htup = (HeapTupleHeader) PageGetItem(page, itemid);
+
+			if (frz->checkflags & HEAP_FREEZE_CHECK_XMIN_COMMITTED)
+			{
+				TransactionId xmin = HeapTupleHeaderGetRawXmin(htup);
+
+				Assert(!HeapTupleHeaderXminFrozen(htup));
+				if (unlikely(!TransactionIdDidCommit(xmin)))
+					ereport(ERROR,
+							(errcode(ERRCODE_DATA_CORRUPTED),
+							 errmsg_internal("uncommitted xmin %u needs to be frozen",
+											 xmin)));
+			}
+
+			if (frz->checkflags & HEAP_FREEZE_CHECK_XMAX_ABORTED)
+			{
+				TransactionId xmax = HeapTupleHeaderGetRawXmax(htup);
+
+				Assert(TransactionIdIsNormal(xmax));
+				if (unlikely(TransactionIdDidCommit(xmax)))
+					ereport(ERROR,
+							(errcode(ERRCODE_DATA_CORRUPTED),
+							 errmsg_internal("cannot freeze committed xmax %u",
+											 xmax)));
+			}
+		}
+	}
+
+	/*
+	 * Page was already all frozen but needs to be marked as such in the
+	 * visibility map.
+	 */
+	else if (result->nfrozen == 0 && result->all_frozen);
+	else
+	{
+		/*
+		 * Page requires "no freeze" processing.  It might be set all-visible
+		 * in the visibility map, but it can never be set all-frozen. Set
+		 * nfrozen to 0 to avoid miscounts in instrumentation, as we may have
+		 * seen tuples that could be frozen but decided not to freeze them.
+		 */
+		result->nfrozen = 0;
+		result->all_frozen = false;
+	}
+
 
 	/* Any error while applying the changes is critical */
 	START_CRIT_SECTION();
@@ -501,7 +577,7 @@ heap_page_prune(Relation relation, Buffer buffer,
 	if (do_prune || new_prune_xid_found || page_full)
 		PageClearFull(page);
 
-	if (do_prune)
+	if (do_prune || do_freeze)
 		MarkBufferDirty(buffer);
 	else if (new_prune_xid_found || page_full)
 		MarkBufferDirtyHint(buffer, true);
@@ -545,6 +621,34 @@ heap_page_prune(Relation relation, Buffer buffer,
 		recptr = XLogInsert(RM_HEAP2_ID, XLOG_HEAP2_PRUNE);
 
 		PageSetLSN(BufferGetPage(buffer), recptr);
+	}
+
+	if (do_freeze)
+	{
+		Assert(result->nfrozen > 0);
+
+		/*
+		 * We can use visibility_cutoff_xid as our cutoff for conflicts when
+		 * the whole page is eligible to become all-frozen in the VM once
+		 * we're done with it.  Otherwise we generate a more conservative
+		 * cutoff by stepping back from the global visibility horizon.
+		 */
+		if (result->all_visible && result->all_frozen)
+			frz_conflict_horizon = result->youngest_visible_xmin;
+		else
+		{
+			/*
+			 * MTODO: explain why it is okay we do this instead of using
+			 * cutoffs oldestxmin
+			 */
+			/* Avoids false conflicts when hot_standby_feedback in use */
+			frz_conflict_horizon = GlobalVisTestNonRemovableHorizon(vistest);
+			if (frz_conflict_horizon > 0)
+				TransactionIdRetreat(frz_conflict_horizon);
+		}
+
+		heap_freeze_execute_prepared(relation, buffer, frz_conflict_horizon,
+									 result->frozen, result->nfrozen);
 	}
 
 	END_CRIT_SECTION();
