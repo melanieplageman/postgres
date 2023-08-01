@@ -188,18 +188,36 @@ typedef struct HeapPageFreeze
 	 */
 	TransactionId NoFreezePageRelfrozenXid;
 	MultiXactId NoFreezePageRelminMxid;
-
+	VacuumCutoffs *cutoffs;
 } HeapPageFreeze;
 
 
 typedef struct PruneResult
 {
 	TransactionId youngest_visible_xmin;
+
+	/*
+	 * State describes the proper VM bit states to set for the page following
+	 * pruning and freezing.  all_visible implies !has_lpdead_items, but don't
+	 * trust all_frozen result unless all_visible is also set to true.
+	 */
 	bool		all_visible;
+	bool		all_frozen;
 	int			ndeleted;
 	int			nnewlpdead;
+	int			nfrozen;
 	int64		recently_dead_tuples;	/* # dead, but not yet removable */
 	int64		live_tuples;	/* # live tuples remaining */
+	// MTODO: this is needed because we have to attempt freeze both after
+	// calling heap_prune_chain() and when redirecting in
+	// heap_prune_record_redirect() to catch both normal non-redirected to
+	// tuples and HOT tuples which are being redirected to. The first time we
+	// encounter these HOT tuples, though, we may skip over them and only end
+	// up marking them once we follow a HOT chain. An alternative to this is to
+	// skip freezing redirect tuples when executing the freeze plans. it would
+	// lead to calling prepare freeze on more tuples, though
+	bool		attempt_frz[MaxHeapTuplesPerPage + 1];
+	HeapTupleFreeze frozen[MaxHeapTuplesPerPage];
 }			PruneResult;
 
 /* ----------------
@@ -269,7 +287,6 @@ extern TM_Result heap_lock_tuple(Relation relation, HeapTuple tuple,
 
 extern void heap_inplace_update(Relation relation, HeapTuple tuple);
 extern bool heap_prepare_freeze_tuple(HeapTupleHeader tuple,
-									  const VacuumCutoffs *cutoffs,
 									  HeapPageFreeze *pagefrz,
 									  HeapTupleFreeze *frz, bool *totally_frozen);
 extern void heap_freeze_execute_prepared(Relation rel, Buffer buffer,
@@ -298,8 +315,9 @@ extern void heap_page_prune_opt(Relation relation, Buffer buffer);
 extern void heap_page_prune(Relation relation, Buffer buffer,
 							VacDeadItems *dead_items,
 							struct GlobalVisState *vistest,
+							HeapPageFreeze *pagefrz,
 							OffsetNumber *off_loc,
-							PruneResult *result);
+							PruneResult *result, bool opportunistic);
 extern void heap_page_prune_execute(Buffer buffer,
 									OffsetNumber *redirected, int nredirected,
 									OffsetNumber *nowdead, int ndead,

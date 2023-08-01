@@ -17,6 +17,7 @@
 #include "access/heapam.h"
 #include "access/heapam_xlog.h"
 #include "access/htup_details.h"
+#include "access/multixact.h"
 #include "access/transam.h"
 #include "access/xlog.h"
 #include "access/xloginsert.h"
@@ -104,6 +105,13 @@ heap_page_prune_opt(Relation relation, Buffer buffer)
 	GlobalVisState *vistest;
 	Size		minfree;
 	PruneResult prune_result;
+	HeapPageFreeze pagefrz;
+
+	pagefrz.freeze_required = false;
+	pagefrz.FreezePageRelfrozenXid = InvalidTransactionId;
+	pagefrz.FreezePageRelminMxid = InvalidMultiXactId;
+	pagefrz.NoFreezePageRelfrozenXid = InvalidTransactionId;
+	pagefrz.NoFreezePageRelminMxid = InvalidMultiXactId;
 
 	/*
 	 * We can't write WAL in recovery mode, so there's no point trying to
@@ -184,8 +192,8 @@ heap_page_prune_opt(Relation relation, Buffer buffer)
 		 */
 		if (PageIsFull(page) || PageGetHeapFreeSpace(page) < minfree)
 		{
-			heap_page_prune(relation, buffer, NULL, vistest,
-							NULL, &prune_result);
+			heap_page_prune(relation, buffer, NULL, vistest, &pagefrz,
+							NULL, &prune_result, true);
 
 			/*
 			 * Report the number of tuples reclaimed to pgstats.  This is
@@ -256,8 +264,9 @@ void
 heap_page_prune(Relation relation, Buffer buffer,
 				VacDeadItems *dead_items,
 				GlobalVisState *vistest,
+				HeapPageFreeze *pagefrz,
 				OffsetNumber *off_loc,
-				PruneResult * result)
+				PruneResult * result, bool opportunistic)
 {
 	Page		page = BufferGetPage(buffer);
 	OffsetNumber offnum,
@@ -283,9 +292,11 @@ heap_page_prune(Relation relation, Buffer buffer,
 	prstate.snapshotConflictHorizon = InvalidTransactionId;
 	prstate.result = result;
 	prstate.result->all_visible = true;
+	prstate.result->all_frozen = true;
 	prstate.result->youngest_visible_xmin = InvalidTransactionId;
 	prstate.nredirected = prstate.ndead = prstate.nunused = 0;
 	memset(prstate.marked, 0, sizeof(prstate.marked));
+	memset(prstate.result->attempt_frz, 0, sizeof(prstate.result->attempt_frz));
 
 	maxoff = PageGetMaxOffsetNumber(page);
 	tup.t_tableOid = RelationGetRelid(prstate.rel);
@@ -364,7 +375,53 @@ heap_page_prune(Relation relation, Buffer buffer,
 
 		/* Process this item or chain of items */
 		result->ndeleted += heap_prune_chain(buffer, offnum, &prstate, dead_items);
+
+		if (!ItemIdIsNormal(itemid) || prstate.marked[offnum] ||
+			prstate.htsv[offnum] == HEAPTUPLE_DEAD ||
+			prstate.htsv[offnum] == -1)
+			continue;
+
+		prstate.result->attempt_frz[offnum] = true;
 	}
+
+	/*
+	 * Calling heap_prepare_freeze_tuple() in a separate loop (instead of
+	 * during heap_prune_chain()) allows on-access pruning callers with
+	 * nothing to prune to avoid the overhead of calling
+	 * heap_prepare_freeze_tuple(). We don't know until heap_prune_chain() has
+	 * finished whether or not there is anything to prune.
+	 */
+	for (offnum = FirstOffsetNumber;
+		 offnum <= maxoff;
+		 offnum = OffsetNumberNext(offnum))
+	{
+		HeapTupleHeader htup;
+		ItemId		itemid;
+		bool		totally_frozen;
+
+		if (off_loc)
+			*off_loc = offnum;
+
+		if (opportunistic || !prstate.result->attempt_frz[offnum])
+			continue;
+
+		itemid = PageGetItemId(page, offnum);
+		htup = (HeapTupleHeader) PageGetItem(page, itemid);
+		if ((heap_prepare_freeze_tuple(htup, pagefrz,
+									   &prstate.result->frozen[prstate.result->nfrozen], &totally_frozen)))
+		{
+			prstate.result->frozen[prstate.result->nfrozen++].offset = offnum;
+		}
+
+		/*
+		 * If any tuple isn't either totally frozen already or eligible to
+		 * become totally frozen (according to its freeze plan), then the page
+		 * definitely cannot be set all-frozen in the visibility map later on
+		 */
+		if (!totally_frozen)
+			prstate.result->all_frozen = false;
+	}
+
 
 	/* Clear the offset information once we have processed the given page. */
 	if (off_loc)
@@ -933,6 +990,10 @@ heap_prune_record_redirect(PruneState *prstate,
 	prstate->marked[offnum] = true;
 	Assert(!prstate->marked[rdoffnum]);
 	prstate->marked[rdoffnum] = true;
+	if (prstate->htsv[rdoffnum] == HEAPTUPLE_DEAD ||
+		prstate->htsv[rdoffnum] == -1)
+		return;
+	prstate->result->attempt_frz[rdoffnum] = true;
 }
 
 /* Record line pointer to be marked dead */

@@ -219,13 +219,6 @@ typedef struct LVPagePruneState
 {
 	bool		hastup;			/* Page prevents rel truncation? */
 	bool		has_lpdead_items;	/* includes existing LP_DEAD items */
-
-	/*
-	 * State describes the proper VM bit states to set for the page following
-	 * pruning and freezing.  all_visible implies !has_lpdead_items, but don't
-	 * trust all_frozen result unless all_visible is also set to true.
-	 */
-	bool		all_frozen;		/* provided all_visible is also true */
 } LVPagePruneState;
 
 /* Struct for saving and restoring vacuum error information. */
@@ -1355,11 +1348,9 @@ lazy_scan_prune(LVRelState *vacrel,
 				maxoff;
 	ItemId		itemid;
 	HeapTupleData tuple;
-	int			tuples_frozen,
-				lpdead_items;
+	int			lpdead_items;
 	HeapPageFreeze pagefrz;
 	int64		fpi_before = pgWalUsage.wal_fpi;
-	HeapTupleFreeze frozen[MaxHeapTuplesPerPage];
 	VacDeadItems *dead_items = vacrel->dead_items;
 	uint8		vmflags = 0;
 	bool		page_all_visible = PageIsAllVisible(page);
@@ -1385,8 +1376,9 @@ lazy_scan_prune(LVRelState *vacrel,
 	pagefrz.FreezePageRelminMxid = vacrel->NewRelminMxid;
 	pagefrz.NoFreezePageRelfrozenXid = vacrel->NewRelfrozenXid;
 	pagefrz.NoFreezePageRelminMxid = vacrel->NewRelminMxid;
-	tuples_frozen = 0;
+	pagefrz.cutoffs = &vacrel->cutoffs;
 	lpdead_items = 0;
+	prune_result.nfrozen = 0;
 	prune_result.live_tuples = 0;
 	prune_result.recently_dead_tuples = 0;
 
@@ -1399,8 +1391,8 @@ lazy_scan_prune(LVRelState *vacrel,
 	 * lpdead_items's final value can be thought of as the number of tuples
 	 * that were deleted from indexes.
 	 */
-	heap_page_prune(rel, buf, dead_items, vacrel->vistest,
-					&vacrel->offnum, &prune_result);
+	heap_page_prune(rel, buf, dead_items, vacrel->vistest, &pagefrz,
+					&vacrel->offnum, &prune_result, false);
 
 	lpdead_items = dead_items->num_items - dead_items_before;
 
@@ -1410,14 +1402,11 @@ lazy_scan_prune(LVRelState *vacrel,
 	 */
 	prunestate.hastup = false;
 	prunestate.has_lpdead_items = false;
-	prunestate.all_frozen = true;
 
 	for (offnum = FirstOffsetNumber;
 		 offnum <= maxoff;
 		 offnum = OffsetNumberNext(offnum))
 	{
-		bool		totally_frozen;
-
 		/*
 		 * Set the offset number so that we can display it along with any
 		 * error that occurred while processing this tuple.
@@ -1463,22 +1452,6 @@ lazy_scan_prune(LVRelState *vacrel,
 		tuple.t_tableOid = RelationGetRelid(rel);
 
 		prunestate.hastup = true;	/* page makes rel truncation unsafe */
-
-		/* Tuple with storage -- consider need to freeze */
-		if (heap_prepare_freeze_tuple(tuple.t_data, &vacrel->cutoffs, &pagefrz,
-									  &frozen[tuples_frozen], &totally_frozen))
-		{
-			/* Save prepared freeze plan for later */
-			frozen[tuples_frozen++].offset = offnum;
-		}
-
-		/*
-		 * If any tuple isn't either totally frozen already or eligible to
-		 * become totally frozen (according to its freeze plan), then the page
-		 * definitely cannot be set all-frozen in the visibility map later on
-		 */
-		if (!totally_frozen)
-			prunestate.all_frozen = false;
 	}
 
 	/*
@@ -1495,8 +1468,8 @@ lazy_scan_prune(LVRelState *vacrel,
 	 * freeze when pruning generated an FPI, if doing so means that we set the
 	 * page all-frozen afterwards (might not happen until final heap pass).
 	 */
-	if (pagefrz.freeze_required || tuples_frozen == 0 ||
-		(prune_result.all_visible && prunestate.all_frozen &&
+	if (pagefrz.freeze_required || prune_result.nfrozen == 0 ||
+		(prune_result.all_visible && prune_result.all_frozen &&
 		 fpi_before != pgWalUsage.wal_fpi))
 	{
 		/*
@@ -1506,7 +1479,7 @@ lazy_scan_prune(LVRelState *vacrel,
 		vacrel->NewRelfrozenXid = pagefrz.FreezePageRelfrozenXid;
 		vacrel->NewRelminMxid = pagefrz.FreezePageRelminMxid;
 
-		if (tuples_frozen == 0)
+		if (prune_result.nfrozen == 0)
 		{
 			/*
 			 * We have no freeze plans to execute, so there's no added cost
@@ -1534,7 +1507,7 @@ lazy_scan_prune(LVRelState *vacrel,
 			 * once we're done with it.  Otherwise we generate a conservative
 			 * cutoff by stepping back from OldestXmin.
 			 */
-			if (prune_result.all_visible && prunestate.all_frozen)
+			if (prune_result.all_visible && prune_result.all_frozen)
 			{
 				/* Using same cutoff when setting VM is now unnecessary */
 				snapshotConflictHorizon = prune_result.youngest_visible_xmin;
@@ -1550,7 +1523,7 @@ lazy_scan_prune(LVRelState *vacrel,
 			/* Execute all freeze plans for page as a single atomic action */
 			heap_freeze_execute_prepared(vacrel->rel, buf,
 										 snapshotConflictHorizon,
-										 frozen, tuples_frozen);
+										 prune_result.frozen, prune_result.nfrozen);
 		}
 	}
 	else
@@ -1561,8 +1534,8 @@ lazy_scan_prune(LVRelState *vacrel,
 		 */
 		vacrel->NewRelfrozenXid = pagefrz.NoFreezePageRelfrozenXid;
 		vacrel->NewRelminMxid = pagefrz.NoFreezePageRelminMxid;
-		prunestate.all_frozen = false;
-		tuples_frozen = 0;		/* avoid miscounts in instrumentation */
+		prune_result.all_frozen = false;
+		prune_result.nfrozen = 0;	/* avoid miscounts in instrumentation */
 	}
 
 	/*
@@ -1615,7 +1588,7 @@ lazy_scan_prune(LVRelState *vacrel,
 
 	/* Finally, add page-local counts to whole-VACUUM counts */
 	vacrel->tuples_deleted += prune_result.ndeleted;
-	vacrel->tuples_frozen += tuples_frozen;
+	vacrel->tuples_frozen += prune_result.nfrozen;
 	vacrel->lpdead_items += lpdead_items;
 	vacrel->live_tuples += prune_result.live_tuples;
 	vacrel->recently_dead_tuples += prune_result.recently_dead_tuples;
@@ -1717,7 +1690,7 @@ lazy_scan_prune(LVRelState *vacrel,
 	{
 		vmflags |= VISIBILITYMAP_ALL_VISIBLE;
 
-		if (prunestate.all_frozen)
+		if (prune_result.all_frozen)
 			vmflags |= VISIBILITYMAP_ALL_FROZEN;
 	}
 
@@ -1727,7 +1700,7 @@ lazy_scan_prune(LVRelState *vacrel,
 	 * make everything safe for REDO was logged when the page's tuples were
 	 * frozen.
 	 */
-	if (!prunestate.all_frozen)
+	if (!prune_result.all_frozen)
 		vm_conflict_horizon = prune_result.youngest_visible_xmin;
 
 	/*
@@ -1754,7 +1727,7 @@ lazy_scan_prune(LVRelState *vacrel,
 	 * so we must check both prunestate fields.
 	 */
 	else if ((prune_result.all_visible && !all_visible_according_to_vm) ||
-			 (prune_result.all_visible && prunestate.all_frozen &&
+			 (prune_result.all_visible && prune_result.all_frozen &&
 			  !all_frozen_according_to_vm &&
 			  !VM_ALL_FROZEN(rel, blkno, &vmbuffer)))
 	{
