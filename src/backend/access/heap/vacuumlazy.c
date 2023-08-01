@@ -1344,6 +1344,7 @@ lazy_scan_prune(LVRelState *vacrel,
 	PruneResult prune_result;
 	Relation	rel = vacrel->rel;
 	int			lpdead_items;
+	bool		pronto_vac;
 	HeapPageFreeze pagefrz;
 	VacDeadItems *dead_items = vacrel->dead_items;
 	uint8		vmflags = 0;
@@ -1353,6 +1354,17 @@ lazy_scan_prune(LVRelState *vacrel,
 	TransactionId vm_conflict_horizon = InvalidTransactionId;
 	int			dead_items_before = dead_items->num_items;
 	bool		hastup = false;
+
+	/*
+	 * Consider the need to do page-at-a-time heap vacuuming when using the
+	 * one-pass strategy now.
+	 *
+	 * If the relation has no indexes, there is no need to call lazy_vacuum().
+	 * We can instead complete vacuuming in a single pass by marking all dead
+	 * tuples unused. When pronto_vac is true, there will be no LP_DEAD items
+	 * left after heap_page_prune().
+	 */
+	pronto_vac = vacrel->nindexes == 0;
 
 	Assert(BufferGetBlockNumber(buf) == blkno);
 
@@ -1380,7 +1392,7 @@ lazy_scan_prune(LVRelState *vacrel,
 	 * that were deleted from indexes.
 	 */
 	hastup = heap_page_prune(rel, buf, dead_items, vacrel->vistest, &pagefrz,
-							 &vacrel->offnum, &prune_result, false);
+							 &vacrel->offnum, &prune_result, false, pronto_vac);
 
 	lpdead_items = dead_items->num_items - dead_items_before;
 
@@ -1480,42 +1492,6 @@ lazy_scan_prune(LVRelState *vacrel,
 	/* Remember the location of the last page with nonremovable tuples */
 	if (hastup)
 		vacrel->nonempty_pages = blkno + 1;
-
-	if (vacrel->nindexes == 0 && prunestate.has_lpdead_items)
-	{
-		/*
-		 * Consider the need to do page-at-a-time heap vacuuming when using
-		 * the one-pass strategy now.
-		 *
-		 * The one-pass strategy will never call lazy_vacuum().  The steps
-		 * performed here can be thought of as the one-pass equivalent of a
-		 * call to lazy_vacuum().
-		 */
-		lazy_vacuum_heap_page(vacrel, blkno, buf, 0, vmbuffer);
-
-		/* Forget the LP_DEAD items that we just vacuumed */
-		dead_items->num_items = 0;
-
-		/*
-		 * Our call to lazy_vacuum_heap_page() will have considered if it's
-		 * possible to set all_visible/all_frozen independently of
-		 * lazy_scan_prune(). So, we don't need to do the visibility map
-		 * processing below.
-		 *
-		 * We shouldn't have called lazy_vacuum_heap_page() if there were no
-		 * tuples to reap. Caller is responsible for FSM processing, so let
-		 * them know we have freed up some space.
-		 */
-		return true;
-	}
-
-	/*
-	 * There was no call to lazy_vacuum_heap_page() because pruning didn't
-	 * encounter/create any LP_DEAD items that needed to be vacuumed. Prune
-	 * state has not been invalidated, so proceed with prunestate-driven
-	 * visibility map and FSM steps (just like the two-pass strategy).
-	 */
-	Assert(vacrel->nindexes > 0 || dead_items->num_items == 0);
 
 	/*
 	 * Handle setting visibility map bit based on information from the VM (as

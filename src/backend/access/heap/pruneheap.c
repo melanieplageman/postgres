@@ -76,7 +76,8 @@ static HTSV_Result heap_prune_satisfies_vacuum(PruneState *prstate,
 											   Buffer buffer);
 static int	heap_prune_chain(Buffer buffer,
 							 OffsetNumber rootoffnum,
-							 PruneState *prstate, VacDeadItems *dead_items);
+							 PruneState *prstate, VacDeadItems *dead_items,
+							 bool pronto_vac);
 static void heap_prune_record_prunable(PruneState *prstate, TransactionId xid);
 static void heap_prune_record_redirect(PruneState *prstate,
 									   OffsetNumber offnum, OffsetNumber rdoffnum);
@@ -194,7 +195,7 @@ heap_page_prune_opt(Relation relation, Buffer buffer)
 		if (PageIsFull(page) || PageGetHeapFreeSpace(page) < minfree)
 		{
 			heap_page_prune(relation, buffer, NULL, vistest, &pagefrz,
-							NULL, &prune_result, true);
+							NULL, &prune_result, true, false);
 
 			/*
 			 * Report the number of tuples reclaimed to pgstats.  This is
@@ -267,7 +268,8 @@ heap_page_prune(Relation relation, Buffer buffer,
 				GlobalVisState *vistest,
 				HeapPageFreeze *pagefrz,
 				OffsetNumber *off_loc,
-				PruneResult * result, bool opportunistic)
+				PruneResult * result, bool opportunistic,
+				bool pronto_vac)
 {
 	Page		page = BufferGetPage(buffer);
 	OffsetNumber offnum,
@@ -383,12 +385,23 @@ heap_page_prune(Relation relation, Buffer buffer,
 
 		if (ItemIdIsDead(itemid))
 		{
+			if (pronto_vac)
+			{
+				/*
+				 * MTODO: increment ndeleted here? vacuum seems not to want to
+				 * include these, but not sure why
+				 */
+				ItemIdSetUnused(itemid);
+				prstate.nowunused[prstate.nunused++] = offnum;
+				continue;
+			}
 			catalog_dead_item_for_vacuum(dead_items, prstate.blkno, offnum);
 			continue;
 		}
 
 		/* Process this item or chain of items */
-		result->ndeleted += heap_prune_chain(buffer, offnum, &prstate, dead_items);
+		result->ndeleted += heap_prune_chain(buffer, offnum, &prstate,
+											 dead_items, pronto_vac);
 
 		if (!ItemIdIsNormal(itemid) || prstate.marked[offnum] ||
 			prstate.htsv[offnum] == HEAPTUPLE_DEAD ||
@@ -874,7 +887,8 @@ heap_prune_satisfies_vacuum(PruneState *prstate, HeapTuple tup, Buffer buffer)
  */
 static int
 heap_prune_chain(Buffer buffer, OffsetNumber rootoffnum,
-				 PruneState *prstate, VacDeadItems *dead_items)
+				 PruneState *prstate, VacDeadItems *dead_items,
+				 bool pronto_vac)
 {
 	int			ndeleted = 0;
 	Page		dp = (Page) BufferGetPage(buffer);
@@ -1122,7 +1136,12 @@ heap_prune_chain(Buffer buffer, OffsetNumber rootoffnum,
 		 * redirect the root to the correct chain member.
 		 */
 		if (i >= nchain)
-			heap_prune_record_dead(prstate, rootoffnum, dead_items);
+		{
+			if (pronto_vac)
+				heap_prune_record_unused(prstate, rootoffnum);
+			else
+				heap_prune_record_dead(prstate, rootoffnum, dead_items);
+		}
 		else
 			heap_prune_record_redirect(prstate, rootoffnum, chainitems[i]);
 	}
@@ -1135,7 +1154,13 @@ heap_prune_chain(Buffer buffer, OffsetNumber rootoffnum,
 		 * redirect item.  We can clean up by setting the redirect item to
 		 * DEAD state.
 		 */
-		heap_prune_record_dead(prstate, rootoffnum, dead_items);
+		if (pronto_vac)
+		{
+			heap_prune_record_unused(prstate, rootoffnum);
+			ndeleted++;
+		}
+		else
+			heap_prune_record_dead(prstate, rootoffnum, dead_items);
 	}
 
 	/*
@@ -1331,13 +1356,12 @@ heap_page_prune_execute(Buffer buffer,
 #ifdef USE_ASSERT_CHECKING
 
 		/*
-		 * Only heap-only tuples can become LP_UNUSED during pruning.  They
-		 * don't need to be left in place as LP_DEAD items until VACUUM gets
-		 * around to doing index vacuuming.
+		 * An LP_NORMAL item being set unused should have storage. There is
+		 * not much else that can be verified here, as LP_NORMAL, LP_REDIRECT,
+		 * and LP_DEAD items could all have been set unused during pruning if
+		 * the relation had no indexes.
 		 */
-		Assert(ItemIdHasStorage(lp) && ItemIdIsNormal(lp));
-		htup = (HeapTupleHeader) PageGetItem(page, lp);
-		Assert(HeapTupleHeaderIsHeapOnly(htup));
+		Assert(!ItemIdIsNormal(lp) || ItemIdHasStorage(lp));
 #endif
 
 		ItemIdSetUnused(lp);
