@@ -69,6 +69,16 @@ typedef struct
 	 * Same indexing as ->marked.
 	 */
 	int8		htsv[MaxHeapTuplesPerPage + 1];
+	// MTODO: this is needed because we have to attempt freeze both after
+	// calling heap_prune_chain() and when redirecting in
+	// heap_prune_record_redirect() to catch both normal non-redirected to
+	// tuples and HOT tuples which are being redirected to. The first time we
+	// encounter these HOT tuples, though, we may skip over them and only end
+	// up marking them once we follow a HOT chain. An alternative to this is to
+	// skip freezing redirect tuples when executing the freeze plans. it would
+	// lead to calling prepare freeze on more tuples, though
+	bool		attempt_frz[MaxHeapTuplesPerPage + 1];
+	HeapTupleFreeze frozen[MaxHeapTuplesPerPage];
 } PruneState;
 
 /* Local functions */
@@ -313,7 +323,7 @@ heap_page_prune(Relation relation, Buffer buffer,
 	prstate.nredirected = prstate.ndead = prstate.nunused = 0;
 	prstate.hastup = false;
 	memset(prstate.marked, 0, sizeof(prstate.marked));
-	memset(prstate.result->attempt_frz, 0, sizeof(prstate.result->attempt_frz));
+	memset(prstate.attempt_frz, 0, sizeof(prstate.attempt_frz));
 
 
 	/*
@@ -416,7 +426,7 @@ heap_page_prune(Relation relation, Buffer buffer,
 			prstate.htsv[offnum] == -1)
 			continue;
 
-		prstate.result->attempt_frz[offnum] = true;
+		prstate.attempt_frz[offnum] = true;
 	}
 
 	do_prune = prstate.nredirected > 0 || prstate.ndead > 0 || prstate.nunused > 0;
@@ -465,15 +475,15 @@ heap_page_prune(Relation relation, Buffer buffer,
 		if (off_loc)
 			*off_loc = offnum;
 
-		if (opportunistic || !prstate.result->attempt_frz[offnum])
+		if (opportunistic || !prstate.attempt_frz[offnum])
 			continue;
 
 		itemid = PageGetItemId(page, offnum);
 		htup = (HeapTupleHeader) PageGetItem(page, itemid);
 		if ((heap_prepare_freeze_tuple(htup, pagefrz,
-									   &prstate.result->frozen[prstate.result->nfrozen], &totally_frozen)))
+									   &prstate.frozen[prstate.result->nfrozen], &totally_frozen)))
 		{
-			prstate.result->frozen[prstate.result->nfrozen++].offset = offnum;
+			prstate.frozen[prstate.result->nfrozen++].offset = offnum;
 		}
 
 		/*
@@ -521,7 +531,7 @@ heap_page_prune(Relation relation, Buffer buffer,
 		 */
 		for (int i = 0; i < result->nfrozen; i++)
 		{
-			HeapTupleFreeze *frz = result->frozen + i;
+			HeapTupleFreeze *frz = prstate.frozen + i;
 			ItemId		itemid = PageGetItemId(page, frz->offset);
 			HeapTupleHeader htup = (HeapTupleHeader) PageGetItem(page, itemid);
 
@@ -766,7 +776,7 @@ heap_page_prune(Relation relation, Buffer buffer,
 				TransactionIdRetreat(frz_conflict_horizon);
 		}
 
-		heap_freeze_execute_prepared(relation, buffer, result->frozen, result->nfrozen);
+		heap_freeze_execute_prepared(relation, buffer, prstate.frozen, result->nfrozen);
 	}
 
 	/*
@@ -830,7 +840,7 @@ heap_page_prune(Relation relation, Buffer buffer,
 		/* Prepare deduplicated representation for use in WAL record */
 		if (do_freeze)
 			xlrec.nplans =
-				heap_log_freeze_plan(result->frozen, result->nfrozen, plans, frz_offsets);
+				heap_log_freeze_plan(prstate.frozen, result->nfrozen, plans, frz_offsets);
 
 		xlrec.nredirected = prstate.nredirected;
 		xlrec.ndead = prstate.ndead;
@@ -1417,7 +1427,7 @@ heap_prune_record_redirect(PruneState *prstate,
 	if (prstate->htsv[rdoffnum] == HEAPTUPLE_DEAD ||
 		prstate->htsv[rdoffnum] == -1)
 		return;
-	prstate->result->attempt_frz[rdoffnum] = true;
+	prstate->attempt_frz[rdoffnum] = true;
 }
 
 /* Record line pointer to be marked dead */

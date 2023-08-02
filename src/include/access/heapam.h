@@ -209,16 +209,6 @@ typedef struct PruneResult
 	int			nfrozen;
 	int64		recently_dead_tuples;	/* # dead, but not yet removable */
 	int64		live_tuples;	/* # live tuples remaining */
-	// MTODO: this is needed because we have to attempt freeze both after
-	// calling heap_prune_chain() and when redirecting in
-	// heap_prune_record_redirect() to catch both normal non-redirected to
-	// tuples and HOT tuples which are being redirected to. The first time we
-	// encounter these HOT tuples, though, we may skip over them and only end
-	// up marking them once we follow a HOT chain. An alternative to this is to
-	// skip freezing redirect tuples when executing the freeze plans. it would
-	// lead to calling prepare freeze on more tuples, though
-	bool		attempt_frz[MaxHeapTuplesPerPage + 1];
-	HeapTupleFreeze frozen[MaxHeapTuplesPerPage];
 }			PruneResult;
 
 /* ----------------
