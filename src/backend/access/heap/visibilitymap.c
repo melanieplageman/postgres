@@ -221,6 +221,10 @@ visibilitymap_pin_ok(BlockNumber heapBlk, Buffer vmbuf)
 	return BufferIsValid(vmbuf) && BufferGetBlockNumber(vmbuf) == mapBlock;
 }
 
+/*
+ * If the visibility map is modified, it is returned locked. Otherwise the lock
+ * is released.
+ */
 bool
 visibilitymap_set_and_lock(Relation rel, BlockNumber heapBlk, Buffer heapBuf,
 						   Buffer vmBuf, uint8 flags)
@@ -254,7 +258,10 @@ visibilitymap_set_and_lock(Relation rel, BlockNumber heapBlk, Buffer heapBuf,
 	LockBuffer(vmBuf, BUFFER_LOCK_EXCLUSIVE);
 
 	if (flags == (map[mapByte] >> mapOffset & VISIBILITYMAP_VALID_BITS))
+	{
+		LockBuffer(vmBuf, BUFFER_LOCK_UNLOCK);
 		return false;
+	}
 
 	map[mapByte] |= (flags << mapOffset);
 	MarkBufferDirty(vmBuf);
