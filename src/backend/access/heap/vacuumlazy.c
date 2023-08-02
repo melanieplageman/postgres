@@ -1441,7 +1441,7 @@ lazy_scan_prune(LVRelState *vacrel,
 	 */
 #ifdef USE_ASSERT_CHECKING
 	/* Note that all_frozen value does not matter when !all_visible */
-	if (prune_result.all_visible && lpdead_items == 0)
+	if (prune_result.all_visible && pronto_vac)
 	{
 		TransactionId cutoff;
 		bool		all_frozen;
