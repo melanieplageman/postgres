@@ -212,14 +212,6 @@ typedef struct LVRelState
 	int64		missed_dead_tuples; /* # removable, but not removed */
 } LVRelState;
 
-/*
- * State returned by lazy_scan_prune()
- */
-typedef struct LVPagePruneState
-{
-	bool		has_lpdead_items;	/* includes existing LP_DEAD items */
-} LVPagePruneState;
-
 /* Struct for saving and restoring vacuum error information. */
 typedef struct LVSavedErrInfo
 {
@@ -1340,7 +1332,6 @@ lazy_scan_prune(LVRelState *vacrel,
 				BlockNumber blkno,
 				Page page, Buffer vmbuffer, uint8 vmbits)
 {
-	LVPagePruneState prunestate;
 	PruneResult prune_result;
 	Relation	rel = vacrel->rel;
 	int			lpdead_items;
@@ -1390,12 +1381,6 @@ lazy_scan_prune(LVRelState *vacrel,
 							 &pagefrz, &vacrel->offnum, &prune_result, false, pronto_vac);
 
 	lpdead_items = dead_items->num_items - dead_items_before;
-
-	/*
-	 * Now scan the page to collect LP_DEAD items and check for tuples
-	 * requiring freezing among remaining tuples with storage
-	 */
-	prunestate.has_lpdead_items = false;
 
 	/*
 	 * We have now divided every item on the page into either an LP_DEAD item
@@ -1455,9 +1440,8 @@ lazy_scan_prune(LVRelState *vacrel,
 	if (lpdead_items > 0)
 	{
 		vacrel->lpdead_item_pages++;
-		prunestate.has_lpdead_items = true;
-
 		Assert(dead_items->num_items <= dead_items->max_items);
+		Assert(!prune_result.all_visible);
 		pgstat_progress_update_param(PROGRESS_VACUUM_NUM_DEAD_TUPLES,
 									 dead_items->num_items);
 
@@ -1481,8 +1465,6 @@ lazy_scan_prune(LVRelState *vacrel,
 	vacrel->lpdead_items += lpdead_items;
 	vacrel->live_tuples += prune_result.live_tuples;
 	vacrel->recently_dead_tuples += prune_result.recently_dead_tuples;
-
-	Assert(!prune_result.all_visible || !prunestate.has_lpdead_items);
 
 	/* Remember the location of the last page with nonremovable tuples */
 	if (hastup)
