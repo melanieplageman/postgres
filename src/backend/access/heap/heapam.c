@@ -8795,9 +8795,16 @@ heap_xlog_vacuum(XLogReaderState *record)
 		ResolveRecoveryConflictWithSnapshot(xlrec->snapshotConflictHorizon,
 											xlrec->isCatalogRel,
 											rlocator);
+
 	/*
-	 * If we have a full-page image, restore it	(without using a cleanup lock)
-	 * and we're done.
+	 * We may wish to update the VM even if the heap page has been backed up.
+	 * MTODO: not sure what we want to do with the VM in the case of BLK_DONE.
+	 */
+	update_vm = (xlrec->flags & VISIBILITYMAP_VALID_BITS) != 0;
+
+	/*
+	 * If we have a full-page image, restore it	(without using a cleanup
+	 * lock).
 	 */
 	action = XLogReadBufferForRedoExtended(record, 0, RBM_NORMAL, false,
 										   &buffer);
@@ -8810,7 +8817,6 @@ heap_xlog_vacuum(XLogReaderState *record)
 		bool		set_all_visible;
 
 		nowunused = (OffsetNumber *) XLogRecGetBlockData(record, 0, &datalen);
-		update_vm = (xlrec->flags & VISIBILITYMAP_VALID_BITS) != 0;
 		set_all_visible = (xlrec->flags & VISIBILITYMAP_ALL_VISIBLE) != 0;
 
 		/* Shouldn't be a record unless there's something to do */
