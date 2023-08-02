@@ -179,8 +179,9 @@ heap2_desc(StringInfo buf, XLogReaderState *record)
 	{
 		xl_heap_prune *xlrec = (xl_heap_prune *) rec;
 
-		appendStringInfo(buf, "snapshotConflictHorizon: %u, nredirected: %u, ndead: %u, nunused: %u, nplans: %u",
+		appendStringInfo(buf, "snapshotConflictHorizon: %u, flags: 0x%02X, nredirected: %u, ndead: %u, nunused: %u, nplans: %u",
 						 xlrec->snapshotConflictHorizon,
+						 xlrec->flags,
 						 xlrec->nredirected,
 						 xlrec->ndead,
 						 xlrec->nunused,

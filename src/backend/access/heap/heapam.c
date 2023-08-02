@@ -8663,6 +8663,8 @@ heap_xlog_prune(XLogReaderState *record)
 	RelFileLocator rlocator;
 	BlockNumber blkno;
 	XLogRedoAction action;
+	bool		update_vm;
+	Buffer		vmbuffer = InvalidBuffer;
 
 	XLogRecGetBlockTag(record, 0, &rlocator, NULL, &blkno);
 
@@ -8676,8 +8678,18 @@ heap_xlog_prune(XLogReaderState *record)
 											rlocator);
 
 	/*
-	 * If we have a full-page image, restore it (using a cleanup lock) and
-	 * we're done.
+	 * It is possible that the heap page all-visible bit is already set but
+	 * the VM bit needs to be set all-frozen. Keep track of whether or not the
+	 * VM should be updated separately from whether or not the page should be
+	 * set all visible so we don't unnecessarily dirty the heap page or miss
+	 * updating the visibility map. We also want to update the visibility map
+	 * even if the heap block was backed up. MTODO: not sure what we want to
+	 * do with the VM in the case of BLK_DONE.
+	 */
+	update_vm = (xlrec->flags & VISIBILITYMAP_VALID_BITS) != 0;
+
+	/*
+	 * If we have a full-page image, restore it (using a cleanup lock).
 	 */
 	action = XLogReadBufferForRedoExtended(record, 0, RBM_NORMAL, true,
 										   &buffer);
@@ -8691,7 +8703,9 @@ heap_xlog_prune(XLogReaderState *record)
 		int			ndead;
 		int			nunused;
 		int			nplans;
+		bool		set_all_visible;
 		bool		do_prune;
+		bool		do_freeze;
 		Size		datalen;
 		xl_heap_freeze_plan *plans;
 		OffsetNumber *frz_offsets;
@@ -8710,6 +8724,9 @@ heap_xlog_prune(XLogReaderState *record)
 		frz_offsets = nowunused + nunused;
 
 		do_prune = nredirected > 0 || ndead > 0 || nunused > 0;
+		do_freeze = nplans > 0;
+
+		set_all_visible = (xlrec->flags & VISIBILITYMAP_ALL_VISIBLE) != 0;
 
 		for (int p = 0; p < nplans; p++)
 		{
@@ -8744,11 +8761,21 @@ heap_xlog_prune(XLogReaderState *record)
 									nowdead, ndead,
 									nowunused, nunused);
 
+		if (set_all_visible)
+			PageSetAllVisible(page);
+
 		/*
 		 * Note: we don't worry about updating the page's prunability hints.
 		 * At worst this will cause an extra prune cycle to occur soon.
+		 *
+		 * If we are only updating the visibility map, we don't bump the LSN
+		 * of the heap page (unless checksums or wal_hint_bits is enabled, in
+		 * which case we must). This exposes us to torn page hazards, but
+		 * since we're not inspecting the existing page contents in any way,
+		 * we don't care.
 		 */
-		PageSetLSN(page, lsn);
+		if (do_prune || do_freeze || (set_all_visible && XLogHintBitIsNeeded()))
+			PageSetLSN(page, lsn);
 
 		MarkBufferDirty(buffer);
 	}
@@ -8770,6 +8797,43 @@ heap_xlog_prune(XLogReaderState *record)
 		 */
 		XLogRecordPageWithFreeSpace(rlocator, blkno, freespace);
 	}
+
+
+	/*
+	 * Update the VM regardless of whether or not the heap block was backed
+	 * up. Also, the prune record could have contained only VM updates.
+	 */
+	if (update_vm && XLogReadBufferForRedoExtended(record, 0, RBM_ZERO_ON_ERROR,
+												   false, &vmbuffer) == BLK_NEEDS_REDO)
+	{
+		Page		vmpage = BufferGetPage(vmbuffer);
+		Relation	reln;
+		uint8		vmbits;
+
+		/* initialize the page if it was read as zeros */
+		if (PageIsNew(vmpage))
+			PageInit(vmpage, BLCKSZ, 0);
+
+		/* remove VISIBILITYMAP_XLOG_* */
+		vmbits = xlrec->flags & VISIBILITYMAP_VALID_BITS;
+
+		/*
+		 * XLogReadBufferForRedoExtended locked the buffer. But
+		 * visibilitymap_set will handle locking itself.
+		 */
+		LockBuffer(vmbuffer, BUFFER_LOCK_UNLOCK);
+
+		reln = CreateFakeRelcacheEntry(rlocator);
+		visibilitymap_pin(reln, blkno, &vmbuffer);
+
+		visibilitymap_set(reln, blkno, InvalidBuffer, lsn, vmbuffer,
+						  xlrec->snapshotConflictHorizon, vmbits);
+
+		ReleaseBuffer(vmbuffer);
+		FreeFakeRelcacheEntry(reln);
+	}
+	else if (BufferIsValid(vmbuffer))
+		UnlockReleaseBuffer(vmbuffer);
 }
 
 /*

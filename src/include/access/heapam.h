@@ -315,6 +315,7 @@ extern TransactionId heap_index_delete_tuples(Relation rel,
 struct GlobalVisState;
 extern void heap_page_prune_opt(Relation relation, Buffer buffer);
 extern bool heap_page_prune(Relation relation, Buffer buffer,
+							Buffer vmbuffer, uint8 vmbits,
 							VacDeadItems *dead_items,
 							struct GlobalVisState *vistest,
 							HeapPageFreeze *pagefrz,

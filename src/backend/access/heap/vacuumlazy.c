@@ -1347,11 +1347,6 @@ lazy_scan_prune(LVRelState *vacrel,
 	bool		pronto_vac;
 	HeapPageFreeze pagefrz;
 	VacDeadItems *dead_items = vacrel->dead_items;
-	uint8		vmflags = 0;
-	bool		page_all_visible = PageIsAllVisible(page);
-	bool		all_visible_according_to_vm = vmbits & VISIBILITYMAP_ALL_VISIBLE;
-	bool		all_frozen_according_to_vm = vmbits & VISIBILITYMAP_ALL_FROZEN;
-	TransactionId vm_conflict_horizon = InvalidTransactionId;
 	int			dead_items_before = dead_items->num_items;
 	bool		hastup = false;
 
@@ -1391,8 +1386,8 @@ lazy_scan_prune(LVRelState *vacrel,
 	 * lpdead_items's final value can be thought of as the number of tuples
 	 * that were deleted from indexes.
 	 */
-	hastup = heap_page_prune(rel, buf, dead_items, vacrel->vistest, &pagefrz,
-							 &vacrel->offnum, &prune_result, false, pronto_vac);
+	hastup = heap_page_prune(rel, buf, vmbuffer, vmbits, dead_items, vacrel->vistest,
+							 &pagefrz, &vacrel->offnum, &prune_result, false, pronto_vac);
 
 	lpdead_items = dead_items->num_items - dead_items_before;
 
@@ -1492,107 +1487,6 @@ lazy_scan_prune(LVRelState *vacrel,
 	/* Remember the location of the last page with nonremovable tuples */
 	if (hastup)
 		vacrel->nonempty_pages = blkno + 1;
-
-	/*
-	 * Handle setting visibility map bit based on information from the VM (as
-	 * of last lazy_scan_skip() call), and from prunestate
-	 */
-	page_all_visible = PageIsAllVisible(page);
-
-	/*
-	 * Avoid relying on vmbits as a proxy for the page-level PD_ALL_VISIBLE
-	 * bit being set, since it might have become stale -- even when
-	 * all_visible is set in prunestate
-	 *
-	 * It should never be the case that the visibility map page is set while
-	 * the page-level bit is clear, but the reverse is allowed (if checksums
-	 * are not enabled).  Regardless, set both bits so that we get back in
-	 * sync.
-	 *
-	 * NB: If the heap page is all-visible but the VM bit is not set, we don't
-	 * need to dirty the heap page.  However, if checksums are enabled, we do
-	 * need to make sure that the heap page is dirtied before passing it to
-	 * visibilitymap_set(), because it may be logged. Given that this
-	 * situation should only happen in rare cases after a crash, it is not
-	 * worth optimizing.
-	 */
-	if (prune_result.all_visible && !page_all_visible)
-	{
-		PageSetAllVisible(page);
-		MarkBufferDirty(buf);
-	}
-
-	/*
-	 * It's possible for the value returned by
-	 * GetOldestNonRemovableTransactionId() to move backwards, so it's not
-	 * wrong for us to see tuples that appear to not be visible to everyone
-	 * yet, while PD_ALL_VISIBLE is already set. The real safe xmin value
-	 * never moves backwards, but GetOldestNonRemovableTransactionId() is
-	 * conservative and sometimes returns a value that's unnecessarily small,
-	 * so if we see that contradiction it just means that the tuples that we
-	 * think are not visible to everyone yet actually are, and the
-	 * PD_ALL_VISIBLE flag is correct.
-	 *
-	 * There should never be LP_DEAD items on a page with PD_ALL_VISIBLE set,
-	 * however.
-	 */
-	else if (prunestate.has_lpdead_items && page_all_visible)
-	{
-		elog(WARNING, "page containing LP_DEAD items is marked as all-visible in relation \"%s\" page %u",
-			 vacrel->relname, blkno);
-		PageClearAllVisible(page);
-		MarkBufferDirty(buf);
-	}
-
-	if (prune_result.all_visible)
-	{
-		vmflags |= VISIBILITYMAP_ALL_VISIBLE;
-
-		if (prune_result.all_frozen)
-			vmflags |= VISIBILITYMAP_ALL_FROZEN;
-	}
-
-	/*
-	 * If the page is all frozen, we can pass InvalidTransactionId as our
-	 * visibility_cutoff_xid, since a snapshotConflictHorizon sufficient to
-	 * make everything safe for REDO was logged when the page's tuples were
-	 * frozen.
-	 */
-	if (!prune_result.all_frozen)
-		vm_conflict_horizon = prune_result.youngest_visible_xmin;
-
-	/*
-	 * As of PostgreSQL 9.2, the visibility map bit should never be set if the
-	 * page-level bit is clear.  However, it's possible that the bit got
-	 * cleared after lazy_scan_skip() was called, so we must recheck with
-	 * buffer lock before concluding that the VM is corrupt.
-	 */
-	if ((all_visible_according_to_vm && !page_all_visible &&
-		 visibilitymap_get_status(vacrel->rel, blkno, &vmbuffer) != 0) ||
-		(prunestate.has_lpdead_items && page_all_visible))
-	{
-		if (!page_all_visible)
-			elog(WARNING, "page is not marked all-visible but visibility map bit is set in relation \"%s\" page %u",
-				 vacrel->relname, blkno);
-		visibilitymap_clear(vacrel->rel, blkno, vmbuffer,
-							VISIBILITYMAP_VALID_BITS);
-	}
-
-	/*
-	 * If page is all visible and VM is not marked as such yet, do so. If the
-	 * all-visible page is all-frozen but not marked as such yet, mark it as
-	 * all-frozen.  Note that all_frozen is only valid if all_visible is true,
-	 * so we must check both prunestate fields.
-	 */
-	else if ((prune_result.all_visible && !all_visible_according_to_vm) ||
-			 (prune_result.all_visible && prune_result.all_frozen &&
-			  !all_frozen_according_to_vm &&
-			  !VM_ALL_FROZEN(rel, blkno, &vmbuffer)))
-	{
-		visibilitymap_set(vacrel->rel, blkno, buf, InvalidXLogRecPtr,
-						  vmbuffer, vm_conflict_horizon,
-						  vmflags);
-	}
 
 	/*
 	 * If pruning deleted tuples, there is freespace which the caller can
