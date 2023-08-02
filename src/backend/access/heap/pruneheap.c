@@ -499,6 +499,9 @@ heap_page_prune(Relation relation, Buffer buffer,
 
 	if (do_freeze)
 	{
+		/* We currently do not do on-access freezing */
+		Assert(!opportunistic);
+
 		/*
 		 * Perform xmin/xmax XID status sanity checks before critical section.
 		 *
