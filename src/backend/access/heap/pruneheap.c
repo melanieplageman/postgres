@@ -402,6 +402,7 @@ heap_page_prune(Relation relation, Buffer buffer,
 				prstate.nowunused[prstate.nunused++] = offnum;
 				continue;
 			}
+			result->all_visible = false;
 			catalog_dead_item_for_vacuum(dead_items, prstate.blkno, offnum);
 			continue;
 		}
@@ -1429,6 +1430,7 @@ heap_prune_record_dead(PruneState *prstate, OffsetNumber offnum,
 	prstate->ndead++;
 	Assert(!prstate->marked[offnum]);
 	prstate->marked[offnum] = true;
+	prstate->result->all_visible = false;
 	catalog_dead_item_for_vacuum(dead_items, prstate->blkno, offnum);
 }
 
