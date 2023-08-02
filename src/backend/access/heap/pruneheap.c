@@ -600,8 +600,8 @@ heap_page_prune(Relation relation, Buffer buffer,
 		Assert(result->nfrozen > 0);
 
 		/*
-		 * We can use visibility_cutoff_xid as our cutoff for conflicts when
-		 * the whole page is eligible to become all-frozen in the VM once
+		 * We can use the youngest visible xmin as our cutoff for conflicts
+		 * when the whole page is eligible to become all-frozen in the VM once
 		 * we're done with it.  Otherwise we generate a more conservative
 		 * cutoff by stepping back from the global visibility horizon.
 		 */
