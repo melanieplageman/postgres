@@ -1394,7 +1394,6 @@ LPVOID
 LPWSTR
 LSEG
 LUID
-LVPagePruneState
 LVRelState
 LVSavedErrInfo
 LWLock
@@ -2152,6 +2151,7 @@ ProjectionPath
 PromptInterruptContext
 ProtocolVersion
 PrsStorage
+PruneResult
 PruneState
 PruneStepResult
 PsqlScanCallbacks
