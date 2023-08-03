@@ -462,6 +462,8 @@ heap_page_prune(Relation relation, Buffer buffer,
 	 * nothing to prune to avoid the overhead of calling
 	 * heap_prepare_freeze_tuple(). We don't know until heap_prune_chain() has
 	 * finished whether or not there is anything to prune.
+	 * This would also apply if we decide not to freeze unless we are already
+	 * pruning.
 	 */
 	for (offnum = FirstOffsetNumber;
 		 offnum <= maxoff;
