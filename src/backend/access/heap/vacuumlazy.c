@@ -230,7 +230,7 @@ static BlockNumber lazy_scan_skip(LVRelState *vacrel, Buffer *vmbuffer,
 static bool lazy_scan_new_or_empty(LVRelState *vacrel, Buffer buf,
 								   BlockNumber blkno, Page page,
 								   bool sharelock, Buffer vmbuffer);
-static void lazy_scan_prune(LVRelState *vacrel, Buffer buf,
+static bool lazy_scan_prune(LVRelState *vacrel, Buffer buf,
 							BlockNumber blkno, Page page,
 							PruneResult * presult);
 static bool lazy_scan_noprune(LVRelState *vacrel, Buffer buf,
@@ -814,6 +814,8 @@ lazy_scan_heap(LVRelState *vacrel)
 	VacDeadItems *dead_items = vacrel->dead_items;
 	Buffer		vmbuffer = InvalidBuffer;
 	uint8		vmbits = 0;
+	int64		lpdead_before;
+	bool		freed_space = false;
 	const int	initprog_index[] = {
 		PROGRESS_VACUUM_PHASE,
 		PROGRESS_VACUUM_TOTAL_HEAP_BLKS,
@@ -966,6 +968,8 @@ lazy_scan_heap(LVRelState *vacrel)
 			goto next;
 		}
 
+		lpdead_before = vacrel->lpdead_items;
+
 		/*
 		 * Prune, freeze, and count tuples.
 		 *
@@ -976,7 +980,7 @@ lazy_scan_heap(LVRelState *vacrel)
 		 * tuple headers of remaining items with storage.
 		 */
 		Assert(blkno == vmbits_blkno);
-		lazy_scan_prune(vacrel, buf, blkno, page, &presult);
+		freed_space = lazy_scan_prune(vacrel, buf, blkno, page, &presult);
 
 		Assert(!presult.all_visible || !presult.has_lpdead_items);
 
@@ -984,61 +988,32 @@ lazy_scan_heap(LVRelState *vacrel)
 		if (presult.hastup)
 			vacrel->nonempty_pages = blkno + 1;
 
-		if (vacrel->nindexes == 0)
+		/*
+		 * Final steps for block: drop cleanup lock, record free space in the
+		 * FSM, if relevant.
+		 *
+		 * If we did free space and vacuumed away LP_DEAD items, periodically
+		 * perform FSM vacuuming to make newly-freed space visible on upper
+		 * FSM pages. Note that we have not yet performed FSM processing for
+		 * blkno.
+		 *
+		 * MTODO: I'm not really sure why we wouldn't vacuum the FSM if we
+		 * freed space during pruning and have no indexes but did not have
+		 * LP_DEAD items that we reaped. (that is, ISTM we should remove the
+		 * lpdead criteria)
+		 */
+		if (freed_space && vacrel->nindexes == 0 &&
+			vacrel->lpdead_items > lpdead_before &&
+			(blkno - next_fsm_block_to_vacuum >= VACUUM_FSM_EVERY_PAGES))
 		{
 			/*
-			 * Consider the need to do page-at-a-time heap vacuuming when
-			 * using the one-pass strategy now.
-			 *
-			 * The one-pass strategy will never call lazy_vacuum().  The steps
-			 * performed here can be thought of as the one-pass equivalent of
-			 * a call to lazy_vacuum().
-			 */
-			if (presult.has_lpdead_items)
-			{
-				Size		freespace;
-
-				lazy_vacuum_heap_page(vacrel, blkno, buf, 0, vmbuffer);
-
-				/* Forget the LP_DEAD items that we just vacuumed */
-				dead_items->num_items = 0;
-
-				/*
-				 * Periodically perform FSM vacuuming to make newly-freed
-				 * space visible on upper FSM pages.  Note we have not yet
-				 * performed FSM processing for blkno.
-				 */
-				if (blkno - next_fsm_block_to_vacuum >= VACUUM_FSM_EVERY_PAGES)
-				{
-					FreeSpaceMapVacuumRange(vacrel->rel, next_fsm_block_to_vacuum,
-											blkno);
-					next_fsm_block_to_vacuum = blkno;
-				}
-
-				/*
-				 * Now perform FSM processing for blkno, and move on to next
-				 * page.
-				 *
-				 * Our call to lazy_vacuum_heap_page() will have considered if
-				 * it's possible to set all_visible/all_frozen independently
-				 * of lazy_scan_prune().  Note that prune result was
-				 * invalidated by lazy_vacuum_heap_page() call.
-				 */
-				freespace = PageGetHeapFreeSpace(page);
-
-				UnlockReleaseBuffer(buf);
-				RecordPageWithFreeSpace(vacrel->rel, blkno, freespace);
-				goto next;
-			}
-
-			/*
-			 * There was no call to lazy_vacuum_heap_page() because pruning
-			 * didn't encounter/create any LP_DEAD items that needed to be
-			 * vacuumed.  Prune state has not been invalidated, so proceed
-			 * with prune result-driven visibility map and FSM steps (just
-			 * like the two-pass strategy).
+			 * With no indexes on the rel, pruning could have removed dead
+			 * tuples it encountered.
 			 */
 			Assert(dead_items->num_items == 0);
+			FreeSpaceMapVacuumRange(vacrel->rel, next_fsm_block_to_vacuum,
+									blkno);
+			next_fsm_block_to_vacuum = blkno;
 		}
 
 		/*
@@ -1499,8 +1474,10 @@ lazy_scan_new_or_empty(LVRelState *vacrel, Buffer buf, BlockNumber blkno,
  * that any items that make it into the dead_items array are simple LP_DEAD
  * line pointers, and that every remaining item with tuple storage is
  * considered as a candidate for freezing.
+ *
+ * Returns whether or not pruning managed to free space on the page.
  */
-static void
+static bool
 lazy_scan_prune(LVRelState *vacrel,
 				Buffer buf,
 				BlockNumber blkno,
@@ -1512,6 +1489,7 @@ lazy_scan_prune(LVRelState *vacrel,
 				maxoff;
 	ItemId		itemid;
 	HeapTupleData tuple;
+	bool		pronto_reap;
 	int			tuples_deleted,
 				tuples_frozen,
 				lpdead_items,
@@ -1521,6 +1499,17 @@ lazy_scan_prune(LVRelState *vacrel,
 	int64		fpi_before = pgWalUsage.wal_fpi;
 	HeapTupleFreeze frozen[MaxHeapTuplesPerPage];
 	int			lpdead_items_before = vacrel->dead_items->num_items;
+
+	/*
+	 * Consider the need to do page-at-a-time heap vacuuming when using the
+	 * one-pass strategy now.
+	 *
+	 * If the relation has no indexes, there is no need to call lazy_vacuum().
+	 * We can instead complete vacuuming in a single pass by marking all dead
+	 * tuples unused. When pronto_vac is true, there will be no LP_DEAD items
+	 * left after heap_page_prune().
+	 */
+	pronto_reap = vacrel->nindexes == 0;
 
 	Assert(BufferGetBlockNumber(buf) == blkno);
 
@@ -1563,7 +1552,8 @@ lazy_scan_prune(LVRelState *vacrel,
 	 * lpdead_items's final value can be thought of as the number of tuples
 	 * that were deleted from indexes.
 	 */
-	tuples_deleted = heap_page_prune(rel, buf, vacrel->vistest, vacrel->dead_items,
+	tuples_deleted = heap_page_prune(rel, buf, pronto_reap,
+									 vacrel->vistest, vacrel->dead_items,
 									 &vacrel->offnum, presult);
 
 	lpdead_items = vacrel->dead_items->num_items - lpdead_items_before;
@@ -1880,6 +1870,12 @@ lazy_scan_prune(LVRelState *vacrel,
 	vacrel->lpdead_items += lpdead_items;
 	vacrel->live_tuples += live_tuples;
 	vacrel->recently_dead_tuples += recently_dead_tuples;
+
+	/*
+	 * If pruning deleted tuples, there is freespace which the caller can
+	 * record in the FSM.
+	 */
+	return tuples_deleted > 0;
 }
 
 /*
