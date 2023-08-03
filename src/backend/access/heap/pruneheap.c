@@ -408,8 +408,7 @@ heap_page_prune(Relation relation, Buffer buffer,
 				 * MTODO: increment ndeleted here? vacuum seems not to want to
 				 * include these, but not sure why
 				 */
-				ItemIdSetUnused(itemid);
-				prstate.nowunused[prstate.nunused++] = offnum;
+				heap_prune_record_unused(&prstate, offnum);
 				continue;
 			}
 			result->all_visible = false;
