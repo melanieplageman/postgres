@@ -934,6 +934,7 @@ lazy_scan_heap(LVRelState *vacrel)
 			if (lazy_scan_noprune(vacrel, buf, blkno, page, &hastup,
 								  &recordfreespace))
 			{
+				// TODO: can this be cleaned up too
 				Size		freespace = 0;
 
 				/*
@@ -1317,9 +1318,6 @@ lazy_scan_prune(LVRelState *vacrel,
 	bool		hastup = false;
 	int			dead_before = vacrel->dead_items->num_items;
 	int			lpdeaditems = 0;
-
-	if (!vacrel->skipwithvm)
-		vmbits &= ~VISIBILITYMAP_ALL_VISIBLE;
 
 	memset(&prune_result, 0, sizeof(PruneResult));
 
