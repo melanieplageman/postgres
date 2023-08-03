@@ -1508,21 +1508,6 @@ lazy_scan_new_or_empty(LVRelState *vacrel, Buffer buf, BlockNumber blkno,
  *	lazy_scan_prune() -- lazy_scan_heap() pruning and freezing.
  *
  * Caller must hold pin and buffer cleanup lock on the buffer.
- *
- * Prior to PostgreSQL 14 there were very rare cases where heap_page_prune()
- * was allowed to disagree with our HeapTupleSatisfiesVacuum() call about
- * whether or not a tuple should be considered DEAD.  This happened when an
- * inserting transaction concurrently aborted (after our heap_page_prune()
- * call, before our HeapTupleSatisfiesVacuum() call).  There was rather a lot
- * of complexity just so we could deal with tuples that were DEAD to VACUUM,
- * but nevertheless were left with storage after pruning.
- *
- * The approach we take now is to restart pruning when the race condition is
- * detected.  This allows heap_page_prune() to prune the tuples inserted by
- * the now-aborted transaction.  This is a little crude, but it guarantees
- * that any items that make it into the dead_items array are simple LP_DEAD
- * line pointers, and that every remaining item with tuple storage is
- * considered as a candidate for freezing.
  */
 static void
 lazy_scan_prune(LVRelState *vacrel,
@@ -1535,14 +1520,11 @@ lazy_scan_prune(LVRelState *vacrel,
 	OffsetNumber offnum,
 				maxoff;
 	ItemId		itemid;
-	HeapTupleData tuple;
-	HTSV_Result res;
 	int			tuples_deleted,
 				tuples_frozen,
 				lpdead_items,
 				live_tuples,
 				recently_dead_tuples;
-	int			nnewlpdead;
 	HeapPageFreeze pagefrz;
 	int64		fpi_before = pgWalUsage.wal_fpi;
 	OffsetNumber deadoffsets[MaxHeapTuplesPerPage];
@@ -1557,14 +1539,22 @@ lazy_scan_prune(LVRelState *vacrel,
 	 */
 	maxoff = PageGetMaxOffsetNumber(page);
 
-retry:
-
 	/* Initialize (or reset) page-level state */
 	pagefrz.freeze_required = false;
 	pagefrz.FreezePageRelfrozenXid = vacrel->NewRelfrozenXid;
 	pagefrz.FreezePageRelminMxid = vacrel->NewRelminMxid;
 	pagefrz.NoFreezePageRelfrozenXid = vacrel->NewRelfrozenXid;
 	pagefrz.NoFreezePageRelminMxid = vacrel->NewRelminMxid;
+	presult->hastup = false;
+	presult->all_visible = true;
+	presult->all_frozen = true;
+	presult->visibility_cutoff_xid = InvalidTransactionId;
+
+	/*
+	 * nnewlpdead only includes those items which were newly set to LP_DEAD
+	 * during pruning.
+	 */
+	presult->nnewlpdead = 0;
 	tuples_deleted = 0;
 	tuples_frozen = 0;
 	lpdead_items = 0;
@@ -1581,21 +1571,17 @@ retry:
 	 * that were deleted from indexes.
 	 */
 	tuples_deleted = heap_page_prune(rel, buf, vacrel->vistest,
-									 &nnewlpdead, &vacrel->offnum);
+									 &vacrel->offnum, presult);
 
 	/*
 	 * Now scan the page to collect LP_DEAD items and check for tuples
 	 * requiring freezing among remaining tuples with storage
 	 */
-	presult->hastup = false;
-	presult->all_visible = true;
-	presult->all_frozen = true;
-	presult->visibility_cutoff_xid = InvalidTransactionId;
-
 	for (offnum = FirstOffsetNumber;
 		 offnum <= maxoff;
 		 offnum = OffsetNumberNext(offnum))
 	{
+		HeapTupleHeader htup;
 		bool		totally_frozen;
 
 		/*
@@ -1638,22 +1624,7 @@ retry:
 
 		Assert(ItemIdIsNormal(itemid));
 
-		ItemPointerSet(&(tuple.t_self), blkno, offnum);
-		tuple.t_data = (HeapTupleHeader) PageGetItem(page, itemid);
-		tuple.t_len = ItemIdGetLength(itemid);
-		tuple.t_tableOid = RelationGetRelid(rel);
-
-		/*
-		 * DEAD tuples are almost always pruned into LP_DEAD line pointers by
-		 * heap_page_prune(), but it's possible that the tuple state changed
-		 * since heap_page_prune() looked.  Handle that here by restarting.
-		 * (See comments at the top of function for a full explanation.)
-		 */
-		res = HeapTupleSatisfiesVacuum(&tuple, vacrel->cutoffs.OldestXmin,
-									   buf);
-
-		if (unlikely(res == HEAPTUPLE_DEAD))
-			goto retry;
+		htup = (HeapTupleHeader) PageGetItem(page, itemid);
 
 		/*
 		 * The criteria for counting a tuple as live in this block need to
@@ -1674,7 +1645,7 @@ retry:
 		 * (Cases where we bypass index vacuuming will violate this optimistic
 		 * assumption, but the overall impact of that should be negligible.)
 		 */
-		switch (res)
+		switch (presult->htsv[offnum])
 		{
 			case HEAPTUPLE_LIVE:
 
@@ -1696,7 +1667,7 @@ retry:
 				{
 					TransactionId xmin;
 
-					if (!HeapTupleHeaderXminCommitted(tuple.t_data))
+					if (!HeapTupleHeaderXminCommitted(htup))
 					{
 						presult->all_visible = false;
 						break;
@@ -1706,7 +1677,7 @@ retry:
 					 * The inserter definitely committed. But is it old enough
 					 * that everyone sees it as committed?
 					 */
-					xmin = HeapTupleHeaderGetXmin(tuple.t_data);
+					xmin = HeapTupleHeaderGetXmin(htup);
 					if (!TransactionIdPrecedes(xmin,
 											   vacrel->cutoffs.OldestXmin))
 					{
@@ -1760,7 +1731,7 @@ retry:
 		presult->hastup = true; /* page makes rel truncation unsafe */
 
 		/* Tuple with storage -- consider need to freeze */
-		if (heap_prepare_freeze_tuple(tuple.t_data, &vacrel->cutoffs, &pagefrz,
+		if (heap_prepare_freeze_tuple(htup, &vacrel->cutoffs, &pagefrz,
 									  &frozen[tuples_frozen], &totally_frozen))
 		{
 			/* Save prepared freeze plan for later */
