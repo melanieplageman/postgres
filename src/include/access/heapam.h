@@ -198,6 +198,8 @@ typedef struct PruneResult
 {
 	bool		hastup;			/* Page prevents rel truncation? */
 
+	int			nnewlpdead;		/* Number of newly LP_DEAD items */
+
 	/*
 	 * State describes the proper VM bit states to set for the page following
 	 * pruning and freezing.  all_visible implies !has_lpdead_items, but don't
@@ -206,6 +208,16 @@ typedef struct PruneResult
 	bool		all_visible;	/* Every item visible to all? */
 	bool		all_frozen;		/* provided all_visible is also true */
 	TransactionId visibility_cutoff_xid;	/* For recovery conflicts */
+
+	/*
+	 * Tuple visibility is only computed once for each tuple, for correctness
+	 * and efficiency reasons; see comment in heap_page_prune() for details.
+	 * This is of type int8[], instead of HTSV_Result[], so we can use -1 to
+	 * indicate no visibility has been computed, e.g. for LP_DEAD items.
+	 *
+	 * Same indexing as ->marked.
+	 */
+	int8		htsv[MaxHeapTuplesPerPage + 1];
 } PruneResult;
 
 
@@ -304,8 +316,8 @@ struct GlobalVisState;
 extern void heap_page_prune_opt(Relation relation, Buffer buffer);
 extern int	heap_page_prune(Relation relation, Buffer buffer,
 							struct GlobalVisState *vistest,
-							int *nnewlpdead,
-							OffsetNumber *off_loc);
+							OffsetNumber *off_loc,
+							PruneResult *presult);
 extern void heap_page_prune_execute(Buffer buffer,
 									OffsetNumber *redirected, int nredirected,
 									OffsetNumber *nowdead, int ndead,
