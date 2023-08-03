@@ -32,6 +32,7 @@
 typedef struct
 {
 	Relation	rel;
+	BlockNumber blkno;
 
 	/* tuple visibility test, initialized for the relation */
 	GlobalVisState *vistest;
@@ -59,13 +60,17 @@ typedef struct
 static HTSV_Result heap_prune_satisfies_vacuum(PruneState *prstate,
 											   HeapTuple tup,
 											   Buffer buffer);
+
+static void catalog_dead_item_for_vacuum(VacDeadItems *dead_items,
+										 BlockNumber blkno, OffsetNumber offnum);
 static int	heap_prune_chain(Buffer buffer,
-							 OffsetNumber rootoffnum,
+							 OffsetNumber rootoffnum, VacDeadItems *dead_items,
 							 PruneState *prstate, PruneResult * presult);
 static void heap_prune_record_prunable(PruneState *prstate, TransactionId xid);
 static void heap_prune_record_redirect(PruneState *prstate,
 									   OffsetNumber offnum, OffsetNumber rdoffnum);
-static void heap_prune_record_dead(PruneState *prstate, OffsetNumber offnum);
+static void heap_prune_record_dead(PruneState *prstate, OffsetNumber offnum,
+								   VacDeadItems *dead_items);
 static void heap_prune_record_unused(PruneState *prstate, OffsetNumber offnum);
 static void page_verify_redirects(Page page);
 
@@ -171,7 +176,7 @@ heap_page_prune_opt(Relation relation, Buffer buffer)
 		if (PageIsFull(page) || PageGetHeapFreeSpace(page) < minfree)
 		{
 			int			ndeleted = heap_page_prune(relation, buffer, vistest,
-												   &off_loc, &presult);
+												   NULL, &off_loc, &presult);
 
 			/*
 			 * Report the number of tuples reclaimed to pgstats.  This is
@@ -215,6 +220,9 @@ heap_page_prune_opt(Relation relation, Buffer buffer)
  * vistest is used to distinguish whether tuples are DEAD or RECENTLY_DEAD (see
  * heap_prune_satisfies_vacuum and HeapTupleSatisfiesVacuum).
  *
+ * dead_items are passed in by vacuum so that heap_prune_chain() can add items
+ * it marks LP_DEAD for vacuum to clean up later.
+ *
  * off_loc is the offset location required by the caller to use in error
  * callback.
  *
@@ -226,16 +234,17 @@ heap_page_prune_opt(Relation relation, Buffer buffer)
  */
 int
 heap_page_prune(Relation relation, Buffer buffer,
-				GlobalVisState *vistest,
+				GlobalVisState *vistest, VacDeadItems *dead_items,
 				OffsetNumber *off_loc, PruneResult * presult)
 {
 	int			ndeleted = 0;
 	Page		page = BufferGetPage(buffer);
-	BlockNumber blockno = BufferGetBlockNumber(buffer);
 	OffsetNumber offnum,
 				maxoff;
 	PruneState	prstate;
 	HeapTupleData tup;
+
+	prstate.blkno = BufferGetBlockNumber(buffer);
 
 	/*
 	 * Our strategy is to scan the page and make lists of items to change,
@@ -295,7 +304,7 @@ heap_page_prune(Relation relation, Buffer buffer,
 		htup = (HeapTupleHeader) PageGetItem(page, itemid);
 		tup.t_data = htup;
 		tup.t_len = ItemIdGetLength(itemid);
-		ItemPointerSet(&(tup.t_self), blockno, offnum);
+		ItemPointerSet(&(tup.t_self), prstate.blkno, offnum);
 
 		/*
 		 * Set the offset number so that we can display it along with any
@@ -323,11 +332,12 @@ heap_page_prune(Relation relation, Buffer buffer,
 
 		/* Nothing to do if slot is empty or already dead */
 		itemid = PageGetItemId(page, offnum);
-		if (!ItemIdIsUsed(itemid) || ItemIdIsDead(itemid))
+		if (!ItemIdIsUsed(itemid))
 			continue;
 
 		/* Process this item or chain of items */
-		ndeleted += heap_prune_chain(buffer, offnum, &prstate, presult);
+		ndeleted += heap_prune_chain(buffer, offnum, dead_items,
+									 &prstate, presult);
 	}
 
 	/* Clear the offset information once we have processed the given page. */
@@ -457,6 +467,23 @@ heap_prune_satisfies_vacuum(PruneState *prstate, HeapTuple tup, Buffer buffer)
 	return res;
 }
 
+/*
+ * Add to Vacuum's dead items list.
+ * MTODO: is there any performance benefit to leaving this static in this file
+ * or should I put it in vacuumlazy.c since it is only used for vacuum.
+ */
+static void
+catalog_dead_item_for_vacuum(VacDeadItems *dead_items,
+							 BlockNumber blkno, OffsetNumber offnum)
+{
+	ItemPointerData tmp;
+
+	if (!dead_items)
+		return;
+	ItemPointerSetBlockNumber(&tmp, blkno);
+	ItemPointerSetOffsetNumber(&tmp, offnum);
+	dead_items->items[dead_items->num_items++] = tmp;
+}
 
 /*
  * Prune specified line pointer or a HOT chain originating at line pointer.
@@ -489,6 +516,7 @@ heap_prune_satisfies_vacuum(PruneState *prstate, HeapTuple tup, Buffer buffer)
  */
 static int
 heap_prune_chain(Buffer buffer, OffsetNumber rootoffnum,
+				 VacDeadItems *dead_items,
 				 PruneState *prstate, PruneResult * presult)
 {
 	int			ndeleted = 0;
@@ -593,12 +621,14 @@ heap_prune_chain(Buffer buffer, OffsetNumber rootoffnum,
 		}
 
 		/*
-		 * Likewise, a dead line pointer can't be part of the chain. (We
-		 * already eliminated the case of dead root tuple outside this
-		 * function.)
+		 * Likewise, a dead line pointer can't be part of the chain. It could
+		 * be a dead root tuple. Keep track of it for vacuum.
 		 */
 		if (ItemIdIsDead(lp))
+		{
+			catalog_dead_item_for_vacuum(dead_items, prstate->blkno, offnum);
 			break;
+		}
 
 		Assert(ItemIdIsNormal(lp));
 		Assert(presult->htsv[offnum] != -1);
@@ -733,7 +763,7 @@ heap_prune_chain(Buffer buffer, OffsetNumber rootoffnum,
 		 * redirect the root to the correct chain member.
 		 */
 		if (i >= nchain)
-			heap_prune_record_dead(prstate, rootoffnum);
+			heap_prune_record_dead(prstate, rootoffnum, dead_items);
 		else
 			heap_prune_record_redirect(prstate, rootoffnum, chainitems[i]);
 	}
@@ -746,7 +776,7 @@ heap_prune_chain(Buffer buffer, OffsetNumber rootoffnum,
 		 * redirect item.  We can clean up by setting the redirect item to
 		 * DEAD state.
 		 */
-		heap_prune_record_dead(prstate, rootoffnum);
+		heap_prune_record_dead(prstate, rootoffnum, dead_items);
 	}
 
 	return ndeleted;
@@ -783,13 +813,15 @@ heap_prune_record_redirect(PruneState *prstate,
 
 /* Record line pointer to be marked dead */
 static void
-heap_prune_record_dead(PruneState *prstate, OffsetNumber offnum)
+heap_prune_record_dead(PruneState *prstate, OffsetNumber offnum,
+					   VacDeadItems *dead_items)
 {
 	Assert(prstate->ndead < MaxHeapTuplesPerPage);
 	prstate->nowdead[prstate->ndead] = offnum;
 	prstate->ndead++;
 	Assert(!prstate->marked[offnum]);
 	prstate->marked[offnum] = true;
+	catalog_dead_item_for_vacuum(dead_items, prstate->blkno, offnum);
 }
 
 /* Record line pointer to be marked unused */

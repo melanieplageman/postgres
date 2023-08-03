@@ -1532,8 +1532,8 @@ lazy_scan_prune(LVRelState *vacrel,
 				recently_dead_tuples;
 	HeapPageFreeze pagefrz;
 	int64		fpi_before = pgWalUsage.wal_fpi;
-	OffsetNumber deadoffsets[MaxHeapTuplesPerPage];
 	HeapTupleFreeze frozen[MaxHeapTuplesPerPage];
+	int			lpdead_items_before = vacrel->dead_items->num_items;
 
 	Assert(BufferGetBlockNumber(buf) == blkno);
 
@@ -1576,12 +1576,14 @@ lazy_scan_prune(LVRelState *vacrel,
 	 * lpdead_items's final value can be thought of as the number of tuples
 	 * that were deleted from indexes.
 	 */
-	tuples_deleted = heap_page_prune(rel, buf, vacrel->vistest,
+	tuples_deleted = heap_page_prune(rel, buf, vacrel->vistest, vacrel->dead_items,
 									 &vacrel->offnum, presult);
 
+	lpdead_items = vacrel->dead_items->num_items - lpdead_items_before;
+
 	/*
-	 * Now scan the page to collect LP_DEAD items and check for tuples
-	 * requiring freezing among remaining tuples with storage
+	 * Now scan the page to check for tuples requiring freezing among
+	 * remaining tuples with storage
 	 */
 	for (offnum = FirstOffsetNumber;
 		 offnum <= maxoff;
@@ -1623,7 +1625,6 @@ lazy_scan_prune(LVRelState *vacrel,
 			 * (This is another case where it's useful to anticipate that any
 			 * LP_DEAD items will become LP_UNUSED during the ongoing VACUUM.)
 			 */
-			deadoffsets[lpdead_items++] = offnum;
 			continue;
 		}
 
@@ -1866,23 +1867,11 @@ lazy_scan_prune(LVRelState *vacrel,
 	 */
 	if (lpdead_items > 0)
 	{
-		VacDeadItems *dead_items = vacrel->dead_items;
-		ItemPointerData tmp;
-
 		vacrel->lpdead_item_pages++;
 		presult->has_lpdead_items = true;
-
-		ItemPointerSetBlockNumber(&tmp, blkno);
-
-		for (int i = 0; i < lpdead_items; i++)
-		{
-			ItemPointerSetOffsetNumber(&tmp, deadoffsets[i]);
-			dead_items->items[dead_items->num_items++] = tmp;
-		}
-
-		Assert(dead_items->num_items <= dead_items->max_items);
+		Assert(vacrel->dead_items->num_items <= vacrel->dead_items->max_items);
 		pgstat_progress_update_param(PROGRESS_VACUUM_NUM_DEAD_TUPLES,
-									 dead_items->num_items);
+									 vacrel->dead_items->num_items);
 
 		/*
 		 * It was convenient to ignore LP_DEAD items in all_visible earlier on
