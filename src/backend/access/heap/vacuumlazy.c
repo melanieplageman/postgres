@@ -1525,13 +1525,11 @@ lazy_scan_prune(LVRelState *vacrel,
 				maxoff;
 	ItemId		itemid;
 	HeapTupleData tuple;
-	HTSV_Result res;
 	int			tuples_deleted,
 				tuples_frozen,
 				lpdead_items,
 				live_tuples,
 				recently_dead_tuples;
-	int			nnewlpdead;
 	HeapPageFreeze pagefrz;
 	int64		fpi_before = pgWalUsage.wal_fpi;
 	OffsetNumber deadoffsets[MaxHeapTuplesPerPage];
@@ -1546,14 +1544,23 @@ lazy_scan_prune(LVRelState *vacrel,
 	 */
 	maxoff = PageGetMaxOffsetNumber(page);
 
-retry:
-
 	/* Initialize (or reset) page-level state */
 	pagefrz.freeze_required = false;
 	pagefrz.FreezePageRelfrozenXid = vacrel->NewRelfrozenXid;
 	pagefrz.FreezePageRelminMxid = vacrel->NewRelminMxid;
 	pagefrz.NoFreezePageRelfrozenXid = vacrel->NewRelfrozenXid;
 	pagefrz.NoFreezePageRelminMxid = vacrel->NewRelminMxid;
+	presult->hastup = false;
+	presult->has_lpdead_items = false;
+	presult->all_visible = true;
+	presult->all_frozen = true;
+	presult->visibility_cutoff_xid = InvalidTransactionId;
+
+	/*
+	 * nnewlpdead only includes those items which were newly set to LP_DEAD
+	 * during pruning.
+	 */
+	presult->nnewlpdead = 0;
 	tuples_deleted = 0;
 	tuples_frozen = 0;
 	lpdead_items = 0;
@@ -1570,18 +1577,12 @@ retry:
 	 * that were deleted from indexes.
 	 */
 	tuples_deleted = heap_page_prune(rel, buf, vacrel->vistest,
-									 &nnewlpdead, &vacrel->offnum);
+									 &vacrel->offnum, presult);
 
 	/*
 	 * Now scan the page to collect LP_DEAD items and check for tuples
 	 * requiring freezing among remaining tuples with storage
 	 */
-	presult->hastup = false;
-	presult->has_lpdead_items = false;
-	presult->all_visible = true;
-	presult->all_frozen = true;
-	presult->visibility_cutoff_xid = InvalidTransactionId;
-
 	for (offnum = FirstOffsetNumber;
 		 offnum <= maxoff;
 		 offnum = OffsetNumberNext(offnum))
@@ -1634,18 +1635,6 @@ retry:
 		tuple.t_tableOid = RelationGetRelid(rel);
 
 		/*
-		 * DEAD tuples are almost always pruned into LP_DEAD line pointers by
-		 * heap_page_prune(), but it's possible that the tuple state changed
-		 * since heap_page_prune() looked.  Handle that here by restarting.
-		 * (See comments at the top of function for a full explanation.)
-		 */
-		res = HeapTupleSatisfiesVacuum(&tuple, vacrel->cutoffs.OldestXmin,
-									   buf);
-
-		if (unlikely(res == HEAPTUPLE_DEAD))
-			goto retry;
-
-		/*
 		 * The criteria for counting a tuple as live in this block need to
 		 * match what analyze.c's acquire_sample_rows() does, otherwise VACUUM
 		 * and ANALYZE may produce wildly different reltuples values, e.g.
@@ -1664,7 +1653,7 @@ retry:
 		 * (Cases where we bypass index vacuuming will violate this optimistic
 		 * assumption, but the overall impact of that should be negligible.)
 		 */
-		switch (res)
+		switch (presult->htsv[offnum])
 		{
 			case HEAPTUPLE_LIVE:
 
