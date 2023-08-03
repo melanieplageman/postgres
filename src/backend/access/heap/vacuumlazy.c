@@ -1664,8 +1664,7 @@ lazy_scan_prune(LVRelState *vacrel,
 					 * that everyone sees it as committed?
 					 */
 					xmin = HeapTupleHeaderGetXmin(tuple.t_data);
-					if (!TransactionIdPrecedes(xmin,
-											   vacrel->cutoffs.OldestXmin))
+					if (!GlobalVisTestIsRemovableXid(vacrel->vistest, xmin))
 					{
 						presult->all_visible = false;
 						break;
