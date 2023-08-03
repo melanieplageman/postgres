@@ -64,7 +64,8 @@ static HTSV_Result heap_prune_satisfies_vacuum(PruneState *prstate,
 static void catalog_dead_item_for_vacuum(VacDeadItems *dead_items,
 										 BlockNumber blkno, OffsetNumber offnum);
 static int	heap_prune_chain(Buffer buffer,
-							 OffsetNumber rootoffnum, VacDeadItems *dead_items,
+							 OffsetNumber rootoffnum, bool pronto_reap,
+							 VacDeadItems *dead_items,
 							 PruneState *prstate, PruneResult *presult);
 static void heap_prune_record_prunable(PruneState *prstate, TransactionId xid);
 static void heap_prune_record_redirect(PruneState *prstate,
@@ -174,7 +175,7 @@ heap_page_prune_opt(Relation relation, Buffer buffer)
 		 */
 		if (PageIsFull(page) || PageGetHeapFreeSpace(page) < minfree)
 		{
-			int			ndeleted = heap_page_prune(relation, buffer, vistest,
+			int			ndeleted = heap_page_prune(relation, buffer, false, vistest,
 												   NULL, &off_loc, &presult);
 
 			/*
@@ -232,7 +233,7 @@ heap_page_prune_opt(Relation relation, Buffer buffer)
  * Returns the number of tuples deleted from the page during this call.
  */
 int
-heap_page_prune(Relation relation, Buffer buffer,
+heap_page_prune(Relation relation, Buffer buffer, bool pronto_reap,
 				GlobalVisState *vistest, VacDeadItems *dead_items,
 				OffsetNumber *off_loc, PruneResult *presult)
 {
@@ -337,7 +338,7 @@ heap_page_prune(Relation relation, Buffer buffer,
 			continue;
 
 		/* Process this item or chain of items */
-		ndeleted += heap_prune_chain(buffer, offnum, dead_items,
+		ndeleted += heap_prune_chain(buffer, offnum, pronto_reap, dead_items,
 									 &prstate, presult);
 	}
 
@@ -354,7 +355,7 @@ heap_page_prune(Relation relation, Buffer buffer,
 		 * Apply the planned item changes, then repair page fragmentation, and
 		 * update the page's hint bit about whether it has free line pointers.
 		 */
-		heap_page_prune_execute(buffer,
+		heap_page_prune_execute(buffer, pronto_reap,
 								prstate.redirected, prstate.nredirected,
 								prstate.nowdead, prstate.ndead,
 								prstate.nowunused, prstate.nunused);
@@ -517,7 +518,7 @@ catalog_dead_item_for_vacuum(VacDeadItems *dead_items,
  */
 static int
 heap_prune_chain(Buffer buffer, OffsetNumber rootoffnum,
-				 VacDeadItems *dead_items,
+				 bool pronto_reap, VacDeadItems *dead_items,
 				 PruneState *prstate, PruneResult *presult)
 {
 	int			ndeleted = 0;
@@ -622,12 +623,22 @@ heap_prune_chain(Buffer buffer, OffsetNumber rootoffnum,
 		}
 
 		/*
-		 * Likewise, a dead line pointer can't be part of the chain. It could
-		 * be a dead root tuple. Keep track of it for vacuum.
+		 * Likewise, a dead line pointer can't be part of the chain. (We
+		 * already eliminated the case of dead root tuple outside this
+		 * function.)
 		 */
 		if (ItemIdIsDead(lp))
 		{
-			catalog_dead_item_for_vacuum(dead_items, prstate->blkno, offnum);
+			/*
+			 * Even if setting unused, don't increment ndeleted here as this
+			 * is an LP that was already marked dead. Though we are removing
+			 * it, ndeleted has historically only counted items that went from
+			 * LP_NORMAL to LP_DEAD or LP_UNUSED.
+			 */
+			if (pronto_reap)
+				heap_prune_record_unused(prstate, offnum);
+			else
+				catalog_dead_item_for_vacuum(dead_items, prstate->blkno, offnum);
 			break;
 		}
 
@@ -764,7 +775,12 @@ heap_prune_chain(Buffer buffer, OffsetNumber rootoffnum,
 		 * redirect the root to the correct chain member.
 		 */
 		if (i >= nchain)
-			heap_prune_record_dead(prstate, rootoffnum, dead_items);
+		{
+			if (pronto_reap)
+				heap_prune_record_unused(prstate, rootoffnum);
+			else
+				heap_prune_record_dead(prstate, rootoffnum, dead_items);
+		}
 		else
 			heap_prune_record_redirect(prstate, rootoffnum, chainitems[i]);
 	}
@@ -777,7 +793,10 @@ heap_prune_chain(Buffer buffer, OffsetNumber rootoffnum,
 		 * redirect item.  We can clean up by setting the redirect item to
 		 * DEAD state.
 		 */
-		heap_prune_record_dead(prstate, rootoffnum, dead_items);
+		if (pronto_reap)
+			heap_prune_record_unused(prstate, rootoffnum);
+		else
+			heap_prune_record_dead(prstate, rootoffnum, dead_items);
 	}
 
 	return ndeleted;
@@ -843,7 +862,7 @@ heap_prune_record_unused(PruneState *prstate, OffsetNumber offnum)
  * buffer.
  */
 void
-heap_page_prune_execute(Buffer buffer,
+heap_page_prune_execute(Buffer buffer, bool pronto_reap,
 						OffsetNumber *redirected, int nredirected,
 						OffsetNumber *nowdead, int ndead,
 						OffsetNumber *nowunused, int nunused)
@@ -952,15 +971,29 @@ heap_page_prune_execute(Buffer buffer,
 		ItemId		lp = PageGetItemId(page, off);
 
 #ifdef USE_ASSERT_CHECKING
-
-		/*
-		 * Only heap-only tuples can become LP_UNUSED during pruning.  They
-		 * don't need to be left in place as LP_DEAD items until VACUUM gets
-		 * around to doing index vacuuming.
-		 */
-		Assert(ItemIdHasStorage(lp) && ItemIdIsNormal(lp));
-		htup = (HeapTupleHeader) PageGetItem(page, lp);
-		Assert(HeapTupleHeaderIsHeapOnly(htup));
+		if (pronto_reap)
+		{
+			/*
+			 * If the relation has no indexes, we may set any of LP_NORMAL,
+			 * LP_REDIRECT, or LP_DEAD items to LP_UNUSED during pruning. We
+			 * can't check much here except that, if the item is LP_NORMAL, it
+			 * should have storage before it is set LP_UNUSED.
+			 */
+			Assert(!ItemIdIsNormal(lp) || ItemIdHasStorage(lp));
+		}
+		else
+		{
+			/*
+			 * If the relation had indexes and we did not do any
+			 * pronto-reaping, only heap-only tuples could become LP_UNUSED
+			 * during pruning. We can set them LP_UNUSED because they don't
+			 * need to be left in place as LP_DEAD items until VACUUM gets
+			 * around to doing index vacuuming.
+			 */
+			Assert(ItemIdHasStorage(lp) && ItemIdIsNormal(lp));
+			htup = (HeapTupleHeader) PageGetItem(page, lp);
+			Assert(HeapTupleHeaderIsHeapOnly(htup));
+		}
 #endif
 
 		ItemIdSetUnused(lp);

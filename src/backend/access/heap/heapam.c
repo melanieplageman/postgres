@@ -8801,11 +8801,17 @@ heap_xlog_prune(XLogReaderState *record)
 		nunused = (end - nowunused);
 		Assert(nunused >= 0);
 
-		/* Update all line pointers per the record, and repair fragmentation */
-		heap_page_prune_execute(buffer,
+		/*
+		 * Update all line pointers per the record, and repair fragmentation.
+		 * We don't know whether or not pronto reaping was done, so pass
+		 * pronto_reap true so that we do a more limited set of validations in
+		 * assert builds.
+		 */
+		heap_page_prune_execute(buffer, true,
 								redirected, nredirected,
 								nowdead, ndead,
 								nowunused, nunused);
+
 
 		/*
 		 * Note: we don't worry about updating the page's prunability hints.
