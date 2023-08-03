@@ -96,6 +96,7 @@ void
 heap_page_prune_opt(Relation relation, Buffer buffer)
 {
 	Page		page = BufferGetPage(buffer);
+	OffsetNumber off_loc = 0;
 	TransactionId prune_xid;
 	GlobalVisState *vistest;
 	Size		minfree;
@@ -168,7 +169,7 @@ heap_page_prune_opt(Relation relation, Buffer buffer)
 						nnewlpdead;
 
 			ndeleted = heap_page_prune(relation, buffer, vistest, &nnewlpdead,
-									   NULL);
+									   &off_loc);
 
 			/*
 			 * Report the number of tuples reclaimed to pgstats.  This is
@@ -298,8 +299,7 @@ heap_page_prune(Relation relation, Buffer buffer,
 		 * Set the offset number so that we can display it along with any
 		 * error that occurred while processing this tuple.
 		 */
-		if (off_loc)
-			*off_loc = offnum;
+		*off_loc = offnum;
 
 		prstate.htsv[offnum] = heap_prune_satisfies_vacuum(&prstate, &tup,
 														   buffer);
@@ -317,8 +317,7 @@ heap_page_prune(Relation relation, Buffer buffer,
 			continue;
 
 		/* see preceding loop */
-		if (off_loc)
-			*off_loc = offnum;
+		*off_loc = offnum;
 
 		/* Nothing to do if slot is empty or already dead */
 		itemid = PageGetItemId(page, offnum);
@@ -330,8 +329,7 @@ heap_page_prune(Relation relation, Buffer buffer,
 	}
 
 	/* Clear the offset information once we have processed the given page. */
-	if (off_loc)
-		*off_loc = InvalidOffsetNumber;
+	*off_loc = InvalidOffsetNumber;
 
 	/* Any error while applying the changes is critical */
 	START_CRIT_SECTION();
