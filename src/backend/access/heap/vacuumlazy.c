@@ -1588,8 +1588,7 @@ retry:
 	 * that were deleted from indexes.
 	 */
 	tuples_deleted = heap_page_prune(rel, buf, vacrel->vistest,
-									 InvalidTransactionId, 0, &nnewlpdead,
-									 &vacrel->offnum);
+									 &nnewlpdead, &vacrel->offnum);
 
 	/*
 	 * Now scan the page to collect LP_DEAD items and check for tuples
