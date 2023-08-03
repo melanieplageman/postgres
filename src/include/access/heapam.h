@@ -191,6 +191,25 @@ typedef struct HeapPageFreeze
 
 } HeapPageFreeze;
 
+/*
+ * State returned from pruning
+ */
+typedef struct PruneResult
+{
+	bool		hastup;			/* Page prevents rel truncation? */
+	bool		has_lpdead_items;	/* includes existing LP_DEAD items */
+
+	/*
+	 * State describes the proper VM bit states to set for the page following
+	 * pruning and freezing.  all_visible implies !has_lpdead_items, but don't
+	 * trust all_frozen result unless all_visible is also set to true.
+	 */
+	bool		all_visible;	/* Every item visible to all? */
+	bool		all_frozen;		/* provided all_visible is also true */
+	TransactionId visibility_cutoff_xid;	/* For recovery conflicts */
+}			PruneResult;
+
+
 /* ----------------
  *		function prototypes for heap access method
  *
