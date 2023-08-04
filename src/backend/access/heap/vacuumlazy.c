@@ -1488,7 +1488,6 @@ lazy_scan_prune(LVRelState *vacrel,
 	OffsetNumber offnum,
 				maxoff;
 	ItemId		itemid;
-	HeapTupleData tuple;
 	bool		pronto_reap;
 	int			tuples_deleted,
 				tuples_frozen,
@@ -1564,6 +1563,7 @@ lazy_scan_prune(LVRelState *vacrel,
 		 offnum <= maxoff;
 		 offnum = OffsetNumberNext(offnum))
 	{
+		HeapTupleHeader htup;
 		bool		totally_frozen;
 
 		/*
@@ -1573,42 +1573,14 @@ lazy_scan_prune(LVRelState *vacrel,
 		vacrel->offnum = offnum;
 		itemid = PageGetItemId(page, offnum);
 
-		if (!ItemIdIsUsed(itemid))
+		/* Redirect, dead, and unused items mustn't be touched */
+		if (!ItemIdIsNormal(itemid))
 			continue;
 
-		/* Redirect items mustn't be touched */
-		if (ItemIdIsRedirected(itemid))
-		{
-			/* page makes rel truncation unsafe */
-			presult->hastup = true;
-			continue;
-		}
-
-		if (ItemIdIsDead(itemid))
-		{
-			/*
-			 * Deliberately don't set hastup for LP_DEAD items.  We make the
-			 * soft assumption that any LP_DEAD items encountered here will
-			 * become LP_UNUSED later on, before count_nondeletable_pages is
-			 * reached.  If we don't make this assumption then rel truncation
-			 * will only happen every other VACUUM, at most.  Besides, VACUUM
-			 * must treat hastup/nonempty_pages as provisional no matter how
-			 * LP_DEAD items are handled (handled here, or handled later on).
-			 */
-			continue;
-		}
-
-		Assert(ItemIdIsNormal(itemid));
-
-		ItemPointerSet(&(tuple.t_self), blkno, offnum);
-		tuple.t_data = (HeapTupleHeader) PageGetItem(page, itemid);
-		tuple.t_len = ItemIdGetLength(itemid);
-		tuple.t_tableOid = RelationGetRelid(rel);
-
-		presult->hastup = true; /* page makes rel truncation unsafe */
+		htup = (HeapTupleHeader) PageGetItem(page, itemid);
 
 		/* Tuple with storage -- consider need to freeze */
-		if (heap_prepare_freeze_tuple(tuple.t_data, &vacrel->cutoffs, &pagefrz,
+		if (heap_prepare_freeze_tuple(htup, &vacrel->cutoffs, &pagefrz,
 									  &frozen[tuples_frozen], &totally_frozen))
 		{
 			/* Save prepared freeze plan for later */
@@ -1753,7 +1725,6 @@ lazy_scan_prune(LVRelState *vacrel,
 		 * to reflect the present state of things, as expected by our caller.
 		 */
 		presult->all_visible = false;
-		Assert(!presult->all_frozen);
 	}
 
 	/* Finally, add page-local counts to whole-VACUUM counts */

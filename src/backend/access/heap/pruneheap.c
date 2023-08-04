@@ -64,7 +64,7 @@ static int	heap_prune_chain(Buffer buffer,
 							 VacDeadItems *dead_items,
 							 PruneState *prstate, PruneResult * presult);
 static void heap_prune_record_prunable(PruneState *prstate, TransactionId xid);
-static void heap_prune_record_redirect(PruneState *prstate,
+static void heap_prune_record_redirect(PruneState *prstate, PruneResult * presult,
 									   OffsetNumber offnum, OffsetNumber rdoffnum);
 static void heap_prune_record_dead(PruneState *prstate, OffsetNumber offnum,
 								   VacDeadItems *dead_items);
@@ -644,31 +644,42 @@ heap_prune_chain(Buffer buffer, OffsetNumber rootoffnum,
 
 		if (HeapTupleHeaderIsHeapOnly(htup))
 		{
-			/*
-			 * If the tuple is DEAD and doesn't chain to anything else, mark
-			 * it unused immediately.  (If it does chain, we can only remove
-			 * it as part of pruning its chain.)
-			 *
-			 * We need this primarily to handle aborted HOT updates, that is,
-			 * XMIN_INVALID heap-only tuples.  Those might not be linked to by
-			 * any chain, since the parent tuple might be re-updated before
-			 * any pruning occurs.  So we have to be able to reap them
-			 * separately from chain-pruning.  (Note that
-			 * HeapTupleHeaderIsHotUpdated will never return true for an
-			 * XMIN_INVALID tuple, so this code will work even when there were
-			 * sequential updates within the aborted transaction.)
-			 *
-			 * Note that we might first arrive at a dead heap-only tuple
-			 * either here or while following a chain below.  Whichever path
-			 * gets there first will mark the tuple unused.
-			 */
-			if (presult->htsv[rootoffnum] == HEAPTUPLE_DEAD &&
-				!HeapTupleHeaderIsHotUpdated(htup))
+			if (!HeapTupleHeaderIsHotUpdated(htup))
 			{
-				heap_prune_record_unused(prstate, rootoffnum);
-				HeapTupleHeaderAdvanceConflictHorizon(htup,
-													  &prstate->snapshotConflictHorizon);
-				ndeleted++;
+				/*
+				 * If the tuple is DEAD and doesn't chain to anything else,
+				 * mark it unused immediately.  (If it does chain, we can only
+				 * remove it as part of pruning its chain.)
+				 *
+				 * We need this primarily to handle aborted HOT updates, that
+				 * is, XMIN_INVALID heap-only tuples.  Those might not be
+				 * linked to by any chain, since the parent tuple might be
+				 * re-updated before any pruning occurs.  So we have to be
+				 * able to reap them separately from chain-pruning.  (Note
+				 * that HeapTupleHeaderIsHotUpdated will never return true for
+				 * an XMIN_INVALID tuple, so this code will work even when
+				 * there were sequential updates within the aborted
+				 * transaction.)
+				 *
+				 * Note that we might first arrive at a dead heap-only tuple
+				 * either here or while following a chain below.  Whichever
+				 * path gets there first will mark the tuple unused.
+				 */
+				if (presult->htsv[rootoffnum] == HEAPTUPLE_DEAD)
+				{
+					heap_prune_record_unused(prstate, rootoffnum);
+					HeapTupleHeaderAdvanceConflictHorizon(htup,
+														  &prstate->snapshotConflictHorizon);
+					ndeleted++;
+				}
+
+				/*
+				 * HOT tuples which don't chain to anything else (but are not
+				 * dead and are not redirected to) page make rel truncation
+				 * unsafe.
+				 */
+				else if (!prstate->marked[rootoffnum])
+					presult->hastup = true;
 			}
 
 			/* Nothing more to do */
@@ -881,7 +892,7 @@ heap_prune_chain(Buffer buffer, OffsetNumber rootoffnum,
 				heap_prune_record_dead(prstate, rootoffnum, dead_items);
 		}
 		else
-			heap_prune_record_redirect(prstate, rootoffnum, chainitems[i]);
+			heap_prune_record_redirect(prstate, presult, rootoffnum, chainitems[i]);
 	}
 	else if (nchain < 2 && ItemIdIsRedirected(rootlp))
 	{
@@ -897,6 +908,21 @@ heap_prune_chain(Buffer buffer, OffsetNumber rootoffnum,
 		else
 			heap_prune_record_dead(prstate, rootoffnum, dead_items);
 	}
+
+	/*
+	 * If the root tuple has not been marked dead, redirected, or unused, it
+	 * will stay LP_NORMAL. Tuples redirected also make the relation unsafe
+	 * for truncation, so hastup is set when the tuple is recorded redirected
+	 * to. We deliberately don't set hastup for LP_DEAD items.  We make the
+	 * soft assumption that any LP_DEAD items encountered here will become
+	 * LP_UNUSED later on, before count_nondeletable_pages is reached.  If we
+	 * don't make this assumption then rel truncation will only happen every
+	 * other VACUUM, at most.  Besides, VACUUM must treat
+	 * hastup/nonempty_pages as provisional no matter when LP_DEAD items are
+	 * handled.
+	 */
+	if (!prstate->marked[rootoffnum])
+		presult->hastup = true;
 
 	return ndeleted;
 }
@@ -917,7 +943,7 @@ heap_prune_record_prunable(PruneState *prstate, TransactionId xid)
 
 /* Record line pointer to be redirected */
 static void
-heap_prune_record_redirect(PruneState *prstate,
+heap_prune_record_redirect(PruneState *prstate, PruneResult * presult,
 						   OffsetNumber offnum, OffsetNumber rdoffnum)
 {
 	Assert(prstate->nredirected < MaxHeapTuplesPerPage);
@@ -928,6 +954,8 @@ heap_prune_record_redirect(PruneState *prstate,
 	prstate->marked[offnum] = true;
 	Assert(!prstate->marked[rdoffnum]);
 	prstate->marked[rdoffnum] = true;
+	/* rel truncation is unsafe. */
+	presult->hastup = true;
 }
 
 /* Record line pointer to be marked dead */
