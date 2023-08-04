@@ -188,7 +188,7 @@ typedef struct HeapPageFreeze
 	 */
 	TransactionId NoFreezePageRelfrozenXid;
 	MultiXactId NoFreezePageRelminMxid;
-
+	VacuumCutoffs *cutoffs;
 } HeapPageFreeze;
 
 /*
@@ -290,7 +290,6 @@ extern TM_Result heap_lock_tuple(Relation relation, HeapTuple tuple,
 
 extern void heap_inplace_update(Relation relation, HeapTuple tuple);
 extern bool heap_prepare_freeze_tuple(HeapTupleHeader tuple,
-									  const VacuumCutoffs *cutoffs,
 									  HeapPageFreeze *pagefrz,
 									  HeapTupleFreeze *frz, bool *totally_frozen);
 extern void heap_freeze_execute_prepared(Relation rel, Buffer buffer,
