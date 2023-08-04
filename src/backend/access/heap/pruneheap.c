@@ -57,10 +57,6 @@ typedef struct
 } PruneState;
 
 /* Local functions */
-static HTSV_Result heap_prune_satisfies_vacuum(PruneState *prstate,
-											   HeapTuple tup,
-											   Buffer buffer);
-
 static void catalog_dead_item_for_vacuum(VacDeadItems *dead_items,
 										 BlockNumber blkno, OffsetNumber offnum);
 
@@ -164,6 +160,8 @@ heap_page_prune_opt(Relation relation, Buffer buffer)
 		presult.hastup = false;
 		presult.all_visible = true;
 		presult.all_frozen = true;
+		presult.live_tuples = 0;
+		presult.recently_dead_tuples = 0;
 		presult.visibility_cutoff_xid = InvalidTransactionId;
 
 		/*
@@ -247,6 +245,8 @@ heap_page_prune(Relation relation, Buffer buffer, bool pronto_reap,
 				maxoff;
 	PruneState	prstate;
 	HeapTupleData tup;
+	HTSV_Result res;
+	TransactionId dead_after;
 
 	prstate.blkno = BufferGetBlockNumber(buffer);
 
@@ -318,8 +318,132 @@ heap_page_prune(Relation relation, Buffer buffer, bool pronto_reap,
 		 */
 		*off_loc = offnum;
 
-		presult->htsv[offnum] = heap_prune_satisfies_vacuum(&prstate, &tup,
-															buffer);
+		/*
+		 * Perform visibility check to determine if tuple can be removed
+		 * during pruning.
+		 */
+		res = HeapTupleSatisfiesVacuumHorizon(&tup, buffer, &dead_after);
+
+		/*
+		 * Check if the row is considered dead and removable according to
+		 * GlobalVisState.
+		 */
+		if (res == HEAPTUPLE_RECENTLY_DEAD &&
+			GlobalVisTestIsRemovableXid(vistest, dead_after))
+			res = HEAPTUPLE_DEAD;
+
+		presult->htsv[offnum] = res;
+
+		/*
+		 * The criteria for counting a tuple as live in this block need to
+		 * match what analyze.c's acquire_sample_rows() does, otherwise VACUUM
+		 * and ANALYZE may produce wildly different reltuples values, e.g.
+		 * when there are many recently-dead tuples.
+		 *
+		 * The logic here is a bit simpler than acquire_sample_rows(), as
+		 * VACUUM can't run inside a transaction block, which makes some cases
+		 * impossible (e.g. in-progress insert from the same transaction).
+		 *
+		 * We assume that LP_DEAD items will become LP_UNUSED before VACUUM
+		 * finishes.  This difference is only superficial.  VACUUM effectively
+		 * agrees with ANALYZE about DEAD items, in the end.  VACUUM won't
+		 * remember LP_DEAD items, but only because they're not supposed to be
+		 * left behind when it is done. (Cases where we bypass index vacuuming
+		 * will violate this optimistic assumption, but the overall impact of
+		 * that should be negligible.)
+		 */
+		switch (presult->htsv[offnum])
+		{
+			case HEAPTUPLE_DEAD:
+
+				/*
+				 * Deliberately delay unsetting all_visible until just before
+				 * updating the visibility map. Dead tuples may be removed by
+				 * pruning or after index vacuuming and shouldn't preclude
+				 * freezing the page. If LP_DEAD items remain on the page
+				 * after pruning, unset all_visible before updating the
+				 * visibility map,
+				 */
+				break;
+			case HEAPTUPLE_LIVE:
+
+				/*
+				 * Count it as live.  Not only is this natural, but it's also
+				 * what acquire_sample_rows() does.
+				 */
+				presult->live_tuples++;
+
+				/*
+				 * Is the tuple definitely visible to all transactions?
+				 *
+				 * NB: Like with per-tuple hint bits, we can't set the
+				 * PD_ALL_VISIBLE flag if the inserter committed
+				 * asynchronously. See SetHintBits for more info. Check that
+				 * the tuple is hinted xmin-committed because of that.
+				 */
+				if (presult->all_visible)
+				{
+					TransactionId xmin;
+
+					if (!HeapTupleHeaderXminCommitted(tup.t_data))
+					{
+						presult->all_visible = false;
+						break;
+					}
+
+					/*
+					 * The inserter definitely committed. But is it old enough
+					 * that everyone sees it as committed?
+					 */
+					xmin = HeapTupleHeaderGetXmin(tup.t_data);
+					if (!GlobalVisTestIsRemovableXid(vistest, xmin))
+					{
+						presult->all_visible = false;
+						break;
+					}
+
+					/* Track newest xmin on page. */
+					if (TransactionIdFollows(xmin, presult->visibility_cutoff_xid) &&
+						TransactionIdIsNormal(xmin))
+						presult->visibility_cutoff_xid = xmin;
+				}
+				break;
+			case HEAPTUPLE_RECENTLY_DEAD:
+
+				/*
+				 * If tuple is recently dead then we must not remove it from
+				 * the relation.  (We only remove items that are LP_DEAD from
+				 * pruning.)
+				 */
+				presult->recently_dead_tuples++;
+				presult->all_visible = false;
+				break;
+			case HEAPTUPLE_INSERT_IN_PROGRESS:
+
+				/*
+				 * We do not count these rows as live, because we expect the
+				 * inserting transaction to update the counters at commit, and
+				 * we assume that will happen only after we report our
+				 * results.  This assumption is a bit shaky, but it is what
+				 * acquire_sample_rows() does, so be consistent.
+				 */
+				presult->all_visible = false;
+				break;
+			case HEAPTUPLE_DELETE_IN_PROGRESS:
+				/* This is an expected case during concurrent vacuum */
+				presult->all_visible = false;
+
+				/*
+				 * Count such rows as live.  As above, we assume the deleting
+				 * transaction will commit and update the counters after we
+				 * report.
+				 */
+				presult->live_tuples++;
+				break;
+			default:
+				elog(ERROR, "unexpected HeapTupleSatisfiesVacuum result");
+				break;
+		}
 	}
 
 	/* Scan the page */
@@ -458,30 +582,6 @@ heap_page_prune(Relation relation, Buffer buffer, bool pronto_reap,
 	return ndeleted;
 }
 
-
-/*
- * Perform visibility checks for heap pruning.
- *
- * We want to be able to remove rows that are too new to be removed
- * according to prstate->vistest.
- */
-static HTSV_Result
-heap_prune_satisfies_vacuum(PruneState *prstate, HeapTuple tup, Buffer buffer)
-{
-	HTSV_Result res;
-	TransactionId dead_after;
-
-	res = HeapTupleSatisfiesVacuumHorizon(tup, buffer, &dead_after);
-
-	/*
-	 * Check if GlobalVisTestIsRemovableXid() finds the row dead.
-	 */
-	if (res == HEAPTUPLE_RECENTLY_DEAD &&
-		GlobalVisTestIsRemovableXid(prstate->vistest, dead_after))
-		res = HEAPTUPLE_DEAD;
-
-	return res;
-}
 
 /*
  * Add to Vacuum's dead items list.
