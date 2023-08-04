@@ -201,6 +201,8 @@ typedef struct PruneResult
 	bool		has_lpdead_items;	/* includes existing LP_DEAD items */
 
 	int			nnewlpdead;		/* Number of newly LP_DEAD items */
+	int64		recently_dead_tuples;	/* # dead, but not yet removable */
+	int64		live_tuples;	/* # live tuples remaining */
 
 	/*
 	 * State describes the proper VM bit states to set for the page following
