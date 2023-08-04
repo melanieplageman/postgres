@@ -199,6 +199,8 @@ typedef struct PruneResult
 	bool		hastup;			/* Page prevents rel truncation? */
 
 	int			nnewlpdead;		/* Number of newly LP_DEAD items */
+	int			recently_dead_tuples;	/* # dead, but not yet removable */
+	int			live_tuples;	/* # live tuples remaining */
 
 	/*
 	 * State describes the proper VM bit states to set for the page following
