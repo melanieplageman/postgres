@@ -201,6 +201,7 @@ typedef struct PruneResult
 	int			nnewlpdead;		/* Number of newly LP_DEAD items */
 	int			recently_dead_tuples;	/* # dead, but not yet removable */
 	int			live_tuples;	/* # live tuples remaining */
+	int			nfrozen;		/* # of newly frozen tuples on the page */
 
 	/*
 	 * State describes the proper VM bit states to set for the page following
@@ -220,6 +221,11 @@ typedef struct PruneResult
 	 * Same indexing as ->marked.
 	 */
 	int8		htsv[MaxHeapTuplesPerPage + 1];
+
+	/*
+	 * One entry for every tuple that we may freeze.
+	 */
+	HeapTupleFreeze frozen[MaxHeapTuplesPerPage];
 } PruneResult;
 
 
@@ -318,6 +324,7 @@ extern void heap_page_prune_opt(Relation relation, Buffer buffer);
 extern int	heap_page_prune(Relation relation, Buffer buffer,
 							bool pronto_reap,
 							struct GlobalVisState *vistest,
+							HeapPageFreeze *pagefrz,
 							VacDeadItems *dead_items,
 							OffsetNumber *off_loc,
 							PruneResult *presult);
