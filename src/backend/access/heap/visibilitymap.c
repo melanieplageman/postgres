@@ -174,6 +174,49 @@ visibilitymap_clear(Relation rel, BlockNumber heapBlk, Buffer vmbuf, uint8 flags
 }
 
 /*
+ * If the visibilitymap is modified, it is returned to the caller locked so
+ * that the caller can choose to log the modifications.
+ */
+bool
+visibilitymap_clear_and_lock(Relation rel, BlockNumber heapBlk,
+							 Buffer vmbuf, uint8 flags)
+{
+	BlockNumber mapBlock = HEAPBLK_TO_MAPBLOCK(heapBlk);
+	int			mapByte = HEAPBLK_TO_MAPBYTE(heapBlk);
+	int			mapOffset = HEAPBLK_TO_OFFSET(heapBlk);
+	uint8		mask = flags << mapOffset;
+	char	   *map;
+	bool		cleared = false;
+
+	/* Must never clear all_visible bit while leaving all_frozen bit set */
+	Assert(flags & VISIBILITYMAP_VALID_BITS);
+	Assert(flags != VISIBILITYMAP_ALL_VISIBLE);
+
+#ifdef TRACE_VISIBILITYMAP
+	elog(DEBUG1, "vm_clear %s %d", RelationGetRelationName(rel), heapBlk);
+#endif
+
+	if (!BufferIsValid(vmbuf) || BufferGetBlockNumber(vmbuf) != mapBlock)
+		elog(ERROR, "wrong buffer passed to visibilitymap_clear");
+
+	LockBuffer(vmbuf, BUFFER_LOCK_EXCLUSIVE);
+	map = PageGetContents(BufferGetPage(vmbuf));
+
+	if (map[mapByte] & mask)
+	{
+		map[mapByte] &= ~mask;
+
+		MarkBufferDirty(vmbuf);
+		cleared = true;
+	}
+	else
+		LockBuffer(vmbuf, BUFFER_LOCK_UNLOCK);
+
+	return cleared;
+}
+
+
+/*
  *	visibilitymap_pin - pin a map page for setting a bit
  *
  * Setting a bit in the visibility map is a two-phase operation. First, call
