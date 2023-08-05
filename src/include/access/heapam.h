@@ -204,14 +204,7 @@ typedef struct PruneResult
 	int			recently_dead_tuples;	/* # dead, but not yet removable */
 	int			live_tuples;	/* # live tuples remaining */
 	int			nfrozen;		/* # of newly frozen tuples on the page */
-
-	/*
-	 * State describes the proper VM bit states to set for the page following
-	 * pruning and freezing.  all_visible implies !has_lpdead_items, but don't
-	 * trust all_frozen result unless all_visible is also set to true.
-	 */
-	bool		all_visible;	/* Every item visible to all? */
-	bool		all_frozen;		/* provided all_visible is also true */
+	bool		page_all_visible;
 	TransactionId visibility_cutoff_xid;	/* For recovery conflicts */
 
 	/*
@@ -326,7 +319,8 @@ extern TransactionId heap_index_delete_tuples(Relation rel,
 struct GlobalVisState;
 extern void heap_page_prune_opt(Relation relation, Buffer buffer);
 extern int	heap_page_prune(Relation relation, Buffer buffer,
-							bool pronto_reap,
+							Buffer vmbuffer, uint8 vmbits,
+							bool on_access, bool pronto_reap,
 							struct GlobalVisState *vistest,
 							HeapPageFreeze *pagefrz,
 							VacDeadItems *dead_items,
