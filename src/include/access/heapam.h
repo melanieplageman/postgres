@@ -15,6 +15,7 @@
 #define HEAPAM_H
 
 #include "access/relation.h"	/* for backward compatibility */
+#include "access/heapam_xlog.h"
 #include "access/relscan.h"
 #include "access/sdir.h"
 #include "access/skey.h"
@@ -202,6 +203,7 @@ typedef struct PruneResult
 	int			nnewlpdead;		/* Number of newly LP_DEAD items */
 	int64		recently_dead_tuples;	/* # dead, but not yet removable */
 	int64		live_tuples;	/* # live tuples remaining */
+	int			nfrozen;		/* # of newly frozen tuples on the page */
 
 	/*
 	 * State describes the proper VM bit states to set for the page following
@@ -294,11 +296,13 @@ extern bool heap_prepare_freeze_tuple(HeapTupleHeader tuple,
 									  HeapPageFreeze *pagefrz,
 									  HeapTupleFreeze *frz, bool *totally_frozen);
 extern void heap_freeze_execute_prepared(Relation rel, Buffer buffer,
-										 TransactionId snapshotConflictHorizon,
 										 HeapTupleFreeze *tuples, int ntuples);
 extern bool heap_freeze_tuple(HeapTupleHeader tuple,
 							  TransactionId relfrozenxid, TransactionId relminmxid,
 							  TransactionId FreezeLimit, TransactionId MultiXactCutoff);
+int			heap_log_freeze_plan(HeapTupleFreeze *tuples, int ntuples,
+								 xl_heap_freeze_plan *plans_out,
+								 OffsetNumber *offsets_out);
 extern bool heap_tuple_should_freeze(HeapTupleHeader tuple,
 									 const VacuumCutoffs * cutoffs,
 									 TransactionId *NoFreezePageRelfrozenXid,
@@ -319,6 +323,7 @@ extern void heap_page_prune_opt(Relation relation, Buffer buffer);
 extern int	heap_page_prune(Relation relation, Buffer buffer,
 							bool pronto_reap,
 							struct GlobalVisState *vistest,
+							HeapPageFreeze *pagefrz,
 							VacDeadItems *dead_items,
 							OffsetNumber *off_loc,
 							PruneResult * presult);

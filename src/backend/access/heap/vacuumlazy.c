@@ -1485,16 +1485,10 @@ lazy_scan_prune(LVRelState *vacrel,
 				PruneResult * presult)
 {
 	Relation	rel = vacrel->rel;
-	OffsetNumber offnum,
-				maxoff;
-	ItemId		itemid;
 	bool		pronto_reap;
 	int			tuples_deleted,
-				tuples_frozen,
 				lpdead_items;
 	HeapPageFreeze pagefrz;
-	int64		fpi_before = pgWalUsage.wal_fpi;
-	HeapTupleFreeze frozen[MaxHeapTuplesPerPage];
 	int			lpdead_items_before = vacrel->dead_items->num_items;
 
 	/*
@@ -1509,13 +1503,6 @@ lazy_scan_prune(LVRelState *vacrel,
 	pronto_reap = vacrel->nindexes == 0;
 
 	Assert(BufferGetBlockNumber(buf) == blkno);
-
-	/*
-	 * maxoff might be reduced following line pointer array truncation in
-	 * heap_page_prune.  That's safe for us to ignore, since the reclaimed
-	 * space will continue to look like LP_UNUSED items below.
-	 */
-	maxoff = PageGetMaxOffsetNumber(page);
 
 	/* Initialize (or reset) page-level state */
 	pagefrz.freeze_required = false;
@@ -1537,8 +1524,8 @@ lazy_scan_prune(LVRelState *vacrel,
 	presult->nnewlpdead = 0;
 	presult->live_tuples = 0;
 	presult->recently_dead_tuples = 0;
+	presult->nfrozen = 0;
 	tuples_deleted = 0;
-	tuples_frozen = 0;
 	lpdead_items = 0;
 
 	/*
@@ -1551,134 +1538,39 @@ lazy_scan_prune(LVRelState *vacrel,
 	 * that were deleted from indexes.
 	 */
 	tuples_deleted = heap_page_prune(rel, buf, pronto_reap,
-									 vacrel->vistest, vacrel->dead_items,
+									 vacrel->vistest, &pagefrz,
+									 vacrel->dead_items,
 									 &vacrel->offnum, presult);
 
 	lpdead_items = vacrel->dead_items->num_items - lpdead_items_before;
 
 	/*
-	 * Now scan the page to check for tuples requiring freezing among
-	 * remaining tuples with storage
-	 */
-	for (offnum = FirstOffsetNumber;
-		 offnum <= maxoff;
-		 offnum = OffsetNumberNext(offnum))
-	{
-		HeapTupleHeader htup;
-		bool		totally_frozen;
-
-		/*
-		 * Set the offset number so that we can display it along with any
-		 * error that occurred while processing this tuple.
-		 */
-		vacrel->offnum = offnum;
-		itemid = PageGetItemId(page, offnum);
-
-		/* Redirect, dead, and unused items mustn't be touched */
-		if (!ItemIdIsNormal(itemid))
-			continue;
-
-		htup = (HeapTupleHeader) PageGetItem(page, itemid);
-
-		/* Tuple with storage -- consider need to freeze */
-		if (heap_prepare_freeze_tuple(htup, &pagefrz,
-									  &frozen[tuples_frozen], &totally_frozen))
-		{
-			/* Save prepared freeze plan for later */
-			frozen[tuples_frozen++].offset = offnum;
-		}
-
-		/*
-		 * If any tuple isn't either totally frozen already or eligible to
-		 * become totally frozen (according to its freeze plan), then the page
-		 * definitely cannot be set all-frozen in the visibility map later on
-		 */
-		if (!totally_frozen)
-			presult->all_frozen = false;
-	}
-
-	/*
 	 * We have now divided every item on the page into either an LP_DEAD item
-	 * that will need to be vacuumed in indexes later, or a LP_NORMAL tuple
-	 * that remains and needs to be considered for freezing now (LP_UNUSED and
-	 * LP_REDIRECT items also remain, but are of no further interest to us).
+	 * that will need to be vacuumed in indexes later, or a LP_NORMAL tuple.
 	 */
 	vacrel->offnum = InvalidOffsetNumber;
 
-	/*
-	 * Freeze the page when heap_prepare_freeze_tuple indicates that at least
-	 * one XID/MXID from before FreezeLimit/MultiXactCutoff is present.  Also
-	 * freeze when pruning generated an FPI, if doing so means that we set the
-	 * page all-frozen afterwards (might not happen until final heap pass).
-	 */
-	if (pagefrz.freeze_required || tuples_frozen == 0 ||
-		(presult->all_visible && presult->all_frozen &&
-		 fpi_before != pgWalUsage.wal_fpi))
+
+	if (presult->nfrozen > 0)
 	{
 		/*
 		 * We're freezing the page.  Our final NewRelfrozenXid doesn't need to
-		 * be affected by the XIDs that are just about to be frozen anyway.
+		 * be affected by the XIDs that were frozen.
 		 */
 		vacrel->NewRelfrozenXid = pagefrz.FreezePageRelfrozenXid;
 		vacrel->NewRelminMxid = pagefrz.FreezePageRelminMxid;
-
-		if (tuples_frozen == 0)
-		{
-			/*
-			 * We have no freeze plans to execute, so there's no added cost
-			 * from following the freeze path.  That's why it was chosen. This
-			 * is important in the case where the page only contains totally
-			 * frozen tuples at this point (perhaps only following pruning).
-			 * Such pages can be marked all-frozen in the VM by our caller,
-			 * even though none of its tuples were newly frozen here (note
-			 * that the "no freeze" path never sets pages all-frozen).
-			 *
-			 * We never increment the frozen_pages instrumentation counter
-			 * here, since it only counts pages with newly frozen tuples
-			 * (don't confuse that with pages newly set all-frozen in VM).
-			 */
-		}
-		else
-		{
-			TransactionId snapshotConflictHorizon;
-
-			vacrel->frozen_pages++;
-
-			/*
-			 * We can use visibility_cutoff_xid as our cutoff for conflicts
-			 * when the whole page is eligible to become all-frozen in the VM
-			 * once we're done with it.  Otherwise we generate a conservative
-			 * cutoff by stepping back from OldestXmin.
-			 */
-			if (presult->all_visible && presult->all_frozen)
-			{
-				/* Using same cutoff when setting VM is now unnecessary */
-				snapshotConflictHorizon = presult->visibility_cutoff_xid;
-				presult->visibility_cutoff_xid = InvalidTransactionId;
-			}
-			else
-			{
-				/* Avoids false conflicts when hot_standby_feedback in use */
-				snapshotConflictHorizon = vacrel->cutoffs.OldestXmin;
-				TransactionIdRetreat(snapshotConflictHorizon);
-			}
-
-			/* Execute all freeze plans for page as a single atomic action */
-			heap_freeze_execute_prepared(vacrel->rel, buf,
-										 snapshotConflictHorizon,
-										 frozen, tuples_frozen);
-		}
+		vacrel->frozen_pages++;
 	}
 	else
 	{
 		/*
-		 * Page requires "no freeze" processing.  It might be set all-visible
-		 * in the visibility map, but it can never be set all-frozen.
+		 * No tuples were newly frozen. Though we may still set a page
+		 * all_frozen, we never increment the frozen_pages instrumentation
+		 * counter here, since it only counts pages with newly frozen tuples
+		 * (don't confuse that with pages newly set all-frozen in VM).
 		 */
 		vacrel->NewRelfrozenXid = pagefrz.NoFreezePageRelfrozenXid;
 		vacrel->NewRelminMxid = pagefrz.NoFreezePageRelminMxid;
-		presult->all_frozen = false;
-		tuples_frozen = 0;		/* avoid miscounts in instrumentation */
 	}
 
 	/*
@@ -1714,6 +1606,8 @@ lazy_scan_prune(LVRelState *vacrel,
 		pgstat_progress_update_param(PROGRESS_VACUUM_NUM_DEAD_TUPLES,
 									 vacrel->dead_items->num_items);
 
+		/* MTODO: figure out newly lp dead/already lp dead stuff */
+
 		/*
 		 * It was convenient to ignore LP_DEAD items in all_visible earlier on
 		 * to make the choice of whether or not to freeze the page unaffected
@@ -1730,7 +1624,7 @@ lazy_scan_prune(LVRelState *vacrel,
 
 	/* Finally, add page-local counts to whole-VACUUM counts */
 	vacrel->tuples_deleted += tuples_deleted;
-	vacrel->tuples_frozen += tuples_frozen;
+	vacrel->tuples_frozen += presult->nfrozen;
 	vacrel->lpdead_items += lpdead_items;
 	vacrel->live_tuples += presult->live_tuples;
 	vacrel->recently_dead_tuples += presult->recently_dead_tuples;
