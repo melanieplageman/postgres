@@ -811,6 +811,8 @@ lazy_scan_heap(LVRelState *vacrel)
 				next_unskippable_block,
 				next_fsm_block_to_vacuum = 0;
 	VacDeadItems *dead_items = vacrel->dead_items;
+	bool		has_lpdead_items = false;
+	int64		lpdead_before;
 	Buffer		vmbuffer = InvalidBuffer;
 	bool		next_unskippable_allvis,
 				skipping_current_range;
@@ -992,6 +994,8 @@ lazy_scan_heap(LVRelState *vacrel)
 			continue;
 		}
 
+		lpdead_before = vacrel->lpdead_items;
+
 		/*
 		 * Prune, freeze, and count tuples.
 		 *
@@ -1003,7 +1007,14 @@ lazy_scan_heap(LVRelState *vacrel)
 		 */
 		lazy_scan_prune(vacrel, buf, blkno, page, &presult);
 
-		Assert(!presult.all_visible || !presult.has_lpdead_items);
+		/*
+		 * Are there any LP_DEAD items remaining on the page? This counts all
+		 * LP_DEAD items on the page -- not just those which pruning newly
+		 * marked LP_DEAD.
+		 */
+		has_lpdead_items = vacrel->lpdead_items - lpdead_before > 0;
+
+		Assert(!presult.all_visible || !has_lpdead_items);
 
 		/* Remember the location of the last page with nonremovable tuples */
 		if (presult.hastup)
@@ -1019,7 +1030,7 @@ lazy_scan_heap(LVRelState *vacrel)
 			 * performed here can be thought of as the one-pass equivalent of
 			 * a call to lazy_vacuum().
 			 */
-			if (presult.has_lpdead_items)
+			if (has_lpdead_items)
 			{
 				Size		freespace;
 
@@ -1130,7 +1141,7 @@ lazy_scan_heap(LVRelState *vacrel)
 		 * There should never be LP_DEAD items on a page with PD_ALL_VISIBLE
 		 * set, however.
 		 */
-		else if (presult.has_lpdead_items && PageIsAllVisible(page))
+		else if (has_lpdead_items && PageIsAllVisible(page))
 		{
 			elog(WARNING, "page containing LP_DEAD items is marked as all-visible in relation \"%s\" page %u",
 				 vacrel->relname, blkno);
@@ -1178,7 +1189,7 @@ lazy_scan_heap(LVRelState *vacrel)
 		 * Final steps for block: drop cleanup lock, record free space in the
 		 * FSM
 		 */
-		if (presult.has_lpdead_items && vacrel->do_index_vacuuming)
+		if (has_lpdead_items && vacrel->do_index_vacuuming)
 		{
 			/*
 			 * Wait until lazy_vacuum_heap_rel() to save free space.  This
@@ -1577,7 +1588,6 @@ retry:
 	 * requiring freezing among remaining tuples with storage
 	 */
 	presult->hastup = false;
-	presult->has_lpdead_items = false;
 	presult->all_visible = true;
 	presult->all_frozen = true;
 	presult->visibility_cutoff_xid = InvalidTransactionId;
@@ -1881,7 +1891,6 @@ retry:
 		ItemPointerData tmp;
 
 		vacrel->lpdead_item_pages++;
-		presult->has_lpdead_items = true;
 
 		ItemPointerSetBlockNumber(&tmp, blkno);
 

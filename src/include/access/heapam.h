@@ -197,7 +197,6 @@ typedef struct HeapPageFreeze
 typedef struct PruneResult
 {
 	bool		hastup;			/* Page prevents rel truncation? */
-	bool		has_lpdead_items;	/* includes existing LP_DEAD items */
 
 	/*
 	 * State describes the proper VM bit states to set for the page following
