@@ -95,9 +95,6 @@ static void compute_new_xmax_infomask(TransactionId xmax, uint16 old_infomask,
 static TM_Result heap_lock_updated_tuple(Relation rel, HeapTuple tuple,
 										 ItemPointer ctid, TransactionId xid,
 										 LockTupleMode mode);
-static int	heap_log_freeze_plan(HeapTupleFreeze *tuples, int ntuples,
-								 xl_heap_freeze_plan *plans_out,
-								 OffsetNumber *offsets_out);
 static void GetMultiXactIdHintBits(MultiXactId multi, uint16 *new_infomask,
 								   uint16 *new_infomask2);
 static TransactionId MultiXactIdGetUpdateXid(TransactionId xmax,
@@ -6669,60 +6666,11 @@ heap_execute_freeze_tuple(HeapTupleHeader tuple, HeapTupleFreeze *frz)
  */
 void
 heap_freeze_execute_prepared(Relation rel, Buffer buffer,
-							 TransactionId snapshotConflictHorizon,
 							 HeapTupleFreeze *tuples, int ntuples)
 {
 	Page		page = BufferGetPage(buffer);
 
 	Assert(ntuples > 0);
-
-	/*
-	 * Perform xmin/xmax XID status sanity checks before critical section.
-	 *
-	 * heap_prepare_freeze_tuple doesn't perform these checks directly because
-	 * pg_xact lookups are relatively expensive.  They shouldn't be repeated
-	 * by successive VACUUMs that each decide against freezing the same page.
-	 */
-	for (int i = 0; i < ntuples; i++)
-	{
-		HeapTupleFreeze *frz = tuples + i;
-		ItemId		itemid = PageGetItemId(page, frz->offset);
-		HeapTupleHeader htup;
-
-		htup = (HeapTupleHeader) PageGetItem(page, itemid);
-
-		/* Deliberately avoid relying on tuple hint bits here */
-		if (frz->checkflags & HEAP_FREEZE_CHECK_XMIN_COMMITTED)
-		{
-			TransactionId xmin = HeapTupleHeaderGetRawXmin(htup);
-
-			Assert(!HeapTupleHeaderXminFrozen(htup));
-			if (unlikely(!TransactionIdDidCommit(xmin)))
-				ereport(ERROR,
-						(errcode(ERRCODE_DATA_CORRUPTED),
-						 errmsg_internal("uncommitted xmin %u needs to be frozen",
-										 xmin)));
-		}
-
-		/*
-		 * TransactionIdDidAbort won't work reliably in the presence of XIDs
-		 * left behind by transactions that were in progress during a crash,
-		 * so we can only check that xmax didn't commit
-		 */
-		if (frz->checkflags & HEAP_FREEZE_CHECK_XMAX_ABORTED)
-		{
-			TransactionId xmax = HeapTupleHeaderGetRawXmax(htup);
-
-			Assert(TransactionIdIsNormal(xmax));
-			if (unlikely(TransactionIdDidCommit(xmax)))
-				ereport(ERROR,
-						(errcode(ERRCODE_DATA_CORRUPTED),
-						 errmsg_internal("cannot freeze committed xmax %u",
-										 xmax)));
-		}
-	}
-
-	START_CRIT_SECTION();
 
 	for (int i = 0; i < ntuples; i++)
 	{
@@ -6733,45 +6681,6 @@ heap_freeze_execute_prepared(Relation rel, Buffer buffer,
 		htup = (HeapTupleHeader) PageGetItem(page, itemid);
 		heap_execute_freeze_tuple(htup, frz);
 	}
-
-	MarkBufferDirty(buffer);
-
-	/* Now WAL-log freezing if necessary */
-	if (RelationNeedsWAL(rel))
-	{
-		xl_heap_freeze_plan plans[MaxHeapTuplesPerPage];
-		OffsetNumber offsets[MaxHeapTuplesPerPage];
-		int			nplans;
-		xl_heap_freeze_page xlrec;
-		XLogRecPtr	recptr;
-
-		/* Prepare deduplicated representation for use in WAL record */
-		nplans = heap_log_freeze_plan(tuples, ntuples, plans, offsets);
-
-		xlrec.snapshotConflictHorizon = snapshotConflictHorizon;
-		xlrec.isCatalogRel = RelationIsAccessibleInLogicalDecoding(rel);
-		xlrec.nplans = nplans;
-
-		XLogBeginInsert();
-		XLogRegisterData((char *) &xlrec, SizeOfHeapFreezePage);
-
-		/*
-		 * The freeze plan array and offset array are not actually in the
-		 * buffer, but pretend that they are.  When XLogInsert stores the
-		 * whole buffer, the arrays need not be stored too.
-		 */
-		XLogRegisterBuffer(0, buffer, REGBUF_STANDARD);
-		XLogRegisterBufData(0, (char *) plans,
-							nplans * sizeof(xl_heap_freeze_plan));
-		XLogRegisterBufData(0, (char *) offsets,
-							ntuples * sizeof(OffsetNumber));
-
-		recptr = XLogInsert(RM_HEAP2_ID, XLOG_HEAP2_FREEZE_PAGE);
-
-		PageSetLSN(page, recptr);
-	}
-
-	END_CRIT_SECTION();
 }
 
 /*
@@ -6861,7 +6770,7 @@ heap_log_freeze_new_plan(xl_heap_freeze_plan *plan, HeapTupleFreeze *frz)
  * (actually there is one array per freeze plan, but that's not of immediate
  * concern to our caller).
  */
-static int
+int
 heap_log_freeze_plan(HeapTupleFreeze *tuples, int ntuples,
 					 xl_heap_freeze_plan *plans_out,
 					 OffsetNumber *offsets_out)
@@ -8781,37 +8690,74 @@ heap_xlog_prune(XLogReaderState *record)
 	if (action == BLK_NEEDS_REDO)
 	{
 		Page		page = (Page) BufferGetPage(buffer);
-		OffsetNumber *end;
 		OffsetNumber *redirected;
 		OffsetNumber *nowdead;
 		OffsetNumber *nowunused;
 		int			nredirected;
 		int			ndead;
 		int			nunused;
+		int			nplans;
+		bool		do_prune;
 		Size		datalen;
+		xl_heap_freeze_plan *plans;
+		OffsetNumber *frz_offsets;
+		int			curoff = 0;
 
-		redirected = (OffsetNumber *) XLogRecGetBlockData(record, 0, &datalen);
-
+		nplans = xlrec->nplans;
 		nredirected = xlrec->nredirected;
 		ndead = xlrec->ndead;
-		end = (OffsetNumber *) ((char *) redirected + datalen);
+		nunused = xlrec->nunused;
+
+		plans = (xl_heap_freeze_plan *) XLogRecGetBlockData(record, 0, &datalen);
+		redirected = (OffsetNumber *) ((char *) plans +
+									   (nplans * sizeof(xl_heap_freeze_plan)));
 		nowdead = redirected + (nredirected * 2);
 		nowunused = nowdead + ndead;
-		nunused = (end - nowunused);
-		Assert(nunused >= 0);
+		frz_offsets = nowunused + nunused;
+
+		do_prune = nredirected > 0 || ndead > 0 || nunused > 0;
+
+		Assert(do_prune || nplans > 0);
+
+		for (int p = 0; p < nplans; p++)
+		{
+			HeapTupleFreeze frz;
+
+			/*
+			 * Convert freeze plan representation from WAL record into
+			 * per-tuple format used by heap_execute_freeze_tuple
+			 */
+			frz.xmax = plans[p].xmax;
+			frz.t_infomask2 = plans[p].t_infomask2;
+			frz.t_infomask = plans[p].t_infomask;
+			frz.frzflags = plans[p].frzflags;
+			frz.offset = InvalidOffsetNumber;	/* unused, but be tidy */
+
+			for (int i = 0; i < plans[p].ntuples; i++)
+			{
+				OffsetNumber offset = frz_offsets[curoff++];
+				ItemId		lp;
+				HeapTupleHeader tuple;
+
+				lp = PageGetItemId(page, offset);
+				tuple = (HeapTupleHeader) PageGetItem(page, lp);
+				heap_execute_freeze_tuple(tuple, &frz);
+			}
+		}
 
 		/* Update all line pointers per the record, and repair fragmentation */
-		heap_page_prune_execute(buffer,
-								redirected, nredirected,
-								nowdead, ndead,
-								nowunused, nunused);
+		if (do_prune)
+			heap_page_prune_execute(buffer,
+									redirected, nredirected,
+									nowdead, ndead,
+									nowunused, nunused);
 
 		/*
 		 * Note: we don't worry about updating the page's prunability hints.
 		 * At worst this will cause an extra prune cycle to occur soon.
 		 */
-
 		PageSetLSN(page, lsn);
+
 		MarkBufferDirty(buffer);
 	}
 
