@@ -564,88 +564,88 @@ heap_page_prune(Relation relation, Buffer buffer, bool pronto_reap,
 	 */
 	((PageHeader) page)->pd_prune_xid = prstate.new_prune_xid;
 
+	/*
+	 * If we haven't found any prunable items, we can return. If we have found
+	 * a new value for the pd_prune_xid field, update it and mark the buffer
+	 * dirty. This is treated as a non-WAL-logged hint.
+	 *
+	 * Also clear the "page is full" flag if it is set, since there's no point
+	 * in repeating the prune/defrag process until something else happens to
+	 * the page.
+	 */
+	if (!do_prune)
+	{
+		if (new_prune_xid_found || page_full)
+		{
+			START_CRIT_SECTION();
+			PageClearFull(page);
+			MarkBufferDirtyHint(buffer, true);
+			END_CRIT_SECTION();
+		}
+
+		return ndeleted;
+	}
+
 	/* Any error while applying the changes is critical */
 	START_CRIT_SECTION();
 
-	/* Have we found any prunable items? */
-	if (!do_prune)
+	/*
+	 * Apply the planned item changes, then repair page fragmentation, and
+	 * update the page's hint bit about whether it has free line pointers.
+	 */
+	heap_page_prune_execute(buffer, pronto_reap,
+							prstate.redirected, prstate.nredirected,
+							prstate.nowdead, prstate.ndead,
+							prstate.nowunused, prstate.nunused);
+
+	/*
+	 * Also clear the "page is full" flag, since there's no point in repeating
+	 * the prune/defrag process until something else happens to the page.
+	 */
+	PageClearFull(page);
+
+	MarkBufferDirty(buffer);
+
+	/*
+	 * Emit a WAL XLOG_HEAP2_PRUNE record showing what we did
+	 */
+	if (RelationNeedsWAL(relation))
 	{
-		/*
-		 * If we didn't prune anything, but have found a new value for the
-		 * pd_prune_xid field, update it and mark the buffer dirty. This is
-		 * treated as a non-WAL-logged hint.
-		 *
-		 * Also clear the "page is full" flag if it is set, since there's no
-		 * point in repeating the prune/defrag process until something else
-		 * happens to the page.
-		 */
-		if (new_prune_xid_found || page_full)
-		{
-			PageClearFull(page);
-			MarkBufferDirtyHint(buffer, true);
-		}
-	}
-	else
-	{
-		/*
-		 * Apply the planned item changes, then repair page fragmentation, and
-		 * update the page's hint bit about whether it has free line pointers.
-		 */
-		heap_page_prune_execute(buffer, pronto_reap,
-								prstate.redirected, prstate.nredirected,
-								prstate.nowdead, prstate.ndead,
-								prstate.nowunused, prstate.nunused);
+		xl_heap_prune xlrec;
+		uint8		info = XLOG_HEAP2_PRUNE;
+		XLogRecPtr	recptr;
+
+		xlrec.isCatalogRel = RelationIsAccessibleInLogicalDecoding(relation);
+		xlrec.snapshotConflictHorizon = prstate.snapshotConflictHorizon;
+		xlrec.nredirected = prstate.nredirected;
+		xlrec.ndead = prstate.ndead;
+
+		XLogBeginInsert();
+		XLogRegisterData((char *) &xlrec, SizeOfHeapPrune);
+
+		XLogRegisterBuffer(0, buffer, REGBUF_STANDARD);
 
 		/*
-		 * Also clear the "page is full" flag, since there's no point in
-		 * repeating the prune/defrag process until something else happens to
-		 * the page.
+		 * The OffsetNumber arrays are not actually in the buffer, but we
+		 * pretend that they are.  When XLogInsert stores the whole buffer,
+		 * the offset arrays need not be stored too.
 		 */
-		PageClearFull(page);
+		if (prstate.nredirected > 0)
+			XLogRegisterBufData(0, (char *) prstate.redirected,
+								prstate.nredirected *
+								sizeof(OffsetNumber) * 2);
 
-		MarkBufferDirty(buffer);
+		if (prstate.ndead > 0)
+			XLogRegisterBufData(0, (char *) prstate.nowdead,
+								prstate.ndead * sizeof(OffsetNumber));
 
-		/*
-		 * Emit a WAL XLOG_HEAP2_PRUNE record showing what we did
-		 */
-		if (RelationNeedsWAL(relation))
-		{
-			xl_heap_prune xlrec;
-			uint8		info = XLOG_HEAP2_PRUNE;
-			XLogRecPtr	recptr;
+		if (prstate.nunused > 0)
+			XLogRegisterBufData(0, (char *) prstate.nowunused,
+								prstate.nunused * sizeof(OffsetNumber));
 
-			xlrec.isCatalogRel = RelationIsAccessibleInLogicalDecoding(relation);
-			xlrec.snapshotConflictHorizon = prstate.snapshotConflictHorizon;
-			xlrec.nredirected = prstate.nredirected;
-			xlrec.ndead = prstate.ndead;
+		recptr = XLogInsert(RM_HEAP2_ID, info);
 
-			XLogBeginInsert();
-			XLogRegisterData((char *) &xlrec, SizeOfHeapPrune);
-
-			XLogRegisterBuffer(0, buffer, REGBUF_STANDARD);
-
-			/*
-			 * The OffsetNumber arrays are not actually in the buffer, but we
-			 * pretend that they are.  When XLogInsert stores the whole
-			 * buffer, the offset arrays need not be stored too.
-			 */
-			if (prstate.nredirected > 0)
-				XLogRegisterBufData(0, (char *) prstate.redirected,
-									prstate.nredirected *
-									sizeof(OffsetNumber) * 2);
-
-			if (prstate.ndead > 0)
-				XLogRegisterBufData(0, (char *) prstate.nowdead,
-									prstate.ndead * sizeof(OffsetNumber));
-
-			if (prstate.nunused > 0)
-				XLogRegisterBufData(0, (char *) prstate.nowunused,
-									prstate.nunused * sizeof(OffsetNumber));
-
-			recptr = XLogInsert(RM_HEAP2_ID, info);
-
-			PageSetLSN(BufferGetPage(buffer), recptr);
-		}
+		PageSetLSN(BufferGetPage(buffer), recptr);
 	}
 
 	END_CRIT_SECTION();
