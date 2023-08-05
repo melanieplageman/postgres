@@ -262,6 +262,9 @@ heap_page_prune(Relation relation, Buffer buffer, bool pronto_reap,
 	HeapTupleData tup;
 	HTSV_Result res;
 	TransactionId dead_after;
+	bool		do_prune = false;
+	bool		new_prune_xid_found = false;
+	bool		page_full = PageIsFull(page);
 
 	prstate.blkno = BufferGetBlockNumber(buffer);
 
@@ -544,11 +547,45 @@ heap_page_prune(Relation relation, Buffer buffer, bool pronto_reap,
 	/* Clear the offset information once we have processed the given page. */
 	*off_loc = InvalidOffsetNumber;
 
+	/* Record number of newly-set-LP_DEAD items for caller */
+	presult->nnewlpdead = prstate.ndead;
+
+	do_prune = prstate.nredirected > 0 || prstate.ndead > 0 || prstate.nunused > 0;
+
+	/* Refresh this value for on-access callers */
+	page_full = PageIsFull(page);
+
+	if (((PageHeader) page)->pd_prune_xid != prstate.new_prune_xid)
+		new_prune_xid_found = true;
+
+	/*
+	 * Update the page's pd_prune_xid field to either zero, or the lowest XID
+	 * of any soon-prunable tuple.
+	 */
+	((PageHeader) page)->pd_prune_xid = prstate.new_prune_xid;
+
 	/* Any error while applying the changes is critical */
 	START_CRIT_SECTION();
 
 	/* Have we found any prunable items? */
-	if (prstate.nredirected > 0 || prstate.ndead > 0 || prstate.nunused > 0)
+	if (!do_prune)
+	{
+		/*
+		 * If we didn't prune anything, but have found a new value for the
+		 * pd_prune_xid field, update it and mark the buffer dirty. This is
+		 * treated as a non-WAL-logged hint.
+		 *
+		 * Also clear the "page is full" flag if it is set, since there's no
+		 * point in repeating the prune/defrag process until something else
+		 * happens to the page.
+		 */
+		if (new_prune_xid_found || page_full)
+		{
+			PageClearFull(page);
+			MarkBufferDirtyHint(buffer, true);
+		}
+	}
+	else
 	{
 		/*
 		 * Apply the planned item changes, then repair page fragmentation, and
@@ -558,12 +595,6 @@ heap_page_prune(Relation relation, Buffer buffer, bool pronto_reap,
 								prstate.redirected, prstate.nredirected,
 								prstate.nowdead, prstate.ndead,
 								prstate.nowunused, prstate.nunused);
-
-		/*
-		 * Update the page's pd_prune_xid field to either zero, or the lowest
-		 * XID of any soon-prunable tuple.
-		 */
-		((PageHeader) page)->pd_prune_xid = prstate.new_prune_xid;
 
 		/*
 		 * Also clear the "page is full" flag, since there's no point in
@@ -616,30 +647,8 @@ heap_page_prune(Relation relation, Buffer buffer, bool pronto_reap,
 			PageSetLSN(BufferGetPage(buffer), recptr);
 		}
 	}
-	else
-	{
-		/*
-		 * If we didn't prune anything, but have found a new value for the
-		 * pd_prune_xid field, update it and mark the buffer dirty. This is
-		 * treated as a non-WAL-logged hint.
-		 *
-		 * Also clear the "page is full" flag if it is set, since there's no
-		 * point in repeating the prune/defrag process until something else
-		 * happens to the page.
-		 */
-		if (((PageHeader) page)->pd_prune_xid != prstate.new_prune_xid ||
-			PageIsFull(page))
-		{
-			((PageHeader) page)->pd_prune_xid = prstate.new_prune_xid;
-			PageClearFull(page);
-			MarkBufferDirtyHint(buffer, true);
-		}
-	}
 
 	END_CRIT_SECTION();
-
-	/* Record number of newly-set-LP_DEAD items for caller */
-	presult->nnewlpdead = prstate.ndead;
 
 #ifdef USE_ASSERT_CHECKING
 
@@ -647,7 +656,7 @@ heap_page_prune(Relation relation, Buffer buffer, bool pronto_reap,
 	 * Validate that we did actually set all the line pointers we meant to and
 	 * the page is in the state the WAL record we just emitted claims.
 	 */
-	if (prstate.nredirected > 0 || prstate.ndead > 0 || prstate.nunused > 0)
+	if (do_prune)
 		heap_page_prune_verify_execute(buffer, &prstate);
 #endif
 
