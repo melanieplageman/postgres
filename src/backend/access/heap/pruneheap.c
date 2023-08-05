@@ -54,6 +54,17 @@ typedef struct
 	 * 1. Otherwise every access would need to subtract 1.
 	 */
 	bool		marked[MaxHeapTuplesPerPage + 1];
+
+	/*
+	 * Keep track of tuples on which we have already called prepare freeze. We
+	 * should only prepare freeze each tuple once, as their freeze tuples are
+	 * added consecutively into an array of freeze tuples. Only tuples that
+	 * will end up being LP_NORMAL should be considered for freezing. Tuples
+	 * may be visited twice while calling heap_prune_chain(). Tuples remaining
+	 * LP_NORMAL should not have different offsets by the time we execute the
+	 * freeze plans.
+	 */
+	bool		attempt_frz[MaxHeapTuplesPerPage + 1];
 } PruneState;
 
 /* Local functions */
@@ -66,9 +77,11 @@ static void heap_page_prune_verify_execute(Buffer buffer, PruneState *prstate);
 static int	heap_prune_chain(Buffer buffer,
 							 OffsetNumber rootoffnum, bool pronto_reap,
 							 VacDeadItems *dead_items,
-							 PruneState *prstate, PruneResult *presult);
+							 PruneState *prstate, HeapPageFreeze *pagefrz,
+							 PruneResult *presult);
 static void heap_prune_record_prunable(PruneState *prstate, TransactionId xid);
-static void heap_prune_record_redirect(PruneState *prstate, PruneResult *presult,
+static void heap_prune_record_redirect(Buffer buffer, PruneState *prstate, HeapPageFreeze *pagefrz,
+									   PruneResult *presult,
 									   OffsetNumber offnum, OffsetNumber rdoffnum);
 static void heap_prune_record_dead(PruneState *prstate, OffsetNumber offnum,
 								   VacDeadItems *dead_items);
@@ -162,6 +175,7 @@ heap_page_prune_opt(Relation relation, Buffer buffer)
 		presult.all_frozen = true;
 		presult.live_tuples = 0;
 		presult.recently_dead_tuples = 0;
+		presult.nfrozen = 0;
 		presult.visibility_cutoff_xid = InvalidTransactionId;
 
 		/*
@@ -178,7 +192,7 @@ heap_page_prune_opt(Relation relation, Buffer buffer)
 		if (PageIsFull(page) || PageGetHeapFreeSpace(page) < minfree)
 		{
 			int			ndeleted = heap_page_prune(relation, buffer, false, vistest,
-												   NULL, &off_loc, &presult);
+												   NULL, NULL, &off_loc, &presult);
 
 			/*
 			 * Report the number of tuples reclaimed to pgstats.  This is
@@ -236,8 +250,9 @@ heap_page_prune_opt(Relation relation, Buffer buffer)
  */
 int
 heap_page_prune(Relation relation, Buffer buffer, bool pronto_reap,
-				GlobalVisState *vistest, VacDeadItems *dead_items,
-				OffsetNumber *off_loc, PruneResult *presult)
+				GlobalVisState *vistest, HeapPageFreeze *pagefrz,
+				VacDeadItems *dead_items, OffsetNumber *off_loc,
+				PruneResult *presult)
 {
 	int			ndeleted = 0;
 	Page		page = BufferGetPage(buffer);
@@ -267,6 +282,7 @@ heap_page_prune(Relation relation, Buffer buffer, bool pronto_reap,
 	prstate.snapshotConflictHorizon = InvalidTransactionId;
 	prstate.nredirected = prstate.ndead = prstate.nunused = 0;
 	memset(prstate.marked, 0, sizeof(prstate.marked));
+	memset(prstate.attempt_frz, 0, sizeof(prstate.attempt_frz));
 
 	maxoff = PageGetMaxOffsetNumber(page);
 	tup.t_tableOid = RelationGetRelid(prstate.rel);
@@ -451,7 +467,9 @@ heap_page_prune(Relation relation, Buffer buffer, bool pronto_reap,
 		 offnum <= maxoff;
 		 offnum = OffsetNumberNext(offnum))
 	{
+		HeapTupleHeader htup;
 		ItemId		itemid;
+		bool		totally_frozen;
 
 		/* Ignore items already processed as part of an earlier chain */
 		if (prstate.marked[offnum])
@@ -467,7 +485,7 @@ heap_page_prune(Relation relation, Buffer buffer, bool pronto_reap,
 
 		/* Process this item or chain of items */
 		ndeleted += heap_prune_chain(buffer, offnum, pronto_reap, dead_items,
-									 &prstate, presult);
+									 &prstate, pagefrz, presult);
 
 		/*
 		 * Dead tuples and ones pointed to by an already not LP_NORMAL line
@@ -493,6 +511,34 @@ heap_page_prune(Relation relation, Buffer buffer, bool pronto_reap,
 		Assert(!prstate.marked[offnum] && presult->htsv[offnum] != -1);
 
 		presult->hastup = true;
+
+		/*
+		 * If the caller did not pass in a pagefrz (on-access pruning) or if
+		 * we have already attempted to freeze the tuple then we shouldn't
+		 * consider freezing it now. The criteria above for avoiding setting
+		 * hastup also applies when determining which tuples to consider
+		 * freezing -- that is, we don't consider freezing tuples which will
+		 * be removed or redirected as part of pruning or reaping.
+		 */
+		if (!pagefrz || prstate.attempt_frz[offnum])
+			continue;
+
+		htup = (HeapTupleHeader) PageGetItem(page, itemid);
+		if ((heap_prepare_freeze_tuple(htup, pagefrz,
+									   &presult->frozen[presult->nfrozen], &totally_frozen)))
+		{
+			presult->frozen[presult->nfrozen++].offset = offnum;
+		}
+
+		/*
+		 * If any tuple isn't either totally frozen already or eligible to
+		 * become totally frozen (according to its freeze plan), then the page
+		 * definitely cannot be set all-frozen in the visibility map later on.
+		 */
+		if (!totally_frozen)
+			presult->all_frozen = false;
+
+		prstate.attempt_frz[offnum] = true;
 	}
 
 	/* Clear the offset information once we have processed the given page. */
@@ -534,6 +580,7 @@ heap_page_prune(Relation relation, Buffer buffer, bool pronto_reap,
 		if (RelationNeedsWAL(relation))
 		{
 			xl_heap_prune xlrec;
+			uint8		info = XLOG_HEAP2_PRUNE;
 			XLogRecPtr	recptr;
 
 			xlrec.isCatalogRel = RelationIsAccessibleInLogicalDecoding(relation);
@@ -564,7 +611,7 @@ heap_page_prune(Relation relation, Buffer buffer, bool pronto_reap,
 				XLogRegisterBufData(0, (char *) prstate.nowunused,
 									prstate.nunused * sizeof(OffsetNumber));
 
-			recptr = XLogInsert(RM_HEAP2_ID, XLOG_HEAP2_PRUNE);
+			recptr = XLogInsert(RM_HEAP2_ID, info);
 
 			PageSetLSN(BufferGetPage(buffer), recptr);
 		}
@@ -658,7 +705,8 @@ catalog_dead_item_for_vacuum(VacDeadItems *dead_items,
 static int
 heap_prune_chain(Buffer buffer, OffsetNumber rootoffnum,
 				 bool pronto_reap, VacDeadItems *dead_items,
-				 PruneState *prstate, PruneResult *presult)
+				 PruneState *prstate, HeapPageFreeze *pagefrz,
+				 PruneResult *presult)
 {
 	int			ndeleted = 0;
 	Page		dp = (Page) BufferGetPage(buffer);
@@ -921,7 +969,8 @@ heap_prune_chain(Buffer buffer, OffsetNumber rootoffnum,
 				heap_prune_record_dead(prstate, rootoffnum, dead_items);
 		}
 		else
-			heap_prune_record_redirect(prstate, presult, rootoffnum, chainitems[i]);
+			heap_prune_record_redirect(buffer, prstate, pagefrz, presult,
+									   rootoffnum, chainitems[i]);
 	}
 	else if (nchain < 2 && ItemIdIsRedirected(rootlp))
 	{
@@ -957,9 +1006,15 @@ heap_prune_record_prunable(PruneState *prstate, TransactionId xid)
 
 /* Record line pointer to be redirected */
 static void
-heap_prune_record_redirect(PruneState *prstate, PruneResult *presult,
+heap_prune_record_redirect(Buffer buffer, PruneState *prstate,
+						   HeapPageFreeze *pagefrz,
+						   PruneResult *presult,
 						   OffsetNumber offnum, OffsetNumber rdoffnum)
 {
+	HeapTupleHeader htup;
+	Page		page;
+	bool		totally_frozen;
+
 	Assert(prstate->nredirected < MaxHeapTuplesPerPage);
 	prstate->redirected[prstate->nredirected * 2] = offnum;
 	prstate->redirected[prstate->nredirected * 2 + 1] = rdoffnum;
@@ -970,6 +1025,35 @@ heap_prune_record_redirect(PruneState *prstate, PruneResult *presult,
 	prstate->marked[rdoffnum] = true;
 	/* rel truncation is unsafe. */
 	presult->hastup = true;
+
+	/*
+	 * Determine whether or not we should consider freezing the tuple which we
+	 * are redirecting to.
+	 */
+	if (!pagefrz || prstate->attempt_frz[rdoffnum] ||
+		presult->htsv[rdoffnum] == HEAPTUPLE_DEAD ||
+		presult->htsv[rdoffnum] == -1)
+		return;
+
+	page = BufferGetPage(buffer);
+	htup = (HeapTupleHeader) PageGetItem(page, PageGetItemId(page, rdoffnum));
+
+	if ((heap_prepare_freeze_tuple(htup, pagefrz,
+								   &presult->frozen[presult->nfrozen], &totally_frozen)))
+	{
+		/* Save prepared freeze plan for later */
+		presult->frozen[presult->nfrozen++].offset = rdoffnum;
+	}
+
+	/*
+	 * If any tuple isn't either totally frozen already or eligible to become
+	 * totally frozen (according to its freeze plan), then the page definitely
+	 * cannot be set all-frozen in the visibility map later on
+	 */
+	if (!totally_frozen)
+		presult->all_frozen = false;
+
+	prstate->attempt_frz[rdoffnum] = true;
 }
 
 /* Record line pointer to be marked dead */
