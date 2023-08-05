@@ -65,6 +65,11 @@ typedef struct
 	 * freeze plans.
 	 */
 	bool		attempt_frz[MaxHeapTuplesPerPage + 1];
+
+	/*
+	 * One entry for every tuple that we may freeze.
+	 */
+	HeapTupleFreeze frozen[MaxHeapTuplesPerPage];
 } PruneState;
 
 /* Local functions */
@@ -262,7 +267,9 @@ heap_page_prune(Relation relation, Buffer buffer, bool pronto_reap,
 	HeapTupleData tup;
 	HTSV_Result res;
 	TransactionId dead_after;
+	TransactionId frz_conflict_horizon = InvalidTransactionId;
 	bool		do_prune = false;
+	bool		do_freeze = false;
 	bool		new_prune_xid_found = false;
 	bool		page_full = PageIsFull(page);
 
@@ -529,9 +536,9 @@ heap_page_prune(Relation relation, Buffer buffer, bool pronto_reap,
 
 		htup = (HeapTupleHeader) PageGetItem(page, itemid);
 		if ((heap_prepare_freeze_tuple(htup, pagefrz,
-									   &presult->frozen[presult->nfrozen], &totally_frozen)))
+									   &prstate.frozen[presult->nfrozen], &totally_frozen)))
 		{
-			presult->frozen[presult->nfrozen++].offset = offnum;
+			prstate.frozen[presult->nfrozen++].offset = offnum;
 		}
 
 		/*
@@ -553,9 +560,6 @@ heap_page_prune(Relation relation, Buffer buffer, bool pronto_reap,
 
 	do_prune = prstate.nredirected > 0 || prstate.ndead > 0 || prstate.nunused > 0;
 
-	/* Refresh this value for on-access callers */
-	page_full = PageIsFull(page);
-
 	if (((PageHeader) page)->pd_prune_xid != prstate.new_prune_xid)
 		new_prune_xid_found = true;
 
@@ -566,17 +570,100 @@ heap_page_prune(Relation relation, Buffer buffer, bool pronto_reap,
 	((PageHeader) page)->pd_prune_xid = prstate.new_prune_xid;
 
 	/*
-	 * If we haven't found any prunable items, we can return. If we have found
-	 * a new value for the pd_prune_xid field, update it and mark the buffer
-	 * dirty. This is treated as a non-WAL-logged hint.
+	 * Freeze the page when heap_prepare_freeze_tuple() indicates that at
+	 * least one XID/MXID from before FreezeLimit/MultiXactCutoff is present
+	 * or when freezing would freeze the whole page and we either are pruning
+	 * and have to emit a record anyway or the page is already dirty and will
+	 * need a record emitted at some point. We only freeze in the latter case
+	 * if we think that doing so will not emit an FPI.
+	 *
+	 * The current value of all_visible does not consider dead tuples. Before
+	 * updating the visibility map, we will need to unset it if there are any
+	 * LP_DEAD items remaining on the page. It is still okay to freeze the
+	 * freezable tuples, though, as we can later update the visibility map
+	 * when reaping the LP_DEAD items after vacuuming the indexes.
+	 */
+	do_freeze = (pagefrz &&
+				 (pagefrz->freeze_required ||
+				  (presult->all_visible && presult->all_frozen && presult->nfrozen > 0 &&
+				   (do_prune || (BufferIsProbablyDirty(buffer) && !XLogCheckBufferNeedsBackup(buffer))))));
+
+	if (do_freeze)
+	{
+		/*
+		 * Perform xmin/xmax XID status sanity checks before critical section.
+		 *
+		 * heap_prepare_freeze_tuple doesn't perform these checks directly
+		 * because pg_xact lookups are relatively expensive.  They shouldn't
+		 * be repeated by successive VACUUMs that each decide against freezing
+		 * the same page.
+		 */
+		for (int i = 0; i < presult->nfrozen; i++)
+		{
+			HeapTupleFreeze *frz = prstate.frozen + i;
+			ItemId		itemid = PageGetItemId(page, frz->offset);
+			HeapTupleHeader htup = (HeapTupleHeader) PageGetItem(page, itemid);
+
+			if (frz->checkflags & HEAP_FREEZE_CHECK_XMIN_COMMITTED)
+			{
+				TransactionId xmin = HeapTupleHeaderGetRawXmin(htup);
+
+				Assert(!HeapTupleHeaderXminFrozen(htup));
+				if (unlikely(!TransactionIdDidCommit(xmin)))
+					ereport(ERROR,
+							(errcode(ERRCODE_DATA_CORRUPTED),
+							 errmsg_internal("uncommitted xmin %u needs to be frozen",
+											 xmin)));
+			}
+
+			if (frz->checkflags & HEAP_FREEZE_CHECK_XMAX_ABORTED)
+			{
+				TransactionId xmax = HeapTupleHeaderGetRawXmax(htup);
+
+				Assert(TransactionIdIsNormal(xmax));
+				if (unlikely(TransactionIdDidCommit(xmax)))
+					ereport(ERROR,
+							(errcode(ERRCODE_DATA_CORRUPTED),
+							 errmsg_internal("cannot freeze committed xmax %u",
+											 xmax)));
+			}
+		}
+	}
+
+	/*
+	 * Page was already all frozen but needs to be marked as such in the
+	 * visibility map.
+	 */
+	else if (presult->nfrozen == 0 && presult->all_frozen);
+	else
+	{
+		/*
+		 * Page requires "no freeze" processing.  It might be set all-visible
+		 * in the visibility map, but it can never be set all-frozen. Set
+		 * nfrozen to 0 to avoid miscounts in instrumentation, as we may have
+		 * seen tuples that could be frozen but decided not to freeze them.
+		 */
+		presult->nfrozen = 0;
+		presult->all_frozen = false;
+	}
+
+
+	/*
+	 * Now that we've updated all the state relevant to the caller, if we are
+	 * not pruning or freezing, then we are done. Check if the page needs its
+	 * page full hint bit set and return. if we found a new value for the
+	 * pd_prune_xid field, update it and mark the buffer dirty. This is
+	 * treated as a non-WAL-logged hint.
 	 *
 	 * Also clear the "page is full" flag if it is set, since there's no point
 	 * in repeating the prune/defrag process until something else happens to
 	 * the page.
 	 */
-	if (!do_prune)
+	if (!do_prune && !do_freeze)
 	{
-		if (new_prune_xid_found || page_full)
+		Assert(pagefrz || presult->nfrozen == 0);
+
+		if (new_prune_xid_found || PageIsFull(page))
 		{
 			START_CRIT_SECTION();
 			PageClearFull(page);
@@ -590,36 +677,125 @@ heap_page_prune(Relation relation, Buffer buffer, bool pronto_reap,
 	/* Any error while applying the changes is critical */
 	START_CRIT_SECTION();
 
-	/*
-	 * Apply the planned item changes, then repair page fragmentation, and
-	 * update the page's hint bit about whether it has free line pointers.
-	 */
-	heap_page_prune_execute(buffer, pronto_reap,
-							prstate.redirected, prstate.nredirected,
-							prstate.nowdead, prstate.ndead,
-							prstate.nowunused, prstate.nunused);
+	if (do_freeze)
+	{
+		Assert(presult->nfrozen > 0);
+
+		/*
+		 * We can use the youngest visible xmin as our cutoff for conflicts
+		 * when the whole page is eligible to become all-frozen in the VM once
+		 * we're done with it.  Otherwise we generate a more conservative
+		 * cutoff by stepping back from the global visibility horizon.
+		 */
+		if (presult->all_visible && presult->all_frozen)
+		{
+			frz_conflict_horizon = presult->visibility_cutoff_xid;
+			/* Using same cutoff when setting VM is now unnecessary */
+			presult->visibility_cutoff_xid = InvalidTransactionId;
+		}
+		else
+		{
+			/* Avoids false conflicts when hot_standby_feedback in use */
+			frz_conflict_horizon = GlobalVisTestNonRemovableHorizon(vistest);
+			if (frz_conflict_horizon > 0)
+				TransactionIdRetreat(frz_conflict_horizon);
+		}
+
+		heap_freeze_execute_prepared(relation, buffer, prstate.frozen,
+									 presult->nfrozen);
+	}
+
+
+	/* Have we found any prunable items? */
+	if (do_prune)
+	{
+		/*
+		 * Apply the planned item changes, then repair page fragmentation, and
+		 * update the page's hint bit about whether it has free line pointers.
+		 */
+		heap_page_prune_execute(buffer, pronto_reap,
+								prstate.redirected, prstate.nredirected,
+								prstate.nowdead, prstate.ndead,
+								prstate.nowunused, prstate.nunused);
+
+	}
+
+	/* Refresh this value for on-access pruning */
+	page_full = PageIsFull(page);
 
 	/*
-	 * Also clear the "page is full" flag, since there's no point in repeating
-	 * the prune/defrag process until something else happens to the page.
+	 * If we didn't prune anything, but have found a new value for the
+	 * pd_prune_xid field, update it and mark the buffer dirty. This is
+	 * treated as a non-WAL-logged hint.
+	 *
+	 * Also clear the "page is full" flag if it is set, since there's no point
+	 * in repeating the prune/defrag process until something else happens to
+	 * the page.
 	 */
-	PageClearFull(page);
+	if (do_prune || new_prune_xid_found || page_full)
+		PageClearFull(page);
 
 	MarkBufferDirty(buffer);
 
 	/*
-	 * Emit a WAL XLOG_HEAP2_PRUNE record showing what we did
+	 * Emit a WAL XLOG_HEAP2_PRUNE record showing what we did and WAL-log
+	 * freezing if necessary. WAL-logs the changes so that VACUUM can advance
+	 * the rel's relfrozenxid later on without any risk of unsafe pg_xact
+	 * lookups, even following a hard crash (or when querying from a standby).
+	 * We represent freezing by setting infomask bits in tuple headers, but
+	 * this shouldn't be thought of as a hint. See section on buffer access
+	 * rules in src/backend/storage/buffer/README.
 	 */
 	if (RelationNeedsWAL(relation))
 	{
 		xl_heap_prune xlrec;
-		uint8		info = XLOG_HEAP2_PRUNE;
 		XLogRecPtr	recptr;
 
+		xl_heap_freeze_plan plans[MaxHeapTuplesPerPage];
+		OffsetNumber frz_offsets[MaxHeapTuplesPerPage];
+
 		xlrec.isCatalogRel = RelationIsAccessibleInLogicalDecoding(relation);
-		xlrec.snapshotConflictHorizon = prstate.snapshotConflictHorizon;
+
+		/*
+		 * The snapshotConflictHorizon for the whole record should be the most
+		 * conservative of all the horizons calculated for any of the possible
+		 * modifications. If this record will prune tuples, any transactions
+		 * on the standby older than the youngest xmax of the most recently
+		 * removed tuple this record will prune will conflict. If this record
+		 * will freeze tuples, any transactions on the standby with xids older
+		 * than the youngest tuple this record will freeze will conflict. If
+		 * this record will modify the visibility map, any transactions on the
+		 * standby older than the youngest tuple on this page will conflict.
+		 */
+		if (do_prune && do_freeze)
+			xlrec.snapshotConflictHorizon = Max(prstate.snapshotConflictHorizon,
+												frz_conflict_horizon);
+		else if (do_freeze)
+			xlrec.snapshotConflictHorizon = frz_conflict_horizon;
+		else
+			xlrec.snapshotConflictHorizon = prstate.snapshotConflictHorizon;
+
+		xlrec.nplans = 0;
+
+		/*
+		 * Prepare deduplicated representation for use in WAL record. We
+		 * WAL-log tuple freezing so that VACUUM can advance the rel's
+		 * relfrozenxid later on without any risk of unsafe pg_xact lookups,
+		 * even following a hard crash (or when querying from a standby).  We
+		 * represent freezing by setting infomask bits in tuple headers, but
+		 * this shouldn't be thought of as a hint. See section on buffer
+		 * access rules in src/backend/storage/buffer/README. Note that we
+		 * destructively sort caller's tuples array in-place, so caller had
+		 * better be done with it.
+		 */
+
+		if (do_freeze)
+			xlrec.nplans =
+				heap_log_freeze_plan(prstate.frozen, presult->nfrozen, plans, frz_offsets);
+
 		xlrec.nredirected = prstate.nredirected;
 		xlrec.ndead = prstate.ndead;
+		xlrec.nunused = prstate.nunused;
 
 		XLogBeginInsert();
 		XLogRegisterData((char *) &xlrec, SizeOfHeapPrune);
@@ -627,10 +803,14 @@ heap_page_prune(Relation relation, Buffer buffer, bool pronto_reap,
 		XLogRegisterBuffer(0, buffer, REGBUF_STANDARD);
 
 		/*
-		 * The OffsetNumber arrays are not actually in the buffer, but we
-		 * pretend that they are.  When XLogInsert stores the whole buffer,
-		 * the offset arrays need not be stored too.
+		 * The OffsetNumber arrays and freeze plan array are not actually in
+		 * the buffer, but pretend that they are.  When XLogInsert stores the
+		 * whole buffer, the arrays need not be stored too.
 		 */
+		if (xlrec.nplans > 0)
+			XLogRegisterBufData(0, (char *) plans,
+								xlrec.nplans * sizeof(xl_heap_freeze_plan));
+
 		if (prstate.nredirected > 0)
 			XLogRegisterBufData(0, (char *) prstate.redirected,
 								prstate.nredirected *
@@ -644,7 +824,12 @@ heap_page_prune(Relation relation, Buffer buffer, bool pronto_reap,
 			XLogRegisterBufData(0, (char *) prstate.nowunused,
 								prstate.nunused * sizeof(OffsetNumber));
 
-		recptr = XLogInsert(RM_HEAP2_ID, info);
+		if (xlrec.nplans > 0)
+			XLogRegisterBufData(0, (char *) frz_offsets,
+								presult->nfrozen * sizeof(OffsetNumber));
+
+
+		recptr = XLogInsert(RM_HEAP2_ID, XLOG_HEAP2_PRUNE);
 
 		PageSetLSN(BufferGetPage(buffer), recptr);
 	}
@@ -1049,10 +1234,10 @@ heap_prune_record_redirect(Buffer buffer, PruneState *prstate,
 	htup = (HeapTupleHeader) PageGetItem(page, PageGetItemId(page, rdoffnum));
 
 	if ((heap_prepare_freeze_tuple(htup, pagefrz,
-								   &presult->frozen[presult->nfrozen], &totally_frozen)))
+								   &prstate->frozen[presult->nfrozen], &totally_frozen)))
 	{
 		/* Save prepared freeze plan for later */
-		presult->frozen[presult->nfrozen++].offset = rdoffnum;
+		prstate->frozen[presult->nfrozen++].offset = rdoffnum;
 	}
 
 	/*
