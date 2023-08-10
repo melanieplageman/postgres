@@ -63,6 +63,10 @@ static HTSV_Result heap_prune_satisfies_vacuum(PruneState *prstate,
 
 static void catalog_dead_item_for_vacuum(VacDeadItems *dead_items,
 										 BlockNumber blkno, OffsetNumber offnum);
+
+#ifdef USE_ASSERT_CHECKING
+static void heap_page_prune_verify_execute(Buffer buffer, PruneState *prstate);
+#endif
 static int	heap_prune_chain(Buffer buffer,
 							 OffsetNumber rootoffnum, bool pronto_reap,
 							 VacDeadItems *dead_items,
@@ -440,6 +444,16 @@ heap_page_prune(Relation relation, Buffer buffer, bool pronto_reap,
 
 	/* Record number of newly-set-LP_DEAD items for caller */
 	presult->nnewlpdead = prstate.ndead;
+
+#ifdef USE_ASSERT_CHECKING
+
+	/*
+	 * Validate that we did actually set all the line pointers we meant to and
+	 * the page is in the state the WAL record we just emitted claims.
+	 */
+	if (prstate.nredirected > 0 || prstate.ndead > 0 || prstate.nunused > 0)
+		heap_page_prune_verify_execute(buffer, &prstate);
+#endif
 
 	return ndeleted;
 }
@@ -854,6 +868,63 @@ heap_prune_record_unused(PruneState *prstate, OffsetNumber offnum)
 	Assert(!prstate->marked[offnum]);
 	prstate->marked[offnum] = true;
 }
+
+/*
+ * In assert builds, it can be useful to verify that all of the line pointers
+ * have truly been updated to the state we intended.
+ */
+#ifdef USE_ASSERT_CHECKING
+static void
+heap_page_prune_verify_execute(Buffer buffer, PruneState *prstate)
+{
+	HeapTupleHeader htup;
+	OffsetNumber *offnum;
+	Page		page = (Page) BufferGetPage(buffer);
+
+	/* Shouldn't be called unless we did something */
+	Assert(prstate->nredirected > 0 || prstate->ndead > 0 ||
+		   prstate->nunused > 0);
+
+	/*
+	 * Validate that we updated all intended redirect line pointers and assert
+	 * that their targets are valid.
+	 */
+	offnum = prstate->redirected;
+	for (int i = 0; i < prstate->nredirected; i++)
+	{
+		OffsetNumber fromoff = *offnum++;
+		OffsetNumber tooff = *offnum++;
+		ItemId		fromlp = PageGetItemId(page, fromoff);
+		ItemId		tolp = PageGetItemId(page, tooff);
+
+		Assert(ItemIdIsRedirected(fromlp));
+		Assert(ItemIdIsNormal(tolp));
+		Assert(ItemIdHasStorage(tolp));
+		htup = (HeapTupleHeader) PageGetItem(page, tolp);
+		Assert(HeapTupleHeaderIsHeapOnly(htup));
+	}
+
+	/* Validate that we set intended now-dead line pointers */
+	offnum = prstate->nowdead;
+	for (int i = 0; i < prstate->ndead; i++)
+	{
+		OffsetNumber off = *offnum++;
+		ItemId		lp = PageGetItemId(page, off);
+
+		Assert(ItemIdIsDead(lp));
+	}
+
+	/* Validate that we set intended now-unused line pointers */
+	offnum = prstate->nowunused;
+	for (int i = 0; i < prstate->nunused; i++)
+	{
+		OffsetNumber off = *offnum++;
+		ItemId		lp = PageGetItemId(page, off);
+
+		Assert(!lp || !ItemIdIsUsed(lp));
+	}
+}
+#endif
 
 
 /*
