@@ -38,7 +38,7 @@ typedef struct
 	GlobalVisState *vistest;
 
 	TransactionId new_prune_xid;	/* new prune hint value for page */
-	TransactionId snapshotConflictHorizon;	/* latest xid removed */
+	TransactionId newest_xid_removed;
 	int			nredirected;	/* numbers of entries in arrays below */
 	int			ndead;
 	int			nunused;
@@ -289,7 +289,7 @@ heap_page_prune(Relation relation, Buffer buffer, bool pronto_reap,
 	prstate.new_prune_xid = InvalidTransactionId;
 	prstate.rel = relation;
 	prstate.vistest = vistest;
-	prstate.snapshotConflictHorizon = InvalidTransactionId;
+	prstate.newest_xid_removed = InvalidTransactionId;
 	prstate.nredirected = prstate.ndead = prstate.nunused = 0;
 	memset(prstate.marked, 0, sizeof(prstate.marked));
 	memset(prstate.attempt_frz, 0, sizeof(prstate.attempt_frz));
@@ -767,12 +767,12 @@ heap_page_prune(Relation relation, Buffer buffer, bool pronto_reap,
 		 * standby older than the youngest tuple on this page will conflict.
 		 */
 		if (do_prune && do_freeze)
-			xlrec.snapshotConflictHorizon = Max(prstate.snapshotConflictHorizon,
+			xlrec.snapshotConflictHorizon = Max(prstate.newest_xid_removed,
 												frz_conflict_horizon);
 		else if (do_freeze)
 			xlrec.snapshotConflictHorizon = frz_conflict_horizon;
 		else
-			xlrec.snapshotConflictHorizon = prstate.snapshotConflictHorizon;
+			xlrec.snapshotConflictHorizon = prstate.newest_xid_removed;
 
 		xlrec.nplans = 0;
 
@@ -949,7 +949,7 @@ heap_prune_chain(Buffer buffer, OffsetNumber rootoffnum,
 			{
 				heap_prune_record_unused(prstate, rootoffnum);
 				HeapTupleHeaderAdvanceConflictHorizon(htup,
-													  &prstate->snapshotConflictHorizon);
+													  &prstate->newest_xid_removed);
 				ndeleted++;
 			}
 
@@ -1098,7 +1098,7 @@ heap_prune_chain(Buffer buffer, OffsetNumber rootoffnum,
 		{
 			latestdead = offnum;
 			HeapTupleHeaderAdvanceConflictHorizon(htup,
-												  &prstate->snapshotConflictHorizon);
+												  &prstate->newest_xid_removed);
 		}
 		else if (!recent_dead)
 			break;
