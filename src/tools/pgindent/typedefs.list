@@ -3104,11 +3104,14 @@ X509_NAME
 X509_NAME_ENTRY
 X509_STORE
 X509_STORE_CTX
+XLBlockPageStatus
 XLTW_Oper
 XLogCtlData
 XLogCtlInsert
 XLogDumpConfig
 XLogDumpPrivate
+XLogIO
+XLogIOQueue
 XLogLongPageHeader
 XLogLongPageHeaderData
 XLogPageHeader
@@ -3134,6 +3137,7 @@ XLogRedoAction
 XLogSegNo
 XLogSource
 XLogStats
+XLogWritePos
 XLogwrtResult
 XLogwrtRqst
 XPV
