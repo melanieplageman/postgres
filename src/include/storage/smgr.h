@@ -120,7 +120,8 @@ extern BlockNumber smgrnblocks_cached(SMgrRelation reln, ForkNumber forknum);
 extern void smgrtruncate(SMgrRelation reln, ForkNumber *forknum,
 						 int nforks, BlockNumber *nblocks);
 extern void smgrimmedsync(SMgrRelation reln, ForkNumber forknum);
-extern int	smgrfd(SMgrRelation reln, ForkNumber forknum, BlockNumber blocknum, uint32 *off);
+extern int	smgrfd(SMgrRelation reln, bool noerror,
+				   ForkNumber forknum, BlockNumber blocknum, uint32 *off);
 extern void AtEOXact_SMgr(void);
 extern bool ProcessBarrierSmgrRelease(void);
 

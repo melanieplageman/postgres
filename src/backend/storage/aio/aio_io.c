@@ -520,9 +520,17 @@ pgaio_do_synchronously(PgAioInProgress *io)
 			break;
 		case PGAIO_OP_FLUSH_RANGE:
 			pgstat_report_wait_start(WAIT_EVENT_DATA_FILE_FLUSH);
-			pg_flush_data(io->op_data.flush_range.fd,
-						  io->op_data.flush_range.offset,
-						  io->op_data.flush_range.nbytes);
+
+			/*
+			 * The reopen callback can fail, due to files getting unlinked
+			 * etc.
+			 */
+			if (io->op_data.flush_range.fd >= 0)
+			{
+				pg_flush_data(io->op_data.flush_range.fd,
+							  io->op_data.flush_range.offset,
+							  io->op_data.flush_range.nbytes);
+			}
 			/* never errors */
 			/* XXX previously we would PANIC on errors here */
 			result = 0;

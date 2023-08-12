@@ -1504,12 +1504,17 @@ register_dirty_segment(SMgrRelation reln, ForkNumber forknum, MdfdVec *seg)
 }
 
 int
-mdfd(SMgrRelation reln, ForkNumber forknum, BlockNumber blocknum, uint32 *off)
+mdfd(SMgrRelation reln, bool noerror,
+	 ForkNumber forknum, BlockNumber blocknum, uint32 *off)
 {
-	MdfdVec    *v = mdopenfork(reln, forknum, EXTENSION_FAIL);
+	MdfdVec    *v = mdopenfork(reln, forknum,
+							   noerror ? EXTENSION_RETURN_NULL : EXTENSION_FAIL);
 
 	v = _mdfd_getseg(reln, forknum, blocknum, false,
 					 EXTENSION_FAIL);
+
+	if (v == NULL)
+		return -1;
 
 	*off = (off_t) BLCKSZ * (blocknum % ((BlockNumber) RELSEG_SIZE));
 
