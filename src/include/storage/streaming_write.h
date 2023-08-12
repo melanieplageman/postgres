@@ -22,6 +22,7 @@ typedef void (*PgStreamingWriteCompleted) (PgStreamingWrite *pgsw, void *pgsw_pr
 
 extern PgStreamingWrite *pg_streaming_write_alloc(uint32 iodepth, void *private_data);
 extern struct PgAioInProgress *pg_streaming_write_get_io(PgStreamingWrite *pgsw);
+extern bool pg_streaming_write_can_issue_io(PgStreamingWrite *pgsw);
 extern void pg_streaming_write_release_io(PgStreamingWrite *pgsw, struct PgAioInProgress *io);
 extern uint32 pg_streaming_write_inflight(PgStreamingWrite *pgsw);
 extern void pg_streaming_write_write(PgStreamingWrite *pgsw, struct PgAioInProgress *io,

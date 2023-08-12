@@ -1939,6 +1939,12 @@ pgaio_io_call_local_callback(PgAioInProgress *io, bool in_error)
 	}
 }
 
+bool
+pgaio_am_processing_local_callbacks(void)
+{
+	return aio_local_callback_depth > 0;
+}
+
 static void
 pgaio_io_retry_common(PgAioInProgress *io)
 {

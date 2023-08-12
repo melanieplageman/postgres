@@ -595,6 +595,7 @@ extern void pgaio_io_stage(PgAioInProgress *io, PgAioSharedCallback scb);
 extern void pgaio_io_unprepare(PgAioInProgress *io, PgAioOp op);
 extern void pgaio_io_flag_string(PgAioIPFlags flags, struct StringInfoData *s);
 static inline bool pgaio_io_recycled(PgAioInProgress *io, uint64 ref_generation, PgAioIPFlags *flags);
+extern bool pgaio_am_processing_local_callbacks(void);
 
 extern bool pgaio_can_scatter_gather(void);
 

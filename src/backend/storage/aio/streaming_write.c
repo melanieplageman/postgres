@@ -165,6 +165,28 @@ pg_streaming_write_get_io(PgStreamingWrite *pgsw)
 	return this_write->aio;
 }
 
+/*
+ * FIXME: this shouldn't be needed. But right now some local callbacks issue
+ * IO and no API is provided to avoid that. Which leads to bad recursion
+ * dangers.
+ */
+bool
+pg_streaming_write_can_issue_io(PgStreamingWrite *pgsw)
+{
+	if (!dlist_is_empty(&pgsw->available))
+		return true;
+
+	if (pgaio_am_processing_local_callbacks())
+	{
+		ereport(DEBUG1, errmsg("not allowing io"),
+				errhidestmt(true),
+				errhidecontext(true));
+		return false;
+	}
+
+	return true;
+}
+
 uint32
 pg_streaming_write_inflight(PgStreamingWrite *pgsw)
 {

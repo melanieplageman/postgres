@@ -6596,6 +6596,20 @@ IssuePendingWritebacks(WritebackContext *wb_context, IOContext io_context,
 				PgAioInProgress *aio;
 				BlockNumber initblocks;
 
+				/*
+				 * FIXME: Using this path in case of
+				 * !pg_streaming_write_can_issue_io() is a hacky workaround
+				 * for nested callbacks causing problems. That aspect needs to
+				 * be rewritten, and I just want to see if this "heals" CI.
+				 */
+				if (!pg_streaming_write_can_issue_io(pgsw))
+				{
+					reln = smgropen(BufTagGetRelFileLocator(&tag), InvalidBackendId);
+					smgrwriteback(reln, BufTagGetForkNum(&tag), startblock, nblocks);
+
+					break;
+				}
+
 				aio = pg_streaming_write_get_io(pgsw);
 				reln = smgropen(BufTagGetRelFileLocator(&tag), InvalidBackendId);
 				initblocks = pgaio_io_start_flush_range_smgr(aio, reln, BufTagGetForkNum(&tag), startblock, nblocks);
