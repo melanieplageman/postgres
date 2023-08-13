@@ -260,6 +260,10 @@ static void dead_items_alloc(LVRelState *vacrel, int nworkers);
 static void dead_items_cleanup(LVRelState *vacrel);
 static bool heap_page_is_all_visible(LVRelState *vacrel, Buffer buf,
 									 TransactionId *visibility_cutoff_xid, bool *all_frozen);
+
+#ifdef VACUUM_DEBUG_PAGE_SKIP
+static void heap_page_vacuum_skippable(Buffer buf, VacuumCutoffs *cutoffs);
+#endif
 static void update_relstats_all_indexes(LVRelState *vacrel);
 static void vacuum_error_callback(void *arg);
 static void update_vacuum_error_info(LVRelState *vacrel,
@@ -766,6 +770,71 @@ heap_vacuum_rel(Relation rel, VacuumParams *params,
 			pfree(indnames[i]);
 	}
 }
+
+
+/*
+ * Helper to check that pages deemed skippable by lazy_scan_skip() are truly
+ * skippable.
+ *
+ * Examines all tuples on the page and asserts that none of them contain xids
+ * older than the the OldestXmin/OldestMxact set at the beginning of vacuum.
+ *
+ * We expect to only call this when the page was found marked all visible and
+ * all frozen in the visibility map when determining skippability. It is
+ * possible the page was modified since then, but we can still expect to find
+ * no tuples on the page containing xids older than OldestXmin/OldestMxact.
+ *
+ * Note that this function doesn't do any validation in a non-assert build.
+ */
+#ifdef VACUUM_DEBUG_PAGE_SKIP
+static void
+heap_page_vacuum_skippable(Buffer buf, VacuumCutoffs *cutoffs)
+{
+	Page		page;
+	OffsetNumber offnum,
+				maxoff;
+	TransactionId NoFreezePageRelfrozenXid = cutoffs->OldestXmin;
+	MultiXactId NoFreezePageRelminMxid = cutoffs->OldestMxact;
+
+	Assert(BufferIsValid(buf));
+	page = BufferGetPage(buf);
+
+	maxoff = PageGetMaxOffsetNumber(page);
+	for (offnum = FirstOffsetNumber;
+		 offnum <= maxoff;
+		 offnum = OffsetNumberNext(offnum))
+	{
+		ItemId		itemid;
+		HeapTupleHeader htup;
+
+		itemid = PageGetItemId(page, offnum);
+
+		/*
+		 * Only bother checking tuples referred to by normal items. We must
+		 * assume that any tuples that are not visible or frozen have been
+		 * inserted or modified after we determined OldestXmin/OldestMxact and
+		 * thus don't challenge page skippability. This could happen if the
+		 * page was modified since we last checked the visibility map.
+		 */
+		if (!ItemIdIsNormal(itemid))
+			continue;
+
+		htup = (HeapTupleHeader) PageGetItem(page, itemid);
+
+		heap_tuple_should_freeze(htup,
+								 cutoffs,
+								 &NoFreezePageRelfrozenXid,
+								 &NoFreezePageRelminMxid);
+
+		/*
+		 * The oldest extant XID/MXID on the page must not be older than
+		 * OldestXmin/OldestMxact.
+		 */
+		Assert(NoFreezePageRelfrozenXid == cutoffs->OldestXmin);
+		Assert(NoFreezePageRelminMxid == cutoffs->OldestMxact);
+	}
+}
+#endif
 
 /*
  *	lazy_scan_heap() -- workhorse function for VACUUM
@@ -1347,6 +1416,28 @@ lazy_scan_skip(LVRelState *vacrel, Buffer *vmbuffer, BlockNumber blkno,
 			 * remember that the final range contains such a block for later.
 			 */
 			skipsallvis = true;
+		}
+		else
+		{
+#ifdef VACUUM_DEBUG_PAGE_SKIP
+			/*
+			 * We are skipping the page. Verify that the page is actually
+			 * skippable by examining all of the tuples on the page. This
+			 * helps avoid data corruption from incorrectly updating
+			 * relfrozenxid/relminmxid. This validation is guarded because it
+			 * is expensive. We only care to do it when skipsallvis is false.
+			 * Otherwise, we don't bother because relfrozenxid/relminmxid will
+			 * not be updated.
+			 */
+			Buffer		buf = ReadBufferExtended(vacrel->rel, MAIN_FORKNUM, next_block,
+												 RBM_NORMAL, vacrel->bstrategy);
+
+			LockBuffer(buf, BUFFER_LOCK_SHARE);
+
+			heap_page_vacuum_skippable(buf, &vacrel->cutoffs);
+
+			UnlockReleaseBuffer(buf);
+#endif
 		}
 
 		vacuum_delay_point();
