@@ -1586,6 +1586,7 @@ lazy_scan_prune(LVRelState *vacrel,
 	HeapPageFreeze pagefrz;
 	int64		fpi_before = pgWalUsage.wal_fpi;
 	HeapTupleFreeze frozen[MaxHeapTuplesPerPage];
+	bool		hastup PG_USED_FOR_ASSERTS_ONLY;
 	int			lpdead_items_before = vacrel->dead_items->num_items;
 
 	/*
@@ -1663,36 +1664,11 @@ lazy_scan_prune(LVRelState *vacrel,
 		vacrel->offnum = offnum;
 		itemid = PageGetItemId(page, offnum);
 
-		if (!ItemIdIsUsed(itemid))
+		/* Redirect, dead, and unused items mustn't be touched */
+		if (!ItemIdIsNormal(itemid))
 			continue;
-
-		/* Redirect items mustn't be touched */
-		if (ItemIdIsRedirected(itemid))
-		{
-			/* page makes rel truncation unsafe */
-			presult->hastup = true;
-			continue;
-		}
-
-		if (ItemIdIsDead(itemid))
-		{
-			/*
-			 * Deliberately don't set hastup for LP_DEAD items.  We make the
-			 * soft assumption that any LP_DEAD items encountered here will
-			 * become LP_UNUSED later on, before count_nondeletable_pages is
-			 * reached.  If we don't make this assumption then rel truncation
-			 * will only happen every other VACUUM, at most.  Besides, VACUUM
-			 * must treat hastup/nonempty_pages as provisional no matter how
-			 * LP_DEAD items are handled (handled here, or handled later on).
-			 */
-			continue;
-		}
-
-		Assert(ItemIdIsNormal(itemid));
 
 		htup = (HeapTupleHeader) PageGetItem(page, itemid);
-
-		presult->hastup = true; /* page makes rel truncation unsafe */
 
 		/* Tuple with storage -- consider need to freeze */
 		if (heap_prepare_freeze_tuple(htup, &vacrel->cutoffs, &pagefrz,
@@ -1815,6 +1791,28 @@ lazy_scan_prune(LVRelState *vacrel,
 		Assert(!TransactionIdIsValid(cutoff) ||
 			   cutoff == presult->visibility_cutoff_xid);
 	}
+
+	/*
+	 * Now that we've executed pruning, confirm that hastup has been correctly
+	 * set in heap_page_prune().
+	 */
+	hastup = false;
+	maxoff = PageGetMaxOffsetNumber(page);
+	for (offnum = FirstOffsetNumber;
+		 offnum <= maxoff;
+		 offnum = OffsetNumberNext(offnum))
+	{
+		itemid = PageGetItemId(page, offnum);
+
+		if (ItemIdIsNormal(itemid) ||
+			ItemIdIsRedirected(itemid))
+		{
+			hastup = true;
+			break;
+		}
+	}
+
+	Assert(presult->hastup == hastup);
 #endif
 
 	/*
