@@ -31,13 +31,15 @@ typedef enum PgStreamingReadNextStatus
 
 typedef PgStreamingReadNextStatus (*PgStreamingReadDetermineNextCB)
 			(PgStreamingRead *pgsr, uintptr_t pgsr_private,
-			 struct PgAioInProgress *aio, uintptr_t *read_private);
-typedef void (*PgStreamingReadRelease) (uintptr_t pgsr_private, uintptr_t read_private);
-extern PgStreamingRead *pg_streaming_read_alloc(uint32 iodepth, uintptr_t pgsr_private,
+			 struct PgAioInProgress *aio, void *read_private);
+typedef void (*PgStreamingReadRelease) (uintptr_t pgsr_private, void *read_private);
+extern PgStreamingRead *pg_streaming_read_alloc(uint32 iodepth,
+												uint32 per_io_private_size,
+												uintptr_t pgsr_private,
 												PgStreamingReadDetermineNextCB determine_next_cb,
 												PgStreamingReadRelease release_cb);
 extern void pg_streaming_read_free(PgStreamingRead *pgsr);
-extern uintptr_t pg_streaming_read_get_next(PgStreamingRead *pgsr);
+extern void *pg_streaming_read_get_next(PgStreamingRead *pgsr);
 
 /*
  * A layer ontop a base PgStreamingRead that makes it easier to work with
@@ -49,9 +51,13 @@ struct RelationData;
 typedef BlockNumber (*PgStreamingReadBufferDetermineNextCB)
 			(PgStreamingRead *pgsr,
 			 uintptr_t pgsr_private,
+			 void *io_private,
 			 struct RelationData **rel, ForkNumber *forkNum, ReadBufferMode *mode);
-extern PgStreamingRead *pg_streaming_read_buffer_alloc(uint32 iodepth, uintptr_t pgsr_private,
+extern PgStreamingRead *pg_streaming_read_buffer_alloc(uint32 iodepth,
+													   uint32 per_io_private_size,
+													   uintptr_t pgsr_private,
 													   BufferAccessStrategy strategy,
 													   PgStreamingReadBufferDetermineNextCB determine_next_cb);
+extern Buffer pg_streaming_read_buffer_get_next(PgStreamingRead *pgsr, void **io_private);
 
 #endif							/* STREAMING_READ_H */

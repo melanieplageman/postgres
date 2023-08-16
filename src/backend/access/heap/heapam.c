@@ -227,7 +227,8 @@ static const int MultiXactStatusLock[MaxMultiXactStatus + 1] =
  */
 
 static BlockNumber
-heap_pgsr_next_single(PgStreamingRead *pgsr, uintptr_t pgsr_private,
+heap_pgsr_next_single(PgStreamingRead *pgsr,
+					  uintptr_t pgsr_private, void *io_private,
 					  Relation *rel, ForkNumber *fork, ReadBufferMode *mode)
 {
 	HeapScanDesc scan = (HeapScanDesc) pgsr_private;
@@ -268,7 +269,8 @@ heap_pgsr_next_single(PgStreamingRead *pgsr, uintptr_t pgsr_private,
 }
 
 static BlockNumber
-heap_pgsr_next_parallel(PgStreamingRead *pgsr, uintptr_t pgsr_private,
+heap_pgsr_next_parallel(PgStreamingRead *pgsr,
+						uintptr_t pgsr_private, void *io_private,
 						Relation *rel, ForkNumber *fork, ReadBufferMode *mode)
 {
 	HeapScanDesc scan = (HeapScanDesc) pgsr_private;
@@ -294,7 +296,8 @@ heap_pgsr_single_alloc(HeapScanDesc scan)
 {
 	int			iodepth = Max(Min(128, NBuffers / 128), 1);
 
-	return pg_streaming_read_buffer_alloc(iodepth, (uintptr_t) scan,
+	return pg_streaming_read_buffer_alloc(iodepth, 0,
+										  (uintptr_t) scan,
 										  scan->rs_strategy,
 										  heap_pgsr_next_single);
 }
@@ -304,7 +307,8 @@ heap_pgsr_parallel_alloc(HeapScanDesc scan)
 {
 	int			iodepth = Max(Min(128, NBuffers / 128), 1);
 
-	return pg_streaming_read_buffer_alloc(iodepth, (uintptr_t) scan,
+	return pg_streaming_read_buffer_alloc(iodepth, 0,
+										  (uintptr_t) scan,
 										  scan->rs_strategy,
 										  heap_pgsr_next_parallel);
 }
@@ -625,7 +629,7 @@ heapgettup_initial_block(HeapScanDesc scan, ScanDirection dir, Buffer *pgsr_buf)
 		/* FIXME: Integrate more neatly */
 		if (scan->pgsr)
 		{
-			*pgsr_buf = pg_streaming_read_get_next(scan->pgsr);
+			*pgsr_buf = pg_streaming_read_buffer_get_next(scan->pgsr, NULL);
 			if (*pgsr_buf == InvalidBuffer)
 				return InvalidBlockNumber;
 			return BufferGetBlockNumber(*pgsr_buf);
@@ -789,7 +793,7 @@ heapgettup_advance_block(HeapScanDesc scan, BlockNumber block, ScanDirection dir
 					block = InvalidBlockNumber;
 			}
 #endif
-			*pgsr_buf = pg_streaming_read_get_next(scan->pgsr);
+			*pgsr_buf = pg_streaming_read_buffer_get_next(scan->pgsr, NULL);
 			if (*pgsr_buf == InvalidBuffer)
 				return InvalidBlockNumber;
 			Assert(scan->rs_base.rs_parallel ||

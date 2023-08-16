@@ -53,7 +53,8 @@ typedef struct prefetch
 } prefetch;
 
 static BlockNumber
-prewarm_buffer_next(PgStreamingRead *pgsr, uintptr_t pgsr_private,
+prewarm_buffer_next(PgStreamingRead *pgsr,
+					uintptr_t pgsr_private, void *io_private,
 					Relation *rel, ForkNumber *fork, ReadBufferMode *mode)
 {
 	prefetch   *p = (prefetch *) pgsr_private;
@@ -72,7 +73,7 @@ prewarm_buffer_next(PgStreamingRead *pgsr, uintptr_t pgsr_private,
 
 static PgStreamingReadNextStatus
 prewarm_smgr_next(PgStreamingRead *pgsr, uintptr_t pgsr_private,
-				  PgAioInProgress *aio, uintptr_t *read_private)
+				  PgAioInProgress *aio, void *read_private)
 {
 	prefetch   *p = (prefetch *) pgsr_private;
 	BlockNumber blockno;
@@ -96,13 +97,13 @@ prewarm_smgr_next(PgStreamingRead *pgsr, uintptr_t pgsr_private,
 	pgaio_io_start_read_smgr(aio, p->rel->rd_smgr, p->forkNumber, blockno,
 							 pgaio_bounce_buffer_buffer(bb));
 
-	*read_private = (uintptr_t) bb;
+	*(void **) read_private = bb;
 
 	return PGSR_NEXT_IO;
 }
 
 static void
-prewarm_smgr_release(uintptr_t pgsr_private, uintptr_t read_private)
+prewarm_smgr_release(uintptr_t pgsr_private, void *read_private)
 {
 }
 
@@ -279,7 +280,7 @@ pg_prewarm(PG_FUNCTION_ARGS)
 		p.lastblock = last_block;
 		p.bbs = NIL;
 
-		pgsr = pg_streaming_read_buffer_alloc(512, (uintptr_t) &p,
+		pgsr = pg_streaming_read_buffer_alloc(512, 0, (uintptr_t) &p,
 											  NULL,
 											  prewarm_buffer_next);
 
@@ -289,7 +290,7 @@ pg_prewarm(PG_FUNCTION_ARGS)
 
 			CHECK_FOR_INTERRUPTS();
 
-			buf = (Buffer) pg_streaming_read_get_next(pgsr);
+			buf = (Buffer) pg_streaming_read_buffer_get_next(pgsr, NULL);
 			if (BufferIsValid(buf))
 				ReleaseBuffer(buf);
 			else
@@ -298,7 +299,7 @@ pg_prewarm(PG_FUNCTION_ARGS)
 			++blocks_done;
 		}
 
-		if (BufferIsValid(pg_streaming_read_get_next(pgsr)))
+		if (BufferIsValid(pg_streaming_read_buffer_get_next(pgsr, NULL)))
 			elog(ERROR, "unexpected additional buffer");
 
 		pg_streaming_read_free(pgsr);
@@ -315,21 +316,23 @@ pg_prewarm(PG_FUNCTION_ARGS)
 		p.lastblock = last_block;
 		p.bbs = NIL;
 
-		pgsr = pg_streaming_read_alloc(512, (uintptr_t) &p,
+		pgsr = pg_streaming_read_alloc(512,
+									   sizeof(void *),
+									   (uintptr_t) &p,
 									   prewarm_smgr_next,
 									   prewarm_smgr_release);
 
 		for (block = first_block; block <= last_block; ++block)
 		{
-			PgAioBounceBuffer *bb;
+			PgAioBounceBuffer **bb;
 
 			CHECK_FOR_INTERRUPTS();
 
-			bb = (PgAioBounceBuffer *) pg_streaming_read_get_next(pgsr);
+			bb = (PgAioBounceBuffer **) pg_streaming_read_get_next(pgsr);
 			if (bb == NULL)
 				elog(ERROR, "prefetch ended early");
 
-			p.bbs = lappend(p.bbs, (void *) bb);
+			p.bbs = lappend(p.bbs, (void *) *bb);
 
 			++blocks_done;
 		}

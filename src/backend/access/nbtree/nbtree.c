@@ -891,6 +891,7 @@ btvacuumcleanup(IndexVacuumInfo *info, IndexBulkDeleteResult *stats)
 
 static BlockNumber
 btvacuumscan_pgsr_next(PgStreamingRead *pgsr, uintptr_t pgsr_private,
+					   void *io_private,
 					   Relation *rel, ForkNumber *fork, ReadBufferMode *mode)
 {
 	BTVacState *vstate = (BTVacState *) pgsr_private;
@@ -1024,14 +1025,15 @@ btvacuumscan(IndexVacuumInfo *info, IndexBulkDeleteResult *stats,
 		vstate.nextblock = scanblkno;
 		vstate.num_pages = num_pages;
 
-		pgsr = pg_streaming_read_buffer_alloc(512, (uintptr_t) &vstate,
+		pgsr = pg_streaming_read_buffer_alloc(512, 0,
+											  (uintptr_t) &vstate,
 											  vstate.info->strategy,
 											  btvacuumscan_pgsr_next);
 
 		/* Iterate over pages, then loop back to recheck length */
 		for (; scanblkno < num_pages; scanblkno++)
 		{
-			Buffer		buf = pg_streaming_read_get_next(pgsr);
+			Buffer		buf = pg_streaming_read_buffer_get_next(pgsr, NULL);
 
 			Assert(BufferIsValid(buf));
 			Assert(BufferGetBlockNumber(buf) == scanblkno);
