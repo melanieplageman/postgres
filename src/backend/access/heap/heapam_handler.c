@@ -2150,7 +2150,8 @@ heapam_scan_bitmap_next_block(TableScanDesc scan, bool *recheck)
 			ReleaseBuffer(hscan->vmbuffer);
 			hscan->vmbuffer = InvalidBuffer;
 		}
-		return false;
+
+		return scan->empty_tuples > 0;
 	}
 
 	Assert(io_private);
@@ -2260,6 +2261,13 @@ heapam_scan_bitmap_next_tuple(TableScanDesc scan, TupleTableSlot *slot)
 	OffsetNumber targoffset;
 	Page		page;
 	ItemId		lp;
+
+	if (scan->empty_tuples)
+	{
+		ExecStoreAllNullTuple(slot);
+		scan->empty_tuples--;
+		return true;
+	}
 
 	/*
 	 * Out of range?  If so, nothing more to look at on this page

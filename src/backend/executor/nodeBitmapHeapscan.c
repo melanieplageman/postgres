@@ -133,22 +133,7 @@ BitmapHeapNext(BitmapHeapScanState *node)
 
 		/* Get the first block. if none, end of scan */
 		if (!table_scan_bitmap_next_block(scan, &node->recheck))
-		{
-			/*
-			 * Release iterator
-			 */
-			if (scan->tbmiterator)
-			{
-				tbm_end_iterate(scan->tbmiterator);
-				scan->tbmiterator = NULL;
-			}
-			else if (scan->shared_tbmiterator)
-			{
-				tbm_end_shared_iterate(scan->shared_tbmiterator);
-				scan->shared_tbmiterator = NULL;
-			}
-			return NULL;
-		}
+			goto exit;
 	}
 
 	do
@@ -168,8 +153,10 @@ BitmapHeapNext(BitmapHeapScanState *node)
 			InstrCountFiltered2(node, 1);
 			ExecClearTuple(slot);
 		}
-	} while (table_scan_bitmap_next_block(scan, &node->recheck));
+	} while (table_scan_bitmap_next_block(scan, &node->recheck) ||
+			scan->empty_tuples > 0);
 
+exit:
 	/*
 	 * Release iterator
 	 */

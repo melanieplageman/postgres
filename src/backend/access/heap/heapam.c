@@ -273,6 +273,14 @@ bitmapheap_pgsr_next_single(PgStreamingRead *pgsr,
 		else
 			hdesc->rs_base.lossy_pages++;
 
+		if (hdesc->rs_base.rs_flags & SO_CAN_SKIP_FETCH &&
+			!tbmres->recheck &&
+			VM_ALL_VISIBLE(rs_rd, tbmres->blockno, &hdesc->vmbuffer))
+		{
+			hdesc->rs_base.empty_tuples += tbmres->ntuples;
+			continue;
+		}
+
 		return tbmres->blockno;
 	}
 }
@@ -1210,6 +1218,7 @@ heap_beginscan(Relation relation, Snapshot snapshot,
 	scan->vmbuffer = InvalidBuffer;
 	scan->rs_base.exact_pages = 0;
 	scan->rs_base.lossy_pages = 0;
+	scan->rs_base.empty_tuples = 0;
 	scan->rs_base.tbmiterator = NULL;
 	scan->rs_base.shared_tbmiterator = NULL;
 

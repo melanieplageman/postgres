@@ -46,6 +46,7 @@ typedef struct TableScanDescData
 	TBMSharedIterator *shared_tbmiterator;
 	long		exact_pages;
 	long		lossy_pages;
+	int			empty_tuples;
 
 	/*
 	 * Information about type and behaviour of the scan, a bitmask of members
