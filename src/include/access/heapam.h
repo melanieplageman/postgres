@@ -80,7 +80,6 @@ typedef struct HeapScanDescData
 	// TODO: currently gets freed before rescan. make it stick around. tricky
 	// because now it is in heapscandescdata and only executor node knows if it
 	// is a rescan or not so seems wrong to stick it in EndNode func
-	List *available_tbmres;
 	Buffer		vmbuffer;
 	int			rs_cindex;		/* current tuple's index in vistuples */
 	int			rs_ntuples;		/* number of visible tuples on page */

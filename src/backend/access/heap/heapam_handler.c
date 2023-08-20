@@ -46,6 +46,7 @@
 #include "storage/smgr.h"
 #include "utils/builtins.h"
 #include "utils/rel.h"
+#include "storage/streaming_read.h"
 
 static void reform_and_rewrite_tuple(HeapTuple tuple,
 									 Relation OldHeap, Relation NewHeap,
@@ -2121,6 +2122,7 @@ heapam_scan_bitmap_next_block(TableScanDesc scan, bool *recheck)
 {
 	HeapScanDesc hscan = (HeapScanDesc) scan;
 	TBMIterateResult *tbmres;
+	void *io_private;
 	Buffer		buffer;
 	Snapshot	snapshot;
 	int			ntup;
@@ -2139,20 +2141,11 @@ heapam_scan_bitmap_next_block(TableScanDesc scan, bool *recheck)
 	hscan->rs_cindex = 0;
 	hscan->rs_ntuples = 0;
 
-	// TODO: this API doesn't work anymore
-	tbmres = (TBMIterateResult *) pg_streaming_read_get_next(hscan->pgsr);
+	hscan->rs_cbuf = pg_streaming_read_buffer_get_next(hscan->pgsr, &io_private);
 
-	// TODO: something about serializable isolation?
-
-	/*
-	 * Hit the end of the relation. All tbmres should have been appended to the
-	 * free list by the streaming read helper, so they can be deleted here
-	 * without leaking memory.
-	 */
-	if (tbmres == NULL)
+	if (!(BufferIsValid(hscan->rs_cbuf)))
 	{
-		list_free_deep(hscan->available_tbmres);
-		if (hscan->vmbuffer != InvalidBuffer)
+		if (BufferIsValid(hscan->vmbuffer))
 		{
 			ReleaseBuffer(hscan->vmbuffer);
 			hscan->vmbuffer = InvalidBuffer;
@@ -2160,28 +2153,16 @@ heapam_scan_bitmap_next_block(TableScanDesc scan, bool *recheck)
 		return false;
 	}
 
+	Assert(io_private);
+
+	tbmres = (TBMIterateResult *) io_private;
+
+	Assert(BufferGetBlockNumber(hscan->rs_cbuf) == tbmres->blockno);
+
 	*recheck = tbmres->recheck;
 
 	hscan->rs_cblock = tbmres->blockno;
-	hscan->rs_cbuf = tbmres->buffer;
-	/*
-	 * If we skipped fetching, the streaming read helper would have set
-	 * tbmres->buffer to InvalidBuffer. We still need rs_ntuples to determine
-	 * how many NULL-filled tuples to return, though. If the page was lossy and
-	 * tbmres->ntuples is -1, hscan->rs_ntuples will still be set to the
-	 * correct value before returning.
-	 */
 	hscan->rs_ntuples = tbmres->ntuples;
-	// TODO: something with ReleaseAndReadBuffer()?
-
-	if (!(BufferIsValid(hscan->rs_cbuf)))
-	{
-		/*
-		 * Done with the TBMIterateResult so it can be put back on the list.
-		 */
-		hscan->available_tbmres = lappend(hscan->available_tbmres, tbmres);
-		return true;
-	}
 
 	buffer = hscan->rs_cbuf;
 	snapshot = scan->rs_snapshot;
@@ -2265,13 +2246,9 @@ heapam_scan_bitmap_next_block(TableScanDesc scan, bool *recheck)
 	hscan->rs_ntuples = ntup;
 
 	/*
-	 * We have used tbmres to fill in all of the information needed while
-	 * yielding tuples so tbmres itself can be appended back to the list of
-	 * available tbmres.
 	 * We still have hscan->rs_cbuf pinned, though. It will be released when we
 	 * come for the next block.
 	 */
-	hscan->available_tbmres = lappend(hscan->available_tbmres, tbmres);
 
 	return true;
 }
