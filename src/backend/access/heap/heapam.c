@@ -273,6 +273,14 @@ bitmapheap_pgsr_next_single(PgStreamingRead *pgsr,
 		else
 			hdesc->rs_base.lossy_pages++;
 
+		if (hdesc->rs_base.rs_flags & SO_CAN_SKIP_FETCH &&
+			!tbmres->recheck &&
+			VM_ALL_VISIBLE(rs_rd, tbmres->blockno, &hdesc->vmbuffer))
+		{
+			hdesc->empty_tuples += tbmres->ntuples;
+			continue;
+		}
+
 		return tbmres->blockno;
 	}
 }
@@ -523,6 +531,8 @@ initscan(HeapScanDesc scan, ScanKey key, bool keep_startblock)
 
 
 		scan->rs_inited = true;
+		scan->empty_tuples = 0;
+		scan->done = false;
 	}
 }
 

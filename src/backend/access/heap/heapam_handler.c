@@ -2138,6 +2138,9 @@ heapam_scan_bitmap_next_block(TableScanDesc scan, bool *recheck)
 		ReleaseBuffer(hscan->rs_cbuf);
 		hscan->rs_cbuf = InvalidBuffer;
 	}
+	else if (hscan->done)
+		return false;
+
 	hscan->rs_cindex = 0;
 	hscan->rs_ntuples = 0;
 
@@ -2150,7 +2153,8 @@ heapam_scan_bitmap_next_block(TableScanDesc scan, bool *recheck)
 			ReleaseBuffer(hscan->vmbuffer);
 			hscan->vmbuffer = InvalidBuffer;
 		}
-		return false;
+
+		return hscan->empty_tuples > 0;
 	}
 
 	Assert(io_private);
@@ -2264,10 +2268,27 @@ heapam_scan_bitmap_next_tuple(TableScanDesc scan, TupleTableSlot *slot)
 	/*
 	 * Out of range?  If so, nothing more to look at on this page
 	 */
-	if (hscan->rs_cindex < 0 || hscan->rs_cindex >= hscan->rs_ntuples)
+	if (hscan->rs_cindex < 0 ||
+			(hscan->empty_tuples == 0 && hscan->rs_cindex >= hscan->rs_ntuples))
 		return false;
 
-	Assert(BufferIsValid(hscan->rs_cbuf));
+	/*
+	 * Skipped fetching so fill slot with NULLs
+	 */
+	if (BufferIsInvalid(hscan->rs_cbuf))
+	{
+		if (hscan->done)
+			return false;
+
+		if (hscan->empty_tuples == 0)
+			hscan->done = true;
+		else if (hscan->empty_tuples > 0)
+			hscan->empty_tuples--;
+
+		ExecStoreAllNullTuple(slot);
+		return true;
+	}
+
 	targoffset = hscan->rs_vistuples[hscan->rs_cindex];
 	page = (Page) BufferGetPage(hscan->rs_cbuf);
 	lp = PageGetItemId(page, targoffset);
@@ -2287,7 +2308,6 @@ heapam_scan_bitmap_next_tuple(TableScanDesc scan, TupleTableSlot *slot)
 	ExecStoreBufferHeapTuple(&hscan->rs_ctup,
 							slot,
 							hscan->rs_cbuf);
-
 	hscan->rs_cindex++;
 
 	return true;
