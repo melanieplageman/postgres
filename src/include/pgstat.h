@@ -11,6 +11,7 @@
 #ifndef PGSTAT_H
 #define PGSTAT_H
 
+#include "access/xlogdefs.h"
 #include "datatype/timestamp.h"
 #include "portability/instr_time.h"
 #include "postmaster/pgarch.h"	/* for MAX_XFN_CHARS */
@@ -424,6 +425,8 @@ typedef struct PgStat_StatTabEntry
 	PgStat_Counter analyze_count;
 	TimestampTz last_autoanalyze_time;	/* autovacuum initiated */
 	PgStat_Counter autoanalyze_count;
+	XLogRecPtr last_vac_lsn;
+	TransactionId last_vac_xid;
 } PgStat_StatTabEntry;
 
 typedef struct PgStat_WalStats
@@ -589,7 +592,12 @@ extern void pgstat_assoc_relation(Relation rel);
 extern void pgstat_unlink_relation(Relation rel);
 
 extern void pgstat_report_vacuum(Oid tableoid, bool shared,
-								 PgStat_Counter livetuples, PgStat_Counter deadtuples);
+								 PgStat_Counter livetuples, PgStat_Counter deadtuples,
+								 TransactionId xid_vac_end, XLogRecPtr last_vac_lsn);
+
+extern void pgstat_get_last_vac_stats(Oid tableoid, bool shared,
+		TransactionId *last_vac_xid, XLogRecPtr *last_vac_lsn);
+
 extern void pgstat_report_analyze(Relation rel,
 								  PgStat_Counter livetuples, PgStat_Counter deadtuples,
 								  bool resetcounter);
