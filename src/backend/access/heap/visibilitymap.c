@@ -315,6 +315,100 @@ visibilitymap_set(Relation rel, BlockNumber heapBlk, Buffer heapBuf,
 	LockBuffer(vmBuf, BUFFER_LOCK_UNLOCK);
 }
 
+void
+visibilitymap_get_rels_statuses(Relation *rels, int num_rels, int64 *all_visible, int64 *all_frozen)
+{
+
+	for (int i = 0; i < num_rels; i++)
+	{
+		Buffer vmbuffer = InvalidBuffer;
+		Relation rel = rels[i];
+		BlockNumber nblocks = RelationGetNumberOfBlocks(rel);
+		for (BlockNumber heap_blkno = 0; heap_blkno < nblocks; ++heap_blkno)
+		{
+			char	   *map;
+			uint8		mapbits;
+			BlockNumber mapBlock = HEAPBLK_TO_MAPBLOCK(heap_blkno);
+			uint32		mapByte = HEAPBLK_TO_MAPBYTE(heap_blkno);
+			uint8		mapOffset = HEAPBLK_TO_OFFSET(heap_blkno);
+
+			if (BufferIsValid(vmbuffer))
+			{
+				if (BufferGetBlockNumber(vmbuffer) != mapBlock)
+				{
+					ReleaseBuffer(vmbuffer);
+					vmbuffer = InvalidBuffer;
+				}
+			}
+
+			if (!BufferIsValid(vmbuffer))
+			{
+				vmbuffer = vm_readbuf(rel, mapBlock, false);
+				if (!BufferIsValid(vmbuffer))
+					break;
+			}
+
+			map = PageGetContents(BufferGetPage(vmbuffer));
+			mapbits = ((map[mapByte] >> mapOffset) & VISIBILITYMAP_VALID_BITS);
+
+			if ((mapbits & VISIBILITYMAP_ALL_VISIBLE) != 0)
+				all_visible[i]++;
+			if ((mapbits & VISIBILITYMAP_ALL_FROZEN) != 0)
+				all_frozen[i]++;
+
+		}
+
+		if (BufferIsValid(vmbuffer))
+			ReleaseBuffer(vmbuffer);
+	}
+}
+
+void
+visibilitymap_get_rel_statuses(Relation rel, int64 *all_visible, int64 *all_frozen)
+{
+
+	Buffer vmbuffer = InvalidBuffer;
+	BlockNumber nblocks = RelationGetNumberOfBlocks(rel);
+	*all_visible = 0;
+	*all_frozen = 0;
+	for (BlockNumber heap_blkno = 0; heap_blkno < nblocks; ++heap_blkno)
+	{
+		char	   *map;
+		uint8		mapbits;
+		BlockNumber mapBlock = HEAPBLK_TO_MAPBLOCK(heap_blkno);
+		uint32		mapByte = HEAPBLK_TO_MAPBYTE(heap_blkno);
+		uint8		mapOffset = HEAPBLK_TO_OFFSET(heap_blkno);
+
+		if (BufferIsValid(vmbuffer))
+		{
+			if (BufferGetBlockNumber(vmbuffer) != mapBlock)
+			{
+				ReleaseBuffer(vmbuffer);
+				vmbuffer = InvalidBuffer;
+			}
+		}
+
+		if (!BufferIsValid(vmbuffer))
+		{
+			vmbuffer = vm_readbuf(rel, mapBlock, false);
+			if (!BufferIsValid(vmbuffer))
+				break;
+		}
+
+		map = PageGetContents(BufferGetPage(vmbuffer));
+		mapbits = ((map[mapByte] >> mapOffset) & VISIBILITYMAP_VALID_BITS);
+
+		if ((mapbits & VISIBILITYMAP_ALL_VISIBLE) != 0)
+			all_visible++;
+		if ((mapbits & VISIBILITYMAP_ALL_FROZEN) != 0)
+			all_frozen++;
+	}
+
+	if (BufferIsValid(vmbuffer))
+		ReleaseBuffer(vmbuffer);
+}
+
+
 /*
  *	visibilitymap_get_status - get status of bits
  *
