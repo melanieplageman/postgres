@@ -2434,6 +2434,16 @@ struct config_int ConfigureNamesInt[] =
 	},
 
 	{
+		{"opp_freeze_algo", PGC_USERSET, RESOURCES_VACUUM_DELAY,
+			gettext_noop("which opp freeze algorithm to use"),
+			NULL
+		},
+		&opp_freeze_algo,
+		0, 0, 10000,
+		NULL, NULL, NULL
+	},
+
+	{
 		{"autovacuum_vacuum_cost_limit", PGC_SIGHUP, AUTOVACUUM,
 			gettext_noop("Vacuum cost amount available before napping, for autovacuum."),
 			NULL
