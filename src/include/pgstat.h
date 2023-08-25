@@ -427,6 +427,7 @@ typedef struct PgStat_StatTabEntry
 	PgStat_Counter autoanalyze_count;
 	XLogRecPtr last_vac_lsn;
 	TransactionId last_vac_xid;
+	PgStat_Counter page_freezes;
 } PgStat_StatTabEntry;
 
 typedef struct PgStat_WalStats
@@ -593,10 +594,11 @@ extern void pgstat_unlink_relation(Relation rel);
 
 extern void pgstat_report_vacuum(Oid tableoid, bool shared,
 								 PgStat_Counter livetuples, PgStat_Counter deadtuples,
-								 TransactionId xid_vac_end, XLogRecPtr last_vac_lsn);
+								 TransactionId xid_vac_end, XLogRecPtr last_vac_lsn,
+								 uint32 page_freezes);
 
 extern void pgstat_get_last_vac_stats(Oid tableoid, bool shared,
-		TransactionId *last_vac_xid, XLogRecPtr *last_vac_lsn);
+		TransactionId *last_vac_xid, XLogRecPtr *last_vac_lsn, uint32 *page_freezes);
 
 extern void pgstat_report_analyze(Relation rel,
 								  PgStat_Counter livetuples, PgStat_Counter deadtuples,

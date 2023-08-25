@@ -5388,10 +5388,17 @@
   proname => 'pg_stat_get_last_autoanalyze_time', provolatile => 's',
   proparallel => 'r', prorettype => 'timestamptz', proargtypes => 'oid',
   prosrc => 'pg_stat_get_last_autoanalyze_time' },
+
 { oid => '3054', descr => 'statistics: number of manual vacuums for a table',
   proname => 'pg_stat_get_vacuum_count', provolatile => 's', proparallel => 'r',
   prorettype => 'int8', proargtypes => 'oid',
   prosrc => 'pg_stat_get_vacuum_count' },
+
+{ oid => '9999', descr => 'statistics: number of opp freezes of pages for a table',
+  proname => 'pg_stat_get_page_freezes', provolatile => 's', proparallel => 'r',
+  prorettype => 'int8', proargtypes => 'oid',
+  prosrc => 'pg_stat_get_page_freezes' },
+
 { oid => '3055', descr => 'statistics: number of auto vacuums for a table',
   proname => 'pg_stat_get_autovacuum_count', provolatile => 's',
   proparallel => 'r', prorettype => 'int8', proargtypes => 'oid',

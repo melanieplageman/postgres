@@ -208,7 +208,7 @@ pgstat_drop_relation(Relation rel)
 
 void
 pgstat_get_last_vac_stats(Oid tableoid, bool shared, TransactionId *last_vac_xid,
-		XLogRecPtr *last_vac_lsn)
+		XLogRecPtr *last_vac_lsn, uint32 *page_freezes)
 {
 	PgStat_EntryRef *entry_ref;
 	PgStatShared_Relation *shtabentry;
@@ -226,6 +226,7 @@ pgstat_get_last_vac_stats(Oid tableoid, bool shared, TransactionId *last_vac_xid
 
 	*last_vac_lsn = tabentry->last_vac_lsn;
 	*last_vac_xid = tabentry->last_vac_xid;
+	*page_freezes = tabentry->page_freezes;
 	pgstat_unlock_entry(entry_ref);
 }
 
@@ -235,7 +236,8 @@ pgstat_get_last_vac_stats(Oid tableoid, bool shared, TransactionId *last_vac_xid
 void
 pgstat_report_vacuum(Oid tableoid, bool shared,
 					 PgStat_Counter livetuples, PgStat_Counter deadtuples,
-					 TransactionId xid_vac_end, XLogRecPtr last_vac_lsn)
+					 TransactionId xid_vac_end, XLogRecPtr last_vac_lsn,
+					 uint32 page_freezes)
 {
 	PgStat_EntryRef *entry_ref;
 	PgStatShared_Relation *shtabentry;
@@ -284,6 +286,7 @@ pgstat_report_vacuum(Oid tableoid, bool shared,
 
 	tabentry->last_vac_xid = xid_vac_end;
 	tabentry->last_vac_lsn = last_vac_lsn;
+	tabentry->page_freezes = page_freezes;
 
 	pgstat_unlock_entry(entry_ref);
 

@@ -213,6 +213,7 @@ typedef struct LVRelState
 	int64		missed_dead_tuples; /* # removable, but not removed */
 	XLogRecPtr last_vac_lsn;
 	TransactionId last_vac_xid;
+	uint32		page_freezes;
 } LVRelState;
 
 /*
@@ -369,10 +370,12 @@ heap_vacuum_rel(Relation rel, VacuumParams *params,
 	errcallback.previous = error_context_stack;
 	error_context_stack = &errcallback;
 
+	vacrel->page_freezes = 0;
 	vacrel->last_vac_xid = InvalidTransactionId;
 	vacrel->last_vac_lsn = InvalidXLogRecPtr;
 	pgstat_get_last_vac_stats(RelationGetRelid(rel),
-			rel->rd_rel->relisshared, &vacrel->last_vac_xid, &vacrel->last_vac_lsn);
+			rel->rd_rel->relisshared, &vacrel->last_vac_xid, &vacrel->last_vac_lsn,
+			&vacrel->page_freezes);
 
 	/* Set up high level stuff about rel and its indexes */
 	vacrel->rel = rel;
@@ -610,7 +613,8 @@ heap_vacuum_rel(Relation rel, VacuumParams *params,
 						 rel->rd_rel->relisshared,
 						 Max(vacrel->new_live_tuples, 0),
 						 vacrel->recently_dead_tuples +
-						 vacrel->missed_dead_tuples, xid_vac_end, lsn_vac_end);
+						 vacrel->missed_dead_tuples, xid_vac_end, lsn_vac_end,
+						 vacrel->page_freezes);
 
 	pgstat_progress_end_command();
 
@@ -1915,6 +1919,7 @@ retry:
 			TransactionId snapshotConflictHorizon;
 
 			vacrel->frozen_pages++;
+			vacrel->page_freezes++;
 
 			/*
 			 * We can use visibility_cutoff_xid as our cutoff for conflicts
