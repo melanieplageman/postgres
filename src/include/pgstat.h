@@ -426,6 +426,7 @@ typedef struct PgStat_StatTabEntry
 	TimestampTz last_autoanalyze_time;	/* autovacuum initiated */
 	PgStat_Counter autoanalyze_count;
 	XLogRecPtr last_vac_lsn;
+	PgStat_Counter page_freezes;
 } PgStat_StatTabEntry;
 
 typedef struct PgStat_WalStats
@@ -592,9 +593,10 @@ extern void pgstat_unlink_relation(Relation rel);
 
 extern void pgstat_report_vacuum(Oid tableoid, bool shared,
 								 PgStat_Counter livetuples, PgStat_Counter deadtuples,
-								 XLogRecPtr last_vac_lsn);
+								 XLogRecPtr last_vac_lsn, uint32 page_freezes);
 
-extern XLogRecPtr pgstat_get_last_vac_lsn(Oid tableoid, bool shared);
+extern XLogRecPtr pgstat_get_last_vac_lsn(Oid tableoid, bool shared,
+								 uint32 *page_freezes);
 
 extern void pgstat_report_analyze(Relation rel,
 								  PgStat_Counter livetuples, PgStat_Counter deadtuples,

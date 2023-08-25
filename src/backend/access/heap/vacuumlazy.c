@@ -211,6 +211,7 @@ typedef struct LVRelState
 	int64		recently_dead_tuples;	/* # dead, but not yet removable */
 	int64		missed_dead_tuples; /* # removable, but not removed */
 	XLogRecPtr last_vac_lsn;
+	uint32		page_freezes;
 } LVRelState;
 
 /*
@@ -366,7 +367,7 @@ heap_vacuum_rel(Relation rel, VacuumParams *params,
 	error_context_stack = &errcallback;
 
 	vacrel->last_vac_lsn = pgstat_get_last_vac_lsn(RelationGetRelid(rel),
-			rel->rd_rel->relisshared);
+			rel->rd_rel->relisshared, &vacrel->page_freezes);
 
 	/* Set up high level stuff about rel and its indexes */
 	vacrel->rel = rel;
@@ -601,7 +602,7 @@ heap_vacuum_rel(Relation rel, VacuumParams *params,
 						 rel->rd_rel->relisshared,
 						 Max(vacrel->new_live_tuples, 0),
 						 vacrel->recently_dead_tuples +
-						 vacrel->missed_dead_tuples, ProcLastRecPtr);
+						 vacrel->missed_dead_tuples, ProcLastRecPtr, vacrel->page_freezes);
 
 	pgstat_progress_end_command();
 
@@ -1845,6 +1846,7 @@ retry:
 			TransactionId snapshotConflictHorizon;
 
 			vacrel->frozen_pages++;
+			vacrel->page_freezes++;
 
 			/*
 			 * We can use visibility_cutoff_xid as our cutoff for conflicts
