@@ -1824,12 +1824,12 @@ retry:
 	current_lsn = GetXLogInsertRecPtr();
 	page_lsn = PageGetLSN(page);
 	lsns_since_last_vacuum = current_lsn - vacrel->last_vac_lsn;
-	freeze_lsn_cutoff = current_lsn - (lsns_since_last_vacuum / 10);
+	freeze_lsn_cutoff = current_lsn - (lsns_since_last_vacuum / 3);
 
-	current_xid = GetTopTransactionId();
+	current_xid = ReadNextTransactionId();
 	page_xid = prunestate->visibility_cutoff_xid;
 	xids_since_last_vacuum = current_xid - vacrel->last_vac_xid;
-	freeze_xid_cutoff = current_xid - (xids_since_last_vacuum / 10);
+	freeze_xid_cutoff = current_xid - (xids_since_last_vacuum / 3);
 
 	if (opp_freeze_algo == 0)
 	{
