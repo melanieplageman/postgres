@@ -11,9 +11,11 @@
 #include "postgres.h"
 
 #include "access/heapam.h"
+#include "access/multixact.h"
 #include "access/htup_details.h"
 #include "access/visibilitymap.h"
 #include "access/xloginsert.h"
+#include "access/xlogutils.h"
 #include "catalog/pg_type.h"
 #include "catalog/storage_xlog.h"
 #include "funcapi.h"
@@ -22,6 +24,8 @@
 #include "storage/procarray.h"
 #include "storage/smgr.h"
 #include "utils/rel.h"
+#include "utils/builtins.h"
+#include "utils/pg_lsn.h"
 #include "utils/snapmgr.h"
 
 PG_MODULE_MAGIC;
@@ -45,6 +49,8 @@ PG_FUNCTION_INFO_V1(pg_visibility_map_rel);
 PG_FUNCTION_INFO_V1(pg_visibility);
 PG_FUNCTION_INFO_V1(pg_visibility_rel);
 PG_FUNCTION_INFO_V1(pg_visibility_map_summary);
+PG_FUNCTION_INFO_V1(pg_stat_unfrozen_metrics);
+
 PG_FUNCTION_INFO_V1(pg_check_frozen);
 PG_FUNCTION_INFO_V1(pg_check_visible);
 PG_FUNCTION_INFO_V1(pg_truncate_visibility_map);
@@ -244,6 +250,246 @@ pg_visibility_rel(PG_FUNCTION_ARGS)
 	}
 
 	SRF_RETURN_DONE(funcctx);
+}
+
+static bool
+heap_tuple_unfrozen(HeapTupleHeader tuple,
+		TransactionId *unfrozen_xid, MultiXactId *unfrozen_mxid)
+{
+	TransactionId xid;
+
+	*unfrozen_xid = InvalidTransactionId;
+	*unfrozen_mxid = InvalidMultiXactId;
+
+	/*
+	 * If xmin is a normal transaction ID, this tuple is definitely not
+	 * frozen.
+	 */
+	xid = HeapTupleHeaderGetXmin(tuple);
+	if (TransactionIdIsNormal(xid))
+	{
+		*unfrozen_xid = xid;
+		return true;
+	}
+
+	/*
+	 * If xmax is a valid xact or multixact, this tuple is also not frozen.
+	 */
+	if (tuple->t_infomask & HEAP_XMAX_IS_MULTI)
+	{
+		MultiXactId multi;
+
+		multi = HeapTupleHeaderGetRawXmax(tuple);
+		if (MultiXactIdIsValid(multi))
+		{
+			*unfrozen_mxid = multi;
+			return true;
+		}
+	}
+	else
+	{
+		xid = HeapTupleHeaderGetRawXmax(tuple);
+		if (TransactionIdIsNormal(xid))
+		{
+			*unfrozen_xid = xid;
+			return true;
+		}
+	}
+
+	if (tuple->t_infomask & HEAP_MOVED)
+	{
+		xid = HeapTupleHeaderGetXvac(tuple);
+		if (TransactionIdIsNormal(xid))
+		{
+			*unfrozen_xid = xid;
+			return true;
+		}
+	}
+
+	return false;
+}
+
+static void unfrozen_metrics(Relation rel,
+		TransactionId *current_xid, TransactionId *oldest_uf_xid, uint32 *avg_uf_xid_age,
+		MultiXactId *current_mxid, MultiXactId *oldest_uf_mxid, uint32 *avg_uf_mxid_age,
+		XLogRecPtr *insert_lsn, XLogRecPtr *oldest_uf_lsn, uint64 *avg_uf_lsn_age,
+		uint64 *npages, uint64 *nunfrozen_pages)
+{
+	Buffer buf;
+	Page page;
+
+	BlockNumber nblocks = RelationGetNumberOfBlocks(rel);
+	uint32 num_uf_xids = 0;
+	uint32 num_uf_mxids = 0;
+	uint64 sum_uf_xid_age = 0;
+	uint64 sum_uf_mxid_age = 0;
+	uint64 sum_uf_lsn_age = 0;
+
+	TransactionId cur_oldest_uf_xid = ReadNextTransactionId();
+	MultiXactId cur_oldest_uf_mxid = ReadNextMultiXactId();
+	XLogRecPtr cur_oldest_uf_lsn = GetXLogInsertRecPtr();
+	uint32 npages_frozen = 0;
+
+	*npages = nblocks;
+
+	*current_xid = cur_oldest_uf_xid;
+	*oldest_uf_xid = InvalidTransactionId;
+	*avg_uf_xid_age = 0;
+
+	*current_mxid = cur_oldest_uf_mxid;
+	*oldest_uf_mxid = InvalidMultiXactId;
+	*avg_uf_mxid_age = 0;
+
+	*insert_lsn = cur_oldest_uf_lsn;
+	*oldest_uf_lsn = InvalidXLogRecPtr;
+	*avg_uf_lsn_age = 0;
+
+	for (BlockNumber blkno = 0; blkno < nblocks; ++blkno)
+	{
+		OffsetNumber offnum, maxoff;
+		XLogRecPtr page_lsn;
+		bool page_frozen = true;
+		uint64 normal_lps = 0;
+
+		buf = ReadBufferExtended(rel, MAIN_FORKNUM, blkno, RBM_NORMAL,
+									NULL);
+		LockBuffer(buf, BUFFER_LOCK_SHARE);
+
+		page = BufferGetPage(buf);
+		page_lsn = PageGetLSN(page);
+
+		maxoff = PageGetMaxOffsetNumber(page);
+
+		for (offnum = FirstOffsetNumber;
+			offnum <= maxoff;
+			offnum = OffsetNumberNext(offnum))
+		{
+			HeapTupleHeader htup;
+			TransactionId xid = InvalidTransactionId;
+			MultiXactId mxid = InvalidMultiXactId;
+			ItemId itemid = PageGetItemId(page, offnum);
+
+			if (!ItemIdIsNormal(itemid))
+				continue;
+
+			normal_lps++;
+			htup = (HeapTupleHeader) PageGetItem(page, itemid);
+
+			if (!heap_tuple_unfrozen(htup, &xid, &mxid))
+				continue;
+
+			page_frozen = false;
+
+			if (TransactionIdIsNormal(xid))
+			{
+				// TODO: make safe
+				uint32 xid_age = *current_xid - xid;
+				sum_uf_xid_age += xid_age;
+				num_uf_xids++;
+				if (TransactionIdPrecedes(xid, cur_oldest_uf_xid))
+					cur_oldest_uf_xid = xid;
+			}
+
+			if (MultiXactIdIsValid(mxid))
+			{
+				uint32 mxid_age = *current_mxid - mxid;
+				sum_uf_mxid_age += mxid_age;
+				num_uf_mxids++;
+				if (MultiXactIdPrecedes(mxid, cur_oldest_uf_mxid))
+					cur_oldest_uf_mxid = mxid;
+			}
+		}
+
+		if (normal_lps == 0)
+			page_frozen = false;
+
+		if (page_frozen)
+			npages_frozen++;
+		else
+		{
+			uint64 uf_lsn_age = *insert_lsn - page_lsn;
+			sum_uf_lsn_age += uf_lsn_age;
+			if (page_lsn < cur_oldest_uf_lsn)
+				cur_oldest_uf_lsn = page_lsn;
+		}
+
+		UnlockReleaseBuffer(buf);
+	}
+
+	*nunfrozen_pages = nblocks - npages_frozen;
+
+	if (num_uf_xids > 0)
+	{
+		*oldest_uf_xid = cur_oldest_uf_xid;
+		*avg_uf_xid_age = sum_uf_xid_age / num_uf_xids;
+	}
+
+	if (num_uf_mxids > 0)
+	{
+		*oldest_uf_mxid = cur_oldest_uf_mxid;
+		*avg_uf_mxid_age = sum_uf_mxid_age / num_uf_mxids;
+	}
+
+	if (npages_frozen < nblocks)
+	{
+		*oldest_uf_lsn = cur_oldest_uf_lsn;
+		*avg_uf_lsn_age = sum_uf_lsn_age / *nunfrozen_pages;
+	}
+}
+
+Datum
+pg_stat_unfrozen_metrics(PG_FUNCTION_ARGS)
+{
+	TupleDesc	tupdesc;
+	Datum		values[12];
+	bool		nulls[12] = {0};
+	Oid			relid = PG_GETARG_OID(0);
+
+	TransactionId current_xid;
+	TransactionId oldest_uf_xid;
+	MultiXactId avg_uf_xid_age;
+
+	MultiXactId current_mxid;
+	MultiXactId oldest_uf_mxid;
+	uint32 avg_uf_mxid_age;
+
+	XLogRecPtr insert_lsn;
+	XLogRecPtr oldest_uf_lsn;
+	uint64 avg_uf_lsn_age;
+
+	uint64 npages;
+	uint64 nunfrozen_pages;
+
+	Relation rel = relation_open(relid, AccessShareLock);
+
+	if (get_call_result_type(fcinfo, NULL, &tupdesc) != TYPEFUNC_COMPOSITE)
+		elog(ERROR, "return type must be a row type");
+
+	unfrozen_metrics(rel,
+			&current_xid, &oldest_uf_xid, &avg_uf_xid_age,
+			&current_mxid, &oldest_uf_mxid, &avg_uf_mxid_age,
+			&insert_lsn, &oldest_uf_lsn, &avg_uf_lsn_age,
+			&npages, &nunfrozen_pages);
+
+	relation_close(rel, AccessShareLock);
+
+	values[0] = CStringGetTextDatum(RelationGetRelationName(rel));
+	values[1] = TransactionIdGetDatum(current_xid);
+	values[2] = TransactionIdGetDatum(oldest_uf_xid);
+	values[3] = Int32GetDatum(avg_uf_xid_age);
+
+	values[4] = MultiXactIdGetDatum(current_mxid);
+	values[5] = MultiXactIdGetDatum(oldest_uf_mxid);
+	values[6] = Int64GetDatum(avg_uf_mxid_age);
+
+	values[7] = LSNGetDatum(insert_lsn);
+	values[8] = LSNGetDatum(oldest_uf_lsn);
+	values[9] = Int64GetDatum(avg_uf_lsn_age);
+
+	values[10] = Int64GetDatum(npages);
+	values[11] = Int64GetDatum(nunfrozen_pages);
+
+	PG_RETURN_DATUM(HeapTupleGetDatum(heap_form_tuple(tupdesc, values, nulls)));
 }
 
 /*
