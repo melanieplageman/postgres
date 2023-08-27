@@ -205,12 +205,37 @@ pgstat_drop_relation(Relation rel)
 	}
 }
 
+
+XLogRecPtr
+pgstat_get_last_vac_lsn(Oid tableoid, bool shared)
+{
+	PgStat_EntryRef *entry_ref;
+	PgStatShared_Relation *shtabentry;
+	PgStat_StatTabEntry *tabentry;
+	XLogRecPtr result;
+	Oid			dboid = (shared ? InvalidOid : MyDatabaseId);
+
+	if (!pgstat_track_counts)
+		return InvalidXLogRecPtr;
+
+	entry_ref = pgstat_get_entry_ref_locked(PGSTAT_KIND_RELATION,
+											dboid, tableoid, false);
+
+	shtabentry = (PgStatShared_Relation *) entry_ref->shared_stats;
+	tabentry = &shtabentry->stats;
+
+	result = tabentry->last_vac_lsn;
+	pgstat_unlock_entry(entry_ref);
+	return result;
+}
+
 /*
  * Report that the table was just vacuumed and flush IO statistics.
  */
 void
 pgstat_report_vacuum(Oid tableoid, bool shared,
-					 PgStat_Counter livetuples, PgStat_Counter deadtuples)
+					 PgStat_Counter livetuples, PgStat_Counter deadtuples,
+					 XLogRecPtr last_vac_lsn)
 {
 	PgStat_EntryRef *entry_ref;
 	PgStatShared_Relation *shtabentry;
@@ -256,6 +281,8 @@ pgstat_report_vacuum(Oid tableoid, bool shared,
 		tabentry->last_vacuum_time = ts;
 		tabentry->vacuum_count++;
 	}
+
+	tabentry->last_vac_lsn = last_vac_lsn;
 
 	pgstat_unlock_entry(entry_ref);
 

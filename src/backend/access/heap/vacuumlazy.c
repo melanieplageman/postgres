@@ -210,6 +210,7 @@ typedef struct LVRelState
 	int64		live_tuples;	/* # live tuples remaining */
 	int64		recently_dead_tuples;	/* # dead, but not yet removable */
 	int64		missed_dead_tuples; /* # removable, but not removed */
+	XLogRecPtr last_vac_lsn;
 } LVRelState;
 
 /*
@@ -363,6 +364,9 @@ heap_vacuum_rel(Relation rel, VacuumParams *params,
 	errcallback.arg = vacrel;
 	errcallback.previous = error_context_stack;
 	error_context_stack = &errcallback;
+
+	vacrel->last_vac_lsn = pgstat_get_last_vac_lsn(RelationGetRelid(rel),
+			rel->rd_rel->relisshared);
 
 	/* Set up high level stuff about rel and its indexes */
 	vacrel->rel = rel;
@@ -597,7 +601,8 @@ heap_vacuum_rel(Relation rel, VacuumParams *params,
 						 rel->rd_rel->relisshared,
 						 Max(vacrel->new_live_tuples, 0),
 						 vacrel->recently_dead_tuples +
-						 vacrel->missed_dead_tuples);
+						 vacrel->missed_dead_tuples, ProcLastRecPtr);
+
 	pgstat_progress_end_command();
 
 	if (instrument)
@@ -1511,6 +1516,7 @@ lazy_scan_new_or_empty(LVRelState *vacrel, Buffer buf, BlockNumber blkno,
 	return false;
 }
 
+#define FREEZE_CUTOFF_DIVISOR 3
 /*
  *	lazy_scan_prune() -- lazy_scan_heap() pruning and freezing.
  *
@@ -1551,9 +1557,11 @@ lazy_scan_prune(LVRelState *vacrel,
 				recently_dead_tuples;
 	int			nnewlpdead;
 	HeapPageFreeze pagefrz;
-	int64		fpi_before = pgWalUsage.wal_fpi;
 	OffsetNumber deadoffsets[MaxHeapTuplesPerPage];
 	HeapTupleFreeze frozen[MaxHeapTuplesPerPage];
+	XLogRecPtr current_lsn;
+	XLogRecPtr lsns_since_last_vacuum;
+	XLogRecPtr freeze_lsn_cutoff;
 
 	Assert(BufferGetBlockNumber(buf) == blkno);
 
@@ -1795,13 +1803,19 @@ retry:
 
 	/*
 	 * Freeze the page when heap_prepare_freeze_tuple indicates that at least
-	 * one XID/MXID from before FreezeLimit/MultiXactCutoff is present.  Also
-	 * freeze when pruning generated an FPI, if doing so means that we set the
-	 * page all-frozen afterwards (might not happen until final heap pass).
+	 * one XID/MXID from before FreezeLimit/MultiXactCutoff is present.  Also,
+	 * if freezing would allow us to set the whole page all-frozen, then freeze
+	 * if the buffer is already dirty, freezing won't emit an FPI and the page
+	 * hasn't been modified recently.
 	 */
+	current_lsn = GetXLogInsertRecPtr();
+	lsns_since_last_vacuum = current_lsn - vacrel->last_vac_lsn;
+	freeze_lsn_cutoff = current_lsn - (lsns_since_last_vacuum / FREEZE_CUTOFF_DIVISOR);
+
 	if (pagefrz.freeze_required || tuples_frozen == 0 ||
 		(prunestate->all_visible && prunestate->all_frozen &&
-		 fpi_before != pgWalUsage.wal_fpi))
+		(BufferIsProbablyDirty(buf) && !XLogCheckBufferNeedsBackup(buf) &&
+		PageGetLSN(page) < freeze_lsn_cutoff)))
 	{
 		/*
 		 * We're freezing the page.  Our final NewRelfrozenXid doesn't need to
