@@ -39,9 +39,26 @@ LANGUAGE C STRICT;
 
 -- Show summary of visibility map bits for a relation.
 CREATE FUNCTION pg_visibility_map_summary(regclass,
-    OUT all_visible bigint, OUT all_frozen bigint)
+    OUT nblocks bigint, OUT all_visible bigint, OUT all_frozen bigint)
 RETURNS record
 AS 'MODULE_PATHNAME', 'pg_visibility_map_summary'
+LANGUAGE C STRICT;
+
+CREATE FUNCTION pg_stat_unfrozen_metrics(regclass,
+	OUT relname TEXT,
+	OUT current_xid xid8,
+	OUT oldest_uf_xid xid8,
+	OUT avg_uf_xid_age int,
+	OUT current_mxid xid8,
+	OUT oldest_uf_mxid xid8,
+	OUT avg_uf_mxid_age int,
+	OUT insert_lsn pg_lsn,
+	OUT oldest_uf_lsn pg_lsn,
+	OUT avg_uf_lsn_age bigint,
+	OUT npages bigint,
+	OUT npages_uf bigint)
+RETURNS record
+AS 'MODULE_PATHNAME', 'pg_stat_unfrozen_metrics'
 LANGUAGE C STRICT;
 
 -- Show tupleids of non-frozen tuples if any in all_frozen pages

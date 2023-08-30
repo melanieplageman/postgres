@@ -2098,6 +2098,25 @@ ExtendBufferedRelShared(BufferManagerRelation bmr,
 	return first_block;
 }
 
+bool
+BufferIsProbablyDirty(Buffer buffer)
+{
+	BufferDesc *bufHdr;
+	uint32		buf_state;
+
+	if (!BufferIsValid(buffer))
+		elog(ERROR, "bad buffer ID: %d", buffer);
+
+	if (BufferIsLocal(buffer))
+		return LocalBufferIsProbablyDirty(buffer);
+
+	bufHdr = GetBufferDescriptor(buffer - 1);
+
+	buf_state = pg_atomic_read_u32(&bufHdr->state);
+
+	return buf_state & BM_DIRTY;
+}
+
 /*
  * MarkBufferDirty
  *

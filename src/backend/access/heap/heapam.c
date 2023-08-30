@@ -6370,7 +6370,7 @@ bool
 heap_prepare_freeze_tuple(HeapTupleHeader tuple,
 						  const struct VacuumCutoffs *cutoffs,
 						  HeapPageFreeze *pagefrz,
-						  HeapTupleFreeze *frz, bool *totally_frozen)
+						  HeapTupleFreeze *frz, bool *totally_frozen, int *already_frozen)
 {
 	bool		xmin_already_frozen = false,
 				xmax_already_frozen = false;
@@ -6613,6 +6613,9 @@ heap_prepare_freeze_tuple(HeapTupleHeader tuple,
 	 */
 	*totally_frozen = ((freeze_xmin || xmin_already_frozen) &&
 					   (freeze_xmax || xmax_already_frozen));
+
+	if (xmin_already_frozen)
+		(*already_frozen)++;
 
 	if (!pagefrz->freeze_required && !(xmin_already_frozen &&
 									   xmax_already_frozen))
@@ -6930,6 +6933,7 @@ heap_freeze_tuple(HeapTupleHeader tuple,
 	bool		totally_frozen;
 	struct VacuumCutoffs cutoffs;
 	HeapPageFreeze pagefrz;
+	int already_frozen = 0;
 
 	cutoffs.relfrozenxid = relfrozenxid;
 	cutoffs.relminmxid = relminmxid;
@@ -6945,7 +6949,7 @@ heap_freeze_tuple(HeapTupleHeader tuple,
 	pagefrz.NoFreezePageRelminMxid = MultiXactCutoff;
 
 	do_freeze = heap_prepare_freeze_tuple(tuple, &cutoffs,
-										  &pagefrz, &frz, &totally_frozen);
+										  &pagefrz, &frz, &totally_frozen, &already_frozen);
 
 	/*
 	 * Note that because this is not a WAL-logged operation, we don't need to

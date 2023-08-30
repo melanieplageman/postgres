@@ -210,6 +210,9 @@ typedef struct LVRelState
 	int64		live_tuples;	/* # live tuples remaining */
 	int64		recently_dead_tuples;	/* # dead, but not yet removable */
 	int64		missed_dead_tuples; /* # removable, but not removed */
+	XLogRecPtr last_vac_lsn;
+	TransactionId last_vac_xid;
+	uint32		page_freezes;
 } LVRelState;
 
 /*
@@ -363,6 +366,13 @@ heap_vacuum_rel(Relation rel, VacuumParams *params,
 	errcallback.arg = vacrel;
 	errcallback.previous = error_context_stack;
 	error_context_stack = &errcallback;
+
+	vacrel->page_freezes = 0;
+	vacrel->last_vac_xid = InvalidTransactionId;
+	vacrel->last_vac_lsn = InvalidXLogRecPtr;
+	pgstat_get_last_vac_stats(RelationGetRelid(rel),
+			rel->rd_rel->relisshared, &vacrel->last_vac_xid, &vacrel->last_vac_lsn,
+			&vacrel->page_freezes);
 
 	/* Set up high level stuff about rel and its indexes */
 	vacrel->rel = rel;
@@ -597,7 +607,10 @@ heap_vacuum_rel(Relation rel, VacuumParams *params,
 						 rel->rd_rel->relisshared,
 						 Max(vacrel->new_live_tuples, 0),
 						 vacrel->recently_dead_tuples +
-						 vacrel->missed_dead_tuples);
+						 vacrel->missed_dead_tuples, ReadNextTransactionId(),
+						 ProcLastRecPtr,
+						 vacrel->page_freezes);
+
 	pgstat_progress_end_command();
 
 	if (instrument)
@@ -1554,6 +1567,17 @@ lazy_scan_prune(LVRelState *vacrel,
 	int64		fpi_before = pgWalUsage.wal_fpi;
 	OffsetNumber deadoffsets[MaxHeapTuplesPerPage];
 	HeapTupleFreeze frozen[MaxHeapTuplesPerPage];
+	bool did_prune;
+	bool do_freeze;
+	int already_frozen;
+	XLogRecPtr current_lsn;
+	XLogRecPtr page_lsn;
+	XLogRecPtr lsns_since_last_vacuum;
+	XLogRecPtr freeze_lsn_cutoff;
+	TransactionId current_xid;
+	TransactionId page_xid;
+	TransactionId xids_since_last_vacuum;
+	TransactionId freeze_xid_cutoff;
 
 	Assert(BufferGetBlockNumber(buf) == blkno);
 
@@ -1566,6 +1590,7 @@ lazy_scan_prune(LVRelState *vacrel,
 
 retry:
 
+	already_frozen = 0;
 	/* Initialize (or reset) page-level state */
 	pagefrz.freeze_required = false;
 	pagefrz.FreezePageRelfrozenXid = vacrel->NewRelfrozenXid;
@@ -1589,7 +1614,7 @@ retry:
 	 */
 	tuples_deleted = heap_page_prune(rel, buf, vacrel->vistest,
 									 InvalidTransactionId, 0, &nnewlpdead,
-									 &vacrel->offnum);
+									 &vacrel->offnum, &did_prune);
 
 	/*
 	 * Now scan the page to collect LP_DEAD items and check for tuples
@@ -1770,7 +1795,7 @@ retry:
 
 		/* Tuple with storage -- consider need to freeze */
 		if (heap_prepare_freeze_tuple(tuple.t_data, &vacrel->cutoffs, &pagefrz,
-									  &frozen[tuples_frozen], &totally_frozen))
+									  &frozen[tuples_frozen], &totally_frozen, &already_frozen))
 		{
 			/* Save prepared freeze plan for later */
 			frozen[tuples_frozen++].offset = offnum;
@@ -1793,15 +1818,94 @@ retry:
 	 */
 	vacrel->offnum = InvalidOffsetNumber;
 
+
+	current_lsn = GetXLogInsertRecPtr();
+	page_lsn = PageGetLSN(page);
+	lsns_since_last_vacuum = current_lsn - vacrel->last_vac_lsn;
+
+	current_xid = ReadNextTransactionId();
+	page_xid = prunestate->visibility_cutoff_xid;
+	xids_since_last_vacuum = current_xid - vacrel->last_vac_xid;
+
+	if (opp_freeze_algo == 0)
+	{
+		do_freeze = pagefrz.freeze_required || tuples_frozen == 0 ||
+			(prunestate->all_visible && prunestate->all_frozen &&
+			fpi_before != pgWalUsage.wal_fpi);
+	}
+	else if (opp_freeze_algo == 1)
+	{
+		do_freeze = pagefrz.freeze_required || tuples_frozen == 0 ||
+			(prunestate->all_visible && prunestate->all_frozen &&
+			BufferIsProbablyDirty(buf) && !XLogCheckBufferNeedsBackup(buf));
+	}
+	else if (opp_freeze_algo == 2)
+	{
+		freeze_lsn_cutoff = current_lsn - (lsns_since_last_vacuum / 10);
+		do_freeze = pagefrz.freeze_required || tuples_frozen == 0 ||
+			(prunestate->all_visible && prunestate->all_frozen &&
+			((BufferIsProbablyDirty(buf) && !XLogCheckBufferNeedsBackup(buf)) ||
+			page_lsn < freeze_lsn_cutoff));
+	}
+	else if (opp_freeze_algo == 3)
+	{
+		freeze_lsn_cutoff = current_lsn - (lsns_since_last_vacuum / 10);
+		do_freeze = pagefrz.freeze_required || tuples_frozen == 0 ||
+			(prunestate->all_visible && prunestate->all_frozen &&
+			(BufferIsProbablyDirty(buf) && !XLogCheckBufferNeedsBackup(buf) &&
+			page_lsn < freeze_lsn_cutoff));
+	}
+	else if (opp_freeze_algo == 4)
+	{
+		freeze_lsn_cutoff = current_lsn - (lsns_since_last_vacuum / 3);
+		do_freeze = pagefrz.freeze_required || tuples_frozen == 0 ||
+			(prunestate->all_visible && prunestate->all_frozen &&
+			((BufferIsProbablyDirty(buf) && !XLogCheckBufferNeedsBackup(buf)) ||
+			page_lsn < freeze_lsn_cutoff));
+	}
+	else if (opp_freeze_algo == 5)
+	{
+		freeze_lsn_cutoff = current_lsn - (lsns_since_last_vacuum / 3);
+		do_freeze = pagefrz.freeze_required || tuples_frozen == 0 ||
+			(prunestate->all_visible && prunestate->all_frozen &&
+			(BufferIsProbablyDirty(buf) && !XLogCheckBufferNeedsBackup(buf) &&
+			page_lsn < freeze_lsn_cutoff));
+	}
+	else if (opp_freeze_algo == 6)
+	{
+		bool do_opp_freeze;
+		freeze_lsn_cutoff = current_lsn - (lsns_since_last_vacuum / 3);
+		// this is algo 4 + peter's criteria
+		do_opp_freeze = prunestate->all_visible && prunestate->all_frozen &&
+			((BufferIsProbablyDirty(buf) && !XLogCheckBufferNeedsBackup(buf)) ||
+			page_lsn < freeze_lsn_cutoff);
+
+		if (already_frozen > 0)
+			do_opp_freeze = false;
+
+		do_freeze = pagefrz.freeze_required || tuples_frozen == 0 || do_opp_freeze;
+	}
+	else if (opp_freeze_algo == 7)
+	{
+		freeze_xid_cutoff = current_xid - (xids_since_last_vacuum/ 10);
+		do_freeze = pagefrz.freeze_required || tuples_frozen == 0 ||
+			(prunestate->all_visible && prunestate->all_frozen &&
+			(BufferIsProbablyDirty(buf) && !XLogCheckBufferNeedsBackup(buf) &&
+			page_xid < freeze_xid_cutoff));
+	}
+	else
+	{
+		do_freeze = pagefrz.freeze_required || tuples_frozen == 0 ||
+			(prunestate->all_visible && prunestate->all_frozen &&
+			fpi_before != pgWalUsage.wal_fpi);
+	}
 	/*
 	 * Freeze the page when heap_prepare_freeze_tuple indicates that at least
 	 * one XID/MXID from before FreezeLimit/MultiXactCutoff is present.  Also
 	 * freeze when pruning generated an FPI, if doing so means that we set the
 	 * page all-frozen afterwards (might not happen until final heap pass).
 	 */
-	if (pagefrz.freeze_required || tuples_frozen == 0 ||
-		(prunestate->all_visible && prunestate->all_frozen &&
-		 fpi_before != pgWalUsage.wal_fpi))
+	if (do_freeze)
 	{
 		/*
 		 * We're freezing the page.  Our final NewRelfrozenXid doesn't need to
@@ -1831,6 +1935,7 @@ retry:
 			TransactionId snapshotConflictHorizon;
 
 			vacrel->frozen_pages++;
+			vacrel->page_freezes++;
 
 			/*
 			 * We can use visibility_cutoff_xid as our cutoff for conflicts

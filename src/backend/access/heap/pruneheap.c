@@ -204,9 +204,10 @@ heap_page_prune_opt(Relation relation, Buffer buffer)
 		{
 			int			ndeleted,
 						nnewlpdead;
+			bool did_prune;
 
 			ndeleted = heap_page_prune(relation, buffer, vistest, limited_xmin,
-									   limited_ts, &nnewlpdead, NULL);
+									   limited_ts, &nnewlpdead, NULL, &did_prune);
 
 			/*
 			 * Report the number of tuples reclaimed to pgstats.  This is
@@ -267,7 +268,7 @@ heap_page_prune(Relation relation, Buffer buffer,
 				TransactionId old_snap_xmin,
 				TimestampTz old_snap_ts,
 				int *nnewlpdead,
-				OffsetNumber *off_loc)
+				OffsetNumber *off_loc, bool *did_prune)
 {
 	int			ndeleted = 0;
 	Page		page = BufferGetPage(buffer);
@@ -378,6 +379,8 @@ heap_page_prune(Relation relation, Buffer buffer,
 	/* Clear the offset information once we have processed the given page. */
 	if (off_loc)
 		*off_loc = InvalidOffsetNumber;
+
+	*did_prune = prstate.nredirected > 0 || prstate.ndead > 0 || prstate.nunused > 0;
 
 	/* Any error while applying the changes is critical */
 	START_CRIT_SECTION();
