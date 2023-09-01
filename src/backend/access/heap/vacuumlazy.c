@@ -845,17 +845,19 @@ lazy_scan_heap(LVRelState *vacrel)
 	initprog_val[2] = dead_items->max_items;
 	pgstat_progress_update_multi_param(3, initprog_index, initprog_val);
 
-	blkno = 0;
 	/* Set up an initial range of skippable blocks using the visibility map */
-	next_unskippable_block = lazy_scan_skip(vacrel, &vmbuffer, blkno,
+	next_unskippable_block = lazy_scan_skip(vacrel, &vmbuffer, 0,
 											&next_unskippable_allvis,
 											&skipping_current_range);
-	for (; blkno < rel_pages; blkno++)
+	for (blkno = 0; blkno < rel_pages; blkno++)
 	{
 		Buffer		buf;
 		Page		page;
-		bool		all_visible_according_to_vm;
+		bool		all_visible_according_to_vm = true;
 		LVPagePruneState prunestate;
+
+		if (blkno != next_unskippable_block && skipping_current_range)
+			continue;
 
 		if (blkno == next_unskippable_block)
 		{
@@ -870,17 +872,6 @@ lazy_scan_heap(LVRelState *vacrel)
 													&skipping_current_range);
 
 			Assert(next_unskippable_block >= blkno + 1);
-		}
-		else
-		{
-			/* Last page always scanned (may need to set nonempty_pages) */
-			Assert(blkno < rel_pages - 1);
-
-			if (skipping_current_range)
-				continue;
-
-			/* Current range is too small to skip -- just scan the page */
-			all_visible_according_to_vm = true;
 		}
 
 		vacrel->scanned_pages++;
