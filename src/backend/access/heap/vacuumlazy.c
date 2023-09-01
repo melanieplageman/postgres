@@ -1293,19 +1293,18 @@ lazy_scan_heap(LVRelState *vacrel)
  * choice to skip such a range is actually made, making everything safe.)
  */
 static BlockNumber
-lazy_scan_skip(LVRelState *vacrel, Buffer *vmbuffer, BlockNumber next_block,
+lazy_scan_skip(LVRelState *vacrel, Buffer *vmbuffer, BlockNumber start,
 			   bool *next_unskippable_allvis, bool *skipping_current_range)
 {
-	BlockNumber rel_pages = vacrel->rel_pages,
-				result = next_block,
-				nskippable_blocks = 0;
+	BlockNumber blkno;
 	bool		skipsallvis = false;
 
 	*next_unskippable_allvis = true;
-	while (result < rel_pages)
+
+	for (blkno = start; blkno < vacrel->rel_pages; blkno++)
 	{
 		uint8 mapbits = visibilitymap_get_status(
-				vacrel->rel, result, vmbuffer);
+				vacrel->rel, blkno, vmbuffer);
 
 		if ((mapbits & VISIBILITYMAP_ALL_VISIBLE) == 0)
 		{
@@ -1324,7 +1323,7 @@ lazy_scan_skip(LVRelState *vacrel, Buffer *vmbuffer, BlockNumber next_block,
 		 *
 		 * Implement this by always treating the last block as unsafe to skip.
 		 */
-		if (result == rel_pages - 1)
+		if (blkno == vacrel->rel_pages - 1)
 			break;
 
 		/* DISABLE_PAGE_SKIPPING makes all skipping unsafe */
@@ -1353,8 +1352,6 @@ lazy_scan_skip(LVRelState *vacrel, Buffer *vmbuffer, BlockNumber next_block,
 		}
 
 		vacuum_delay_point();
-		result++;
-		nskippable_blocks++;
 	}
 
 	/*
@@ -1367,11 +1364,11 @@ lazy_scan_skip(LVRelState *vacrel, Buffer *vmbuffer, BlockNumber next_block,
 	 * non-aggressive VACUUMs.  If the range has any all-visible pages then
 	 * skipping makes updating relfrozenxid unsafe, which is a real downside.
 	 */
-	*skipping_current_range = nskippable_blocks >= SKIP_PAGES_THRESHOLD;
+	*skipping_current_range = (blkno - start) >= SKIP_PAGES_THRESHOLD;
 	if (*skipping_current_range && skipsallvis)
 		vacrel->skippedallvis = true;
 
-	return result;
+	return blkno;
 }
 
 /*
