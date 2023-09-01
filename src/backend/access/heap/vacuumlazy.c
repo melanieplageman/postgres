@@ -845,11 +845,12 @@ lazy_scan_heap(LVRelState *vacrel)
 	initprog_val[2] = dead_items->max_items;
 	pgstat_progress_update_multi_param(3, initprog_index, initprog_val);
 
+	blkno = 0;
 	/* Set up an initial range of skippable blocks using the visibility map */
-	next_unskippable_block = lazy_scan_skip(vacrel, &vmbuffer, 0,
+	next_unskippable_block = lazy_scan_skip(vacrel, &vmbuffer, blkno,
 											&next_unskippable_allvis,
 											&skipping_current_range);
-	for (blkno = 0; blkno < rel_pages; blkno++)
+	for (; blkno < rel_pages; blkno++)
 	{
 		Buffer		buf;
 		Page		page;
