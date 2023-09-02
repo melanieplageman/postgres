@@ -829,8 +829,7 @@ lazy_scan_heap(LVRelState *vacrel)
 				next_fsm_block_to_vacuum = 0;
 	VacDeadItems *dead_items = vacrel->dead_items;
 	Buffer		vmbuffer = InvalidBuffer;
-	bool		next_unskippable_allvis,
-				skipping_current_range;
+	bool		next_unskippable_allvis;
 	const int	initprog_index[] = {
 		PROGRESS_VACUUM_PHASE,
 		PROGRESS_VACUUM_TOTAL_HEAP_BLKS,
@@ -856,25 +855,12 @@ lazy_scan_heap(LVRelState *vacrel)
 	// If the next unskippable block is past the threshold, then just skip
 	// there
 	for (; blkno < rel_pages;
-			next_unskippable_block - (blkno + 1) >= SKIP_PAGES_THRESHOLD ?
-			(blkno = next_unskippable_block) : blkno++)
+			)
 	{
 		Buffer		buf;
 		Page		page;
-		bool		all_visible_according_to_vm = true;
+		bool		all_visible_according_to_vm;
 		LVPagePruneState prunestate;
-
-		if (blkno == next_unskippable_block)
-		{
-			/*
-			 * Can't skip this page safely.  Must scan the page.  But
-			 * determine the next skippable range after the page first.
-			 */
-			all_visible_according_to_vm = next_unskippable_allvis;
-			next_unskippable_block = lazy_scan_skip(vacrel, &vmbuffer,
-													blkno + 1,
-													&next_unskippable_allvis);
-		}
 
 		vacrel->scanned_pages++;
 
@@ -963,7 +949,7 @@ lazy_scan_heap(LVRelState *vacrel)
 									   vmbuffer))
 			{
 				/* Processed as new/empty page (lock and pin released) */
-				continue;
+				goto next;
 			}
 
 			/* Collect LP_DEAD items in dead_items array, count tuples */
@@ -985,7 +971,7 @@ lazy_scan_heap(LVRelState *vacrel)
 				UnlockReleaseBuffer(buf);
 				if (recordfreespace)
 					RecordPageWithFreeSpace(vacrel->rel, blkno, freespace);
-				continue;
+				goto next;
 			}
 
 			/*
@@ -1001,7 +987,7 @@ lazy_scan_heap(LVRelState *vacrel)
 		if (lazy_scan_new_or_empty(vacrel, buf, blkno, page, false, vmbuffer))
 		{
 			/* Processed as new/empty page (lock and pin released) */
-			continue;
+			goto next;
 		}
 
 		/*
@@ -1065,7 +1051,7 @@ lazy_scan_heap(LVRelState *vacrel)
 
 				UnlockReleaseBuffer(buf);
 				RecordPageWithFreeSpace(vacrel->rel, blkno, freespace);
-				continue;
+				goto next;
 			}
 
 			/*
@@ -1077,6 +1063,10 @@ lazy_scan_heap(LVRelState *vacrel)
 			 */
 			Assert(dead_items->num_items == 0);
 		}
+
+		all_visible_according_to_vm = true;
+		if (blkno == next_unskippable_block)
+			all_visible_according_to_vm = next_unskippable_allvis;
 
 		/*
 		 * Handle setting visibility map bit based on information from the VM
@@ -1219,6 +1209,16 @@ lazy_scan_heap(LVRelState *vacrel)
 
 			UnlockReleaseBuffer(buf);
 			RecordPageWithFreeSpace(vacrel->rel, blkno, freespace);
+		}
+
+	next:
+		if (blkno++ == next_unskippable_block)
+		{
+			next_unskippable_block = lazy_scan_skip(vacrel, &vmbuffer,
+												blkno,
+												&next_unskippable_allvis);
+			if (next_unskippable_block - blkno >= SKIP_PAGES_THRESHOLD)
+				blkno = next_unskippable_block;
 		}
 	}
 
