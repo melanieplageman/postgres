@@ -844,18 +844,13 @@ lazy_scan_heap(LVRelState *vacrel)
 	pgstat_progress_update_multi_param(3, initprog_index, initprog_val);
 
 	/* Set up an initial range of skippable blocks using the visibility map */
-	blkno = 0;
-	next_unskippable_block = lazy_scan_skip(vacrel, &vmbuffer, blkno,
-											&next_unskippable_allvis);
-	if (next_unskippable_block >= SKIP_PAGES_THRESHOLD)
-	{
-		blkno = next_unskippable_block;
-	}
 
-	// If the next unskippable block is past the threshold, then just skip
-	// there
-	for (; blkno < rel_pages;
-			)
+	/* Always skip blocks at the beginning since the optimization doesn't apply
+	 * here. Also, since we must scan the last page, there's no chance that the
+	 * loop doesn't run at least once. */
+	blkno = lazy_scan_skip(vacrel, &vmbuffer, 0, &next_unskippable_allvis);
+
+	while (1)
 	{
 		Buffer		buf;
 		Page		page;
@@ -1212,7 +1207,10 @@ lazy_scan_heap(LVRelState *vacrel)
 		}
 
 	next:
-		if (blkno++ == next_unskippable_block)
+		if (blkno++ == rel_pages)
+			break;
+
+		if (blkno == next_unskippable_block)
 		{
 			next_unskippable_block = lazy_scan_skip(vacrel, &vmbuffer,
 												blkno,
