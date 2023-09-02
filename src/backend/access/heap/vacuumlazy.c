@@ -243,8 +243,7 @@ typedef struct LVSavedErrInfo
 static void lazy_scan_heap(LVRelState *vacrel);
 static BlockNumber lazy_scan_skip(LVRelState *vacrel, Buffer *vmbuffer,
 								  BlockNumber next_block,
-								  bool *next_unskippable_allvis,
-								  bool *skipping_current_range);
+								  bool *next_unskippable_allvis);
 static bool lazy_scan_new_or_empty(LVRelState *vacrel, Buffer buf,
 								   BlockNumber blkno, Page page,
 								   bool sharelock, Buffer vmbuffer);
@@ -846,18 +845,24 @@ lazy_scan_heap(LVRelState *vacrel)
 	pgstat_progress_update_multi_param(3, initprog_index, initprog_val);
 
 	/* Set up an initial range of skippable blocks using the visibility map */
-	next_unskippable_block = lazy_scan_skip(vacrel, &vmbuffer, 0,
-											&next_unskippable_allvis,
-											&skipping_current_range);
-	for (blkno = 0; blkno < rel_pages; blkno++)
+	blkno = 0;
+	next_unskippable_block = lazy_scan_skip(vacrel, &vmbuffer, blkno,
+											&next_unskippable_allvis);
+	if (next_unskippable_block >= SKIP_PAGES_THRESHOLD)
+	{
+		blkno = next_unskippable_block;
+	}
+
+	// If the next unskippable block is past the threshold, then just skip
+	// there
+	for (; blkno < rel_pages;
+			next_unskippable_block - (blkno + 1) >= SKIP_PAGES_THRESHOLD ?
+			(blkno = next_unskippable_block) : blkno++)
 	{
 		Buffer		buf;
 		Page		page;
 		bool		all_visible_according_to_vm = true;
 		LVPagePruneState prunestate;
-
-		if (blkno != next_unskippable_block && skipping_current_range)
-			continue;
 
 		if (blkno == next_unskippable_block)
 		{
@@ -868,10 +873,7 @@ lazy_scan_heap(LVRelState *vacrel)
 			all_visible_according_to_vm = next_unskippable_allvis;
 			next_unskippable_block = lazy_scan_skip(vacrel, &vmbuffer,
 													blkno + 1,
-													&next_unskippable_allvis,
-													&skipping_current_range);
-
-			Assert(next_unskippable_block >= blkno + 1);
+													&next_unskippable_allvis);
 		}
 
 		vacrel->scanned_pages++;
@@ -1286,7 +1288,7 @@ lazy_scan_heap(LVRelState *vacrel)
  */
 static BlockNumber
 lazy_scan_skip(LVRelState *vacrel, Buffer *vmbuffer, BlockNumber start,
-			   bool *next_unskippable_allvis, bool *skipping_current_range)
+			   bool *next_unskippable_allvis)
 {
 	BlockNumber blkno;
 	bool		skipsallvis = false;
@@ -1356,8 +1358,7 @@ lazy_scan_skip(LVRelState *vacrel, Buffer *vmbuffer, BlockNumber start,
 	 * non-aggressive VACUUMs.  If the range has any all-visible pages then
 	 * skipping makes updating relfrozenxid unsafe, which is a real downside.
 	 */
-	*skipping_current_range = (blkno - start) >= SKIP_PAGES_THRESHOLD;
-	if (*skipping_current_range && skipsallvis)
+	if (blkno - start >= SKIP_PAGES_THRESHOLD && skipsallvis)
 		vacrel->skippedallvis = true;
 
 	return blkno;
