@@ -242,8 +242,7 @@ typedef struct LVSavedErrInfo
 /* non-export function prototypes */
 static void lazy_scan_heap(LVRelState *vacrel);
 static BlockNumber lazy_scan_skip(LVRelState *vacrel, Buffer *vmbuffer,
-								  BlockNumber next_block,
-								  bool *next_unskippable_allvis);
+								  BlockNumber next_block, uint8 *vmbits);
 static bool lazy_scan_new_or_empty(LVRelState *vacrel, Buffer buf,
 								   BlockNumber blkno, Page page,
 								   bool sharelock, Buffer vmbuffer);
@@ -829,7 +828,7 @@ lazy_scan_heap(LVRelState *vacrel)
 				next_fsm_block_to_vacuum = 0;
 	VacDeadItems *dead_items = vacrel->dead_items;
 	Buffer		vmbuffer = InvalidBuffer;
-	bool		next_unskippable_allvis;
+	uint8 		next_unskippable_vmbits;
 	const int	initprog_index[] = {
 		PROGRESS_VACUUM_PHASE,
 		PROGRESS_VACUUM_TOTAL_HEAP_BLKS,
@@ -848,7 +847,8 @@ lazy_scan_heap(LVRelState *vacrel)
 	/* Always skip blocks at the beginning since the optimization doesn't apply
 	 * here. Also, since we must scan the last page, there's no chance that the
 	 * loop doesn't run at least once. */
-	blkno = lazy_scan_skip(vacrel, &vmbuffer, 0, &next_unskippable_allvis);
+	blkno = lazy_scan_skip(vacrel, &vmbuffer, 0, &next_unskippable_vmbits);
+	next_unskippable_block = blkno;
 
 	while (1)
 	{
@@ -1059,9 +1059,10 @@ lazy_scan_heap(LVRelState *vacrel)
 			Assert(dead_items->num_items == 0);
 		}
 
-		all_visible_according_to_vm = true;
 		if (blkno == next_unskippable_block)
-			all_visible_according_to_vm = next_unskippable_allvis;
+			all_visible_according_to_vm = next_unskippable_vmbits & VISIBILITYMAP_ALL_VISIBLE;
+		else
+			all_visible_according_to_vm = true;
 
 		/*
 		 * Handle setting visibility map bit based on information from the VM
@@ -1210,14 +1211,14 @@ lazy_scan_heap(LVRelState *vacrel)
 		if (blkno++ == rel_pages)
 			break;
 
-		if (blkno == next_unskippable_block)
-		{
-			next_unskippable_block = lazy_scan_skip(vacrel, &vmbuffer,
-												blkno,
-												&next_unskippable_allvis);
-			if (next_unskippable_block - blkno >= SKIP_PAGES_THRESHOLD)
-				blkno = next_unskippable_block;
-		}
+		if (blkno < next_unskippable_block)
+			continue;
+
+		next_unskippable_block = lazy_scan_skip(vacrel, &vmbuffer,
+											blkno,
+											&next_unskippable_vmbits);
+		if (next_unskippable_block - blkno >= SKIP_PAGES_THRESHOLD)
+			blkno = next_unskippable_block;
 	}
 
 	vacrel->blkno = InvalidBlockNumber;
@@ -1286,22 +1287,18 @@ lazy_scan_heap(LVRelState *vacrel)
  */
 static BlockNumber
 lazy_scan_skip(LVRelState *vacrel, Buffer *vmbuffer, BlockNumber start,
-			   bool *next_unskippable_allvis)
+			   uint8 *vmbits)
 {
 	BlockNumber blkno;
 	bool		skipsallvis = false;
 
-	*next_unskippable_allvis = true;
-
 	for (blkno = start; blkno < vacrel->rel_pages; blkno++)
 	{
-		uint8 mapbits = visibilitymap_get_status(
-				vacrel->rel, blkno, vmbuffer);
+		*vmbits = visibilitymap_get_status(vacrel->rel, blkno, vmbuffer);
 
-		if ((mapbits & VISIBILITYMAP_ALL_VISIBLE) == 0)
+		if ((*vmbits & VISIBILITYMAP_ALL_VISIBLE) == 0)
 		{
-			Assert((mapbits & VISIBILITYMAP_ALL_FROZEN) == 0);
-			*next_unskippable_allvis = false;
+			Assert((*vmbits & VISIBILITYMAP_ALL_FROZEN) == 0);
 			break;
 		}
 
@@ -1322,7 +1319,7 @@ lazy_scan_skip(LVRelState *vacrel, Buffer *vmbuffer, BlockNumber start,
 		if (!vacrel->skipwithvm)
 		{
 			/* Caller shouldn't rely on all_visible_according_to_vm */
-			*next_unskippable_allvis = false;
+			*vmbits = 0;
 			break;
 		}
 
@@ -1331,7 +1328,7 @@ lazy_scan_skip(LVRelState *vacrel, Buffer *vmbuffer, BlockNumber start,
 		 * all-visible.  They may still skip all-frozen pages, which can't
 		 * contain XIDs < OldestXmin (XIDs that aren't already frozen by now).
 		 */
-		if ((mapbits & VISIBILITYMAP_ALL_FROZEN) == 0)
+		if ((*vmbits & VISIBILITYMAP_ALL_FROZEN) == 0)
 		{
 			if (vacrel->aggressive)
 				break;
