@@ -791,6 +791,7 @@ heapam_relation_copy_for_cluster(Relation OldHeap, Relation NewHeap,
 		HeapTuple	tuple;
 		Buffer		buf;
 		bool		isdead;
+		TransactionId xmin;
 
 		CHECK_FOR_INTERRUPTS();
 
@@ -853,10 +854,18 @@ heapam_relation_copy_for_cluster(Relation OldHeap, Relation NewHeap,
 				break;
 			case HEAPTUPLE_RECENTLY_DEAD:
 				*tups_recently_dead += 1;
-				/* fall through */
+				isdead = false;
+				rwstate->all_visible = false;
+				break;
 			case HEAPTUPLE_LIVE:
 				/* Live or recently dead, must copy it */
+				xmin = HeapTupleHeaderGetXmin(tuple->t_data);
 				isdead = false;
+				if (!HeapTupleHeaderXminCommitted(tuple->t_data))
+					rwstate->all_visible = false;
+
+				else if (!TransactionIdPrecedes(xmin, OldestXmin))
+					rwstate->all_visible = false;
 				break;
 			case HEAPTUPLE_INSERT_IN_PROGRESS:
 
@@ -873,6 +882,7 @@ heapam_relation_copy_for_cluster(Relation OldHeap, Relation NewHeap,
 					elog(WARNING, "concurrent insert in progress within table \"%s\"",
 						 RelationGetRelationName(OldHeap));
 				/* treat as live */
+				rwstate->all_visible = false;
 				isdead = false;
 				break;
 			case HEAPTUPLE_DELETE_IN_PROGRESS:
@@ -886,6 +896,7 @@ heapam_relation_copy_for_cluster(Relation OldHeap, Relation NewHeap,
 						 RelationGetRelationName(OldHeap));
 				/* treat as recently dead */
 				*tups_recently_dead += 1;
+				rwstate->all_visible = false;
 				isdead = false;
 				break;
 			default:
@@ -906,6 +917,8 @@ heapam_relation_copy_for_cluster(Relation OldHeap, Relation NewHeap,
 				*tups_vacuumed += 1;
 				*tups_recently_dead -= 1;
 			}
+			else
+				rwstate->all_visible = false;
 			continue;
 		}
 

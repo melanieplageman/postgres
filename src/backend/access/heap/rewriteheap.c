@@ -111,6 +111,7 @@
 #include "access/transam.h"
 #include "access/xact.h"
 #include "access/xloginsert.h"
+#include "access/visibilitymap.h"
 #include "catalog/catalog.h"
 #include "common/file_utils.h"
 #include "lib/ilist.h"
@@ -234,6 +235,7 @@ begin_heap_rewrite(Relation old_heap, Relation new_heap, TransactionId oldest_xm
 	state->rs_freeze_xid = freeze_xid;
 	state->rs_cutoff_multi = cutoff_multi;
 	state->rs_cxt = rw_cxt;
+	state->all_visible = true;
 
 	/* Initialize hash tables used to track update chains */
 	hash_ctl.keysize = sizeof(TidHashKey);
@@ -647,6 +649,8 @@ raw_heap_insert(RewriteState state, HeapTuple tup)
 			 * enforce saveFreeSpace unconditionally.
 			 */
 
+			if (state->all_visible)
+				PageSetAllVisible(page);
 			/* XLOG stuff */
 			if (RelationNeedsWAL(state->rs_new_rel))
 				log_newpage(&state->rs_new_rel->rd_locator,
@@ -654,6 +658,18 @@ raw_heap_insert(RewriteState state, HeapTuple tup)
 							state->rs_blockno,
 							page,
 							true);
+
+			if (state->all_visible)
+			{
+				Buffer vmbuffer = InvalidBuffer;
+				visibilitymap_pin(state->rs_new_rel, state->rs_blockno, &vmbuffer);
+				visibilitymap_set_unbuffered(state->rs_new_rel, state->rs_blockno, vmbuffer,
+									VISIBILITYMAP_ALL_VISIBLE | VISIBILITYMAP_ALL_FROZEN);
+				if (BufferIsValid(vmbuffer))
+					ReleaseBuffer(vmbuffer);
+			}
+
+			state->all_visible = true;
 
 			/*
 			 * Now write the page. We say skipFsync = true because there's no
