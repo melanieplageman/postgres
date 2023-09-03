@@ -316,6 +316,35 @@ visibilitymap_set(Relation rel, BlockNumber heapBlk, Buffer heapBuf,
 }
 
 /*
+ * TODO: emit WAL
+ */
+void
+visibilitymap_set_unbuffered(Relation rel, BlockNumber heap_block,
+		Buffer vm_buffer, uint8 flags)
+{
+	uint32		mapByte = HEAPBLK_TO_MAPBYTE(heap_block);
+	uint8		mapOffset = HEAPBLK_TO_OFFSET(heap_block);
+	Page		page;
+	uint8	   *map;
+
+	page = BufferGetPage(vm_buffer);
+	map = (uint8 *) PageGetContents(page);
+	LockBuffer(vm_buffer, BUFFER_LOCK_EXCLUSIVE);
+
+	if (flags != (map[mapByte] >> mapOffset & VISIBILITYMAP_VALID_BITS))
+	{
+		START_CRIT_SECTION();
+
+		map[mapByte] |= (flags << mapOffset);
+		MarkBufferDirty(vm_buffer);
+
+		END_CRIT_SECTION();
+	}
+
+	LockBuffer(vm_buffer, BUFFER_LOCK_UNLOCK);
+}
+
+/*
  *	visibilitymap_get_status - get status of bits
  *
  * Are all tuples on heapBlk visible to all or are marked frozen, according
