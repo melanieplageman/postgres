@@ -1873,6 +1873,14 @@ retry:
 	}
 	else if (opp_freeze_algo == 6)
 	{
+		freeze_lsn_cutoff = current_lsn - (lsns_since_last_vacuum / 3);
+		do_freeze = pagefrz.freeze_required || tuples_frozen == 0 ||
+			(prunestate->all_visible && prunestate->all_frozen &&
+			((BufferIsProbablyDirty(buf) || !XLogCheckBufferNeedsBackup(buf)) &&
+			page_lsn < freeze_lsn_cutoff));
+	}
+	else if (opp_freeze_algo == 7)
+	{
 		bool do_opp_freeze;
 		freeze_lsn_cutoff = current_lsn - (lsns_since_last_vacuum / 3);
 		// this is algo 4 + peter's criteria
@@ -1885,7 +1893,7 @@ retry:
 
 		do_freeze = pagefrz.freeze_required || tuples_frozen == 0 || do_opp_freeze;
 	}
-	else if (opp_freeze_algo == 7)
+	else if (opp_freeze_algo == 8)
 	{
 		freeze_xid_cutoff = current_xid - (xids_since_last_vacuum/ 10);
 		do_freeze = pagefrz.freeze_required || tuples_frozen == 0 ||
