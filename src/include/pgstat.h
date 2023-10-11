@@ -11,6 +11,7 @@
 #ifndef PGSTAT_H
 #define PGSTAT_H
 
+#include "access/xlogdefs.h"
 #include "datatype/timestamp.h"
 #include "portability/instr_time.h"
 #include "postmaster/pgarch.h"	/* for MAX_XFN_CHARS */
@@ -394,6 +395,40 @@ typedef struct PgStat_StatSubEntry
 	TimestampTz stat_reset_timestamp;
 } PgStat_StatSubEntry;
 
+
+typedef enum page_state_change
+{
+	PAGE_DIRTY,
+	PAGE_FREEZE,
+	PAGE_UNFREEZE
+} page_state_change;
+
+#define NUM_PAGE_STATE_CHANGES PAGE_UNFREEZE + 1
+typedef struct PgStat_VacuumStat
+{
+	TimestampTz start;
+	TimestampTz end;
+	XLogRecPtr	start_lsn;
+	XLogRecPtr	end_lsn;
+
+	/*
+	 * number of
+	 * - clean pages dirtied
+	 * - unfrozen pages frozen
+	 * - clean pages unfrozen
+	 */
+	uint64		state_changes[NUM_PAGE_STATE_CHANGES];
+
+	/*
+	 * sum of age of
+	 * - clean pages dirtied
+	 * - unfrozen pages frozen
+	 * - clean pages unfrozen
+	 */
+	XLogRecPtr	sum_per_state_page_ages[NUM_PAGE_STATE_CHANGES];
+} PgStat_VacuumStat;
+
+#define VACUUM_STATS_LOOKBACK 10
 typedef struct PgStat_StatTabEntry
 {
 	PgStat_Counter numscans;
@@ -424,6 +459,9 @@ typedef struct PgStat_StatTabEntry
 	PgStat_Counter analyze_count;
 	TimestampTz last_autoanalyze_time;	/* autovacuum initiated */
 	PgStat_Counter autoanalyze_count;
+
+	int			current_vacuum;
+	PgStat_VacuumStat vacuums[VACUUM_STATS_LOOKBACK];
 } PgStat_StatTabEntry;
 
 typedef struct PgStat_WalStats
@@ -590,6 +628,17 @@ extern void pgstat_unlink_relation(Relation rel);
 
 extern void pgstat_report_vacuum(Oid tableoid, bool shared,
 								 PgStat_Counter livetuples, PgStat_Counter deadtuples);
+
+extern void pgstat_setup_vacuum_stats(Oid tableoid, bool shared);
+
+extern void pgstat_update_vacuum_stats(Oid tableoid, bool shared,
+									   XLogRecPtr page_lsn, XLogRecPtr insert_lsn, page_state_change state);
+
+extern void pgstat_update_vacuum_freeze(Oid tableoid, bool shared, XLogRecPtr page_age);
+
+extern void debug_pgstat_vacuum_stat(Oid tableoid, bool shared,
+									 int lookback, PgStat_VacuumStat *result);
+
 extern void pgstat_report_analyze(Relation rel,
 								  PgStat_Counter livetuples, PgStat_Counter deadtuples,
 								  bool resetcounter);

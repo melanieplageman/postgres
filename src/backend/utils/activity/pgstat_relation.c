@@ -205,6 +205,139 @@ pgstat_drop_relation(Relation rel)
 	}
 }
 
+void
+pgstat_setup_vacuum_stats(Oid tableoid, bool shared)
+{
+	PgStat_EntryRef *entry_ref;
+	PgStat_StatTabEntry *tabentry;
+	Oid			dboid = (shared ? InvalidOid : MyDatabaseId);
+	PgStat_VacuumStat *vacuum;
+	TimestampTz ts = GetCurrentTimestamp();
+	XLogRecPtr	start_lsn = GetInsertRecPtr();
+
+	if (!pgstat_track_counts)
+		return;
+
+	/* block acquiring lock for the same reason as pgstat_report_autovac() */
+	entry_ref = pgstat_get_entry_ref_locked(PGSTAT_KIND_RELATION,
+											dboid, tableoid, false);
+
+	tabentry = &((PgStatShared_Relation *) entry_ref->shared_stats)->stats;
+
+	/* Set current_vacuum to the next value */
+	tabentry->current_vacuum = (tabentry->current_vacuum + 1) % VACUUM_STATS_LOOKBACK;
+
+	vacuum = &tabentry->vacuums[tabentry->current_vacuum];
+	vacuum->start = ts;
+	vacuum->end = 0;
+	vacuum->start_lsn = start_lsn;
+	vacuum->end_lsn = InvalidXLogRecPtr;
+	memset(vacuum->state_changes, 0, sizeof(vacuum->state_changes));
+	memset(vacuum->sum_per_state_page_ages, InvalidXLogRecPtr,
+		   sizeof(vacuum->sum_per_state_page_ages));
+
+	pgstat_unlock_entry(entry_ref);
+}
+
+void
+debug_pgstat_vacuum_stat(Oid tableoid, bool shared, int lookback, PgStat_VacuumStat *result)
+{
+	PgStat_EntryRef *entry_ref;
+	PgStat_StatTabEntry *tabentry;
+	Oid			dboid = (shared ? InvalidOid : MyDatabaseId);
+	int			index;
+
+	if (!pgstat_track_counts)
+		return;
+
+	entry_ref = pgstat_get_entry_ref_locked(PGSTAT_KIND_RELATION,
+											dboid, tableoid, false);
+
+	tabentry = &((PgStatShared_Relation *) entry_ref->shared_stats)->stats;
+	index = (tabentry->current_vacuum - lookback) & VACUUM_STATS_LOOKBACK;
+	Assert(index < VACUUM_STATS_LOOKBACK);
+
+	memcpy(result, &tabentry->vacuums[index], sizeof(PgStat_VacuumStat));
+
+	pgstat_unlock_entry(entry_ref);
+}
+
+void
+pgstat_update_vacuum_stats(Oid tableoid, bool shared, XLogRecPtr page_lsn,
+						   XLogRecPtr insert_lsn, page_state_change state)
+{
+	PgStat_EntryRef *entry_ref;
+	PgStat_StatTabEntry *tabentry;
+	Oid			dboid = (shared ? InvalidOid : MyDatabaseId);
+
+	if (!pgstat_track_counts)
+		return;
+
+	Assert(state <= PAGE_UNFREEZE);
+
+	entry_ref = pgstat_get_entry_ref_locked(PGSTAT_KIND_RELATION,
+											dboid, tableoid, false);
+
+	tabentry = &((PgStatShared_Relation *) entry_ref->shared_stats)->stats;
+
+	for (int i = 0; i < VACUUM_STATS_LOOKBACK; i++)
+	{
+		PgStat_VacuumStat *vacuum = &tabentry->vacuums[i];
+
+		if (vacuum->start_lsn == InvalidXLogRecPtr)
+			continue;
+
+		if (page_lsn > vacuum->start_lsn && page_lsn <= vacuum->end_lsn)
+		{
+			vacuum->state_changes[state]++;
+			vacuum->sum_per_state_page_ages[state] += insert_lsn - page_lsn;
+			break;
+		}
+	}
+
+	/*
+	 * If the page is older than any of our currently tracked vacuums, we
+	 * aren't going to count it. We are only concerned with the efficacy of
+	 * our more recent vacuums. If a very old page is being unfrozen, that is
+	 * fine anyway.
+	 */
+
+	pgstat_unlock_entry(entry_ref);
+}
+
+/*
+ * Count a page frozen by vacuum in per vacuum per table stats
+ */
+void
+pgstat_update_vacuum_freeze(Oid tableoid, bool shared, XLogRecPtr page_age)
+{
+	PgStat_EntryRef *entry_ref;
+	PgStat_StatTabEntry *tabentry;
+	PgStat_VacuumStat *vacuum;
+	Oid			dboid = (shared ? InvalidOid : MyDatabaseId);
+
+	if (!pgstat_track_counts)
+		return;
+
+	entry_ref = pgstat_get_entry_ref_locked(PGSTAT_KIND_RELATION,
+											dboid, tableoid, false);
+
+	tabentry = &((PgStatShared_Relation *) entry_ref->shared_stats)->stats;
+
+	vacuum = &tabentry->vacuums[tabentry->current_vacuum];
+
+	/*
+	 * This should only be called by the current vacuum and start_lsn will be
+	 * initialized.
+	 */
+	Assert(vacuum->start_lsn > InvalidXLogRecPtr);
+
+	vacuum->state_changes[PAGE_FREEZE]++;
+	vacuum->sum_per_state_page_ages[PAGE_FREEZE] += page_age;
+
+	pgstat_unlock_entry(entry_ref);
+}
+
 /*
  * Report that the table was just vacuumed and flush IO statistics.
  */
