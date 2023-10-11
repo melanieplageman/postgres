@@ -179,7 +179,10 @@ extern Buffer ReadBufferWithoutRelcache(RelFileLocator rlocator,
 										bool permanent);
 extern void ReleaseBuffer(Buffer buffer);
 extern void UnlockReleaseBuffer(Buffer buffer);
+
+extern bool BufferIsProbablyDirty(Buffer buffer);
 extern void MarkBufferDirty(Buffer buffer);
+
 extern void IncrBufferRefCount(Buffer buffer);
 extern void CheckBufferIsPinnedOnce(Buffer buffer);
 extern Buffer ReleaseAndReadBuffer(Buffer buffer, Relation relation,

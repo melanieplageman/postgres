@@ -2099,6 +2099,31 @@ ExtendBufferedRelShared(BufferManagerRelation bmr,
 }
 
 /*
+ * Without acquiring a lock, read the buffer descriptor state to determine
+ * whether or not the buffer is probably dirty. This is useful when gathering
+ * statistics or for approximations where a more recent value is not worth the
+ * overhead of a lock acquisition.
+ */
+bool
+BufferIsProbablyDirty(Buffer buffer)
+{
+	BufferDesc *bufHdr;
+	uint32		buf_state;
+
+	if (!BufferIsValid(buffer))
+		elog(ERROR, "bad buffer ID: %d", buffer);
+
+	if (BufferIsLocal(buffer))
+		return LocalBufferIsDirty(buffer);
+
+	bufHdr = GetBufferDescriptor(buffer - 1);
+
+	buf_state = pg_atomic_read_u32(&bufHdr->state);
+
+	return buf_state & BM_DIRTY;
+}
+
+/*
  * MarkBufferDirty
  *
  *		Marks buffer contents as dirty (actual write happens later).

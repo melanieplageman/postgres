@@ -430,7 +430,10 @@ extern BlockNumber ExtendBufferedRelLocal(BufferManagerRelation bmr,
 										  BlockNumber extend_upto,
 										  Buffer *buffers,
 										  uint32 *extended_by);
+
+extern bool LocalBufferIsDirty(Buffer buffer);
 extern void MarkLocalBufferDirty(Buffer buffer);
+
 extern void DropRelationLocalBuffers(RelFileLocator rlocator,
 									 ForkNumber forkNum,
 									 BlockNumber firstDelBlock);

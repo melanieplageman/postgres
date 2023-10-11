@@ -437,6 +437,29 @@ ExtendBufferedRelLocal(BufferManagerRelation bmr,
 }
 
 /*
+ * Inform caller whether or not this local buffer is dirty.
+ */
+bool
+LocalBufferIsDirty(Buffer buffer)
+{
+	int			bufid;
+	BufferDesc *bufHdr;
+	uint32		buf_state;
+
+	Assert(BufferIsLocal(buffer));
+
+	bufid = -buffer - 1;
+
+	Assert(LocalRefCount[bufid] > 0);
+
+	bufHdr = GetLocalBufferDescriptor(bufid);
+
+	buf_state = pg_atomic_read_u32(&bufHdr->state);
+
+	return buf_state & BM_DIRTY;
+}
+
+/*
  * MarkLocalBufferDirty -
  *	  mark a local buffer dirty
  */
