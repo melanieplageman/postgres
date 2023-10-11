@@ -3543,10 +3543,11 @@ l2:
 		 * overhead would be unchanged, that doesn't seem necessarily
 		 * worthwhile.
 		 */
-		if (PageIsAllVisible(page) &&
-			visibilitymap_clear(relation, block, vmbuffer,
-								VISIBILITYMAP_ALL_FROZEN))
-			cleared_all_frozen = true;
+		if (PageIsAllVisible(page))
+		{
+			cleared_all_frozen = visibilitymap_clear(relation, block, vmbuffer,
+													 VISIBILITYMAP_ALL_FROZEN) & VISIBILITYMAP_ALL_FROZEN;
+		}
 
 		MarkBufferDirty(buffer);
 
@@ -4740,11 +4741,11 @@ failed:
 		tuple->t_data->t_ctid = *tid;
 
 	/* Clear only the all-frozen bit on visibility map if needed */
-	if (PageIsAllVisible(page) &&
-		visibilitymap_clear(relation, block, vmbuffer,
-							VISIBILITYMAP_ALL_FROZEN))
-		cleared_all_frozen = true;
-
+	if (PageIsAllVisible(page))
+	{
+		cleared_all_frozen = visibilitymap_clear(relation, block, vmbuffer,
+												 VISIBILITYMAP_ALL_FROZEN) & VISIBILITYMAP_ALL_FROZEN;
+	}
 
 	MarkBufferDirty(*buffer);
 
@@ -5494,10 +5495,11 @@ l4:
 								  xid, mode, false,
 								  &new_xmax, &new_infomask, &new_infomask2);
 
-		if (PageIsAllVisible(BufferGetPage(buf)) &&
-			visibilitymap_clear(rel, block, vmbuffer,
-								VISIBILITYMAP_ALL_FROZEN))
-			cleared_all_frozen = true;
+		if (PageIsAllVisible(BufferGetPage(buf)))
+		{
+			cleared_all_frozen = visibilitymap_clear(rel, block, vmbuffer,
+													 VISIBILITYMAP_ALL_FROZEN) & VISIBILITYMAP_ALL_FROZEN;
+		}
 
 		START_CRIT_SECTION();
 

@@ -134,9 +134,9 @@ static Buffer vm_extend(Relation rel, BlockNumber vm_nblocks);
  *
  * You must pass a buffer containing the correct map page to this function.
  * Call visibilitymap_pin first to pin the right one. This function doesn't do
- * any I/O.  Returns true if any bits have been cleared and false otherwise.
+ * any I/O.  Returns the old vmbits.
  */
-bool
+uint8
 visibilitymap_clear(Relation rel, BlockNumber heapBlk, Buffer vmbuf, uint8 flags)
 {
 	BlockNumber mapBlock = HEAPBLK_TO_MAPBLOCK(heapBlk);
@@ -144,7 +144,7 @@ visibilitymap_clear(Relation rel, BlockNumber heapBlk, Buffer vmbuf, uint8 flags
 	int			mapOffset = HEAPBLK_TO_OFFSET(heapBlk);
 	uint8		mask = flags << mapOffset;
 	char	   *map;
-	bool		cleared = false;
+	uint8		old_vmbits;
 
 	/* Must never clear all_visible bit while leaving all_frozen bit set */
 	Assert(flags & VISIBILITYMAP_VALID_BITS);
@@ -160,17 +160,18 @@ visibilitymap_clear(Relation rel, BlockNumber heapBlk, Buffer vmbuf, uint8 flags
 	LockBuffer(vmbuf, BUFFER_LOCK_EXCLUSIVE);
 	map = PageGetContents(BufferGetPage(vmbuf));
 
+	old_vmbits = map[mapByte];
+
 	if (map[mapByte] & mask)
 	{
 		map[mapByte] &= ~mask;
 
 		MarkBufferDirty(vmbuf);
-		cleared = true;
 	}
 
 	LockBuffer(vmbuf, BUFFER_LOCK_UNLOCK);
 
-	return cleared;
+	return old_vmbits;
 }
 
 /*
