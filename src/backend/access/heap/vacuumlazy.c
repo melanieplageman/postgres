@@ -489,6 +489,8 @@ heap_vacuum_rel(Relation rel, VacuumParams *params,
 							vacrel->relname)));
 	}
 
+	pgstat_setup_vacuum_stats(RelationGetRelid(rel), rel->rd_rel->relisshared);
+
 	/*
 	 * Allocate dead_items array memory using dead_items_alloc.  This handles
 	 * parallel VACUUM initialization as part of allocating shared memory
@@ -1806,9 +1808,14 @@ lazy_scan_prune(LVRelState *vacrel,
 		}
 		else
 		{
+			XLogRecPtr	insert_lsn = GetInsertRecPtr();
+			XLogRecPtr	page_lsn = PageGetLSN(page);
 			TransactionId snapshotConflictHorizon;
 
 			vacrel->frozen_pages++;
+
+			pgstat_update_vacuum_freeze(RelationGetRelid(rel),
+										rel->rd_rel->relisshared, insert_lsn - page_lsn);
 
 			/*
 			 * We can use visibility_cutoff_xid as our cutoff for conflicts

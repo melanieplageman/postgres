@@ -350,6 +350,8 @@ pgstat_report_vacuum(Oid tableoid, bool shared,
 	PgStat_StatTabEntry *tabentry;
 	Oid			dboid = (shared ? InvalidOid : MyDatabaseId);
 	TimestampTz ts;
+	XLogRecPtr	end_lsn = GetInsertRecPtr();
+	PgStat_VacuumStat *vacstat;
 
 	if (!pgstat_track_counts)
 		return;
@@ -366,6 +368,10 @@ pgstat_report_vacuum(Oid tableoid, bool shared,
 
 	tabentry->live_tuples = livetuples;
 	tabentry->dead_tuples = deadtuples;
+
+	vacstat = &tabentry->vacuums[tabentry->current_vacuum];
+	vacstat->end = ts;
+	vacstat->end_lsn = end_lsn;
 
 	/*
 	 * It is quite possible that a non-aggressive VACUUM ended up skipping

@@ -1820,8 +1820,12 @@ heap_insert(Relation relation, HeapTuple tup, CommandId cid,
 	TransactionId xid = GetCurrentTransactionId();
 	HeapTuple	heaptup;
 	Buffer		buffer;
+	bool		buffer_dirty;
+	XLogRecPtr	insert_lsn = InvalidXLogRecPtr;
+	XLogRecPtr	page_lsn = InvalidXLogRecPtr;
 	Buffer		vmbuffer = InvalidBuffer;
 	bool		all_visible_cleared = false;
+	bool		all_frozen_cleared = false;
 
 	/* Cheap, simplistic check that the tuple matches the rel's rowtype. */
 	Assert(HeapTupleHeaderGetNatts(tup->t_data) <=
@@ -1843,6 +1847,8 @@ heap_insert(Relation relation, HeapTuple tup, CommandId cid,
 									   InvalidBuffer, options, bistate,
 									   &vmbuffer, NULL,
 									   0);
+
+	buffer_dirty = BufferIsProbablyDirty(buffer);
 
 	/*
 	 * We're about to do the actual insert -- but check for conflict first, to
@@ -1871,9 +1877,10 @@ heap_insert(Relation relation, HeapTuple tup, CommandId cid,
 	{
 		all_visible_cleared = true;
 		PageClearAllVisible(BufferGetPage(buffer));
-		visibilitymap_clear(relation,
-							ItemPointerGetBlockNumber(&(heaptup->t_self)),
-							vmbuffer, VISIBILITYMAP_VALID_BITS);
+
+		all_frozen_cleared = visibilitymap_clear(relation,
+												 ItemPointerGetBlockNumber(&(heaptup->t_self)),
+												 vmbuffer, VISIBILITYMAP_VALID_BITS) & VISIBILITYMAP_ALL_FROZEN;
 	}
 
 	/*
@@ -1965,6 +1972,9 @@ heap_insert(Relation relation, HeapTuple tup, CommandId cid,
 
 		recptr = XLogInsert(RM_HEAP_ID, info);
 
+		insert_lsn = recptr;
+		page_lsn = PageGetLSN(page);
+
 		PageSetLSN(page, recptr);
 	}
 
@@ -1984,6 +1994,18 @@ heap_insert(Relation relation, HeapTuple tup, CommandId cid,
 
 	/* Note: speculative insertions are counted too, even if aborted later */
 	pgstat_count_heap_insert(relation, 1);
+
+	/*
+	 * If we dirtied a clean buffer, count it as either a page dirty or a page
+	 * unfreeze (if we also unfroze the page).
+	 */
+	if (!buffer_dirty)
+	{
+		pgstat_update_vacuum_stats(
+								   RelationGetRelid(relation), relation->rd_rel->relisshared,
+								   page_lsn, insert_lsn,
+								   (all_frozen_cleared ? PAGE_UNFREEZE : PAGE_DIRTY));
+	}
 
 	/*
 	 * If heaptup is a private copy, release it.  Don't forget to copy t_self
@@ -2150,9 +2172,13 @@ heap_multi_insert(Relation relation, TupleTableSlot **slots, int ntuples,
 	while (ndone < ntuples)
 	{
 		Buffer		buffer;
+		XLogRecPtr	page_lsn = InvalidXLogRecPtr;
+		XLogRecPtr	insert_lsn = InvalidXLogRecPtr;
+		bool		all_frozen_cleared = false;
 		bool		all_visible_cleared = false;
 		bool		all_frozen_set = false;
 		int			nthispage;
+		bool		page_dirty;
 
 		CHECK_FOR_INTERRUPTS();
 
@@ -2186,6 +2212,9 @@ heap_multi_insert(Relation relation, TupleTableSlot **slots, int ntuples,
 										   InvalidBuffer, options, bistate,
 										   &vmbuffer, NULL,
 										   npages - npages_used);
+
+		page_dirty = BufferIsProbablyDirty(buffer);
+
 		page = BufferGetPage(buffer);
 
 		starting_with_empty_page = PageGetMaxOffsetNumber(page) == 0;
@@ -2237,9 +2266,9 @@ heap_multi_insert(Relation relation, TupleTableSlot **slots, int ntuples,
 		{
 			all_visible_cleared = true;
 			PageClearAllVisible(page);
-			visibilitymap_clear(relation,
-								BufferGetBlockNumber(buffer),
-								vmbuffer, VISIBILITYMAP_VALID_BITS);
+			all_frozen_cleared = visibilitymap_clear(relation,
+													 BufferGetBlockNumber(buffer),
+													 vmbuffer, VISIBILITYMAP_VALID_BITS) & VISIBILITYMAP_ALL_FROZEN;
 		}
 		else if (all_frozen_set)
 			PageSetAllVisible(page);
@@ -2361,10 +2390,24 @@ heap_multi_insert(Relation relation, TupleTableSlot **slots, int ntuples,
 
 			recptr = XLogInsert(RM_HEAP2_ID, info);
 
+			insert_lsn = recptr;
+			page_lsn = PageGetLSN(page);
 			PageSetLSN(page, recptr);
 		}
 
 		END_CRIT_SECTION();
+
+		/*
+		 * If we dirtied a clean page, keep track of that and whether or not
+		 * we unfroze it.
+		 */
+		if (!page_dirty)
+		{
+			pgstat_update_vacuum_stats(RelationGetRelid(relation),
+									   relation->rd_rel->relisshared,
+									   page_lsn, insert_lsn,
+									   (all_frozen_cleared ? PAGE_FREEZE : PAGE_DIRTY));
+		}
 
 		/*
 		 * If we've frozen everything on the page, update the visibilitymap.
@@ -2520,7 +2563,11 @@ heap_delete(Relation relation, ItemPointer tid,
 				new_infomask2;
 	bool		have_tuple_lock = false;
 	bool		iscombo;
+	bool		page_dirty;
 	bool		all_visible_cleared = false;
+	bool		all_frozen_cleared = false;
+	XLogRecPtr	insert_lsn = InvalidXLogRecPtr;
+	XLogRecPtr	page_lsn = InvalidXLogRecPtr;
 	HeapTuple	old_key_tuple = NULL;	/* replica identity of the tuple */
 	bool		old_key_copied = false;
 
@@ -2539,6 +2586,8 @@ heap_delete(Relation relation, ItemPointer tid,
 	block = ItemPointerGetBlockNumber(tid);
 	buffer = ReadBuffer(relation, block);
 	page = BufferGetPage(buffer);
+
+	page_dirty = BufferIsProbablyDirty(buffer);
 
 	/*
 	 * Before locking the buffer, pin the visibility map page if it appears to
@@ -2777,8 +2826,8 @@ l1:
 	{
 		all_visible_cleared = true;
 		PageClearAllVisible(page);
-		visibilitymap_clear(relation, BufferGetBlockNumber(buffer),
-							vmbuffer, VISIBILITYMAP_VALID_BITS);
+		all_frozen_cleared = visibilitymap_clear(relation, BufferGetBlockNumber(buffer),
+												 vmbuffer, VISIBILITYMAP_VALID_BITS) & VISIBILITYMAP_ALL_FROZEN;
 	}
 
 	/* store transaction information of xact deleting the tuple */
@@ -2861,6 +2910,9 @@ l1:
 
 		recptr = XLogInsert(RM_HEAP_ID, XLOG_HEAP_DELETE);
 
+		insert_lsn = recptr;
+		page_lsn = PageGetLSN(page);
+
 		PageSetLSN(page, recptr);
 	}
 
@@ -2903,6 +2955,14 @@ l1:
 		UnlockTupleTuplock(relation, &(tp.t_self), LockTupleExclusive);
 
 	pgstat_count_heap_delete(relation);
+
+	if (!page_dirty)
+	{
+		pgstat_update_vacuum_stats(
+								   RelationGetRelid(relation), relation->rd_rel->relisshared,
+								   page_lsn, insert_lsn,
+								   (all_frozen_cleared ? PAGE_UNFREEZE : PAGE_DIRTY));
+	}
 
 	if (old_key_tuple != NULL && old_key_copied)
 		heap_freetuple(old_key_tuple);
@@ -3009,6 +3069,20 @@ heap_update(Relation relation, ItemPointer otid, HeapTuple newtup,
 				infomask2_old_tuple,
 				infomask_new_tuple,
 				infomask2_new_tuple;
+
+	/*
+	 * To control opportunistic freezing behavior, we keep track of clean
+	 * buffers dirtied by this update. The same buffer could be dirtied by us
+	 * multiple times. We initialize *buf_dirty to true because we only count
+	 * dirtying clean buffers.
+	 */
+	bool		old_buf_dirty = true;
+	bool		new_buf_dirty = true;
+	bool		cleared_all_frozen = false;
+	bool		cleared_all_frozen_new = false;
+	XLogRecPtr	old_page_lsn = InvalidXLogRecPtr;
+	XLogRecPtr	new_page_lsn = InvalidXLogRecPtr;
+	XLogRecPtr	insert_lsn = InvalidXLogRecPtr;
 
 	Assert(ItemPointerIsValid(otid));
 
@@ -3142,6 +3216,13 @@ heap_update(Relation relation, ItemPointer otid, HeapTuple newtup,
 l2:
 	checked_lockers = false;
 	locker_remains = false;
+
+	/*
+	 * Wait until l2 to check if the buffer is dirty in case another backend
+	 * dirtied or flushed it.
+	 */
+	old_buf_dirty = BufferIsProbablyDirty(buffer);
+
 	result = HeapTupleSatisfiesUpdate(&oldtup, cid, buffer);
 
 	/* see below about the "no wait" case */
@@ -3492,7 +3573,6 @@ l2:
 		TransactionId xmax_lock_old_tuple;
 		uint16		infomask_lock_old_tuple,
 					infomask2_lock_old_tuple;
-		bool		cleared_all_frozen = false;
 
 		/*
 		 * To prevent concurrent sessions from updating the tuple, we have to
@@ -3567,12 +3647,28 @@ l2:
 				cleared_all_frozen ? XLH_LOCK_ALL_FROZEN_CLEARED : 0;
 			XLogRegisterData((char *) &xlrec, SizeOfHeapLock);
 			recptr = XLogInsert(RM_HEAP_ID, XLOG_HEAP_LOCK);
+			insert_lsn = recptr;
+			old_page_lsn = PageGetLSN(page);
 			PageSetLSN(page, recptr);
 		}
 
 		END_CRIT_SECTION();
 
 		LockBuffer(buffer, BUFFER_LOCK_UNLOCK);
+
+		/*
+		 * If the page was clean before, we have dirtied and potentially
+		 * unfrozen it now.
+		 */
+		if (!old_buf_dirty)
+		{
+			pgstat_update_vacuum_stats(RelationGetRelid(relation), relation->rd_rel->relisshared,
+									   old_page_lsn, insert_lsn, (cleared_all_frozen ? PAGE_UNFREEZE : PAGE_DIRTY));
+
+			/* Avoid double counting page dirties and unfreezes. */
+			old_buf_dirty = true;
+			cleared_all_frozen = false;
+		}
 
 		/*
 		 * Let the toaster do its thing, if needed.
@@ -3622,6 +3718,9 @@ l2:
 												   buffer, 0, NULL,
 												   &vmbuffer_new, &vmbuffer,
 												   0);
+
+				new_buf_dirty = BufferIsProbablyDirty(newbuf);
+
 				/* We're all done. */
 				break;
 			}
@@ -3775,15 +3874,15 @@ l2:
 	{
 		all_visible_cleared = true;
 		PageClearAllVisible(BufferGetPage(buffer));
-		visibilitymap_clear(relation, BufferGetBlockNumber(buffer),
-							vmbuffer, VISIBILITYMAP_VALID_BITS);
+		cleared_all_frozen = visibilitymap_clear(relation, BufferGetBlockNumber(buffer),
+												 vmbuffer, VISIBILITYMAP_VALID_BITS) & VISIBILITYMAP_ALL_FROZEN;
 	}
 	if (newbuf != buffer && PageIsAllVisible(BufferGetPage(newbuf)))
 	{
 		all_visible_cleared_new = true;
 		PageClearAllVisible(BufferGetPage(newbuf));
-		visibilitymap_clear(relation, BufferGetBlockNumber(newbuf),
-							vmbuffer_new, VISIBILITYMAP_VALID_BITS);
+		cleared_all_frozen_new = visibilitymap_clear(relation, BufferGetBlockNumber(newbuf),
+													 vmbuffer_new, VISIBILITYMAP_VALID_BITS) & VISIBILITYMAP_ALL_FROZEN;
 	}
 
 	if (newbuf != buffer)
@@ -3812,9 +3911,20 @@ l2:
 								 all_visible_cleared_new);
 		if (newbuf != buffer)
 		{
+			new_page_lsn = PageGetLSN(BufferGetPage(newbuf));
 			PageSetLSN(BufferGetPage(newbuf), recptr);
 		}
+
+		old_page_lsn = PageGetLSN(BufferGetPage(buffer));
 		PageSetLSN(BufferGetPage(buffer), recptr);
+
+		/*
+		 * There is a good chance that the insert LSN has changed since the
+		 * last time we might have set it (when locking the tuple above).
+		 * Since it will be larger here, we may consider the page as older
+		 * when it was modified, but that shouldn't matter much.
+		 */
+		insert_lsn = recptr;
 	}
 
 	END_CRIT_SECTION();
@@ -3849,6 +3959,19 @@ l2:
 		UnlockTupleTuplock(relation, &(oldtup.t_self), *lockmode);
 
 	pgstat_count_heap_update(relation, use_hot_update, newbuf != buffer);
+
+	if (!old_buf_dirty)
+	{
+		pgstat_update_vacuum_stats(RelationGetRelid(relation), relation->rd_rel->relisshared,
+								   old_page_lsn, insert_lsn, (cleared_all_frozen ? PAGE_UNFREEZE : PAGE_DIRTY));
+	}
+
+	if (newbuf != buffer && !new_buf_dirty)
+	{
+		pgstat_update_vacuum_stats(RelationGetRelid(relation), relation->rd_rel->relisshared,
+								   new_page_lsn, insert_lsn, (cleared_all_frozen_new ? PAGE_UNFREEZE : PAGE_DIRTY));
+	}
+
 
 	/*
 	 * If heaptup is a private copy, release it.  Don't forget to copy t_self
