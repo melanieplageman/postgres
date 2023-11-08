@@ -3594,6 +3594,7 @@ pgssStoreKind
 pgssVersion
 pgstat_entry_ref_hash_hash
 pgstat_entry_ref_hash_iterator
+PgStat_Frz
 pgstat_page
 pgstat_snapshot_hash
 pgstattuple_type
