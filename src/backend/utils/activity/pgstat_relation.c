@@ -207,10 +207,12 @@ pgstat_drop_relation(Relation rel)
 
 /*
  * Report that the table was just vacuumed and flush IO statistics.
+ *
+ * vacrel is an input parameter only and will not be modified by
+ * pgstat_report_vacuum().
  */
 void
-pgstat_report_vacuum(Oid tableoid, bool shared,
-					 PgStat_Counter livetuples, PgStat_Counter deadtuples)
+pgstat_report_vacuum(Oid tableoid, bool shared, LVRelState *vacrel)
 {
 	PgStat_EntryRef *entry_ref;
 	PgStatShared_Relation *shtabentry;
@@ -231,8 +233,18 @@ pgstat_report_vacuum(Oid tableoid, bool shared,
 	shtabentry = (PgStatShared_Relation *) entry_ref->shared_stats;
 	tabentry = &shtabentry->stats;
 
-	tabentry->live_tuples = livetuples;
-	tabentry->dead_tuples = deadtuples;
+	tabentry->live_tuples = Max(vacrel->new_live_tuples, 0);
+
+	/*
+	 * Deliberately avoid telling the stats system about LP_DEAD items that
+	 * remain in the table due to VACUUM bypassing index and heap vacuuming.
+	 * ANALYZE will consider the remaining LP_DEAD items to be dead "tuples".
+	 * It seems like a good idea to err on the side of not vacuuming again too
+	 * soon in cases where the failsafe prevented significant amounts of heap
+	 * vacuuming.
+	 */
+	tabentry->dead_tuples = vacrel->recently_dead_tuples +
+		vacrel->missed_dead_tuples;
 
 	/*
 	 * It is quite possible that a non-aggressive VACUUM ended up skipping

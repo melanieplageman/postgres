@@ -59,7 +59,6 @@
 #include "utils/guc_hooks.h"
 #include "utils/memutils.h"
 #include "utils/pg_rusage.h"
-#include "utils/snapmgr.h"
 #include "utils/syscache.h"
 
 

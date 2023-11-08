@@ -127,90 +127,6 @@
  */
 #define ParallelVacuumIsActive(vacrel) ((vacrel)->pvs != NULL)
 
-/* Phases of vacuum during which we report error context. */
-typedef enum
-{
-	VACUUM_ERRCB_PHASE_UNKNOWN,
-	VACUUM_ERRCB_PHASE_SCAN_HEAP,
-	VACUUM_ERRCB_PHASE_VACUUM_INDEX,
-	VACUUM_ERRCB_PHASE_VACUUM_HEAP,
-	VACUUM_ERRCB_PHASE_INDEX_CLEANUP,
-	VACUUM_ERRCB_PHASE_TRUNCATE,
-} VacErrPhase;
-
-typedef struct LVRelState
-{
-	/* Target heap relation and its indexes */
-	Relation	rel;
-	Relation   *indrels;
-	int			nindexes;
-
-	/* Buffer access strategy and parallel vacuum state */
-	BufferAccessStrategy bstrategy;
-	ParallelVacuumState *pvs;
-
-	/* Aggressive VACUUM? (must set relfrozenxid >= FreezeLimit) */
-	bool		aggressive;
-	/* Use visibility map to skip? (disabled by DISABLE_PAGE_SKIPPING) */
-	bool		skipwithvm;
-	/* Consider index vacuuming bypass optimization? */
-	bool		consider_bypass_optimization;
-
-	/* Doing index vacuuming, index cleanup, rel truncation? */
-	bool		do_index_vacuuming;
-	bool		do_index_cleanup;
-	bool		do_rel_truncate;
-
-	/* VACUUM operation's cutoffs for freezing and pruning */
-	struct VacuumCutoffs cutoffs;
-	GlobalVisState *vistest;
-	/* Tracks oldest extant XID/MXID for setting relfrozenxid/relminmxid */
-	TransactionId NewRelfrozenXid;
-	MultiXactId NewRelminMxid;
-	bool		skippedallvis;
-
-	/* Error reporting state */
-	char	   *dbname;
-	char	   *relnamespace;
-	char	   *relname;
-	char	   *indname;		/* Current index name */
-	BlockNumber blkno;			/* used only for heap operations */
-	OffsetNumber offnum;		/* used only for heap operations */
-	VacErrPhase phase;
-	bool		verbose;		/* VACUUM VERBOSE? */
-
-	/*
-	 * dead_items stores TIDs whose index tuples are deleted by index
-	 * vacuuming. Each TID points to an LP_DEAD line pointer from a heap page
-	 * that has been processed by lazy_scan_prune.  Also needed by
-	 * lazy_vacuum_heap_rel, which marks the same LP_DEAD line pointers as
-	 * LP_UNUSED during second heap pass.
-	 */
-	VacDeadItems *dead_items;	/* TIDs whose index tuples we'll delete */
-	BlockNumber rel_pages;		/* total number of pages */
-	BlockNumber scanned_pages;	/* # pages examined (not skipped via VM) */
-	BlockNumber removed_pages;	/* # pages removed by relation truncation */
-	BlockNumber frozen_pages;	/* # pages with newly frozen tuples */
-	BlockNumber lpdead_item_pages;	/* # pages with LP_DEAD items */
-	BlockNumber missed_dead_pages;	/* # pages with missed dead tuples */
-	BlockNumber nonempty_pages; /* actually, last nonempty page + 1 */
-
-	/* Statistics output by us, for table */
-	double		new_rel_tuples; /* new estimated total # of tuples */
-	double		new_live_tuples;	/* new estimated total # of live tuples */
-	/* Statistics output by index AMs */
-	IndexBulkDeleteResult **indstats;
-
-	/* Instrumentation counters */
-	int			num_index_scans;
-	/* Counters that follow are only for scanned_pages */
-	int64		tuples_deleted; /* # deleted from table */
-	int64		tuples_frozen;	/* # newly frozen */
-	int64		lpdead_items;	/* # deleted from indexes */
-	int64		live_tuples;	/* # live tuples remaining */
-	int64		recently_dead_tuples;	/* # dead, but not yet removable */
-	int64		missed_dead_tuples; /* # removable, but not removed */
-} LVRelState;
 
 /*
  * State returned by lazy_scan_prune()
@@ -583,21 +499,9 @@ heap_vacuum_rel(Relation rel, VacuumParams *params,
 						vacrel->NewRelfrozenXid, vacrel->NewRelminMxid,
 						&frozenxid_updated, &minmulti_updated, false);
 
-	/*
-	 * Report results to the cumulative stats system, too.
-	 *
-	 * Deliberately avoid telling the stats system about LP_DEAD items that
-	 * remain in the table due to VACUUM bypassing index and heap vacuuming.
-	 * ANALYZE will consider the remaining LP_DEAD items to be dead "tuples".
-	 * It seems like a good idea to err on the side of not vacuuming again too
-	 * soon in cases where the failsafe prevented significant amounts of heap
-	 * vacuuming.
-	 */
+	/* Report results to the cumulative stats system, too. */
 	pgstat_report_vacuum(RelationGetRelid(rel),
-						 rel->rd_rel->relisshared,
-						 Max(vacrel->new_live_tuples, 0),
-						 vacrel->recently_dead_tuples +
-						 vacrel->missed_dead_tuples);
+						 rel->rd_rel->relisshared, vacrel);
 	pgstat_progress_end_command();
 
 	if (instrument)
