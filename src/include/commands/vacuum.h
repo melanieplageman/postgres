@@ -356,7 +356,7 @@ typedef struct LVRelState
 	BlockNumber rel_pages;		/* total number of pages */
 	BlockNumber scanned_pages;	/* # pages examined (not skipped via VM) */
 	BlockNumber removed_pages;	/* # pages removed by relation truncation */
-	BlockNumber frozen_pages;	/* # pages with newly frozen tuples */
+	BlockNumber pages_frozen;	/* # pages with newly frozen tuples */
 	BlockNumber lpdead_item_pages;	/* # pages with LP_DEAD items */
 	BlockNumber missed_dead_pages;	/* # pages with missed dead tuples */
 	BlockNumber nonempty_pages; /* actually, last nonempty page + 1 */

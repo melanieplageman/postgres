@@ -335,7 +335,7 @@ heap_vacuum_rel(Relation rel, VacuumParams *params,
 	/* Initialize page counters explicitly (be tidy) */
 	vacrel->scanned_pages = 0;
 	vacrel->removed_pages = 0;
-	vacrel->frozen_pages = 0;
+	vacrel->pages_frozen = 0;
 	vacrel->lpdead_item_pages = 0;
 	vacrel->missed_dead_pages = 0;
 	vacrel->nonempty_pages = 0;
@@ -601,9 +601,9 @@ heap_vacuum_rel(Relation rel, VacuumParams *params,
 								 vacrel->NewRelminMxid, diff);
 			}
 			appendStringInfo(&buf, _("frozen: %u pages from table (%.2f%% of total) had %lld tuples frozen\n"),
-							 vacrel->frozen_pages,
+							 vacrel->pages_frozen,
 							 orig_rel_pages == 0 ? 100.0 :
-							 100.0 * vacrel->frozen_pages / orig_rel_pages,
+							 100.0 * vacrel->pages_frozen / orig_rel_pages,
 							 (long long) vacrel->tuples_frozen);
 			if (vacrel->do_index_vacuuming)
 			{
@@ -1712,7 +1712,7 @@ lazy_scan_prune(LVRelState *vacrel,
 		{
 			TransactionId snapshotConflictHorizon;
 
-			vacrel->frozen_pages++;
+			vacrel->pages_frozen++;
 
 			/*
 			 * We can use visibility_cutoff_xid as our cutoff for conflicts
