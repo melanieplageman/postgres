@@ -11,10 +11,12 @@
 #ifndef PGSTAT_H
 #define PGSTAT_H
 
+#include "access/xlogdefs.h"
 #include "commands/vacuum.h"
 #include "datatype/timestamp.h"
 #include "portability/instr_time.h"
 #include "postmaster/pgarch.h"	/* for MAX_XFN_CHARS */
+#include "storage/block.h"
 #include "utils/backend_progress.h" /* for backward compatibility */
 #include "utils/backend_status.h"	/* for backward compatibility */
 #include "utils/relcache.h"
@@ -718,9 +720,16 @@ extern void pgstat_init_relation(Relation rel);
 extern void pgstat_assoc_relation(Relation rel);
 extern void pgstat_unlink_relation(Relation rel);
 
-extern void pgstat_report_vacuum(Oid tableoid, bool shared, LVRelState *vacrel);
+extern void pgstat_report_vacuum(Oid tableoid, bool shared, LVRelState *vacrel,
+								 BlockNumber orig_rel_pages,
+								 BlockNumber new_rel_all_frozen);
 
 extern void pgstat_setup_vacuum_frz_stats(Oid tableoid, bool shared);
+
+extern void pgstat_count_page_unfreeze(Oid tableoid, bool shared,
+									   XLogRecPtr page_lsn, XLogRecPtr insert_lsn);
+
+extern void pgstat_count_page_freeze(Oid tableoid, bool shared, int64 page_age);
 
 extern void pgstat_report_analyze(Relation rel,
 								  PgStat_Counter livetuples, PgStat_Counter deadtuples,
