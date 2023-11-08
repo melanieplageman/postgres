@@ -361,6 +361,39 @@ typedef struct LVRelState
 	BlockNumber missed_dead_pages;	/* # pages with missed dead tuples */
 	BlockNumber nonempty_pages; /* actually, last nonempty page + 1 */
 
+	/*
+	 * The following members track freeze-related statistics which will be
+	 * accumulated into the PgStat_StatTabEntry at the end of the vacuum.
+	 */
+
+	/*
+	 * Number of pages marked frozen in the VM before relation is vacuumed.
+	 * This does not include pages marked frozen by this vacuum.
+	 */
+	BlockNumber already_frozen_pages;
+
+	/*
+	 * The sum of the age of every page with tuples frozen by this vacuum of
+	 * the relation.
+	 */
+	int64		sum_frozen_page_ages;
+
+	/*
+	 * Pages newly marked frozen in the VM. This is inclusive of pages_frozen.
+	 */
+	BlockNumber vm_pages_frozen;
+
+	/* oldest and youngest page we froze during this vacuum */
+	XLogRecPtr	max_frz_page_age;
+	XLogRecPtr	min_frz_page_age;
+
+	XLogRecPtr min_page_age;
+
+	/* number of freeze records emitted by this vacuum containing FPIs */
+	BlockNumber freeze_fpis;
+
+	XLogRecPtr page_age_threshold;
+
 	/* Statistics output by us, for table */
 	double		new_rel_tuples; /* new estimated total # of tuples */
 	double		new_live_tuples;	/* new estimated total # of live tuples */

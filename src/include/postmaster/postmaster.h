@@ -34,6 +34,7 @@ extern PGDLLIMPORT bool remove_temp_files_after_crash;
 extern PGDLLIMPORT bool send_abort_for_crash;
 extern PGDLLIMPORT bool send_abort_for_kill;
 
+
 #ifdef WIN32
 extern PGDLLIMPORT HANDLE PostmasterHandle;
 #else

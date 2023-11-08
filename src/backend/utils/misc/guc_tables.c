@@ -2466,6 +2466,16 @@ struct config_int ConfigureNamesInt[] =
 	},
 
 	{
+		{"opp_freeze_algo", PGC_USERSET, AUTOVACUUM,
+			gettext_noop("algorithm used to determine whether or not to freeze a page during vacuum"),
+			NULL
+		},
+		&opp_freeze_algo,
+		0, 0, 10000,
+		NULL, NULL, NULL
+	},
+
+	{
 		{"target_page_freeze_duration", PGC_USERSET, AUTOVACUUM,
 			gettext_noop("minimum amount of time in seconds that a page should stay frozen."),
 			NULL,

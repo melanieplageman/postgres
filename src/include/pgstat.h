@@ -11,10 +11,12 @@
 #ifndef PGSTAT_H
 #define PGSTAT_H
 
+#include "access/xlogdefs.h"
 #include "commands/vacuum.h"
 #include "datatype/timestamp.h"
 #include "portability/instr_time.h"
 #include "postmaster/pgarch.h"	/* for MAX_XFN_CHARS */
+#include "storage/block.h"
 #include "utils/backend_progress.h" /* for backward compatibility */
 #include "utils/backend_status.h"	/* for backward compatibility */
 #include "utils/relcache.h"
@@ -160,6 +162,8 @@ typedef struct PgStat_BackendSubEntry
  */
 typedef struct PgStat_TableCounts
 {
+	TimestampTz associated;
+	XLogRecPtr assoc_lsn;
 	PgStat_Counter numscans;
 
 	PgStat_Counter tuples_returned;
@@ -394,8 +398,147 @@ typedef struct PgStat_StatSubEntry
 	TimestampTz stat_reset_timestamp;
 } PgStat_StatSubEntry;
 
+/*
+ * Each PgStat_Frz is a bucket in a ring buffer containing stats from one or
+ * more freeze periods, PgStat_StatTabEntry->frz_buckets. Each freeze period is
+ * a single vacuum of a single relation. Once VAC_FRZ_STATS_MAX_NBUCKETS # of
+ * freeze periods have been recorded, multiple older freeze periods are
+ * combined into single buckets (PgStat_Frz).
+ *
+ * Pages frozen by vacuum are tracked in the current PgStat_Frz. Once those
+ * pages are modified, those "unfreezes" are tracked in the PgStat_Frz bucket
+ * whose LSN span (start_lsn -> end_lsn) covers the page freeze LSN.
+ *
+ * Because each PgStat_Frz may contain stats from multiple freeze periods, many
+ * of the stats only make sense when used to calculate a ratio. For example,
+ * adding the relsize at the end of a vacuum across multiple vacuums is
+ * meaningless. However, we use frozen_pages_end and relsize_end to calculate
+ * the percentage of the relation that is frozen at the end of the vacuum. This
+ * is effectively an average when calculated across multiple vacuums in the
+ * same bucket.
+ */
+typedef struct PgStat_Frz
+{
+	/* insert LSN at the start of the oldest freeze period in this bucket */
+	XLogRecPtr	start_lsn;
+	/* insert LSN at the end of the newest freeze period in this bucket */
+	XLogRecPtr	end_lsn;
+	/* start time of the oldest freeze period in this bucket */
+	TimestampTz start_time;
+	/* end time of the newest freeze period in this bucket */
+	TimestampTz end_time;
+	/* page_age_threshold */
+	double sum_page_age_threshold;
+	float b_sum;
+	float m_sum;
+	/* number of freeze periods we have combined into this bucket */
+	int			count;
+
+	/*
+	 * number of pages with newly frozen tuples for all freeze periods in this
+	 * bucket
+	 */
+	int64		freezes;
+
+	/*
+	 * number of pages newly marked frozen in the visibility map by vacuum
+	 * during all freeze periods in this bucket
+	 */
+	int64		vm_page_freezes;
+
+	/*
+	 * number of pages whose all frozen bit was cleared in the visibility map
+	 * which were frozen during all freeze periods in this bucket
+	 */
+	int64		unfreezes;
+
+	/*
+	 * a subset of unfreezes, this is the number of pages frozen during all
+	 * freeze periods in this bucket which were unfrozen before
+	 * target_page_freeze_duration seconds had elapsed
+	 */
+	int64		early_unfreezes;
+
+	/*
+	 * Number of pages of this relation marked all frozen in the visibility
+	 * map at the end of all freeze periods in this bucket
+	 */
+	int64		frozen_pages_end;
+
+	/*
+	 * Number of pages of this relation marked all frozen in the visibility
+	 * map at the start of this freeze period.
+	 */
+	int64		frozen_pages_start;
+
+	/*
+	 * number of pages in the relation at the beginning and end of all freeze
+	 * periods in this bucket
+	 */
+	int64		relsize_end;
+	int64		relsize_start;
+
+	/*
+	 * number of pages actually scanned by vacuum (not skipped) during all
+	 * freeze periods in this bucket.
+	 */
+	int64		scanned_pages;
+
+	/*
+	 * number of freeze records emitted by vacuum containing FPIs during all
+	 * freeze periods in this bucket
+	 */
+	int64		freeze_fpis;
+
+	/*
+	 * When a page is frozen, its age in LSNs is the number of LSNs elapsed
+	 * since it was last modified. Keeping track of a running sum of page ages
+	 * at the time of freezing for freezes happening during all freeze periods
+	 * in this bucket allows us to calculate an average page age, in LSNs, for
+	 * pages we end up freezing.
+	 */
+	double		sum_page_age_lsns;
+
+	/*
+	 * the oldest and youngest pages (in LSNs) that we saw while vacuuming
+	 */
+	XLogRecPtr	max_frz_page_age;
+	XLogRecPtr	min_frz_page_age;
+	/* youngest page we saw */
+	XLogRecPtr min_page_age;
+
+	/*
+	 * When a page is unfrozen, the number of LSNs for which it stayed frozen
+	 * is added to this total. This allows us to calculate the average "time"
+	 * in LSNs that a page stays frozen for.
+	 */
+	double		total_frozen_duration_lsns;
+
+	/*
+	 * The page frozen during any of the freeze periods in this bucket which
+	 * lasted the longest before being modified and unfrozen.
+	 */
+	XLogRecPtr	max_frozen_duration_lsns;
+
+	/*
+	 * The page frozen during any of the freeze periods in this bucket which
+	 * was modified the soonest after being frozen.
+	 */
+	XLogRecPtr	min_frozen_duration_lsns;
+} PgStat_Frz;
+
+typedef struct PgStat_Unfrz
+{
+	XLogRecPtr unfreeze_lsn;
+	XLogRecPtr frz_duration;
+	XLogRecPtr page_age;
+} PgStat_Unfrz;
+
+#define VAC_FRZ_STATS_MAX_NBUCKETS 15
+#define VAC_NUM_UNFRZ_STATS (20 * VAC_FRZ_STATS_MAX_NBUCKETS)
 typedef struct PgStat_StatTabEntry
 {
+	/* time at which stats were first associated with table */
 	PgStat_Counter numscans;
 	TimestampTz lastscan;
 
@@ -424,6 +567,15 @@ typedef struct PgStat_StatTabEntry
 	PgStat_Counter analyze_count;
 	TimestampTz last_autoanalyze_time;	/* autovacuum initiated */
 	PgStat_Counter autoanalyze_count;
+
+	int			frz_current;
+	int			frz_oldest;
+	int			frz_nbuckets_used;
+	PgStat_Frz	frz_buckets[VAC_FRZ_STATS_MAX_NBUCKETS];
+
+	int nunfrz_used;
+	int current_unfrz;
+	PgStat_Unfrz unfrzs[VAC_NUM_UNFRZ_STATS];
 } PgStat_StatTabEntry;
 
 typedef struct PgStat_WalStats
@@ -588,7 +740,20 @@ extern void pgstat_init_relation(Relation rel);
 extern void pgstat_assoc_relation(Relation rel);
 extern void pgstat_unlink_relation(Relation rel);
 
-extern void pgstat_report_vacuum(Oid tableoid, bool shared, LVRelState *vacrel);
+extern void pgstat_report_vacuum(Oid tableoid, bool shared, LVRelState *vacrel,
+								 BlockNumber orig_rel_pages,
+								 BlockNumber new_rel_all_frozen);
+
+extern XLogRecPtr pgstat_setup_vacuum_frz_stats(Oid tableoid, bool shared);
+
+
+extern void pgstat_count_page_unfreeze(Oid tableoid, bool shared,
+									   XLogRecPtr page_lsn, XLogRecPtr insert_lsn);
+
+extern float pgstat_frz_error_rate(Oid tableoid);
+
+extern void pgstat_count_page_freeze(Oid tableoid, bool shared, int64 page_age);
+
 extern void pgstat_report_analyze(Relation rel,
 								  PgStat_Counter livetuples, PgStat_Counter deadtuples,
 								  bool resetcounter);

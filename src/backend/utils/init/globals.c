@@ -149,6 +149,7 @@ int			VacuumCostPageMiss = 2;
 int			VacuumCostPageDirty = 20;
 int			VacuumCostLimit = 200;
 double		VacuumCostDelay = 0;
+int			opp_freeze_algo = 0;
 int			target_page_freeze_duration = 1;
 
 int64		VacuumPageHit = 0;
@@ -157,3 +158,4 @@ int64		VacuumPageDirty = 0;
 
 int			VacuumCostBalance = 0;	/* working state for vacuum */
 bool		VacuumCostActive = false;
+

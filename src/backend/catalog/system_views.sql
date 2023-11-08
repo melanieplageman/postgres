@@ -675,6 +675,8 @@ CREATE VIEW pg_stat_all_tables AS
             pg_stat_get_last_analyze_time(C.oid) as last_analyze,
             pg_stat_get_last_autoanalyze_time(C.oid) as last_autoanalyze,
             pg_stat_get_vacuum_count(C.oid) AS vacuum_count,
+            pg_stat_get_page_freezes(C.oid) AS page_freezes,
+            pg_stat_get_page_unfreezes(C.oid) AS page_unfreezes,
             pg_stat_get_autovacuum_count(C.oid) AS autovacuum_count,
             pg_stat_get_analyze_count(C.oid) AS analyze_count,
             pg_stat_get_autoanalyze_count(C.oid) AS autoanalyze_count

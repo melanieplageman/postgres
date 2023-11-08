@@ -237,6 +237,7 @@ heap_page_prune(Relation relation, Buffer buffer,
 	 */
 	presult->ndeleted = 0;
 	presult->nnewlpdead = 0;
+	presult->page_lsn = PageGetLSN(page);
 
 	maxoff = PageGetMaxOffsetNumber(page);
 	tup.t_tableOid = RelationGetRelid(prstate.rel);
