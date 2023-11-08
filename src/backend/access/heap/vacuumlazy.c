@@ -203,6 +203,9 @@ static void update_vacuum_error_info(LVRelState *vacrel,
 static void restore_vacuum_error_info(LVRelState *vacrel,
 									  const LVSavedErrInfo *saved_vacrel);
 
+static bool vacuum_opp_freeze(LVRelState *vacrel,
+							  int64 page_age, bool all_visible_all_frozen,
+							  bool prune_emitted_fpi);
 
 /*
  *	heap_vacuum_rel() -- perform VACUUM for one heap relation
@@ -1750,8 +1753,9 @@ lazy_scan_prune(LVRelState *vacrel,
 	 * page all-frozen afterwards (might not happen until final heap pass).
 	 */
 	if (pagefrz.freeze_required || tuples_frozen == 0 ||
-		(prunestate->all_visible && prunestate->all_frozen &&
-		 fpi_before != pgWalUsage.wal_fpi))
+		vacuum_opp_freeze(vacrel, page_age,
+						  prunestate->all_visible && prunestate->all_frozen,
+						  fpi_before != pgWalUsage.wal_fpi))
 	{
 		/*
 		 * We're freezing the page.  Our final NewRelfrozenXid doesn't need to
@@ -3498,4 +3502,78 @@ restore_vacuum_error_info(LVRelState *vacrel,
 	vacrel->blkno = saved_vacrel->blkno;
 	vacrel->offnum = saved_vacrel->offnum;
 	vacrel->phase = saved_vacrel->phase;
+}
+
+#define VAC_FRZ_ERR_THRESHOLD 0.5
+
+/*
+ * Determine whether or not vacuum should opportunistically freeze a page.
+ * Given freeze statistics about the relation contained in LVRelState, whether
+ * or not the page will be able to be marked all visible and all frozen, and
+ * whether or not pruning emitted an FPI, return whether or not the page should
+ * be frozen. The LVRelState should not be modified.
+ */
+static bool
+vacuum_opp_freeze(LVRelState *vacrel,
+				  int64 page_age,
+				  bool all_visible_all_frozen,
+				  bool prune_emitted_fpi)
+{
+	if (opp_freeze_algo == 0)
+		return all_visible_all_frozen && prune_emitted_fpi;
+
+	if (opp_freeze_algo == 1)
+		return all_visible_all_frozen;
+
+	if (opp_freeze_algo == 2)
+	{
+		float		error_rate = 0;
+
+		/*
+		 * if the page LSN is the same as the approximate insert LSN, it was
+		 * modified very recently, so it isn't a good candidate for freezing
+		 */
+		if (page_age == 0)
+			return false;
+
+		/*
+		 * Calculate the average error rate for our past vacuums.
+		 */
+		error_rate = pgstat_frz_error_rate(RelationGetRelid(vacrel->rel));
+
+		/*
+		 * If the error rate is 0, either we don't have enough vacuums yet to
+		 * have data, we haven't frozen anything yet, or we have a perfect
+		 * track record. In all of these cases, freeze the page.
+		 */
+		if (error_rate == 0)
+			return true;
+
+		/*
+		 * Here it may be worth freezing the page if it is older than the
+		 * oldest page scanned so far and a certain number of pages have been
+		 * scanned. Similarly, we could check if the page is younger than the
+		 * youngest page scanned and a certain number of pages have been
+		 * scanned.
+		 */
+
+		/*
+		 * If we have frozen some pages, we can calculate the average page age
+		 * and use that to determine whether or not to freeze the page.
+		 */
+		if (vacrel->pages_frozen > 0)
+		{
+			float		avg_page_age = 0;
+
+			avg_page_age = (float) vacrel->sum_frozen_page_ages /
+				vacrel->pages_frozen;
+
+			if (error_rate > VAC_FRZ_ERR_THRESHOLD &&
+				page_age > avg_page_age)
+				return true;
+
+		}
+	}
+
+	return false;
 }

@@ -729,6 +729,8 @@ extern void pgstat_setup_vacuum_frz_stats(Oid tableoid, bool shared);
 extern void pgstat_count_page_unfreeze(Oid tableoid, bool shared,
 									   XLogRecPtr page_lsn, XLogRecPtr insert_lsn);
 
+extern float pgstat_frz_error_rate(Oid tableoid);
+
 extern void pgstat_count_page_freeze(Oid tableoid, bool shared, int64 page_age);
 
 extern void pgstat_report_analyze(Relation rel,

@@ -367,6 +367,76 @@ pgstat_setup_vacuum_frz_stats(Oid tableoid, bool shared)
 	pgstat_flush_io(false);
 }
 
+/*
+ * Calculate the average error rate for recorded freeze periods.
+ *
+ *  MTODO: should this be done in the cached backend local copy or the copy in
+ *  shared memory.
+ */
+float
+pgstat_frz_error_rate(Oid tableoid)
+{
+	PgStat_StatTabEntry *tabentry;
+	int64		early_unfreezes = 0;
+	int64		freezes = 0;
+	bool		skip_oldest;
+	int			i;
+
+	if ((tabentry = pgstat_fetch_stat_tabentry(tableoid)) == NULL)
+		return 0;
+
+	if (tabentry->frz_nbuckets_used == 0)
+		return 0;
+
+	/*
+	 * When calculating the freeze error rate, once we have used all available
+	 * buckets, we restrict the calculation to exclude the oldest period to
+	 * avoid a feedback loop where a high error rate causes us to freeze less
+	 * and then because we freeze less we have less new data causing the old
+	 * data to be over-represented. This could be done with a weighted average
+	 * but, for now, simply exclude the oldest entry.
+	 */
+	skip_oldest = tabentry->frz_nbuckets_used >= VAC_FRZ_STATS_MAX_NBUCKETS;
+
+	for (i = skip_oldest; i < tabentry->frz_nbuckets_used; i++)
+	{
+		PgStat_Frz *frz;
+
+		frz = &tabentry->frz_buckets[(tabentry->frz_oldest + i) % VAC_FRZ_STATS_MAX_NBUCKETS];
+
+		/*
+		 * We don't include the current freeze period in our error rate rate
+		 * calculation, as we have yet to see the consequences of those freeze
+		 * decisions and including it will skew the numbers.
+		 */
+		if (frz->start_lsn == InvalidXLogRecPtr ||
+			frz->end_lsn == InvalidXLogRecPtr)
+			continue;
+
+		/*
+		 * We use vm_page_freezes, even though those are not all subject to
+		 * the opportunistic freezing algorithm (and thus not in our power to
+		 * decide whether or not to freeze) because we cannot distinguish
+		 * between an unfreeze of a page that was opportunistically frozen and
+		 * one that was marked frozen in the VM because it happened to qualify
+		 * as all frozen.
+		 */
+		freezes += frz->vm_page_freezes;
+
+		/*
+		 * We care only about early_unfreezes, those pages which were unfrozen
+		 * before target_page_freeze_duration had elapsed.
+		 */
+		early_unfreezes += frz->early_unfreezes;
+	}
+
+	Assert(early_unfreezes <= freezes);
+
+	if (freezes == 0)
+		return 0;
+
+	return (float) early_unfreezes / freezes;
+}
 
 /*
  * When a frozen page from a table with oid tableoid is modified, the page LSN
