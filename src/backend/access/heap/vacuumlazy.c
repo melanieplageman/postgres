@@ -217,7 +217,6 @@ typedef struct LVRelState
  */
 typedef struct LVPagePruneState
 {
-	bool		hastup;			/* Page prevents rel truncation? */
 	bool		has_lpdead_items;	/* includes existing LP_DEAD items */
 
 	/*
@@ -254,7 +253,7 @@ static void lazy_scan_prune(LVRelState *vacrel, Buffer buf,
 							bool *recordfreespace);
 static bool lazy_scan_noprune(LVRelState *vacrel, Buffer buf,
 							  BlockNumber blkno, Page page,
-							  bool *hastup, bool *recordfreespace);
+							  bool *recordfreespace);
 static void lazy_vacuum(LVRelState *vacrel);
 static bool lazy_vacuum_all_indexes(LVRelState *vacrel);
 static void lazy_vacuum_heap_rel(LVRelState *vacrel);
@@ -962,8 +961,6 @@ lazy_scan_heap(LVRelState *vacrel)
 		page = BufferGetPage(buf);
 		if (!ConditionalLockBufferForCleanup(buf))
 		{
-			bool		hastup;
-
 			LockBuffer(buf, BUFFER_LOCK_SHARE);
 
 			/* Check for new or empty pages before lazy_scan_noprune call */
@@ -974,20 +971,21 @@ lazy_scan_heap(LVRelState *vacrel)
 				continue;
 			}
 
-			/* Collect LP_DEAD items in dead_items array, count tuples */
-			if (lazy_scan_noprune(vacrel, buf, blkno, page, &hastup,
+			/*
+			 * Collect LP_DEAD items in dead_items array, count tuples,
+			 * determine if rel truncation is safe
+			 */
+			if (lazy_scan_noprune(vacrel, buf, blkno, page,
 								  &recordfreespace))
 			{
 				Size		freespace = 0;
 
 				/*
 				 * Processed page successfully (without cleanup lock) -- just
-				 * need to perform rel truncation and FSM steps, much like the
-				 * lazy_scan_prune case.  Don't bother trying to match its
-				 * visibility map setting steps, though.
+				 * need to update the FSM, much like the lazy_scan_prune case.
+				 * Don't bother trying to match its visibility map setting
+				 * steps, though.
 				 */
-				if (hastup)
-					vacrel->nonempty_pages = blkno + 1;
 				if (recordfreespace)
 					freespace = PageGetHeapFreeSpace(page);
 				UnlockReleaseBuffer(buf);
@@ -1021,15 +1019,12 @@ lazy_scan_heap(LVRelState *vacrel)
 		 * dead_items array.  This includes LP_DEAD line pointers that we
 		 * pruned ourselves, as well as existing LP_DEAD line pointers that
 		 * were pruned some time earlier.  Also considers freezing XIDs in the
-		 * tuple headers of remaining items with storage.
+		 * tuple headers of remaining items with storage. It also determines
+		 * if truncating this block is safe.
 		 */
 		lazy_scan_prune(vacrel, buf, blkno, page, &prunestate, &recordfreespace);
 
 		Assert(!prunestate.all_visible || !prunestate.has_lpdead_items);
-
-		/* Remember the location of the last page with nonremovable tuples */
-		if (prunestate.hastup)
-			vacrel->nonempty_pages = blkno + 1;
 
 		/*
 		 * Handle setting visibility map bit based on information from the VM
@@ -1504,6 +1499,7 @@ lazy_scan_prune(LVRelState *vacrel,
 				live_tuples,
 				recently_dead_tuples;
 	HeapPageFreeze pagefrz;
+	bool		hastup = false;
 	int64		fpi_before = pgWalUsage.wal_fpi;
 	OffsetNumber deadoffsets[MaxHeapTuplesPerPage];
 	HeapTupleFreeze frozen[MaxHeapTuplesPerPage];
@@ -1543,7 +1539,6 @@ lazy_scan_prune(LVRelState *vacrel,
 	 * Now scan the page to collect LP_DEAD items and check for tuples
 	 * requiring freezing among remaining tuples with storage
 	 */
-	prunestate->hastup = false;
 	prunestate->has_lpdead_items = false;
 	prunestate->all_visible = true;
 	prunestate->all_frozen = true;
@@ -1571,7 +1566,7 @@ lazy_scan_prune(LVRelState *vacrel,
 		if (ItemIdIsRedirected(itemid))
 		{
 			/* page makes rel truncation unsafe */
-			prunestate->hastup = true;
+			hastup = true;
 			continue;
 		}
 
@@ -1701,7 +1696,7 @@ lazy_scan_prune(LVRelState *vacrel,
 				break;
 		}
 
-		prunestate->hastup = true;	/* page makes rel truncation unsafe */
+		hastup = true;			/* page makes rel truncation unsafe */
 
 		/* Tuple with storage -- consider need to freeze */
 		if (heap_prepare_freeze_tuple(htup, &vacrel->cutoffs, &pagefrz,
@@ -1878,6 +1873,10 @@ lazy_scan_prune(LVRelState *vacrel,
 	if (vacrel->nindexes == 0 ||
 		!vacrel->do_index_vacuuming || lpdead_items == 0)
 		*recordfreespace = true;
+
+	/* Can't truncate this page */
+	if (hastup)
+		vacrel->nonempty_pages = blkno + 1;
 }
 
 /*
@@ -1895,7 +1894,6 @@ lazy_scan_prune(LVRelState *vacrel,
  * one or more tuples on the page.  We always return true for non-aggressive
  * callers.
  *
- * See lazy_scan_prune for an explanation of hastup return flag.
  * recordfreespace flag instructs caller on whether or not it should do
  * generic FSM processing for page.
  */
@@ -1904,7 +1902,6 @@ lazy_scan_noprune(LVRelState *vacrel,
 				  Buffer buf,
 				  BlockNumber blkno,
 				  Page page,
-				  bool *hastup,
 				  bool *recordfreespace)
 {
 	OffsetNumber offnum,
@@ -1913,6 +1910,7 @@ lazy_scan_noprune(LVRelState *vacrel,
 				live_tuples,
 				recently_dead_tuples,
 				missed_dead_tuples;
+	bool		hastup;
 	HeapTupleHeader tupleheader;
 	TransactionId NoFreezePageRelfrozenXid = vacrel->NewRelfrozenXid;
 	MultiXactId NoFreezePageRelminMxid = vacrel->NewRelminMxid;
@@ -1920,7 +1918,7 @@ lazy_scan_noprune(LVRelState *vacrel,
 
 	Assert(BufferGetBlockNumber(buf) == blkno);
 
-	*hastup = false;			/* for now */
+	hastup = false;				/* for now */
 	*recordfreespace = false;	/* for now */
 
 	lpdead_items = 0;
@@ -1944,7 +1942,7 @@ lazy_scan_noprune(LVRelState *vacrel,
 
 		if (ItemIdIsRedirected(itemid))
 		{
-			*hastup = true;
+			hastup = true;
 			continue;
 		}
 
@@ -1958,7 +1956,7 @@ lazy_scan_noprune(LVRelState *vacrel,
 			continue;
 		}
 
-		*hastup = true;			/* page prevents rel truncation */
+		hastup = true;			/* page prevents rel truncation */
 		tupleheader = (HeapTupleHeader) PageGetItem(page, itemid);
 		if (heap_tuple_should_freeze(tupleheader, &vacrel->cutoffs,
 									 &NoFreezePageRelfrozenXid,
@@ -2060,7 +2058,7 @@ lazy_scan_noprune(LVRelState *vacrel,
 			 * but it beats having to maintain specialized heap vacuuming code
 			 * forever, for vanishingly little benefit.)
 			 */
-			*hastup = true;
+			hastup = true;
 			missed_dead_tuples += lpdead_items;
 		}
 
@@ -2115,6 +2113,10 @@ lazy_scan_noprune(LVRelState *vacrel,
 	vacrel->missed_dead_tuples += missed_dead_tuples;
 	if (missed_dead_tuples > 0)
 		vacrel->missed_dead_pages++;
+
+	/* Can't truncate this page */
+	if (hastup)
+		vacrel->nonempty_pages = blkno + 1;
 
 	/* Caller won't need to call lazy_scan_prune with same page */
 	return true;
