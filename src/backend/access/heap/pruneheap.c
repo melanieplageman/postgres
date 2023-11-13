@@ -35,6 +35,8 @@ typedef struct
 
 	/* tuple visibility test, initialized for the relation */
 	GlobalVisState *vistest;
+	/* whether or not dead items can be set LP_UNUSED during pruning */
+	bool		no_indexes;
 
 	TransactionId new_prune_xid;	/* new prune hint value for page */
 	TransactionId snapshotConflictHorizon;	/* latest xid removed */
@@ -148,7 +150,8 @@ heap_page_prune_opt(Relation relation, Buffer buffer)
 		{
 			PruneResult presult;
 
-			heap_page_prune(relation, buffer, vistest, &presult, NULL);
+			heap_page_prune(relation, buffer, vistest, false,
+							&presult, NULL);
 
 			/*
 			 * Report the number of tuples reclaimed to pgstats.  This is
@@ -193,6 +196,9 @@ heap_page_prune_opt(Relation relation, Buffer buffer)
  * (see heap_prune_satisfies_vacuum and
  * HeapTupleSatisfiesVacuum).
  *
+ * no_indexes indicates whether or not dead items can be set LP_UNUSED during
+ * pruning.
+ *
  * off_loc is the offset location required by the caller to use in error
  * callback.
  *
@@ -203,6 +209,7 @@ heap_page_prune_opt(Relation relation, Buffer buffer)
 void
 heap_page_prune(Relation relation, Buffer buffer,
 				GlobalVisState *vistest,
+				bool no_indexes,
 				PruneResult *presult,
 				OffsetNumber *off_loc)
 {
@@ -227,6 +234,7 @@ heap_page_prune(Relation relation, Buffer buffer,
 	prstate.new_prune_xid = InvalidTransactionId;
 	prstate.rel = relation;
 	prstate.vistest = vistest;
+	prstate.no_indexes = no_indexes;
 	prstate.snapshotConflictHorizon = InvalidTransactionId;
 	prstate.nredirected = prstate.ndead = prstate.nunused = 0;
 	memset(prstate.marked, 0, sizeof(prstate.marked));
@@ -306,9 +314,9 @@ heap_page_prune(Relation relation, Buffer buffer,
 		if (off_loc)
 			*off_loc = offnum;
 
-		/* Nothing to do if slot is empty or already dead */
+		/* Nothing to do if slot is empty */
 		itemid = PageGetItemId(page, offnum);
-		if (!ItemIdIsUsed(itemid) || ItemIdIsDead(itemid))
+		if (!ItemIdIsUsed(itemid))
 			continue;
 
 		/* Process this item or chain of items */
@@ -330,7 +338,7 @@ heap_page_prune(Relation relation, Buffer buffer,
 		 * Apply the planned item changes, then repair page fragmentation, and
 		 * update the page's hint bit about whether it has free line pointers.
 		 */
-		heap_page_prune_execute(buffer,
+		heap_page_prune_execute(buffer, prstate.no_indexes,
 								prstate.redirected, prstate.nredirected,
 								prstate.nowdead, prstate.ndead,
 								prstate.nowunused, prstate.nunused);
@@ -581,7 +589,17 @@ heap_prune_chain(Buffer buffer, OffsetNumber rootoffnum,
 		 * function.)
 		 */
 		if (ItemIdIsDead(lp))
+		{
+			/*
+			 * If the relation has no indexes, we can set dead line pointers
+			 * LP_UNUSED now. We don't increment ndeleted here since the LP
+			 * was already marked dead.
+			 */
+			if (unlikely(prstate->no_indexes))
+				heap_prune_record_unused(prstate, offnum);
+
 			break;
+		}
 
 		Assert(ItemIdIsNormal(lp));
 		htup = (HeapTupleHeader) PageGetItem(dp, lp);
@@ -726,7 +744,7 @@ heap_prune_chain(Buffer buffer, OffsetNumber rootoffnum,
 		 * item.  This can happen if the loop in heap_page_prune caused us to
 		 * visit the dead successor of a redirect item before visiting the
 		 * redirect item.  We can clean up by setting the redirect item to
-		 * DEAD state.
+		 * DEAD state or LP_UNUSED if the table has no indexes.
 		 */
 		heap_prune_record_dead(prstate, rootoffnum);
 	}
@@ -767,6 +785,17 @@ heap_prune_record_redirect(PruneState *prstate,
 static void
 heap_prune_record_dead(PruneState *prstate, OffsetNumber offnum)
 {
+	/*
+	 * If the relation has no indexes, we can remove dead tuples during
+	 * pruning instead of marking their line pointers dead. Set this tuple's
+	 * line pointer LP_UNUSED. We hint that tables with indexes are more
+	 * likely.
+	 */
+	if (unlikely(prstate->no_indexes))
+	{
+		heap_prune_record_unused(prstate, offnum);
+		return;
+	}
 	Assert(prstate->ndead < MaxHeapTuplesPerPage);
 	prstate->nowdead[prstate->ndead] = offnum;
 	prstate->ndead++;
@@ -792,7 +821,7 @@ heap_prune_record_unused(PruneState *prstate, OffsetNumber offnum)
  * buffer.
  */
 void
-heap_page_prune_execute(Buffer buffer,
+heap_page_prune_execute(Buffer buffer, bool no_indexes,
 						OffsetNumber *redirected, int nredirected,
 						OffsetNumber *nowdead, int ndead,
 						OffsetNumber *nowunused, int nunused)
@@ -902,14 +931,28 @@ heap_page_prune_execute(Buffer buffer,
 
 #ifdef USE_ASSERT_CHECKING
 
-		/*
-		 * Only heap-only tuples can become LP_UNUSED during pruning.  They
-		 * don't need to be left in place as LP_DEAD items until VACUUM gets
-		 * around to doing index vacuuming.
-		 */
-		Assert(ItemIdHasStorage(lp) && ItemIdIsNormal(lp));
-		htup = (HeapTupleHeader) PageGetItem(page, lp);
-		Assert(HeapTupleHeaderIsHeapOnly(htup));
+		if (no_indexes)
+		{
+			/*
+			 * If the relation has no indexes, we may set any of LP_NORMAL,
+			 * LP_REDIRECT, or LP_DEAD items to LP_UNUSED during pruning. We
+			 * can't check much here except that, if the item is LP_NORMAL, it
+			 * should have storage before it is set LP_UNUSED.
+			 */
+			Assert(!ItemIdIsNormal(lp) || ItemIdHasStorage(lp));
+		}
+		else
+		{
+			/*
+			 * If the relation has indexes, only heap-only tuples can become
+			 * LP_UNUSED during pruning. They don't need to be left in place
+			 * as LP_DEAD items until VACUUM gets around to doing index
+			 * vacuuming.
+			 */
+			Assert(ItemIdHasStorage(lp) && ItemIdIsNormal(lp));
+			htup = (HeapTupleHeader) PageGetItem(page, lp);
+			Assert(HeapTupleHeaderIsHeapOnly(htup));
+		}
 #endif
 
 		ItemIdSetUnused(lp);
