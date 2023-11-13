@@ -320,9 +320,10 @@ struct GlobalVisState;
 extern void heap_page_prune_opt(Relation relation, Buffer buffer);
 extern void heap_page_prune(Relation relation, Buffer buffer,
 							struct GlobalVisState *vistest,
+							bool no_indexes,
 							PruneResult *presult,
 							OffsetNumber *off_loc);
-extern void heap_page_prune_execute(Buffer buffer,
+extern void heap_page_prune_execute(Buffer buffer, bool no_indexes,
 									OffsetNumber *redirected, int nredirected,
 									OffsetNumber *nowdead, int ndead,
 									OffsetNumber *nowunused, int nunused);

@@ -8810,8 +8810,13 @@ heap_xlog_prune(XLogReaderState *record)
 		nunused = (end - nowunused);
 		Assert(nunused >= 0);
 
-		/* Update all line pointers per the record, and repair fragmentation */
-		heap_page_prune_execute(buffer,
+		/*
+		 * Update all line pointers per the record, and repair fragmentation.
+		 * We always pass no_indexes as true, because we don't know whether
+		 * or not this option was used when pruning. This reduces the
+		 * validation done on replay in an assert build.
+		 */
+		heap_page_prune_execute(buffer, true,
 								redirected, nredirected,
 								nowdead, ndead,
 								nowunused, nunused);
