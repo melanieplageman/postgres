@@ -388,6 +388,7 @@ typedef struct LVRelState
 	XLogRecPtr	min_frz_page_age;
 
 	XLogRecPtr min_page_age;
+	XLogRecPtr max_page_age;
 
 	/* number of freeze records emitted by this vacuum containing FPIs */
 	BlockNumber freeze_fpis;

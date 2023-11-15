@@ -506,6 +506,8 @@ typedef struct PgStat_Frz
 	XLogRecPtr	min_frz_page_age;
 	/* youngest page we saw */
 	XLogRecPtr min_page_age;
+	/* oldest page we saw */
+	XLogRecPtr max_page_age;
 
 	/*
 	 * When a page is unfrozen, the number of LSNs for which it stayed frozen
@@ -525,6 +527,8 @@ typedef struct PgStat_Frz
 	 * was modified the soonest after being frozen.
 	 */
 	XLogRecPtr	min_frozen_duration_lsns;
+
+	XLogRecPtr	target_page_freeze_duration_lsns;
 } PgStat_Frz;
 
 typedef struct PgStat_Unfrz
@@ -567,6 +571,9 @@ typedef struct PgStat_StatTabEntry
 	PgStat_Counter analyze_count;
 	TimestampTz last_autoanalyze_time;	/* autovacuum initiated */
 	PgStat_Counter autoanalyze_count;
+
+	// TODO: could also add an "oldest page LSN seen by vacuum" or something
+	XLogRecPtr	most_recent_page_mod;
 
 	int			frz_current;
 	int			frz_oldest;

@@ -1527,7 +1527,7 @@ pgstat_frz_vac_lsn_gen_rate(PgStat_Frz *vacuum)
 	if (lsns_elapsed <= 0)
 		return 0;
 
-	return (float) time_elapsed * USECS_PER_SEC / lsns_elapsed;
+	return (float) lsns_elapsed / time_elapsed;
 }
 
 

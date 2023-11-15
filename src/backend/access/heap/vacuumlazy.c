@@ -351,6 +351,7 @@ heap_vacuum_rel(Relation rel, VacuumParams *params,
 	vacrel->max_frz_page_age = InvalidXLogRecPtr;
 	vacrel->min_frz_page_age = InvalidXLogRecPtr;
 	vacrel->min_page_age = InvalidXLogRecPtr;
+	vacrel->max_page_age = InvalidXLogRecPtr;
 	vacrel->freeze_fpis = 0;
 
 	/* Allocate/initialize output statistics state */
@@ -1750,6 +1751,10 @@ lazy_scan_prune(LVRelState *vacrel,
 	if (vacrel->min_page_age == InvalidXLogRecPtr ||
 			page_age < vacrel->min_page_age)
 		vacrel->min_page_age = page_age;
+
+	if (vacrel->max_page_age == InvalidXLogRecPtr ||
+			page_age > vacrel->max_page_age)
+		vacrel->max_page_age = page_age;
 
 	/*
 	 * Freeze the page when heap_prepare_freeze_tuple indicates that at least
