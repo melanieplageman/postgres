@@ -2934,6 +2934,8 @@ VacDeadItems
 VacErrPhase
 VacObjFilter
 VacOptValue
+VacReapLPBlkState
+VacScanBlkState
 VacuumParams
 VacuumRelation
 VacuumStmt
