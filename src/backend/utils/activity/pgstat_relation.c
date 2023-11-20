@@ -615,6 +615,109 @@ pgstat_frz_error_rate(Oid tableoid)
 	return pgstat_frz_error_rate_internal(tabentry);
 }
 
+/* void pick_samples(double mean, double stddev, size_t n, double *result) { */
+/* 	while (n > 0) { */
+/* 		double u1 = rand(); */
+/* 		double u2 = rand(); */
+
+/* 		double pi = 3.14; */
+
+/* 		double z1 = sqrt(-2 * ln(u1)) * cos(2 * pi * u2); */
+/* 		z1 = mean + stddev * z1; */
+
+/* 		double z2 = sqrt(-2 * ln(u1)) * sin(2 * pi * u2); */
+/* 		z2 = mean + stddev * z2; */
+
+/* 		result[--n] = z1; */
+/* 		result[--n] = z2; */
+/* 	} */
+
+/* 	sort(result); */
+/* } */
+
+/* void */
+/* pgstat_count_page_frz() */
+/* { */
+/* 	double u1 = rand(); */
+/* 	double u2 = rand(); */
+/* 	double z1 = sqrt(-2 * ln(u1)) * cos(2 * pi * u2); */
+/* 	double z2 = sqrt(-2 * ln(u1)) * sin(2 * pi * u2); */
+/* } */
+
+/*
+ * MTODO: if checksums are on, we can bail out of the loop when start lsn >
+ * page_lsn and use the page_lsn to calculate the all visible duration for the
+ * page.
+ */
+void
+pgstat_count_page_unvis(Oid tableoid, bool shared,
+						   XLogRecPtr page_lsn, XLogRecPtr insert_lsn)
+{
+	Oid			dboid = (shared ? InvalidOid : MyDatabaseId);
+	PgStat_EntryRef *entry_ref;
+	PgStat_StatTabEntry *tabentry;
+
+	if (!pgstat_track_counts)
+		return;
+
+	entry_ref = pgstat_get_entry_ref_locked(PGSTAT_KIND_RELATION,
+											dboid, tableoid, false);
+
+	tabentry = &((PgStatShared_Relation *) entry_ref->shared_stats)->stats;
+
+	for (int i = 0; i < tabentry->frz_nbuckets_used; i++)
+	{
+		PgStat_Frz *frz;
+		XLogRecPtr	page_av_duration_lsns;
+		XLogRecPtr	recent_lsn;
+		int frz_idx = (tabentry->frz_oldest + i) % VAC_FRZ_STATS_MAX_NBUCKETS;
+
+		frz = &tabentry->frz_buckets[frz_idx];
+
+		/* no entry should have been added without a start lsn */
+		Assert(frz->start_lsn != InvalidXLogRecPtr);
+
+
+		if (frz->end_lsn != InvalidXLogRecPtr && frz->end_lsn < page_lsn)
+			continue;
+
+		/*
+		 * We know the page was set all visible sometime between the start and
+		 * end of this vacuum. Try using a value halfway in between
+		 */
+		if (frz->end_lsn == InvalidXLogRecPtr)
+			recent_lsn = insert_lsn;
+		else
+			recent_lsn = frz->end_lsn;
+
+		page_av_duration_lsns = insert_lsn - ((frz->start_lsn + recent_lsn) / 2);
+
+		frz->unavs++;
+
+		frz->sum_av_duration_lsns += page_av_duration_lsns;
+
+		frz->sum_sq_av_duration_lsns += (page_av_duration_lsns * page_av_duration_lsns);
+
+		if (page_av_duration_lsns > frz->target_page_freeze_duration_lsns)
+			frz->missed_freezes++;
+
+		break;
+	}
+
+	tabentry->most_recent_page_mod =
+		Min(tabentry->most_recent_page_mod, insert_lsn);
+
+	/*
+	 * If the page is older than any of our currently tracked vacuums, we
+	 * aren't going to count it. We are only concerned with the efficacy of
+	 * our more recent vacuums. If a very old page is being unfrozen, that is
+	 * fine anyway.
+	 */
+
+	pgstat_unlock_entry(entry_ref);
+}
+
+
 /*
  * When a frozen page from a table with oid tableoid is modified, the page LSN
  * before modification is passed into this function. This LSN is used to

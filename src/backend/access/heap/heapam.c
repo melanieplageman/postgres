@@ -2009,6 +2009,11 @@ heap_insert(Relation relation, HeapTuple tup, CommandId cid,
 								   relation->rd_rel->relisshared,
 								   page_lsn, insert_lsn);
 
+	if (all_visible_cleared)
+		pgstat_count_page_unvis(RelationGetRelid(relation),
+								   relation->rd_rel->relisshared,
+								   page_lsn, insert_lsn);
+
 	/*
 	 * If heaptup is a private copy, release it.  Don't forget to copy t_self
 	 * back to the caller's image, too.
@@ -2398,6 +2403,11 @@ heap_multi_insert(Relation relation, TupleTableSlot **slots, int ntuples,
 
 		if (all_frozen_cleared)
 			pgstat_count_page_unfreeze(RelationGetRelid(relation),
+									   relation->rd_rel->relisshared,
+									   page_lsn, insert_lsn);
+
+		if (all_visible_cleared)
+			pgstat_count_page_unvis(RelationGetRelid(relation),
 									   relation->rd_rel->relisshared,
 									   page_lsn, insert_lsn);
 
@@ -2953,6 +2963,11 @@ l1:
 								   relation->rd_rel->relisshared,
 								   page_lsn, insert_lsn);
 
+	if (all_visible_cleared)
+		pgstat_count_page_unvis(RelationGetRelid(relation),
+								   relation->rd_rel->relisshared,
+								   page_lsn, insert_lsn);
+
 	if (old_key_tuple != NULL && old_key_copied)
 		heap_freetuple(old_key_tuple);
 
@@ -3063,7 +3078,7 @@ heap_update(Relation relation, ItemPointer otid, HeapTuple newtup,
 	bool		cleared_all_frozen_new = false;
 	XLogRecPtr	old_page_lsn = InvalidXLogRecPtr;
 	XLogRecPtr	new_page_lsn = InvalidXLogRecPtr;
-	XLogRecPtr	insert_lsn = InvalidXLogRecPtr;
+	XLogRecPtr	insert_lsn = GetInsertRecPtr();
 
 	Assert(ItemPointerIsValid(otid));
 
@@ -3113,6 +3128,8 @@ heap_update(Relation relation, ItemPointer otid, HeapTuple newtup,
 	block = ItemPointerGetBlockNumber(otid);
 	buffer = ReadBuffer(relation, block);
 	page = BufferGetPage(buffer);
+
+	old_page_lsn = PageGetLSN(page);
 
 	/*
 	 * Before locking the buffer, pin the visibility map page if it appears to
@@ -3599,6 +3616,7 @@ l2:
 		 */
 		if (PageIsAllVisible(page))
 		{
+			all_visible_cleared = true;
 			cleared_all_frozen = visibilitymap_clear(relation, block, vmbuffer,
 													 VISIBILITYMAP_ALL_FROZEN) & VISIBILITYMAP_ALL_FROZEN;
 		}
@@ -3621,24 +3639,14 @@ l2:
 				cleared_all_frozen ? XLH_LOCK_ALL_FROZEN_CLEARED : 0;
 			XLogRegisterData((char *) &xlrec, SizeOfHeapLock);
 			recptr = XLogInsert(RM_HEAP_ID, XLOG_HEAP_LOCK);
-			insert_lsn = recptr;
-			old_page_lsn = PageGetLSN(page);
+			insert_lsn = Max(recptr, insert_lsn);
 			PageSetLSN(page, recptr);
 		}
+
 
 		END_CRIT_SECTION();
 
 		LockBuffer(buffer, BUFFER_LOCK_UNLOCK);
-
-		if (cleared_all_frozen)
-		{
-			pgstat_count_page_unfreeze(RelationGetRelid(relation),
-									   relation->rd_rel->relisshared,
-									   old_page_lsn, insert_lsn);
-
-			/* Avoid double counting page unfreezes. */
-			cleared_all_frozen = false;
-		}
 
 		/*
 		 * Let the toaster do its thing, if needed.
@@ -3688,6 +3696,7 @@ l2:
 												   buffer, 0, NULL,
 												   &vmbuffer_new, &vmbuffer,
 												   0);
+				new_page_lsn = PageGetLSN(BufferGetPage(newbuf));
 				/* We're all done. */
 				break;
 			}
@@ -3877,15 +3886,12 @@ l2:
 								 all_visible_cleared,
 								 all_visible_cleared_new);
 		if (newbuf != buffer)
-		{
-			new_page_lsn = PageGetLSN(BufferGetPage(newbuf));
 			PageSetLSN(BufferGetPage(newbuf), recptr);
-		}
 
 		old_page_lsn = PageGetLSN(BufferGetPage(buffer));
 		PageSetLSN(BufferGetPage(buffer), recptr);
 
-		insert_lsn = recptr;
+		insert_lsn = Max(recptr, insert_lsn);
 	}
 
 	END_CRIT_SECTION();
@@ -3926,8 +3932,19 @@ l2:
 								   relation->rd_rel->relisshared,
 								   old_page_lsn, insert_lsn);
 
+	if (all_visible_cleared)
+		pgstat_count_page_unvis(RelationGetRelid(relation),
+									relation->rd_rel->relisshared,
+									old_page_lsn, insert_lsn);
+
 	if (newbuf != buffer && cleared_all_frozen_new)
 		pgstat_count_page_unfreeze(RelationGetRelid(relation),
+								   relation->rd_rel->relisshared,
+								   new_page_lsn, insert_lsn);
+
+	if (newbuf != buffer && all_visible_cleared_new &&
+			new_page_lsn != InvalidXLogRecPtr)
+		pgstat_count_page_unvis(RelationGetRelid(relation),
 								   relation->rd_rel->relisshared,
 								   new_page_lsn, insert_lsn);
 
@@ -4227,6 +4244,9 @@ heap_lock_tuple(Relation relation, HeapTuple tuple,
 	bool		skip_tuple_lock = false;
 	bool		have_tuple_lock = false;
 	bool		cleared_all_frozen = false;
+	bool		cleared_all_visible = false;
+
+	insert_lsn = GetInsertRecPtr();
 
 	*buffer = ReadBuffer(relation, ItemPointerGetBlockNumber(tid));
 	block = ItemPointerGetBlockNumber(tid);
@@ -4826,10 +4846,13 @@ failed:
 	/* Clear only the all-frozen bit on visibility map if needed */
 	if (PageIsAllVisible(page))
 	{
+		cleared_all_visible = true;
 		cleared_all_frozen = visibilitymap_clear(relation, block, vmbuffer,
 												 VISIBILITYMAP_ALL_FROZEN) & VISIBILITYMAP_ALL_FROZEN;
 	}
 
+
+	page_lsn = PageGetLSN(page);
 
 	MarkBufferDirty(*buffer);
 
@@ -4863,8 +4886,7 @@ failed:
 		/* we don't decode row locks atm, so no need to log the origin */
 
 		recptr = XLogInsert(RM_HEAP_ID, XLOG_HEAP_LOCK);
-		insert_lsn = recptr;
-		page_lsn = PageGetLSN(page);
+		insert_lsn = Max(recptr, insert_lsn);
 
 		PageSetLSN(page, recptr);
 	}
@@ -4894,6 +4916,10 @@ out_unlocked:
 
 	if (cleared_all_frozen)
 		pgstat_count_page_unfreeze(RelationGetRelid(relation),
+								   relation->rd_rel->relisshared,
+								   page_lsn, insert_lsn);
+	if (cleared_all_visible)
+		pgstat_count_page_unvis(RelationGetRelid(relation),
 								   relation->rd_rel->relisshared,
 								   page_lsn, insert_lsn);
 
@@ -5349,6 +5375,7 @@ heap_lock_updated_tuple_rec(Relation rel, ItemPointer tid, TransactionId xid,
 				new_xmax;
 	TransactionId priorXmax = InvalidTransactionId;
 	bool		cleared_all_frozen = false;
+	bool		cleared_all_visible = false;
 	XLogRecPtr	page_lsn = InvalidXLogRecPtr;
 	XLogRecPtr	insert_lsn = InvalidXLogRecPtr;
 	bool		pinned_desired_page;
@@ -5356,6 +5383,8 @@ heap_lock_updated_tuple_rec(Relation rel, ItemPointer tid, TransactionId xid,
 	BlockNumber block;
 
 	ItemPointerCopy(tid, &tupid);
+
+	insert_lsn = GetInsertRecPtr();
 
 	for (;;)
 	{
@@ -5380,6 +5409,7 @@ heap_lock_updated_tuple_rec(Relation rel, ItemPointer tid, TransactionId xid,
 l4:
 		CHECK_FOR_INTERRUPTS();
 
+		page_lsn = PageGetLSN(BufferGetPage(buf));
 		/*
 		 * Before locking the buffer, pin the visibility map page if it
 		 * appears to be necessary.  Since we haven't got the lock yet,
@@ -5388,6 +5418,7 @@ l4:
 		 */
 		if (PageIsAllVisible(BufferGetPage(buf)))
 		{
+			cleared_all_visible = true;
 			visibilitymap_pin(rel, block, &vmbuffer);
 			pinned_desired_page = true;
 		}
@@ -5624,8 +5655,7 @@ l4:
 			XLogRegisterData((char *) &xlrec, SizeOfHeapLockUpdated);
 
 			recptr = XLogInsert(RM_HEAP2_ID, XLOG_HEAP2_LOCK_UPDATED);
-			insert_lsn = recptr;
-			page_lsn = PageGetLSN(page);
+			insert_lsn = Max(recptr, insert_lsn);;
 
 			PageSetLSN(page, recptr);
 		}
@@ -5660,6 +5690,10 @@ out_unlocked:
 
 	if (cleared_all_frozen)
 		pgstat_count_page_unfreeze(RelationGetRelid(rel),
+								   rel->rd_rel->relisshared,
+								   page_lsn, insert_lsn);
+	if (cleared_all_visible)
+		pgstat_count_page_unvis(RelationGetRelid(rel),
 								   rel->rd_rel->relisshared,
 								   page_lsn, insert_lsn);
 

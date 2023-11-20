@@ -529,6 +529,27 @@ typedef struct PgStat_Frz
 	XLogRecPtr	min_frozen_duration_lsns;
 
 	XLogRecPtr	target_page_freeze_duration_lsns;
+
+	/*
+	 * The number of pages which were set all visible in the VM by this vacuum
+	 * which were later modified.
+	 */
+	int64		unavs;
+
+	/*
+	 * The number of pages set AV in the VM by this vacuum which were AV >= the
+	 * target freeze duration.
+	 */
+	int64		missed_freezes;
+
+	/*
+	 * The number of LSNs pages which were set all visible by this vacuum were
+	 * all visible
+	 */
+	double		sum_av_duration_lsns;
+
+	double		sum_sq_av_duration_lsns;
+
 } PgStat_Frz;
 
 typedef struct PgStat_Unfrz
@@ -756,6 +777,10 @@ extern XLogRecPtr pgstat_setup_vacuum_frz_stats(Oid tableoid, bool shared);
 
 extern void pgstat_count_page_unfreeze(Oid tableoid, bool shared,
 									   XLogRecPtr page_lsn, XLogRecPtr insert_lsn);
+
+extern void
+pgstat_count_page_unvis(Oid tableoid, bool shared,
+						   XLogRecPtr page_lsn, XLogRecPtr insert_lsn);
 
 extern float pgstat_frz_error_rate(Oid tableoid);
 
