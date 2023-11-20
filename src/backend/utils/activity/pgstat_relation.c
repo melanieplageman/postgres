@@ -986,6 +986,10 @@ pgstat_report_vacuum(Oid tableoid, bool shared, LVRelState *vacrel,
 	vacstat->max_page_age = vacrel->max_page_age;
 	vacstat->freeze_fpis = vacrel->freeze_fpis;
 
+	vacstat->pages_av = vacrel->pages_av;
+	vacstat->sum_av_page_ages = vacrel->sum_av_page_ages;
+	vacstat->sum_sq_av_page_ages = vacrel->sum_sq_av_page_ages;
+
 	/*
 	 * It is quite possible that a non-aggressive VACUUM ended up skipping
 	 * various pages, however, we'll zero the insert counter here regardless.

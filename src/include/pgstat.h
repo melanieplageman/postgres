@@ -550,6 +550,17 @@ typedef struct PgStat_Frz
 
 	double		sum_sq_av_duration_lsns;
 
+	/* number of pages set all visible by this vacuum */
+	int64		pages_av;
+
+	/*
+	 * The sum of the age of all pages set all visible by this vacuum. Where
+	 * the page age is the LSNs elapsed since the last page modification before
+	 * vacuum.
+	 */
+	double		sum_av_page_ages;
+	double		sum_sq_av_page_ages;
+
 } PgStat_Frz;
 
 typedef struct PgStat_Unfrz

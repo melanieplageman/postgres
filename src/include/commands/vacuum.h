@@ -395,6 +395,10 @@ typedef struct LVRelState
 
 	XLogRecPtr page_age_threshold;
 
+	double		sum_av_page_ages;
+	double		sum_sq_av_page_ages;
+	int64		pages_av;
+
 	/* Statistics output by us, for table */
 	double		new_rel_tuples; /* new estimated total # of tuples */
 	double		new_live_tuples;	/* new estimated total # of live tuples */
