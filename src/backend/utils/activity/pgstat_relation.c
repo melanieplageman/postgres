@@ -59,6 +59,15 @@ static XLogRecPtr target_page_freeze_duration_lsns( PgStat_StatTabEntry *tabentr
 		TimestampTz current_time,
 		XLogRecPtr current_lsn);
 
+static double *
+pick_age_samples(PgStat_Frz *vac);
+
+static double *
+pick_duration_samples(PgStat_Frz *vac, XLogRecPtr current_lsn);
+
+static void
+vac_av_regress(PgStat_StatTabEntry *tabentry, XLogRecPtr current_lsn,
+		float *b, float *m);
 
 static void vac_stats_regress(PgStat_Unfrz *unfreezes, int nunfreezes,
 		float *b, float *m);
@@ -534,6 +543,76 @@ vac_stats_regress(PgStat_Unfrz *unfreezes, int nunfreezes,
 	*b = (float) y_avg - ((*m) * x_avg);
 }
 
+static void
+vac_av_regress(PgStat_StatTabEntry *tabentry, XLogRecPtr current_lsn,
+		float *b, float *m)
+{
+	double **all_page_ages;
+	double **all_av_durs;
+	double total_page_avs = 0;
+	float x_avg;
+	float y_avg;
+	/* page_age is x and av_duration is y */
+	double x_sum = 0;
+	double y_sum = 0;
+	float m_numerator = 0;
+	float m_denom = 0;
+
+	all_page_ages = palloc(sizeof(size_t) * tabentry->frz_nbuckets_used);
+	all_av_durs = palloc(sizeof(size_t) * tabentry->frz_nbuckets_used);
+
+	for (int i = 0; i < tabentry->frz_nbuckets_used; i++)
+	{
+		PgStat_Frz *frz;
+		int frz_idx = (tabentry->frz_oldest + i) % VAC_FRZ_STATS_MAX_NBUCKETS;
+
+		frz = &tabentry->frz_buckets[frz_idx];
+		all_page_ages[i] = pick_age_samples(frz);
+		all_av_durs[i] = pick_duration_samples(frz, current_lsn);
+
+		for (int j = 0; j < frz->pages_av; j++)
+		{
+			x_sum += all_page_ages[i][j];
+			y_sum += all_av_durs[i][j];
+		}
+
+		total_page_avs += frz->pages_av;
+	}
+
+	x_avg = (float) x_sum / total_page_avs;;
+	y_avg = (float) y_sum / total_page_avs;
+
+	for (int i = 0; i < tabentry->frz_nbuckets_used; i++)
+	{
+		double *page_ages;
+		double *av_durs;
+		PgStat_Frz *frz;
+		int frz_idx = (tabentry->frz_oldest + i) % VAC_FRZ_STATS_MAX_NBUCKETS;
+
+		frz = &tabentry->frz_buckets[frz_idx];
+		page_ages = all_page_ages[i];
+		av_durs = all_av_durs[i];
+
+		for (int j = 0; j < frz->pages_av; j++)
+		{
+			m_numerator +=
+				(page_ages[j] - x_avg) * (av_durs[j] - y_avg);
+
+			m_denom += (page_ages[j] - x_avg) * (page_ages[j] - x_avg);
+		}
+
+		pfree(page_ages);
+		pfree(av_durs);
+	}
+
+	pfree(all_page_ages);
+	pfree(all_av_durs);
+
+	*m = (float) m_numerator / m_denom;
+
+	*b = (float) y_avg - ((*m) * x_avg);
+}
+
 float
 pgstat_frz_error_rate_internal(PgStat_StatTabEntry *tabentry)
 {
@@ -615,34 +694,84 @@ pgstat_frz_error_rate(Oid tableoid)
 	return pgstat_frz_error_rate_internal(tabentry);
 }
 
-/* void pick_samples(double mean, double stddev, size_t n, double *result) { */
-/* 	while (n > 0) { */
-/* 		double u1 = rand(); */
-/* 		double u2 = rand(); */
+static void
+pick_samples(double mean, double stddev, size_t n, double *result)
+{
+	/* https://en.wikipedia.org/wiki/Box%E2%80%93Muller_transform */
+	while (n > 0)
+	{
+		double u1 = rand();
+		double u2 = rand();
 
-/* 		double pi = 3.14; */
+		double pi = 3.14;
 
-/* 		double z1 = sqrt(-2 * ln(u1)) * cos(2 * pi * u2); */
-/* 		z1 = mean + stddev * z1; */
+		double z1 = sqrt(-2 * ln(u1)) * cos(2 * pi * u2);
+		z1 = mean + stddev * z1;
 
-/* 		double z2 = sqrt(-2 * ln(u1)) * sin(2 * pi * u2); */
-/* 		z2 = mean + stddev * z2; */
+		double z2 = sqrt(-2 * ln(u1)) * sin(2 * pi * u2);
+		z2 = mean + stddev * z2;
 
-/* 		result[--n] = z1; */
-/* 		result[--n] = z2; */
-/* 	} */
+		result[--n] = z1;
+		result[--n] = z2;
+	}
 
-/* 	sort(result); */
-/* } */
+	sort(result);
+}
 
-/* void */
-/* pgstat_count_page_frz() */
-/* { */
-/* 	double u1 = rand(); */
-/* 	double u2 = rand(); */
-/* 	double z1 = sqrt(-2 * ln(u1)) * cos(2 * pi * u2); */
-/* 	double z2 = sqrt(-2 * ln(u1)) * sin(2 * pi * u2); */
-/* } */
+static double *
+pick_age_samples(PgStat_Frz *vac)
+{
+	float stddev_page_age;
+	float avg_page_age;
+	double avg_page_age_sq;
+	double *page_ages;
+
+	page_ages = palloc(sizeof(double) * vac->pages_av);
+
+	avg_page_age = vac->sum_av_duration_lsns / vac->pages_av;
+
+	avg_page_age_sq = vac->sum_av_duration_lsns * vac->sum_av_duration_lsns;
+
+	stddev_page_age = ((vac->sum_sq_av_duration_lsns - avg_page_age_sq) / vac->pages_av) /
+		vac->pages_av;
+
+	pick_samples(avg_page_age, stddev_page_age, vac->pages_av, page_ages);
+
+	return page_ages;
+}
+
+static double *
+pick_duration_samples(PgStat_Frz *vac, XLogRecPtr current_lsn)
+{
+	float stddev_av_dur;
+	float avg_av_dur;
+	double avg_av_dur_sq;
+	double *av_durs;
+	XLogRecPtr filler_duration;
+
+	filler_duration = current_lsn - vac->start_lsn;
+	filler_duration = Max(filler_duration, 0);
+
+	/*
+	 * Allocate as many members as how many we set AV. Then, after sorting, for
+	 * those which have not yet been set AV, provide filler duration for them
+	 */
+	av_durs = palloc(sizeof(double) * vac->pages_av);
+
+	avg_av_dur = vac->sum_av_duration_lsns / vac->unavs;
+
+	avg_av_dur_sq = vac->sum_av_duration_lsns * vac->sum_av_duration_lsns;
+
+	stddev_av_dur = ((vac->sum_sq_av_duration_lsns - avg_av_dur_sq) / vac->unavs) /
+		vac->unavs;
+
+	pick_samples(avg_av_dur, stddev_av_dur, vac->unavs, av_durs);
+
+	for (int i = vac->unavs; i < vac->pages_av; i++)
+		av_durs[i] = filler_duration;
+
+	return av_durs;
+}
 
 /*
  * MTODO: if checksums are on, we can bail out of the loop when start lsn >
