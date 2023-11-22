@@ -304,6 +304,19 @@ typedef enum
 	VACUUM_ERRCB_PHASE_TRUNCATE,
 } VacErrPhase;
 
+
+typedef struct PgStat_Estimator
+{
+	/* Number of values in this estimator */
+	uint64 n;
+
+	/* Sum of values */
+	double s;
+
+	/* Sum of squared values */
+	double q;
+} PgStat_Estimator;
+
 typedef struct LVRelState
 {
 	/* Target heap relation and its indexes */
@@ -395,9 +408,7 @@ typedef struct LVRelState
 
 	XLogRecPtr page_age_threshold;
 
-	double		sum_av_page_ages;
-	double		sum_sq_av_page_ages;
-	int64		pages_av;
+	PgStat_Estimator estimator;
 
 	/* Statistics output by us, for table */
 	double		new_rel_tuples; /* new estimated total # of tuples */

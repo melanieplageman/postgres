@@ -21,6 +21,7 @@
 #include "utils/backend_status.h"	/* for backward compatibility */
 #include "utils/relcache.h"
 #include "utils/wait_event.h"	/* for backward compatibility */
+#include <math.h>
 
 
 /* ----------
@@ -398,6 +399,102 @@ typedef struct PgStat_StatSubEntry
 	TimestampTz stat_reset_timestamp;
 } PgStat_StatSubEntry;
 
+static inline void estimator_insert(PgStat_Estimator *estimator, double v)
+{
+	estimator->n++;
+	estimator->s += v;
+	estimator->q += pow(v, 2);
+}
+
+static inline double estimator_remove(PgStat_Estimator *estimator)
+{
+	double result;
+
+	Assert(estimator->n > 0);
+
+	result = estimator->s / estimator->n;
+
+	estimator->n--;
+	estimator->s -= result;
+	estimator->q -= pow(result, 2);
+
+	return result;
+}
+
+/* static double rand_unit_interval() */
+/* { */
+/* 	int r; */
+/* 	do */
+/* 	{ */
+/* 		r = rand(); */
+/* 	} while (r == 0 || r == RAND_MAX); */
+
+/* 	return (double) r / RAND_MAX; */
+/* } */
+
+#ifndef M_PI
+#define M_PI 3.14159265358979323846
+#endif
+
+static int qsort_double_comparator(const void *a, const void *b)
+{
+	double ra = *(const double *) a;
+	double rb = *(const double *) b;
+
+	if (ra < rb)
+		return -1;
+	if (ra > rb)
+		return 1;
+	return 0;
+}
+
+
+static inline double *estimator_sample(PgStat_Estimator *estimator, size_t n, double *result)
+{
+	double mean;
+	double variance;
+	double stddev;
+	Assert(estimator->n);
+
+	mean = estimator->s / estimator->n;
+	variance = (estimator->q - pow(estimator->s, 2) / estimator->n) / estimator->n;
+	stddev = sqrt(variance);
+
+	/*
+	 * Make a list (in result) of the numbers i / (n + 1)
+	 */
+	for (size_t i = 1; i <= n; i++)
+		result[i - 1] = (double) i / (n + 1);
+
+	/* https://en.wikipedia.org/wiki/Box%E2%80%93Muller_transform */
+	for (size_t i = 0; i < n; i += 2)
+	{
+		double u1, u2;
+		double z1, z2;
+
+		u1 = result[i];
+
+		if (i + 1 < n)
+			u2 = result[i + 1];
+		else
+			u2 = 1;
+
+		z1 = sqrt(-2 * log(u1)) * cos(2 * M_PI * u2);
+		z2 = sqrt(-2 * log(u1)) * sin(2 * M_PI * u2);
+
+		z1 = mean + stddev * z1;
+		z2 = mean + stddev * z2;
+
+		result[i] = z1;
+
+		if (i + 1 < n)
+			result[i + 1] = z2;
+	}
+
+	qsort(result, n, sizeof(double), qsort_double_comparator);
+	return result;
+}
+
 /*
  * Each PgStat_Frz is a bucket in a ring buffer containing stats from one or
  * more freeze periods, PgStat_StatTabEntry->frz_buckets. Each freeze period is
@@ -531,36 +628,13 @@ typedef struct PgStat_Frz
 	XLogRecPtr	target_page_freeze_duration_lsns;
 
 	/*
-	 * The number of pages which were set all visible in the VM by this vacuum
-	 * which were later modified.
-	 */
-	int64		unavs;
-
-	/*
 	 * The number of pages set AV in the VM by this vacuum which were AV >= the
 	 * target freeze duration.
 	 */
 	int64		missed_freezes;
 
-	/*
-	 * The number of LSNs pages which were set all visible by this vacuum were
-	 * all visible
-	 */
-	double		sum_av_duration_lsns;
-
-	double		sum_sq_av_duration_lsns;
-
-	/* number of pages set all visible by this vacuum */
-	int64		pages_av;
-
-	/*
-	 * The sum of the age of all pages set all visible by this vacuum. Where
-	 * the page age is the LSNs elapsed since the last page modification before
-	 * vacuum.
-	 */
-	double		sum_av_page_ages;
-	double		sum_sq_av_page_ages;
-
+	PgStat_Estimator av_age;
+	PgStat_Estimator av_duration;
 } PgStat_Frz;
 
 typedef struct PgStat_Unfrz

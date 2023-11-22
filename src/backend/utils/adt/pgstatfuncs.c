@@ -1531,7 +1531,7 @@ pgstat_frz_vac_lsn_gen_rate(PgStat_Frz *vacuum)
 }
 
 
-#define TABLE_VACUUM_STAT_NCOLS 23
+#define TABLE_VACUUM_STAT_NCOLS 30
 Datum
 pg_stat_get_table_vacuums(PG_FUNCTION_ARGS)
 {
@@ -1548,6 +1548,10 @@ pg_stat_get_table_vacuums(PG_FUNCTION_ARGS)
 	for (int i = 0; i < tabentry->frz_nbuckets_used; i++)
 	{
 		PgStat_Frz *frz;
+		PgStat_Estimator *age_e;
+		PgStat_Estimator *avdur_e;
+		double	age_stddev;
+		double	avdur_stddev;
 		Datum		values[TABLE_VACUUM_STAT_NCOLS] = {0};
 		bool		nulls[TABLE_VACUUM_STAT_NCOLS] = {0};
 
@@ -1556,6 +1560,9 @@ pg_stat_get_table_vacuums(PG_FUNCTION_ARGS)
 			];
 
 		Assert(frz->start_lsn != InvalidXLogRecPtr);
+
+		age_e = &frz->av_age;
+		avdur_e = &frz->av_duration;
 
 		values[0] = ObjectIdGetDatum(tableoid);
 		values[1] = Int32GetDatum(frz->count);
@@ -1615,6 +1622,35 @@ pg_stat_get_table_vacuums(PG_FUNCTION_ARGS)
 		values[21] = Int64GetDatum(frz->min_page_age);
 		values[22] = Float8GetDatum((float) frz->sum_page_age_threshold /
 				frz->count);
+
+		values[23] = Int64GetDatum(frz->missed_freezes);
+		values[24] = Int64GetDatum(age_e->n);
+		values[25] = Int64GetDatum(avdur_e->n);
+		if (age_e->n > 0)
+		{
+			int64 avg_age = age_e->s / age_e->n;
+			values[26] = Int64GetDatum(avg_age);
+			age_stddev = sqrt((age_e->q - pow(age_e->s, 2) / age_e->n) / age_e->n);
+			values[27] = Int64GetDatum(age_stddev);
+		}
+		else
+		{
+			nulls[26] = true;
+			nulls[27] = true;
+		}
+
+		if (avdur_e->n > 0)
+		{
+			int64 avg_avdur = avdur_e->s / avdur_e->n;
+			values[28] = Int64GetDatum(avg_avdur);
+			avdur_stddev = sqrt((avdur_e->q - pow(avdur_e->s, 2) / avdur_e->n) / avdur_e->n);
+			values[29] = Int64GetDatum(avdur_stddev);
+		}
+		else
+		{
+			nulls[28] = true;
+			nulls[29] = true;
+		}
 
 		tuplestore_putvalues(rsinfo->setResult, rsinfo->setDesc,
 							 values, nulls);

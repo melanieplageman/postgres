@@ -5770,9 +5770,9 @@
   proname => 'pg_stat_get_table_vacuums', prorows => '15', proretset => 't',
   provolatile => 'v', proparallel => 'r', prorettype => 'record',
   proargtypes => 'oid',
-  proallargtypes => '{oid,oid,int4,timestamptz,pg_lsn,timestamptz,pg_lsn,float8,int8,int8,float8,int8,int8,float8,int8,int8,int8,int8,int8,int8,int8,int8,int8,float8}',
-  proargmodes => '{i,o,o,o,o,o,o,o,o,o,o,o,o,o,o,o,o,o,o,o,o,o,o,o}',
-  proargnames => '{reloid,reloid,members,start_time,start_lsn,end_time,end_lsn,lsn_gen_rate,vm_page_freezes,freezes,avg_page_age_lsns,range_page_age_lsns,unfreezes,avg_frozen_duration_lsns,range_frozen_duration_lsns,early_unfreezes,npages_start,nfrozen_start,npages_end,nfrozen_end,scanned_pages,freeze_fpis,min_page_age,page_age_threshold}',
+  proallargtypes => '{oid,oid,int4,timestamptz,pg_lsn,timestamptz,pg_lsn,float8,int8,int8,float8,int8,int8,float8,int8,int8,int8,int8,int8,int8,int8,int8,int8,float8,int8,int8,int8,int8,int8,int8,int8}',
+  proargmodes => '{i,o,o,o,o,o,o,o,o,o,o,o,o,o,o,o,o,o,o,o,o,o,o,o,o,o,o,o,o,o,o}',
+  proargnames => '{reloid,reloid,members,start_time,start_lsn,end_time,end_lsn,lsn_gen_rate,vm_page_freezes,freezes,avg_page_age_lsns,range_page_age_lsns,unfreezes,avg_frozen_duration_lsns,range_frozen_duration_lsns,early_unfreezes,npages_start,nfrozen_start,npages_end,nfrozen_end,scanned_pages,freeze_fpis,min_page_age,page_age_threshold,missed_freezes,av,unav,avg_av_page_age,stddev_av_page_age,avg_av_dur,stddev_av_dur}',
   prosrc => 'pg_stat_get_table_vacuums' },
 
 { oid => '1136', descr => 'statistics: information about WAL activity',

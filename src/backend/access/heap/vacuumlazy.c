@@ -1198,9 +1198,8 @@ lazy_scan_heap(LVRelState *vacrel)
 			page_age = insert_lsn - page_lsn;
 			page_age = Max(page_age, 0);
 
-			vacrel->pages_av++;
-			vacrel->sum_av_page_ages += page_age;
-			vacrel->sum_sq_av_page_ages += (page_age * page_age);
+			/* elog(WARNING, "first pass vac set all vis. page_age: %ld", page_age); */
+			estimator_insert(&vacrel->estimator, page_age);
 		}
 	}
 
@@ -1482,10 +1481,8 @@ lazy_scan_new_or_empty(LVRelState *vacrel, Buffer buf, BlockNumber blkno,
 							  VISIBILITYMAP_ALL_VISIBLE | VISIBILITYMAP_ALL_FROZEN);
 			END_CRIT_SECTION();
 
-			vacrel->pages_av++;
-
-			vacrel->sum_av_page_ages += page_age;
-			vacrel->sum_sq_av_page_ages += (page_age * page_age);
+			/* elog(WARNING, "vac set empty page all vis. page_age: %ld", page_age); */
+			estimator_insert(&vacrel->estimator, page_age);
 
 			/* Count a page freeze since we set it in the VM. */
 			vacrel->vm_pages_frozen++;
@@ -2639,9 +2636,9 @@ lazy_vacuum_heap_page(LVRelState *vacrel, BlockNumber blkno, Buffer buffer,
 			XLogRecPtr page_age = insert_lsn - page_lsn;
 
 			page_age = Max(0, page_age);
-			vacrel->pages_av++;
-			vacrel->sum_av_page_ages += page_age;
-			vacrel->sum_sq_av_page_ages += (page_age * page_age);
+
+			/* elog(WARNING, "second pass vac set page all vis. page_age: %ld", page_age); */
+			estimator_insert(&vacrel->estimator, page_age);
 		}
 
 		/*
@@ -3625,8 +3622,10 @@ vacuum_opp_freeze(LVRelState *vacrel,
 		}
 	}
 	else if (opp_freeze_algo == 3)
+	{
 		return all_visible_all_frozen &&
 			page_age > vacrel->page_age_threshold;
+	}
 
 	return false;
 }

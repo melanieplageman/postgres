@@ -17,6 +17,8 @@
 
 #include "postgres.h"
 
+#include <math.h>
+
 #include "access/twophase_rmgr.h"
 #include "access/xact.h"
 #include "catalog/partition.h"
@@ -63,10 +65,11 @@ static double *
 pick_age_samples(PgStat_Frz *vac);
 
 static double *
-pick_duration_samples(PgStat_Frz *vac, XLogRecPtr current_lsn);
+pick_duration_samples(PgStat_Frz *vac, XLogRecPtr current_lsn, XLogRecPtr guc_lsns);
 
 static void
 vac_av_regress(PgStat_StatTabEntry *tabentry, XLogRecPtr current_lsn,
+		XLogRecPtr guc_lsns,
 		float *b, float *m);
 
 static void vac_stats_regress(PgStat_Unfrz *unfreezes, int nunfreezes,
@@ -310,12 +313,12 @@ pgstat_setup_vacuum_frz_stats(Oid tableoid, bool shared)
 	PgStat_StatTabEntry *tabentry;
 	PgStat_Frz *current;
 	XLogRecPtr	insert_lsn;
-	XLogRecPtr page_age_threshold;
+	XLogRecPtr  page_age_threshold;
 	Oid			dboid = (shared ? InvalidOid : MyDatabaseId);
-	XLogRecPtr min_page_age;
 	XLogRecPtr guc_lsns;
 	TimestampTz ts = GetCurrentTimestamp();
-	float err;
+	float b = 0;
+	float m = 0;
 
 	if (!pgstat_track_counts)
 		return 0;
@@ -332,40 +335,37 @@ pgstat_setup_vacuum_frz_stats(Oid tableoid, bool shared)
 
 	current = &tabentry->frz_buckets[tabentry->frz_current];
 
-	/*
-	 * Calculate regression model based on just ended vacuum
-	 */
-	vac_stats_regress(tabentry->unfrzs, tabentry->nunfrz_used, &current->b_sum,
-			&current->m_sum);
-
-	min_page_age = tabentry->frz_nbuckets_used <= 0 ? InvalidXLogRecPtr :
-		current->min_frz_page_age;
-
-	/* Calculate our error rate so far. */
-	err = pgstat_frz_error_rate_internal(tabentry);
-
 	/* Calculate our recent LSN generation rate */
 	guc_lsns = target_page_freeze_duration_lsns(tabentry, ts, insert_lsn);
 
 	current->target_page_freeze_duration_lsns = guc_lsns;
 
-	/*
-	 * For the first vacuum, freeze all visible and all frozen. For subsequent
-	 * vacuums, if there have been no unfreezes, decrease the threshold. If
-	 * there are few errors, use the previous threshold. Otherwise, use the
-	 * data from past unfreezes and the recent lsn generation rate to calculate
-	 * a threshold.
-	 */
+	if (tabentry->frz_nbuckets_used > 0)
+		vac_av_regress(tabentry, insert_lsn, guc_lsns, &b, &m);
+
 	if (tabentry->frz_nbuckets_used == 0)
 		page_age_threshold = 0;
-	else if (tabentry->nunfrz_used <= 2)
-		page_age_threshold = min_page_age * 0.8;
-	else if (err <= 0.1)
-		page_age_threshold = current->sum_page_age_threshold /
-			current->count;
+	else if (m == 0)
+	{
+		/* This is a horizontal line. If the line is "above" or equal to the
+		 * GUC LSNs, then freeze everything. Otherwise, freeze nothing. */
+		if (b >= guc_lsns)
+			page_age_threshold = 0;
+		else
+			page_age_threshold = InvalidXLogRecPtr - 1;
+	}
 	else
-		page_age_threshold = (guc_lsns - current->b_sum) /
-			current->m_sum;
+	{
+		double raw_threshold = (guc_lsns - b) / m;
+		page_age_threshold = Max(raw_threshold, 0);
+	}
+
+	/* if (tabentry->frz_nbuckets_used > 0) */
+	/* 	elog(WARNING, "setting up vacuum. guc_lsns: %ld. threshold: %ld. for all vacs model m: %f, b: %f.", */
+	/* 			guc_lsns, page_age_threshold, m, b); */
+	/* else */
+	/* 	elog(WARNING, "setting up first vacuum. guc_lsns: %ld. threshold: %ld.", */
+	/* 			guc_lsns, page_age_threshold); */
 
 	/*
 	 * While free buckets remain, simply use the next bucket for the next
@@ -495,6 +495,8 @@ target_page_freeze_duration_lsns( PgStat_StatTabEntry *tabentry,
 	guc_usecs = target_page_freeze_duration * USECS_PER_SEC;
 
 	guc_lsns = (XLogRecPtr) ((float) lsns_elapsed / time_elapsed) * guc_usecs;
+	/* elog(WARNING, "guc_usecs: %ld. guc_lsns: %ld. usecs elapsed: %ld. lsns elapsed: %ld", */
+	/* 		guc_usecs, guc_lsns, time_elapsed, lsns_elapsed); */
 
 	return guc_lsns;
 }
@@ -545,6 +547,7 @@ vac_stats_regress(PgStat_Unfrz *unfreezes, int nunfreezes,
 
 static void
 vac_av_regress(PgStat_StatTabEntry *tabentry, XLogRecPtr current_lsn,
+		XLogRecPtr guc_lsns,
 		float *b, float *m)
 {
 	double **all_page_ages;
@@ -558,8 +561,9 @@ vac_av_regress(PgStat_StatTabEntry *tabentry, XLogRecPtr current_lsn,
 	float m_numerator = 0;
 	float m_denom = 0;
 
-	all_page_ages = palloc(sizeof(size_t) * tabentry->frz_nbuckets_used);
-	all_av_durs = palloc(sizeof(size_t) * tabentry->frz_nbuckets_used);
+	Assert(tabentry->frz_nbuckets_used > 0);
+	all_page_ages = palloc(sizeof(double *) * tabentry->frz_nbuckets_used);
+	all_av_durs = palloc(sizeof(double *) * tabentry->frz_nbuckets_used);
 
 	for (int i = 0; i < tabentry->frz_nbuckets_used; i++)
 	{
@@ -567,20 +571,40 @@ vac_av_regress(PgStat_StatTabEntry *tabentry, XLogRecPtr current_lsn,
 		int frz_idx = (tabentry->frz_oldest + i) % VAC_FRZ_STATS_MAX_NBUCKETS;
 
 		frz = &tabentry->frz_buckets[frz_idx];
-		all_page_ages[i] = pick_age_samples(frz);
-		all_av_durs[i] = pick_duration_samples(frz, current_lsn);
 
-		for (int j = 0; j < frz->pages_av; j++)
+		if (frz->av_age.n == 0)
+			continue;
+
+		all_page_ages[i] = pick_age_samples(frz);
+		all_av_durs[i] = pick_duration_samples(frz, current_lsn, guc_lsns);
+
+		/* regression starts here */
+		for (int j = 0; j < frz->av_age.n; j++)
 		{
 			x_sum += all_page_ages[i][j];
 			y_sum += all_av_durs[i][j];
 		}
 
-		total_page_avs += frz->pages_av;
+		total_page_avs += frz->av_age.n;
 	}
 
-	x_avg = (float) x_sum / total_page_avs;;
+	x_avg = (float) x_sum / total_page_avs;
 	y_avg = (float) y_sum / total_page_avs;
+	/* elog(WARNING, "doing regression. all vacs x_avg (page_age): %f. y_avg (av dur): %f.", */
+	/* 		x_avg, y_avg); */
+
+/* 	for (int i = 0; i < tabentry->frz_nbuckets_used; i++) */
+/* 	{ */
+/* 		PgStat_Frz *frz; */
+/* 		int frz_idx = (tabentry->frz_oldest + i) % VAC_FRZ_STATS_MAX_NBUCKETS; */
+
+/* 		frz = &tabentry->frz_buckets[frz_idx]; */
+/* 		for (int j = 0; j < frz->av_age.n; j++) */
+/* 		{ */
+/* 			elog(WARNING, "generated points: x (page_age): %f. y (av dur): %f.", */
+/* 					all_page_ages[i][j], all_av_durs[i][j]); */
+/* 		} */
+/* 	} */
 
 	for (int i = 0; i < tabentry->frz_nbuckets_used; i++)
 	{
@@ -593,13 +617,20 @@ vac_av_regress(PgStat_StatTabEntry *tabentry, XLogRecPtr current_lsn,
 		page_ages = all_page_ages[i];
 		av_durs = all_av_durs[i];
 
-		for (int j = 0; j < frz->pages_av; j++)
+		/* if nothing was set AV, there is nothing to do for this vacuum */
+		if (frz->av_age.n == 0)
+			continue;
+
+		for (int j = 0; j < frz->av_age.n; j++)
 		{
 			m_numerator +=
 				(page_ages[j] - x_avg) * (av_durs[j] - y_avg);
 
 			m_denom += (page_ages[j] - x_avg) * (page_ages[j] - x_avg);
 		}
+
+		/* elog(WARNING, "this vacuum set %ld all vis. of those, %ld were unset.", */
+		/* 		frz->av_age.n, frz->av_duration.n); */
 
 		pfree(page_ages);
 		pfree(av_durs);
@@ -694,80 +725,49 @@ pgstat_frz_error_rate(Oid tableoid)
 	return pgstat_frz_error_rate_internal(tabentry);
 }
 
-static void
-pick_samples(double mean, double stddev, size_t n, double *result)
-{
-	/* https://en.wikipedia.org/wiki/Box%E2%80%93Muller_transform */
-	while (n > 0)
-	{
-		double u1 = rand();
-		double u2 = rand();
-
-		double pi = 3.14;
-
-		double z1 = sqrt(-2 * ln(u1)) * cos(2 * pi * u2);
-		z1 = mean + stddev * z1;
-
-		double z2 = sqrt(-2 * ln(u1)) * sin(2 * pi * u2);
-		z2 = mean + stddev * z2;
-
-		result[--n] = z1;
-		result[--n] = z2;
-	}
-
-	sort(result);
-}
-
 static double *
 pick_age_samples(PgStat_Frz *vac)
 {
-	float stddev_page_age;
-	float avg_page_age;
-	double avg_page_age_sq;
 	double *page_ages;
 
-	page_ages = palloc(sizeof(double) * vac->pages_av);
+	if (vac->av_age.n == 0)
+		return NULL;
 
-	avg_page_age = vac->sum_av_duration_lsns / vac->pages_av;
-
-	avg_page_age_sq = vac->sum_av_duration_lsns * vac->sum_av_duration_lsns;
-
-	stddev_page_age = ((vac->sum_sq_av_duration_lsns - avg_page_age_sq) / vac->pages_av) /
-		vac->pages_av;
-
-	pick_samples(avg_page_age, stddev_page_age, vac->pages_av, page_ages);
-
-	return page_ages;
+	page_ages = palloc(sizeof(double) * vac->av_age.n);
+	return estimator_sample(&vac->av_age, vac->av_age.n, page_ages);
 }
 
 static double *
-pick_duration_samples(PgStat_Frz *vac, XLogRecPtr current_lsn)
+pick_duration_samples(PgStat_Frz *vac, XLogRecPtr current_lsn, XLogRecPtr guc_lsns)
 {
-	float stddev_av_dur;
-	float avg_av_dur;
-	double avg_av_dur_sq;
 	double *av_durs;
 	XLogRecPtr filler_duration;
 
+	/* if there are none set all vis, there are none unset */
+	if (vac->av_age.n == 0)
+		return NULL;
+
 	filler_duration = current_lsn - vac->start_lsn;
 	filler_duration = Max(filler_duration, 0);
+	/*
+	 * If guc_lsns have not passed since this vacuum started, we will end up
+	 * never freezing. Thus we have the choice of picking the greater of
+	 * guc_lsns and filler_duration. This could have downsides in cases where
+	 * we don't want to freeze.
+	 */
+	filler_duration = Max(filler_duration, guc_lsns);
+	/* elog(WARNING, "picking av duration samples. filler_duration: %ld", filler_duration); */
 
 	/*
 	 * Allocate as many members as how many we set AV. Then, after sorting, for
 	 * those which have not yet been set AV, provide filler duration for them
 	 */
-	av_durs = palloc(sizeof(double) * vac->pages_av);
+	av_durs = palloc(sizeof(double) * vac->av_age.n);
 
-	avg_av_dur = vac->sum_av_duration_lsns / vac->unavs;
+	if (vac->av_duration.n > 0)
+		estimator_sample(&vac->av_duration, vac->av_duration.n, av_durs);
 
-	avg_av_dur_sq = vac->sum_av_duration_lsns * vac->sum_av_duration_lsns;
-
-	stddev_av_dur = ((vac->sum_sq_av_duration_lsns - avg_av_dur_sq) / vac->unavs) /
-		vac->unavs;
-
-	pick_samples(avg_av_dur, stddev_av_dur, vac->unavs, av_durs);
-
-	for (int i = vac->unavs; i < vac->pages_av; i++)
+	for (int i = vac->av_duration.n; i < vac->av_age.n; i++)
 		av_durs[i] = filler_duration;
 
 	return av_durs;
@@ -821,11 +821,7 @@ pgstat_count_page_unvis(Oid tableoid, bool shared,
 
 		page_av_duration_lsns = insert_lsn - ((frz->start_lsn + recent_lsn) / 2);
 
-		frz->unavs++;
-
-		frz->sum_av_duration_lsns += page_av_duration_lsns;
-
-		frz->sum_sq_av_duration_lsns += (page_av_duration_lsns * page_av_duration_lsns);
+		estimator_insert(&frz->av_duration, page_av_duration_lsns);
 
 		if (page_av_duration_lsns > frz->target_page_freeze_duration_lsns)
 			frz->missed_freezes++;
@@ -1065,6 +1061,8 @@ pgstat_report_vacuum(Oid tableoid, bool shared, LVRelState *vacrel,
 	TimestampTz ts;
 	XLogRecPtr	end_lsn;
 	PgStat_Frz *vacstat;
+	double variance;
+	double stddev;
 
 	if (!pgstat_track_counts)
 		return;
@@ -1115,9 +1113,13 @@ pgstat_report_vacuum(Oid tableoid, bool shared, LVRelState *vacrel,
 	vacstat->max_page_age = vacrel->max_page_age;
 	vacstat->freeze_fpis = vacrel->freeze_fpis;
 
-	vacstat->pages_av = vacrel->pages_av;
-	vacstat->sum_av_page_ages = vacrel->sum_av_page_ages;
-	vacstat->sum_sq_av_page_ages = vacrel->sum_sq_av_page_ages;
+	PgStat_Estimator *e = &vacrel->estimator;
+	variance = (e->q - pow(e->s, 2) / e->n) / e->n;
+	stddev = sqrt(variance);
+	vacstat->av_age = vacrel->estimator;
+	/* elog(WARNING, "end of vac: estimator->s: %f, estimator->n: %ld. estimator->q: %f. avg: %f. stddev: %f", */
+	/* 		vacrel->estimator.s, vacrel->estimator.n, vacrel->estimator.q, */
+	/* 		vacrel->estimator.s / vacrel->estimator.n, stddev); */
 
 	/*
 	 * It is quite possible that a non-aggressive VACUUM ended up skipping
