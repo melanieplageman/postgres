@@ -643,7 +643,7 @@ typedef struct PgStat_Unfrz
 	XLogRecPtr page_age;
 } PgStat_Unfrz;
 
-#define VAC_FRZ_STATS_MAX_NBUCKETS 20
+#define VAC_FRZ_STATS_MAX_NBUCKETS 30
 #define VAC_NUM_UNFRZ_STATS (20 * VAC_FRZ_STATS_MAX_NBUCKETS)
 typedef struct PgStat_StatTabEntry
 {

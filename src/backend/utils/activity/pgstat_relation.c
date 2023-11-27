@@ -61,12 +61,6 @@ static XLogRecPtr target_page_freeze_duration_lsns( PgStat_StatTabEntry *tabentr
 		TimestampTz current_time,
 		XLogRecPtr current_lsn);
 
-static double *
-pick_age_samples(PgStat_Frz *vac);
-
-static double *
-pick_duration_samples(PgStat_Frz *vac, XLogRecPtr current_lsn, XLogRecPtr guc_lsns);
-
 static void
 vac_av_regress(PgStat_StatTabEntry *tabentry, XLogRecPtr current_lsn,
 		XLogRecPtr guc_lsns,
@@ -584,6 +578,7 @@ vac_av_regress(PgStat_StatTabEntry *tabentry, XLogRecPtr current_lsn,
 	for (int i = 0; i < nbuckets_used; i++)
 	{
 		PgStat_Frz *frz;
+		XLogRecPtr filler_duration;
 		int frz_idx = (tabentry->frz_oldest + i) % VAC_FRZ_STATS_MAX_NBUCKETS;
 
 		frz = &tabentry->frz_buckets[frz_idx];
@@ -594,13 +589,38 @@ vac_av_regress(PgStat_StatTabEntry *tabentry, XLogRecPtr current_lsn,
 		if (nages1 == 0)
 			continue;
 
-		all_page_ages[i] = pick_age_samples(frz);
-		all_av_durs[i] = pick_duration_samples(frz, current_lsn, guc_lsns);
+		all_page_ages[i] = palloc0(sizeof(double) * frz->av_age.n);
+		estimator_sample(&frz->av_age, frz->av_age.n, all_page_ages[i]);
+
+		/*
+		* Allocate as many members as how many we set AV. Then, after sorting, for
+		* those which have not yet been set AV, provide filler duration for them
+		*/
+		all_av_durs[i] = palloc0(sizeof(double) * frz->av_age.n);
+
+		/*
+		* It's possible that av_duration.n > vac->av_age.n. TODO: explain this
+		*/
+		if (frz->av_duration.n > 0)
+			estimator_sample(&frz->av_duration, Min(frz->av_duration.n, frz->av_age.n),
+					all_av_durs[i]);
+
+		filler_duration = current_lsn - frz->start_lsn;
+		filler_duration = Max(filler_duration, 0);
+
+		/*
+		* If guc_lsns have not passed since this vacuum started, we will end up
+		* never freezing. Thus we have the choice of picking the greater of
+		* guc_lsns and filler_duration. This could have downsides in cases where
+		* we don't want to freeze.
+		*/
+		filler_duration = filler_duration + guc_lsns;
+		for (int j = frz->av_duration.n; j < frz->av_age.n; j++)
+			all_av_durs[i][j] = filler_duration;
 
 		/* regression starts here */
 		for (int j = 0; j < frz->av_age.n; j++)
 		{
-			/* elog(WARNING, "loop 1: i: %d. j: %d. page_age: %lf", i, j, all_page_ages[i][j]); */
 			x_sum += all_page_ages[i][j];
 			y_sum += all_av_durs[i][j];
 		}
@@ -632,7 +652,6 @@ vac_av_regress(PgStat_StatTabEntry *tabentry, XLogRecPtr current_lsn,
 
 		for (int j = 0; j < frz->av_age.n; j++)
 		{
-			/* elog(WARNING, "loop 2: i: %d. j: %d. page_age: %lf", i, j, all_page_ages[i][j]); */
 			m_numerator +=
 				(page_ages[j] - x_avg) * (av_durs[j] - y_avg);
 
@@ -732,55 +751,6 @@ pgstat_frz_error_rate(Oid tableoid)
 	return pgstat_frz_error_rate_internal(tabentry);
 }
 
-static double *
-pick_age_samples(PgStat_Frz *vac)
-{
-	double *page_ages;
-	Assert(vac->av_age.n > 0);
-
-	page_ages = palloc0(sizeof(double) * vac->av_age.n);
-	estimator_sample(&vac->av_age, vac->av_age.n, page_ages);
-	return page_ages;
-}
-
-static double *
-pick_duration_samples(PgStat_Frz *vac, XLogRecPtr current_lsn, XLogRecPtr guc_lsns)
-{
-	double *av_durs;
-	XLogRecPtr filler_duration;
-	uint64 ndur = vac->av_duration.n;
-
-	/* if there are none set all vis, there are none unset */
-	Assert(vac->av_age.n > 0);
-
-	filler_duration = current_lsn - vac->start_lsn;
-	filler_duration = Max(filler_duration, 0);
-	/*
-	 * If guc_lsns have not passed since this vacuum started, we will end up
-	 * never freezing. Thus we have the choice of picking the greater of
-	 * guc_lsns and filler_duration. This could have downsides in cases where
-	 * we don't want to freeze.
-	 */
-	filler_duration = filler_duration + guc_lsns;
-	/* elog(WARNING, "picking av duration samples. filler_duration: %ld", filler_duration); */
-
-	/*
-	 * Allocate as many members as how many we set AV. Then, after sorting, for
-	 * those which have not yet been set AV, provide filler duration for them
-	 */
-	av_durs = palloc0(sizeof(double) * vac->av_age.n);
-
-	/*
-	 * It's possible that av_duration.n > vac->av_age.n. TODO: explain this
-	 */
-	if (ndur > 0)
-		estimator_sample(&vac->av_duration, Min(vac->av_duration.n, vac->av_age.n), av_durs);
-
-	for (int i = vac->av_duration.n; i < vac->av_age.n; i++)
-		av_durs[i] = filler_duration;
-
-	return av_durs;
-}
 
 /*
  * MTODO: if checksums are on, we can bail out of the loop when start lsn >
