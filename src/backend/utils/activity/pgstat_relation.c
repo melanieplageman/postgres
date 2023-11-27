@@ -297,6 +297,15 @@ pgstat_combine_vacuum_stats(PgStat_Frz *next, PgStat_Frz *oldest)
 
 	next->b_sum += oldest->b_sum;
 	next->m_sum += oldest->m_sum;
+
+	next->av_age.n += oldest->av_age.n;
+	next->av_age.s += oldest->av_age.s;
+	next->av_age.q += oldest->av_age.q;
+
+	next->av_duration.n += oldest->av_duration.n;
+	next->av_duration.s += oldest->av_duration.s;
+	next->av_duration.q += oldest->av_duration.q;
+	next->missed_freezes += oldest->missed_freezes;
 }
 
 
@@ -550,6 +559,7 @@ vac_av_regress(PgStat_StatTabEntry *tabentry, XLogRecPtr current_lsn,
 		XLogRecPtr guc_lsns,
 		float *b, float *m)
 {
+	int nbuckets_used;
 	double **all_page_ages;
 	double **all_av_durs;
 	double total_page_avs = 0;
@@ -565,14 +575,19 @@ vac_av_regress(PgStat_StatTabEntry *tabentry, XLogRecPtr current_lsn,
 	all_page_ages = palloc(sizeof(double *) * tabentry->frz_nbuckets_used);
 	all_av_durs = palloc(sizeof(double *) * tabentry->frz_nbuckets_used);
 
-	for (int i = 0; i < tabentry->frz_nbuckets_used; i++)
+	nbuckets_used = tabentry->frz_nbuckets_used;
+
+	for (int i = 0; i < nbuckets_used; i++)
 	{
 		PgStat_Frz *frz;
+		int nentries;
 		int frz_idx = (tabentry->frz_oldest + i) % VAC_FRZ_STATS_MAX_NBUCKETS;
 
 		frz = &tabentry->frz_buckets[frz_idx];
 
-		if (frz->av_age.n == 0)
+		nentries = frz->av_age.n;
+
+		if (nentries == 0)
 			continue;
 
 		all_page_ages[i] = pick_age_samples(frz);
@@ -608,6 +623,7 @@ vac_av_regress(PgStat_StatTabEntry *tabentry, XLogRecPtr current_lsn,
 
 	for (int i = 0; i < tabentry->frz_nbuckets_used; i++)
 	{
+		int nentries;
 		double *page_ages;
 		double *av_durs;
 		PgStat_Frz *frz;
@@ -618,7 +634,9 @@ vac_av_regress(PgStat_StatTabEntry *tabentry, XLogRecPtr current_lsn,
 		av_durs = all_av_durs[i];
 
 		/* if nothing was set AV, there is nothing to do for this vacuum */
-		if (frz->av_age.n == 0)
+		nentries = frz->av_age.n;
+
+		if (nentries == 0)
 			continue;
 
 		for (int j = 0; j < frz->av_age.n; j++)

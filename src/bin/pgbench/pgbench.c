@@ -4933,7 +4933,7 @@ initPopulateTable(PGconn *con, const char *table, int64 base,
 	{
 		if (strcmp(table, "pgbench_accounts") != 0 ||
 			partitions == 0)
-			copy_statement_fmt = "copy %s from stdin with (freeze on)";
+			copy_statement_fmt = "copy %s from stdin";
 	}
 
 	n = pg_snprintf(copy_statement, sizeof(copy_statement), copy_statement_fmt, table);
