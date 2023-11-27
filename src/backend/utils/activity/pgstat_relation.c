@@ -570,24 +570,28 @@ vac_av_regress(PgStat_StatTabEntry *tabentry, XLogRecPtr current_lsn,
 	double y_sum = 0;
 	float m_numerator = 0;
 	float m_denom = 0;
+	int nages1;
+	int ndur1;
+	int nages2;
+	int ndur2;
 
 	Assert(tabentry->frz_nbuckets_used > 0);
-	all_page_ages = palloc(sizeof(double *) * tabentry->frz_nbuckets_used);
-	all_av_durs = palloc(sizeof(double *) * tabentry->frz_nbuckets_used);
+	all_page_ages = palloc0(sizeof(double *) * tabentry->frz_nbuckets_used);
+	all_av_durs = palloc0(sizeof(double *) * tabentry->frz_nbuckets_used);
 
 	nbuckets_used = tabentry->frz_nbuckets_used;
 
 	for (int i = 0; i < nbuckets_used; i++)
 	{
 		PgStat_Frz *frz;
-		int nentries;
 		int frz_idx = (tabentry->frz_oldest + i) % VAC_FRZ_STATS_MAX_NBUCKETS;
 
 		frz = &tabentry->frz_buckets[frz_idx];
 
-		nentries = frz->av_age.n;
+		nages1 = frz->av_age.n;
+		ndur1 = frz->av_duration.n;
 
-		if (nentries == 0)
+		if (nages1 == 0)
 			continue;
 
 		all_page_ages[i] = pick_age_samples(frz);
@@ -596,6 +600,7 @@ vac_av_regress(PgStat_StatTabEntry *tabentry, XLogRecPtr current_lsn,
 		/* regression starts here */
 		for (int j = 0; j < frz->av_age.n; j++)
 		{
+			/* elog(WARNING, "loop 1: i: %d. j: %d. page_age: %lf", i, j, all_page_ages[i][j]); */
 			x_sum += all_page_ages[i][j];
 			y_sum += all_av_durs[i][j];
 		}
@@ -605,53 +610,37 @@ vac_av_regress(PgStat_StatTabEntry *tabentry, XLogRecPtr current_lsn,
 
 	x_avg = (float) x_sum / total_page_avs;
 	y_avg = (float) y_sum / total_page_avs;
-	/* elog(WARNING, "doing regression. all vacs x_avg (page_age): %f. y_avg (av dur): %f.", */
-	/* 		x_avg, y_avg); */
 
-/* 	for (int i = 0; i < tabentry->frz_nbuckets_used; i++) */
-/* 	{ */
-/* 		PgStat_Frz *frz; */
-/* 		int frz_idx = (tabentry->frz_oldest + i) % VAC_FRZ_STATS_MAX_NBUCKETS; */
-
-/* 		frz = &tabentry->frz_buckets[frz_idx]; */
-/* 		for (int j = 0; j < frz->av_age.n; j++) */
-/* 		{ */
-/* 			elog(WARNING, "generated points: x (page_age): %f. y (av dur): %f.", */
-/* 					all_page_ages[i][j], all_av_durs[i][j]); */
-/* 		} */
-/* 	} */
-
-	for (int i = 0; i < tabentry->frz_nbuckets_used; i++)
+	for (int i = 0; i < nbuckets_used; i++)
 	{
-		int nentries;
 		double *page_ages;
 		double *av_durs;
 		PgStat_Frz *frz;
 		int frz_idx = (tabentry->frz_oldest + i) % VAC_FRZ_STATS_MAX_NBUCKETS;
 
 		frz = &tabentry->frz_buckets[frz_idx];
+
+		/* if nothing was set AV, there is nothing to do for this vacuum */
+		nages2 = frz->av_age.n;
+		ndur2 = frz->av_duration.n;
+
+		if (nages2 == 0)
+			continue;
+
 		page_ages = all_page_ages[i];
 		av_durs = all_av_durs[i];
 
-		/* if nothing was set AV, there is nothing to do for this vacuum */
-		nentries = frz->av_age.n;
-
-		if (nentries == 0)
-			continue;
-
 		for (int j = 0; j < frz->av_age.n; j++)
 		{
+			/* elog(WARNING, "loop 2: i: %d. j: %d. page_age: %lf", i, j, all_page_ages[i][j]); */
 			m_numerator +=
 				(page_ages[j] - x_avg) * (av_durs[j] - y_avg);
 
 			m_denom += (page_ages[j] - x_avg) * (page_ages[j] - x_avg);
 		}
 
-		/* elog(WARNING, "this vacuum set %ld all vis. of those, %ld were unset.", */
-		/* 		frz->av_age.n, frz->av_duration.n); */
-
-		pfree(page_ages);
-		pfree(av_durs);
+		pfree(all_page_ages[i]);
+		pfree(all_av_durs[i]);
 	}
 
 	pfree(all_page_ages);
@@ -747,12 +736,11 @@ static double *
 pick_age_samples(PgStat_Frz *vac)
 {
 	double *page_ages;
+	Assert(vac->av_age.n > 0);
 
-	if (vac->av_age.n == 0)
-		return NULL;
-
-	page_ages = palloc(sizeof(double) * vac->av_age.n);
-	return estimator_sample(&vac->av_age, vac->av_age.n, page_ages);
+	page_ages = palloc0(sizeof(double) * vac->av_age.n);
+	estimator_sample(&vac->av_age, vac->av_age.n, page_ages);
+	return page_ages;
 }
 
 static double *
@@ -760,10 +748,10 @@ pick_duration_samples(PgStat_Frz *vac, XLogRecPtr current_lsn, XLogRecPtr guc_ls
 {
 	double *av_durs;
 	XLogRecPtr filler_duration;
+	uint64 ndur = vac->av_duration.n;
 
 	/* if there are none set all vis, there are none unset */
-	if (vac->av_age.n == 0)
-		return NULL;
+	Assert(vac->av_age.n > 0);
 
 	filler_duration = current_lsn - vac->start_lsn;
 	filler_duration = Max(filler_duration, 0);
@@ -773,17 +761,20 @@ pick_duration_samples(PgStat_Frz *vac, XLogRecPtr current_lsn, XLogRecPtr guc_ls
 	 * guc_lsns and filler_duration. This could have downsides in cases where
 	 * we don't want to freeze.
 	 */
-	filler_duration = Max(filler_duration, guc_lsns);
+	filler_duration = filler_duration + guc_lsns;
 	/* elog(WARNING, "picking av duration samples. filler_duration: %ld", filler_duration); */
 
 	/*
 	 * Allocate as many members as how many we set AV. Then, after sorting, for
 	 * those which have not yet been set AV, provide filler duration for them
 	 */
-	av_durs = palloc(sizeof(double) * vac->av_age.n);
+	av_durs = palloc0(sizeof(double) * vac->av_age.n);
 
-	if (vac->av_duration.n > 0)
-		estimator_sample(&vac->av_duration, vac->av_duration.n, av_durs);
+	/*
+	 * It's possible that av_duration.n > vac->av_age.n. TODO: explain this
+	 */
+	if (ndur > 0)
+		estimator_sample(&vac->av_duration, Min(vac->av_duration.n, vac->av_age.n), av_durs);
 
 	for (int i = vac->av_duration.n; i < vac->av_age.n; i++)
 		av_durs[i] = filler_duration;

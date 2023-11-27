@@ -449,7 +449,7 @@ static int qsort_double_comparator(const void *a, const void *b)
 }
 
 
-static inline double *estimator_sample(PgStat_Estimator *estimator, size_t n, double *result)
+static inline void estimator_sample(PgStat_Estimator *estimator, size_t n, double *result)
 {
 	double mean;
 	double variance;
@@ -492,7 +492,6 @@ static inline double *estimator_sample(PgStat_Estimator *estimator, size_t n, do
 	}
 
 	qsort(result, n, sizeof(double), qsort_double_comparator);
-	return result;
 }
 
 /*
@@ -644,7 +643,7 @@ typedef struct PgStat_Unfrz
 	XLogRecPtr page_age;
 } PgStat_Unfrz;
 
-#define VAC_FRZ_STATS_MAX_NBUCKETS 15
+#define VAC_FRZ_STATS_MAX_NBUCKETS 20
 #define VAC_NUM_UNFRZ_STATS (20 * VAC_FRZ_STATS_MAX_NBUCKETS)
 typedef struct PgStat_StatTabEntry
 {

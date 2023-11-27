@@ -2426,6 +2426,7 @@ heap_multi_insert(Relation relation, TupleTableSlot **slots, int ntuples,
 			 * when HEAP_INSERT_FROZEN is specified, which intentionally
 			 * violates visibility rules.
 			 */
+			elog(WARNING, "MELANIE: not meant to happen");
 			visibilitymap_set(relation, BufferGetBlockNumber(buffer), buffer,
 							  InvalidXLogRecPtr, vmbuffer,
 							  InvalidTransactionId,
