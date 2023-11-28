@@ -512,4 +512,8 @@ extern void RestoreClientConnectionInfo(char *conninfo);
 /* in executor/nodeHash.c */
 extern size_t get_hash_memory_limit(void);
 
+
+extern bool dump_regression_stats;
+extern int dump_regression_stats_i;
+
 #endif							/* MISCADMIN_H */

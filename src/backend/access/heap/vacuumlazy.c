@@ -419,6 +419,9 @@ heap_vacuum_rel(Relation rel, VacuumParams *params,
 							vacrel->relname)));
 	}
 
+	const char *relation_name = RelationGetRelationName(rel);
+	dump_regression_stats = !strcmp(relation_name, "pgbench_history");
+
 	vacrel->page_age_threshold = pgstat_setup_vacuum_frz_stats(RelationGetRelid(rel),
 								  rel->rd_rel->relisshared);
 

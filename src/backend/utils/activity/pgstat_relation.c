@@ -363,13 +363,6 @@ pgstat_setup_vacuum_frz_stats(Oid tableoid, bool shared)
 		page_age_threshold = Max(raw_threshold, 0);
 	}
 
-	/* if (tabentry->frz_nbuckets_used > 0) */
-	/* 	elog(WARNING, "setting up vacuum. guc_lsns: %ld. threshold: %ld. for all vacs model m: %f, b: %f.", */
-	/* 			guc_lsns, page_age_threshold, m, b); */
-	/* else */
-	/* 	elog(WARNING, "setting up first vacuum. guc_lsns: %ld. threshold: %ld.", */
-	/* 			guc_lsns, page_age_threshold); */
-
 	/*
 	 * While free buckets remain, simply use the next bucket for the next
 	 * freeze period.
@@ -569,6 +562,14 @@ vac_av_regress(PgStat_StatTabEntry *tabentry, XLogRecPtr current_lsn,
 	int nages2;
 	int ndur2;
 
+	FILE *dumper;
+
+	if (dump_regression_stats) {
+		char dump_name[256];
+		sprintf(dump_name, "/tmp/regression_stats_accounts/%s", timestamptz_to_str(GetCurrentTimestamp()));
+		dumper = fopen(dump_name, "w");
+	}
+
 	Assert(tabentry->frz_nbuckets_used > 0);
 	all_page_ages = palloc0(sizeof(double *) * tabentry->frz_nbuckets_used);
 	all_av_durs = palloc0(sizeof(double *) * tabentry->frz_nbuckets_used);
@@ -623,6 +624,9 @@ vac_av_regress(PgStat_StatTabEntry *tabentry, XLogRecPtr current_lsn,
 		{
 			x_sum += all_page_ages[i][j];
 			y_sum += all_av_durs[i][j];
+
+			if (dump_regression_stats)
+				fprintf(dumper, "%lf,%lf,%ld\n", all_page_ages[i][j], all_av_durs[i][j], guc_lsns);
 		}
 
 		total_page_avs += frz->av_age.n;
@@ -668,6 +672,9 @@ vac_av_regress(PgStat_StatTabEntry *tabentry, XLogRecPtr current_lsn,
 	*m = (float) m_numerator / m_denom;
 
 	*b = (float) y_avg - ((*m) * x_avg);
+
+	if (dump_regression_stats)
+		fclose(dumper);
 }
 
 float

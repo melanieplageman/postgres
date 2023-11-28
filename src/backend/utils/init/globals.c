@@ -159,3 +159,5 @@ int64		VacuumPageDirty = 0;
 int			VacuumCostBalance = 0;	/* working state for vacuum */
 bool		VacuumCostActive = false;
 
+bool dump_regression_stats = false;
+int dump_regression_stats_i = 0;
