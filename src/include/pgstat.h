@@ -634,6 +634,8 @@ typedef struct PgStat_Frz
 
 	PgStat_Estimator av_age;
 	PgStat_Estimator av_duration;
+	double mean;
+	double stddev;
 } PgStat_Frz;
 
 typedef struct PgStat_Unfrz
@@ -856,7 +858,8 @@ extern void pgstat_report_vacuum(Oid tableoid, bool shared, LVRelState *vacrel,
 								 BlockNumber orig_rel_pages,
 								 BlockNumber new_rel_all_frozen);
 
-extern XLogRecPtr pgstat_setup_vacuum_frz_stats(Oid tableoid, bool shared);
+extern XLogRecPtr pgstat_setup_vacuum_frz_stats(Oid tableoid, bool shared,
+		const char *relname, double *mean, double *stddev);
 
 
 extern void pgstat_count_page_unfreeze(Oid tableoid, bool shared,

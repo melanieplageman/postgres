@@ -206,7 +206,7 @@ static void restore_vacuum_error_info(LVRelState *vacrel,
 
 static bool vacuum_opp_freeze(LVRelState *vacrel,
 							  int64 page_age, bool all_visible_all_frozen,
-							  bool prune_emitted_fpi);
+							  bool prune_emitted_fpi, double mean, double stddev);
 
 /*
  *	heap_vacuum_rel() -- perform VACUUM for one heap relation
@@ -420,10 +420,16 @@ heap_vacuum_rel(Relation rel, VacuumParams *params,
 	}
 
 	const char *relation_name = RelationGetRelationName(rel);
-	dump_regression_stats = !strcmp(relation_name, "pgbench_history");
+	if (!strcmp(relation_name, "pgbench_accounts") ||
+			!strcmp(relation_name, "pgbench_history") ||
+			!strcmp(relation_name, "flux"))
+		dump_regression_stats = true;
+	else
+		dump_regression_stats = false;
 
 	vacrel->page_age_threshold = pgstat_setup_vacuum_frz_stats(RelationGetRelid(rel),
-								  rel->rd_rel->relisshared);
+								  rel->rd_rel->relisshared, relation_name,
+								  &vacrel->mean, &vacrel->stddev);
 
 	/*
 	 * Allocate dead_items array memory using dead_items_alloc.  This handles
@@ -1796,7 +1802,7 @@ lazy_scan_prune(LVRelState *vacrel,
 	if (pagefrz.freeze_required || tuples_frozen == 0 ||
 		vacuum_opp_freeze(vacrel, page_age,
 						  prunestate->all_visible && prunestate->all_frozen,
-						  fpi_before != pgWalUsage.wal_fpi))
+						  fpi_before != pgWalUsage.wal_fpi, vacrel->mean, vacrel->stddev))
 	{
 		/*
 		 * We're freezing the page.  Our final NewRelfrozenXid doesn't need to
@@ -3572,7 +3578,7 @@ static bool
 vacuum_opp_freeze(LVRelState *vacrel,
 				  int64 page_age,
 				  bool all_visible_all_frozen,
-				  bool prune_emitted_fpi)
+				  bool prune_emitted_fpi, double mean, double stddev)
 {
 	if (opp_freeze_algo == 0)
 		return all_visible_all_frozen && prune_emitted_fpi;
@@ -3628,6 +3634,23 @@ vacuum_opp_freeze(LVRelState *vacrel,
 	{
 		return all_visible_all_frozen &&
 			page_age > vacrel->page_age_threshold;
+	}
+	else if (opp_freeze_algo == 4)
+	{
+		double normal;
+		double e;
+
+		/* Probability that the page is a "don't freeze" page */
+		double prob;
+
+		normal = ((double) page_age - mean) / stddev;
+		e = (1 + erf(normal / sqrt(2))) / 2;
+		prob = (double) 1 - e;
+		if (!strcmp(RelationGetRelationName(vacrel->rel), "pgbench_history"))
+			elog(WARNING, "page_age: %ld. mean: %lf. stddev: %lf. normal: %lf e: %lf. PROB: %lf",
+					page_age, mean, stddev, normal, e, prob);
+
+		return all_visible_all_frozen && prob < 0.05;
 	}
 
 	return false;

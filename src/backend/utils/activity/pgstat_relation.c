@@ -62,9 +62,10 @@ static XLogRecPtr target_page_freeze_duration_lsns( PgStat_StatTabEntry *tabentr
 		XLogRecPtr current_lsn);
 
 static void
-vac_av_regress(PgStat_StatTabEntry *tabentry, XLogRecPtr current_lsn,
+vac_av_regress(PgStat_StatTabEntry *tabentry, const char *relname,
+		XLogRecPtr current_lsn,
 		XLogRecPtr guc_lsns,
-		float *b, float *m);
+		float *b, float *m, double *mean, double *stddev);
 
 static void vac_stats_regress(PgStat_Unfrz *unfreezes, int nunfreezes,
 		float *b, float *m);
@@ -310,7 +311,8 @@ pgstat_combine_vacuum_stats(PgStat_Frz *next, PgStat_Frz *oldest)
  * before now - target_page_freeze_duration with those ending after.
  */
 XLogRecPtr
-pgstat_setup_vacuum_frz_stats(Oid tableoid, bool shared)
+pgstat_setup_vacuum_frz_stats(Oid tableoid, bool shared, const char *relname,
+		double *mean, double *stddev)
 {
 	PgStat_EntryRef *entry_ref;
 	PgStat_StatTabEntry *tabentry;
@@ -344,7 +346,8 @@ pgstat_setup_vacuum_frz_stats(Oid tableoid, bool shared)
 	current->target_page_freeze_duration_lsns = guc_lsns;
 
 	if (tabentry->frz_nbuckets_used > 0)
-		vac_av_regress(tabentry, insert_lsn, guc_lsns, &b, &m);
+		vac_av_regress(tabentry, relname, insert_lsn, guc_lsns, &b, &m,
+				mean, stddev);
 
 	if (tabentry->frz_nbuckets_used == 0)
 		page_age_threshold = 0;
@@ -425,6 +428,8 @@ pgstat_setup_vacuum_frz_stats(Oid tableoid, bool shared)
 	current->count = 1;
 	current->start_time = ts;
 	current->sum_page_age_threshold = page_age_threshold;
+	current->mean = *mean;
+	current->stddev = *stddev;
 
 	pgstat_unlock_entry(entry_ref);
 
@@ -542,13 +547,15 @@ vac_stats_regress(PgStat_Unfrz *unfreezes, int nunfreezes,
 }
 
 static void
-vac_av_regress(PgStat_StatTabEntry *tabentry, XLogRecPtr current_lsn,
+vac_av_regress(PgStat_StatTabEntry *tabentry, const char *relname,
+		XLogRecPtr current_lsn,
 		XLogRecPtr guc_lsns,
-		float *b, float *m)
+		float *b, float *m, double *mean, double *stddev)
 {
 	int nbuckets_used;
 	double **all_page_ages;
 	double **all_av_durs;
+	bool **all_unav_remains;
 	double total_page_avs = 0;
 	float x_avg;
 	float y_avg;
@@ -558,21 +565,26 @@ vac_av_regress(PgStat_StatTabEntry *tabentry, XLogRecPtr current_lsn,
 	float m_numerator = 0;
 	float m_denom = 0;
 	int nages1;
-	int ndur1;
 	int nages2;
-	int ndur2;
+	int n_unset = 0;
+	double sum_age_unset = 0;
+	double sum_sq_age_unset = 0;
+	double variance = 0;
 
 	FILE *dumper;
 
 	if (dump_regression_stats) {
 		char dump_name[256];
-		sprintf(dump_name, "/tmp/regression_stats_accounts/%s", timestamptz_to_str(GetCurrentTimestamp()));
+		sprintf(dump_name, "/tmp/regression_stats_%s/%s",
+				relname,
+				timestamptz_to_str(GetCurrentTimestamp()));
 		dumper = fopen(dump_name, "w");
 	}
 
 	Assert(tabentry->frz_nbuckets_used > 0);
 	all_page_ages = palloc0(sizeof(double *) * tabentry->frz_nbuckets_used);
 	all_av_durs = palloc0(sizeof(double *) * tabentry->frz_nbuckets_used);
+	all_unav_remains = palloc0(sizeof(bool *) * tabentry->frz_nbuckets_used);
 
 	nbuckets_used = tabentry->frz_nbuckets_used;
 
@@ -585,26 +597,34 @@ vac_av_regress(PgStat_StatTabEntry *tabentry, XLogRecPtr current_lsn,
 		frz = &tabentry->frz_buckets[frz_idx];
 
 		nages1 = frz->av_age.n;
-		ndur1 = frz->av_duration.n;
 
 		if (nages1 == 0)
 			continue;
 
 		all_page_ages[i] = palloc0(sizeof(double) * frz->av_age.n);
 		estimator_sample(&frz->av_age, frz->av_age.n, all_page_ages[i]);
-
-		/*
-		* Allocate as many members as how many we set AV. Then, after sorting, for
-		* those which have not yet been set AV, provide filler duration for them
-		*/
+		all_unav_remains[i] = palloc0(sizeof(bool) * frz->av_age.n);
+		for (int j = 0; j < frz->av_age.n; j++)
+			all_unav_remains[i][j] = false;
 		all_av_durs[i] = palloc0(sizeof(double) * frz->av_age.n);
 
-		/*
-		* It's possible that av_duration.n > vac->av_age.n. TODO: explain this
-		*/
+		/* It's possible that av_duration.n > vac->av_age.n. TODO: explain this */
 		if (frz->av_duration.n > 0)
-			estimator_sample(&frz->av_duration, Min(frz->av_duration.n, frz->av_age.n),
+		{
+			int local_n_unset = Min(frz->av_duration.n, frz->av_age.n);
+
+			estimator_sample(&frz->av_duration, local_n_unset,
 					all_av_durs[i]);
+
+			n_unset += local_n_unset;
+
+			for (int k = 0; k < local_n_unset; k++)
+			{
+				double kage = all_page_ages[i][k];
+				sum_age_unset += kage;
+				sum_sq_age_unset += pow(kage, 2);
+			}
+		}
 
 		filler_duration = current_lsn - frz->start_lsn;
 		filler_duration = Max(filler_duration, 0);
@@ -615,9 +635,11 @@ vac_av_regress(PgStat_StatTabEntry *tabentry, XLogRecPtr current_lsn,
 		* guc_lsns and filler_duration. This could have downsides in cases where
 		* we don't want to freeze.
 		*/
-		filler_duration = filler_duration + guc_lsns;
 		for (int j = frz->av_duration.n; j < frz->av_age.n; j++)
+		{
 			all_av_durs[i][j] = filler_duration;
+			all_unav_remains[i][j] = true;
+		}
 
 		/* regression starts here */
 		for (int j = 0; j < frz->av_age.n; j++)
@@ -626,7 +648,9 @@ vac_av_regress(PgStat_StatTabEntry *tabentry, XLogRecPtr current_lsn,
 			y_sum += all_av_durs[i][j];
 
 			if (dump_regression_stats)
-				fprintf(dumper, "%lf,%lf,%ld\n", all_page_ages[i][j], all_av_durs[i][j], guc_lsns);
+				fprintf(dumper, "%lf,%d,%ld\n",
+						all_page_ages[i][j],
+						all_unav_remains[i][j], guc_lsns);
 		}
 
 		total_page_avs += frz->av_age.n;
@@ -634,6 +658,13 @@ vac_av_regress(PgStat_StatTabEntry *tabentry, XLogRecPtr current_lsn,
 
 	x_avg = (float) x_sum / total_page_avs;
 	y_avg = (float) y_sum / total_page_avs;
+
+	if (n_unset > 0)
+	{
+		*mean = (double) sum_age_unset / n_unset;
+		variance = (sum_sq_age_unset - pow(sum_age_unset, 2) / n_unset) / n_unset;
+		*stddev = sqrt(variance);
+	}
 
 	for (int i = 0; i < nbuckets_used; i++)
 	{
@@ -646,7 +677,6 @@ vac_av_regress(PgStat_StatTabEntry *tabentry, XLogRecPtr current_lsn,
 
 		/* if nothing was set AV, there is nothing to do for this vacuum */
 		nages2 = frz->av_age.n;
-		ndur2 = frz->av_duration.n;
 
 		if (nages2 == 0)
 			continue;

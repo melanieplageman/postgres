@@ -408,6 +408,9 @@ typedef struct LVRelState
 
 	XLogRecPtr page_age_threshold;
 
+	double mean;
+	double stddev;
+
 	PgStat_Estimator estimator;
 
 	/* Statistics output by us, for table */
