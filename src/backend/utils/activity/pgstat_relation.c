@@ -66,6 +66,9 @@ vac_calc_nofrz_dist(PgStat_StatTabEntry *tabentry, const char *relname,
 		XLogRecPtr guc_lsns,
 		double *mean, double *stddev);
 
+static void vac_unset_estimator(PgStat_StatTabEntry *tabentry,
+		double *mean, double *stddev);
+
 /*
  * Copy stats between relations. This is used for things like REINDEX
  * CONCURRENTLY.
@@ -304,8 +307,12 @@ pgstat_setup_vacuum_frz_stats(Oid tableoid, bool shared, const char *relname,
 	current->target_page_freeze_duration_lsns = guc_lsns;
 
 	if (tabentry->frz_nbuckets_used > 0)
+	{
 		vac_calc_nofrz_dist(tabentry, relname, insert_lsn, guc_lsns,
 				&mean, &stddev);
+
+		vac_unset_estimator(tabentry, &mean, &stddev);
+	}
 
 	/*
 	 * While free buckets remain, simply use the next bucket for the next
@@ -517,6 +524,30 @@ vac_calc_nofrz_dist(PgStat_StatTabEntry *tabentry, const char *relname,
 	*stddev = sqrt((sum_sq_age_unset - pow(sum_age_unset, 2) / n_unset) / n_unset);
 }
 
+static void
+vac_unset_estimator(PgStat_StatTabEntry *tabentry, double *mean, double *stddev)
+{
+	PgStat_Estimator result = (PgStat_Estimator) {0};
+
+	for (int i = 0; i < tabentry->frz_nbuckets_used; i++)
+	{
+		PgStat_Frz *frz;
+		int frz_idx = (tabentry->frz_oldest + i) % VAC_FRZ_STATS_MAX_NBUCKETS;
+
+		frz = &tabentry->frz_buckets[frz_idx];
+
+		/* If we reach one that hasn't been initialized, we are done */
+		if (frz->start_lsn == InvalidXLogRecPtr)
+			break;
+
+		if (frz->av_duration.n == 0)
+			continue;
+
+		estimator_combine(&result, &frz->av_duration);
+	}
+
+	estimator_calculate(&result, mean, stddev);
+}
 
 /*
  * When a frozen page from a table with oid tableoid is modified, the page LSN
@@ -609,7 +640,7 @@ pgstat_count_vm_unset(Oid tableoid, bool shared,
 		vm_lsn = (frz->start_lsn + recent_lsn) / 2;
 		vm_lsn = Max(page_lsn, vm_lsn);
 
-		vm_duration_lsns = insert_lsn - vm_lsn;
+		vm_duration_lsns = insert_lsn - page_lsn;
 		vm_duration_lsns = Max(vm_duration_lsns, 0);
 
 		estimator_insert(&frz->av_duration, vm_duration_lsns);
