@@ -32,6 +32,7 @@
 #include "utils/acl.h"
 #include "utils/builtins.h"
 #include "utils/inet.h"
+#include "utils/pg_lsn.h"
 #include "utils/timestamp.h"
 
 #define UINT32_ACCESS_ONCE(var)		 ((uint32)(*((volatile uint32 *)&(var))))
@@ -107,6 +108,53 @@ PG_STAT_GET_RELENTRY_INT64(tuples_updated)
 
 /* pg_stat_get_vacuum_count */
 PG_STAT_GET_RELENTRY_INT64(vacuum_count)
+
+Datum
+pg_stat_get_page_freezes(PG_FUNCTION_ARGS)
+{
+	Oid			relid = PG_GETARG_OID(0);
+	int64		freezes = 0;
+	PgStat_StatTabEntry *tabentry;
+
+	if ((tabentry = pgstat_fetch_stat_tabentry(relid)) == NULL)
+		PG_RETURN_NULL();
+
+	for (int i = 0; i < tabentry->frz_nbuckets_used; i++)
+	{
+		PgStat_Frz *frz = &tabentry->frz_buckets[i];
+
+		if (frz->start_lsn == InvalidXLogRecPtr)
+			continue;
+
+		freezes += frz->vm_page_freezes;
+	}
+
+	PG_RETURN_INT64(freezes);
+}
+
+Datum
+pg_stat_get_page_unfreezes(PG_FUNCTION_ARGS)
+{
+	Oid			relid = PG_GETARG_OID(0);
+	int64		unfreezes = 0;
+	PgStat_StatTabEntry *tabentry;
+
+	if ((tabentry = pgstat_fetch_stat_tabentry(relid)) == NULL)
+		PG_RETURN_NULL();
+
+	for (int i = 0; i < tabentry->frz_nbuckets_used; i++)
+	{
+		PgStat_Frz *frz = &tabentry->frz_buckets[i];
+
+		if (frz->start_lsn == InvalidXLogRecPtr)
+			continue;
+
+		unfreezes += frz->af_duration.n;
+	}
+
+	PG_RETURN_INT64(unfreezes);
+}
+
 
 #define PG_STAT_GET_RELENTRY_TIMESTAMPTZ(stat)					\
 Datum															\
@@ -1445,6 +1493,193 @@ pg_stat_get_io(PG_FUNCTION_ARGS)
 
 	return (Datum) 0;
 }
+
+/*
+ * Calculate the LSN generation rate for a given freeze bucket in LSNs/second.
+ */
+static float
+pgstat_frz_vac_lsn_gen_rate(PgStat_Frz *vacuum)
+{
+	TimestampTz end_time;
+	XLogRecPtr	end_lsn;
+	int64		time_elapsed;
+	int64		lsns_elapsed;
+
+	Assert(vacuum->start_lsn != InvalidXLogRecPtr);
+	Assert(vacuum->start_time >= 0);
+
+	if (vacuum->end_lsn == InvalidXLogRecPtr)
+	{
+		/* get exact current LSN since cost isn't very important here */
+		end_lsn = GetXLogInsertRecPtr();
+		end_time = GetCurrentTimestamp();
+	}
+	else
+	{
+		end_lsn = vacuum->end_lsn;
+		end_time = vacuum->end_time;
+	}
+
+	time_elapsed = end_time - vacuum->start_time;
+	lsns_elapsed = end_lsn - vacuum->start_lsn;
+
+	/* If nothing happened during this vacuum, it is possible 0 LSNs elapsed. */
+	if (lsns_elapsed <= 0)
+		return 0;
+
+	return (float) lsns_elapsed / time_elapsed;
+}
+
+
+#define TABLE_VACUUM_STAT_NCOLS 33
+Datum
+pg_stat_get_table_vacuums(PG_FUNCTION_ARGS)
+{
+	ReturnSetInfo *rsinfo;
+	PgStat_StatTabEntry *tabentry;
+	Oid			tableoid = PG_GETARG_OID(0);
+
+	InitMaterializedSRF(fcinfo, 0);
+	rsinfo = (ReturnSetInfo *) fcinfo->resultinfo;
+
+	if ((tabentry = pgstat_fetch_stat_tabentry(tableoid)) == NULL)
+		return (Datum) 0;
+
+	for (int i = 0; i < tabentry->frz_nbuckets_used; i++)
+	{
+		PgStat_Frz *frz;
+		PgStat_Estimator *av_age;
+		PgStat_Estimator *av_dur;
+		PgStat_Estimator *af_age;
+		PgStat_Estimator *af_dur;
+		PgStat_Estimator *age;
+		Datum		values[TABLE_VACUUM_STAT_NCOLS] = {0};
+		bool		nulls[TABLE_VACUUM_STAT_NCOLS] = {0};
+
+		frz = &tabentry->frz_buckets[
+									 (tabentry->frz_oldest + i) % VAC_FRZ_STATS_MAX_NBUCKETS
+			];
+
+		Assert(frz->start_lsn != InvalidXLogRecPtr);
+
+		av_age = &frz->av_age;
+		av_dur = &frz->av_duration;
+		af_age = &frz->af_age;
+		af_dur = &frz->af_duration;
+		age = &frz->age;
+
+		values[0] = ObjectIdGetDatum(tableoid);
+		values[1] = Int32GetDatum(frz->count);
+		values[2] = TimestampTzGetDatum(frz->start_time);
+		values[3] = LSNGetDatum(frz->start_lsn);
+		values[4] = TimestampTzGetDatum(frz->end_time);
+		values[5] = LSNGetDatum(frz->end_lsn);
+		values[6] = Float8GetDatum(pgstat_frz_vac_lsn_gen_rate(frz));
+		values[7] = Int64GetDatum(frz->target_page_freeze_duration_lsns);
+
+		values[8] = Int64GetDatum(frz->vm_page_freezes);
+		/* freezes */
+		values[9] = Int64GetDatum(af_age->n);
+		/* unfreezes */
+		values[10] = Int64GetDatum(af_dur->n);
+
+		values[11] = Int64GetDatum(frz->early_unfreezes);
+		values[12] = Int64GetDatum(frz->missed_freezes);
+		/* scanned pages */
+		values[13] = Int64GetDatum(age->n);
+
+		values[14] = Int64GetDatum(frz->freeze_fpis);
+		/* all visible */
+		values[15] = Int64GetDatum(av_age->n);
+		/* unset all visible */
+		values[16] = Int64GetDatum(av_dur->n);
+
+		if (age->n > 0)
+		{
+			double avg, stddev;
+			estimator_calculate(age, &avg, &stddev);
+
+			values[17] = Float8GetDatum(avg);
+			values[18] = Float8GetDatum(stddev);
+		}
+		else
+		{
+			nulls[17] = true;
+			nulls[18] = true;
+		}
+
+		if (av_age->n > 0)
+		{
+			double avg, stddev;
+			estimator_calculate(av_age, &avg, &stddev);
+
+			values[19] = Float8GetDatum(avg);
+			values[20] = Float8GetDatum(stddev);
+		}
+		else
+		{
+			nulls[19] = true;
+			nulls[20] = true;
+		}
+
+		if (af_age->n > 0)
+		{
+			double avg, stddev;
+			estimator_calculate(af_age, &avg, &stddev);
+
+			values[21] = Float8GetDatum(avg);
+			values[22] = Float8GetDatum(stddev);
+		}
+		else
+		{
+			nulls[21] = true;
+			nulls[22] = true;
+		}
+
+		if (av_dur->n > 0)
+		{
+			double avg, stddev;
+			estimator_calculate(av_dur, &avg, &stddev);
+
+			values[23] = Float8GetDatum(avg);
+			values[24] = Float8GetDatum(stddev);
+		}
+		else
+		{
+			nulls[23] = true;
+			nulls[24] = true;
+		}
+
+		if (af_dur->n > 0)
+		{
+			double avg, stddev;
+			estimator_calculate(af_dur, &avg, &stddev);
+
+			values[25] = Float8GetDatum(avg);
+			values[26] = Float8GetDatum(stddev);
+		}
+		else
+		{
+			nulls[25] = true;
+			nulls[26] = true;
+		}
+
+
+		values[27] = Int64GetDatum(frz->relsize_start);
+		values[28] = Int64GetDatum(frz->frozen_pages_start);
+		values[29] = Int64GetDatum(frz->relsize_end);
+		values[30] = Int64GetDatum(frz->frozen_pages_end);
+
+		values[31] = Float8GetDatum(frz->mean);
+		values[32] = Float8GetDatum(frz->stddev);
+
+		tuplestore_putvalues(rsinfo->setResult, rsinfo->setDesc,
+							 values, nulls);
+	}
+
+	return (Datum) 0;
+}
+
 
 /*
  * Returns statistics of WAL activity
