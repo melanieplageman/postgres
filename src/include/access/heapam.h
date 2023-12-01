@@ -196,6 +196,11 @@ typedef struct HeapPageFreeze
  */
 typedef struct PruneResult
 {
+	/*
+	 * Page LSN prior to pruning, regardless of whether or not the page was
+	 * pruned. This is used by freeze logic.
+	 */
+	XLogRecPtr	page_lsn;
 	int			ndeleted;		/* Number of tuples deleted from the page */
 	int			nnewlpdead;		/* Number of newly LP_DEAD items */
 

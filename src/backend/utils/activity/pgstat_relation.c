@@ -17,10 +17,14 @@
 
 #include "postgres.h"
 
+#include <math.h>
+
 #include "access/twophase_rmgr.h"
+#include "access/visibilitymapdefs.h"
 #include "access/xact.h"
 #include "catalog/partition.h"
 #include "postmaster/autovacuum.h"
+#include "utils/builtins.h"
 #include "utils/memutils.h"
 #include "utils/pgstat_internal.h"
 #include "utils/rel.h"
@@ -50,6 +54,17 @@ static void ensure_tabstat_xact_level(PgStat_TableStatus *pgstat_info);
 static void save_truncdrop_counters(PgStat_TableXactStatus *trans, bool is_drop);
 static void restore_truncdrop_counters(PgStat_TableXactStatus *trans);
 
+static void pgstat_combine_vacuum_stats(PgStat_Frz *next, PgStat_Frz *oldest);
+
+static XLogRecPtr target_page_freeze_duration_lsns( PgStat_StatTabEntry *tabentry,
+		TimestampTz current_time,
+		XLogRecPtr current_lsn);
+
+static void
+vac_calc_nofrz_dist(PgStat_StatTabEntry *tabentry, const char *relname,
+		XLogRecPtr current_lsn,
+		XLogRecPtr guc_lsns,
+		double *mean, double *stddev);
 
 /*
  * Copy stats between relations. This is used for things like REINDEX
@@ -206,6 +221,435 @@ pgstat_drop_relation(Relation rel)
 }
 
 /*
+ * Given two adjacent PgStat_Frz, combine the data from the older PgStat_Frz
+ * into the newer one. This is used when PgStat_StatTabEntry has filled and we
+ * need to free up a spot for an imminent vacuum.
+ */
+static void
+pgstat_combine_vacuum_stats(PgStat_Frz *next, PgStat_Frz *oldest)
+{
+	next->start_lsn = oldest->start_lsn;
+	next->start_time = oldest->start_time;
+
+	next->count = oldest->count + 1;
+	// TODO: I left the target_page_freeze_duration_lsns to be the most recent
+	// calculated one. don't think that is right. same with mean and stddev
+
+
+	next->vm_page_freezes += oldest->vm_page_freezes;
+	next->early_unfreezes += oldest->early_unfreezes;
+
+	/*
+	 * Though the total number of pages (and frozen pages) in the relation at
+	 * the beginning and end of vacuum does not mean anything on its own when
+	 * combined across entries, we use these numbers to calculate ratios, so
+	 * we still must sum them.
+	 */
+	next->frozen_pages_end += oldest->frozen_pages_end;
+	next->frozen_pages_start += oldest->frozen_pages_start;
+
+	next->relsize_end += oldest->relsize_end;
+	next->relsize_start += oldest->relsize_start;
+
+	next->freeze_fpis += oldest->freeze_fpis;
+
+	estimator_combine(&next->av_age, &oldest->av_age);
+	estimator_combine(&next->av_duration, &oldest->av_duration);
+	estimator_combine(&next->af_age, &oldest->af_age);
+	estimator_combine(&next->af_duration, &oldest->af_duration);
+	estimator_combine(&next->age, &oldest->age);
+
+	next->missed_freezes += oldest->missed_freezes;
+}
+
+
+/*
+ * At the beginning of a vacuum, set up a PgStat_Frz. If there are no free
+ * buckets in PgStat_StatTabEntry->frz_buckets, combine two PgStat_Frz entries
+ * into a single bucket -- being mindful not to combine PgStat_Frz ending
+ * before now - target_page_freeze_duration with those ending after.
+ */
+void
+pgstat_setup_vacuum_frz_stats(Oid tableoid, bool shared, const char *relname,
+		PgStat_Frz *target)
+{
+	PgStat_EntryRef *entry_ref;
+	PgStat_StatTabEntry *tabentry;
+	PgStat_Frz *current;
+	XLogRecPtr	insert_lsn;
+	Oid			dboid = (shared ? InvalidOid : MyDatabaseId);
+	XLogRecPtr guc_lsns;
+	double mean;
+	double stddev;
+	TimestampTz ts = GetCurrentTimestamp();
+
+	if (!pgstat_track_counts)
+		return;
+
+	/* Use exact (not approximate) insert LSN at vacuum start/end */
+	insert_lsn = GetXLogInsertRecPtr();
+
+	entry_ref = pgstat_get_entry_ref_locked(PGSTAT_KIND_RELATION,
+											dboid, tableoid, false);
+
+	Assert(entry_ref != NULL && entry_ref->shared_stats != NULL);
+
+	tabentry = &((PgStatShared_Relation *) entry_ref->shared_stats)->stats;
+
+	current = &tabentry->frz_buckets[tabentry->frz_current];
+
+	/* Calculate our recent LSN generation rate */
+	guc_lsns = target_page_freeze_duration_lsns(tabentry, ts, insert_lsn);
+
+	current->target_page_freeze_duration_lsns = guc_lsns;
+
+	if (tabentry->frz_nbuckets_used > 0)
+		vac_calc_nofrz_dist(tabentry, relname, insert_lsn, guc_lsns,
+				&mean, &stddev);
+
+	/*
+	 * While free buckets remain, simply use the next bucket for the next
+	 * freeze period.
+	 */
+	if (tabentry->frz_nbuckets_used < VAC_FRZ_STATS_MAX_NBUCKETS)
+	{
+		tabentry->frz_current = tabentry->frz_nbuckets_used;
+		tabentry->frz_nbuckets_used++;
+	}
+	else
+	{
+		PgStat_Frz *oldest;
+		PgStat_Frz *next;
+		int			next_idx;
+		TimestampTz cutoff;
+
+		/*
+		 * We want pages to stay frozen for at least
+		 * target_page_freeze_duration. If they are unfrozen before that, it
+		 * is an early unfreeze. We want all earlier unfreezes to be correctly
+		 * attributed to a vacuum. So, don't combine vacuums which ended
+		 * before the cutoff with those that ended after. cutoff is how long
+		 * ago a pages would be allowed to have been unfrozen to not be
+		 * considered an early unfreeze.
+		 */
+		cutoff = ts - (target_page_freeze_duration * USECS_PER_SEC);
+
+		next_idx = (tabentry->frz_oldest + 1) % VAC_FRZ_STATS_MAX_NBUCKETS;
+
+		oldest = &tabentry->frz_buckets[tabentry->frz_oldest];
+		next = &tabentry->frz_buckets[next_idx];
+
+		/*
+		 * If oldest is old enough but next is not old enough, we can't just
+		 * combine them. instead combine next and next next, then copy oldest
+		 * into next.
+		 */
+		if (oldest->end_time < cutoff && next->end_time > cutoff)
+		{
+			int			next_next_idx = (next_idx + 1) % VAC_FRZ_STATS_MAX_NBUCKETS;
+			PgStat_Frz *next_next = &tabentry->frz_buckets[next_next_idx];
+
+			pgstat_combine_vacuum_stats(next_next, next);
+
+			memcpy(next, oldest, sizeof(PgStat_Frz));
+		}
+		else
+			pgstat_combine_vacuum_stats(next, oldest);
+
+		tabentry->frz_current = tabentry->frz_oldest;
+		tabentry->frz_oldest = next_idx;
+	}
+
+	Assert(tabentry->frz_current < VAC_FRZ_STATS_MAX_NBUCKETS);
+	Assert(tabentry->frz_oldest < VAC_FRZ_STATS_MAX_NBUCKETS);
+
+	current = &tabentry->frz_buckets[tabentry->frz_current];
+	memset(current, 0, sizeof(PgStat_Frz));
+	current->start_lsn = insert_lsn;
+	current->count = 1;
+	current->start_time = ts;
+	current->mean = mean;
+	current->stddev = stddev;
+	current->target_page_freeze_duration_lsns = guc_lsns;
+
+	pgstat_unlock_entry(entry_ref);
+
+	memcpy(target, current, sizeof(PgStat_Frz));
+
+	/*
+	 * Flush IO stats at the beginning of the vacuum after setting the start
+	 * time and start LSN for this vacuum. This ensures that pages that are
+	 * unfrozen before the end of the vacuum are still attributed as an
+	 * unfreeze to that vacuum.
+	 */
+	pgstat_flush_io(false);
+
+	return;
+}
+
+/*
+ * The LSN generation rate in LSNs/microsecond starting from either database
+ * startup time or the beginning of the previous vacuum and spanning to current
+ * time.
+ */
+static XLogRecPtr
+target_page_freeze_duration_lsns( PgStat_StatTabEntry *tabentry,
+		TimestampTz current_time,
+		XLogRecPtr current_lsn)
+{
+	PgStat_Frz *previous;
+	int previous_idx;
+
+	TimestampTz start_time;
+	XLogRecPtr start_lsn;
+	XLogRecPtr guc_lsns;
+
+	int64 guc_usecs;
+
+	int64		time_elapsed;
+	int64		lsns_elapsed;
+
+	if (tabentry->frz_nbuckets_used <= 1)
+	{
+		start_time = PgStartTime;
+		start_lsn = PgStartLSN;
+	}
+	else
+	{
+		Assert(tabentry->frz_current >= 0);
+		if (tabentry->frz_current == 0)
+			previous_idx = VAC_FRZ_STATS_MAX_NBUCKETS - 1;
+		else
+			previous_idx = tabentry->frz_current - 1;
+
+		previous = &tabentry->frz_buckets[previous_idx];
+
+		/* Previous must be a completed freeze bucket */
+		Assert(previous->start_lsn != InvalidXLogRecPtr &&
+				previous->end_lsn != InvalidXLogRecPtr);
+
+		start_time = previous->start_time;
+		start_lsn = previous->start_lsn;
+	}
+
+	time_elapsed = current_time - start_time;
+	lsns_elapsed = current_lsn - start_lsn;
+
+	/* time_elapsed is in usecs so convert guc */
+	guc_usecs = target_page_freeze_duration * USECS_PER_SEC;
+
+	guc_lsns = (XLogRecPtr) ((float) lsns_elapsed / time_elapsed) * guc_usecs;
+
+	return guc_lsns;
+}
+
+
+static void
+vac_calc_nofrz_dist(PgStat_StatTabEntry *tabentry, const char *relname,
+		XLogRecPtr current_lsn,
+		XLogRecPtr guc_lsns,
+		double *mean, double *stddev)
+{
+	int n_unset = 0;
+	double sum_age_unset = 0;
+	double sum_sq_age_unset = 0;
+
+	FILE *dumper;
+
+	if (dump_regression_stats) {
+		char dump_name[256];
+		sprintf(dump_name, "/tmp/regression_stats_%s/%s",
+				relname,
+				timestamptz_to_str(GetCurrentTimestamp()));
+		dumper = fopen(dump_name, "w");
+	}
+
+	Assert(tabentry->frz_nbuckets_used > 0);
+
+	for (int i = 0; i < tabentry->frz_nbuckets_used; i++)
+	{
+		PgStat_Frz *frz;
+		double *page_ages;
+		int frz_idx = (tabentry->frz_oldest + i) % VAC_FRZ_STATS_MAX_NBUCKETS;
+
+		frz = &tabentry->frz_buckets[frz_idx];
+
+		/* If we reach one that hasn't been initialized, we are done */
+		if (frz->start_lsn == InvalidXLogRecPtr)
+			break;
+
+		if (frz->av_age.n == 0)
+			continue;
+
+		/* It's possible that av_duration.n > vac->av_age.n. TODO: explain this */
+		n_unset += Min(frz->av_duration.n, frz->av_age.n);
+
+		page_ages = palloc0(sizeof(double) * frz->av_age.n);
+		estimator_sample(&frz->av_age, frz->av_age.n, page_ages);
+
+		for (int j = 0; j < frz->av_duration.n; j++)
+		{
+			double kage = page_ages[j];
+			sum_age_unset += kage;
+			sum_sq_age_unset += pow(kage, 2);
+		}
+
+		for (int j = 0; j < frz->av_age.n; j++)
+		{
+			bool remain = j >= frz->av_duration.n;
+
+			if (dump_regression_stats)
+				fprintf(dumper, "%lf,%d,%ld\n",
+						page_ages[j],
+						remain, guc_lsns);
+		}
+
+		pfree(page_ages);
+	}
+
+	if (dump_regression_stats)
+		fclose(dumper);
+
+	if (n_unset == 0)
+		return;
+
+	*mean = (double) sum_age_unset / n_unset;
+	*stddev = sqrt((sum_sq_age_unset - pow(sum_age_unset, 2) / n_unset) / n_unset);
+}
+
+
+/*
+ * When a frozen page from a table with oid tableoid is modified, the page LSN
+ * before modification is passed into this function. This LSN is used to
+ * identify which bucket contains stats from the freeze period in which this
+ * page was frozen. Then that bucket's unfreeze counter incremented. If the
+ * page did not stay frozen for target_page_freeze_duration amount of time, it
+ * is also counted as an early unfreeze.
+ *
+ * MTODO: instead of accessing the table in shared memory, this should be
+ * cached locally and refetched when counting an unfreeze which is newer than
+ * any of its local recorded freeze periods.
+ * MTODO: if checksums are on, we can bail out of the loop when start lsn >
+ * page_lsn and use the page_lsn to calculate the all visible/frozen duration
+ * for the page.
+ */
+void
+pgstat_count_vm_unset(Oid tableoid, bool shared,
+						   XLogRecPtr page_lsn, XLogRecPtr insert_lsn,
+						   uint8 old_vmbits)
+{
+	Oid			dboid = (shared ? InvalidOid : MyDatabaseId);
+	PgStat_EntryRef *entry_ref;
+	PgStat_StatTabEntry *tabentry;
+
+	if (!pgstat_track_counts)
+		return;
+
+	/*
+	 * Can't be all frozen without being all visible and we shouldn't call this
+	 * function if all bits were unset
+	 */
+	Assert(old_vmbits & VISIBILITYMAP_ALL_VISIBLE);
+
+	entry_ref = pgstat_get_entry_ref_locked(PGSTAT_KIND_RELATION,
+											dboid, tableoid, false);
+
+	tabentry = &((PgStatShared_Relation *) entry_ref->shared_stats)->stats;
+
+	/*
+	 * Loop through the freeze stats stored in the ring, starting with the
+	 * oldest. By starting with the oldest, and since they are in order, we
+	 * know that we will run into the bucket containing the period in which
+	 * our page was frozen.
+	 */
+	for (int i = 0; i < tabentry->frz_nbuckets_used; i++)
+	{
+		PgStat_Frz *frz;
+		XLogRecPtr	vm_duration_lsns;
+		XLogRecPtr	recent_lsn;
+		XLogRecPtr	vm_lsn;
+		int frz_idx = (tabentry->frz_oldest + i) % VAC_FRZ_STATS_MAX_NBUCKETS;
+
+		frz = &tabentry->frz_buckets[frz_idx];
+
+		/* no entry should have been added without a start lsn */
+		Assert(frz->start_lsn != InvalidXLogRecPtr);
+
+		/*
+		 * If this is a past sample (not a current, unfinished sample) and it
+		 * ended before our page was frozen, we know our page was not frozen
+		 * by this sample.
+		 */
+		if (frz->end_lsn != InvalidXLogRecPtr && frz->end_lsn < page_lsn)
+			continue;
+
+		/* We've found the bucket to which this page LSN belongs.*/
+
+		/*
+		 * If the page was marked frozen in the VM its page LSN is more likely
+		 * to be when the page was set frozen in the VM because we often freeze
+		 * tuples then mark the page frozen in the visibility map. This is not
+		 * guaranteed, however. If the data page was not modified or if the
+		 * page was only marked all visible in the visibility map (and not all
+		 * frozen and checksums are not on), the page LSN will be from the data
+		 * page's most recent modification which could be substantially before
+		 * it is marked all visible in the VM. In those cases, we can estimate
+		 * a value.
+		 * If we use the larger of the page LSN and estimated value, this will
+		 * be the right value if we did modify the page and make it all frozen.
+		 * We know the page was set all visible (and potentially all frozen)
+		 * sometime between the start and end of this vacuum. Try using a value
+		 * halfway in between
+		 */
+		if (frz->end_lsn == InvalidXLogRecPtr)
+			recent_lsn = insert_lsn;
+		else
+			recent_lsn = frz->end_lsn;
+
+		vm_lsn = (frz->start_lsn + recent_lsn) / 2;
+		vm_lsn = Max(page_lsn, vm_lsn);
+
+		vm_duration_lsns = insert_lsn - vm_lsn;
+		vm_duration_lsns = Max(vm_duration_lsns, 0);
+
+		estimator_insert(&frz->av_duration, vm_duration_lsns);
+
+		if (old_vmbits & VISIBILITYMAP_ALL_FROZEN)
+		{
+			estimator_insert(&frz->af_duration, vm_duration_lsns);
+
+			/*
+			* If the page stayed frozen less than target page freeze duration, it
+			* is an early unfreeze.
+			*/
+			if (vm_duration_lsns < frz->target_page_freeze_duration_lsns)
+				frz->early_unfreezes++;
+		}
+		else
+		{
+			/*
+			 * If the page wasn't frozen but it stayed all visible for longer
+			 * than target page freeze duration, we missed an opportunity to
+			 * freeze the page.
+			 */
+			if (vm_duration_lsns >= frz->target_page_freeze_duration_lsns)
+				frz->missed_freezes++;
+		}
+
+		break;
+	}
+
+	/*
+	 * If the page is older than any of our currently tracked vacuums, we
+	 * aren't going to count it. We are only concerned with the efficacy of
+	 * our more recent vacuums. If a very old page is being modified, that is
+	 * fine anyway.
+	 */
+	pgstat_unlock_entry(entry_ref);
+}
+
+
+/*
  * Report that the table was just vacuumed and flush IO statistics.
  */
 void
@@ -267,6 +711,36 @@ pgstat_report_vacuum(Oid tableoid, bool shared,
 	 */
 	pgstat_flush_io(false);
 }
+
+void
+pgstat_report_heap_vacfrz(Oid tableoid, bool shared, PgStat_Frz *source)
+{
+	PgStat_EntryRef *entry_ref;
+	PgStat_Frz *target;
+	PgStat_StatTabEntry *tabentry;
+	Oid			dboid = (shared ? InvalidOid : MyDatabaseId);
+
+	if (!pgstat_track_counts)
+		return;
+
+	source->end_time = GetCurrentTimestamp();
+
+	/* Don't use an approximate insert LSN for vacuum start and end */
+	source->end_lsn = GetXLogInsertRecPtr();
+
+	/* block acquiring lock for the same reason as pgstat_report_autovac() */
+	entry_ref = pgstat_get_entry_ref_locked(PGSTAT_KIND_RELATION,
+											dboid, tableoid, false);
+
+	tabentry = &((PgStatShared_Relation *) entry_ref->shared_stats)->stats;
+
+	target = &tabentry->frz_buckets[tabentry->frz_current];
+
+	memcpy(target, source, sizeof(PgStat_Frz));
+
+	pgstat_unlock_entry(entry_ref);
+}
+
 
 /*
  * Report that the table was just analyzed and flush IO statistics.

@@ -210,6 +210,7 @@ typedef struct LVRelState
 	int64		live_tuples;	/* # live tuples remaining */
 	int64		recently_dead_tuples;	/* # dead, but not yet removable */
 	int64		missed_dead_tuples; /* # removable, but not removed */
+	PgStat_Frz frz;
 } LVRelState;
 
 /*
@@ -258,7 +259,8 @@ static void lazy_vacuum(LVRelState *vacrel);
 static bool lazy_vacuum_all_indexes(LVRelState *vacrel);
 static void lazy_vacuum_heap_rel(LVRelState *vacrel);
 static int	lazy_vacuum_heap_page(LVRelState *vacrel, BlockNumber blkno,
-								  Buffer buffer, int index, Buffer vmbuffer);
+								  Buffer buffer, int index, Buffer vmbuffer,
+								  XLogRecPtr orig_page_lsn);
 static bool lazy_check_wraparound_failsafe(LVRelState *vacrel);
 static void lazy_cleanup_all_indexes(LVRelState *vacrel);
 static IndexBulkDeleteResult *lazy_vacuum_one_index(Relation indrel,
@@ -287,6 +289,9 @@ static void update_vacuum_error_info(LVRelState *vacrel,
 static void restore_vacuum_error_info(LVRelState *vacrel,
 									  const LVSavedErrInfo *saved_vacrel);
 
+static bool vacuum_opp_freeze(LVRelState *vacrel,
+							  int64 page_age, bool all_visible_all_frozen,
+							  bool prune_emitted_fpi, double mean, double stddev);
 
 /*
  *	heap_vacuum_rel() -- perform VACUUM for one heap relation
@@ -311,7 +316,8 @@ heap_vacuum_rel(Relation rel, VacuumParams *params,
 				minmulti_updated;
 	BlockNumber orig_rel_pages,
 				new_rel_pages,
-				new_rel_allvisible;
+				new_rel_allvisible,
+				new_rel_allfrozen;
 	PGRUsage	ru0;
 	TimestampTz starttime = 0;
 	PgStat_Counter startreadtime = 0,
@@ -322,6 +328,7 @@ heap_vacuum_rel(Relation rel, VacuumParams *params,
 				StartPageDirty = VacuumPageDirty;
 	ErrorContextCallback errcallback;
 	char	  **indnames = NULL;
+	const char *relation_name = NULL;
 
 	verbose = (params->options & VACOPT_VERBOSE) != 0;
 	instrument = (verbose || (IsAutoVacuumWorkerProcess() &&
@@ -489,6 +496,18 @@ heap_vacuum_rel(Relation rel, VacuumParams *params,
 							vacrel->relname)));
 	}
 
+	relation_name = RelationGetRelationName(rel);
+	if (!strcmp(relation_name, "pgbench_accounts") ||
+			!strcmp(relation_name, "pgbench_history") ||
+			!strcmp(relation_name, "flux"))
+		dump_regression_stats = true;
+	else
+		dump_regression_stats = false;
+
+	pgstat_setup_vacuum_frz_stats(RelationGetRelid(rel),
+								  rel->rd_rel->relisshared, relation_name,
+								  &vacrel->frz);
+
 	/*
 	 * Allocate dead_items array memory using dead_items_alloc.  This handles
 	 * parallel VACUUM initialization as part of allocating shared memory
@@ -567,9 +586,12 @@ heap_vacuum_rel(Relation rel, VacuumParams *params,
 	 * pg_class.relpages to
 	 */
 	new_rel_pages = vacrel->rel_pages;	/* After possible rel truncation */
-	visibilitymap_count(rel, &new_rel_allvisible, NULL);
+	visibilitymap_count(rel, &new_rel_allvisible, &new_rel_allfrozen);
 	if (new_rel_allvisible > new_rel_pages)
 		new_rel_allvisible = new_rel_pages;
+
+	if (new_rel_allfrozen > new_rel_pages)
+		new_rel_allfrozen = new_rel_pages;
 
 	/*
 	 * Now actually update rel's pg_class entry.
@@ -598,6 +620,15 @@ heap_vacuum_rel(Relation rel, VacuumParams *params,
 						 Max(vacrel->new_live_tuples, 0),
 						 vacrel->recently_dead_tuples +
 						 vacrel->missed_dead_tuples);
+
+	vacrel->frz.relsize_end = new_rel_pages;
+	vacrel->frz.relsize_start = orig_rel_pages;
+	vacrel->frz.frozen_pages_end = new_rel_allfrozen;
+
+	pgstat_report_heap_vacfrz(RelationGetRelid(rel),
+			rel->rd_rel->relisshared,
+			&vacrel->frz);
+
 	pgstat_progress_end_command();
 
 	if (instrument)
@@ -838,6 +869,7 @@ lazy_scan_heap(LVRelState *vacrel)
 		PROGRESS_VACUUM_MAX_DEAD_TUPLES
 	};
 	int64		initprog_val[3];
+	XLogRecPtr page_age = InvalidXLogRecPtr;
 
 	/* Report that we're scanning the heap, advertising total # of blocks */
 	initprog_val[0] = PROGRESS_VACUUM_PHASE_SCAN_HEAP;
@@ -855,6 +887,9 @@ lazy_scan_heap(LVRelState *vacrel)
 		Page		page;
 		bool		all_visible_according_to_vm;
 		LVPagePruneState prunestate;
+		XLogRecPtr page_lsn = InvalidXLogRecPtr;
+		XLogRecPtr insert_lsn = GetInsertRecPtr();
+		bool		set_all_vis = false;
 
 		if (blkno == next_unskippable_block)
 		{
@@ -957,6 +992,7 @@ lazy_scan_heap(LVRelState *vacrel)
 		buf = ReadBufferExtended(vacrel->rel, MAIN_FORKNUM, blkno, RBM_NORMAL,
 								 vacrel->bstrategy);
 		page = BufferGetPage(buf);
+		page_lsn = PageGetLSN(page);
 		if (!ConditionalLockBufferForCleanup(buf))
 		{
 			bool		hastup,
@@ -1041,7 +1077,7 @@ lazy_scan_heap(LVRelState *vacrel)
 			{
 				Size		freespace;
 
-				lazy_vacuum_heap_page(vacrel, blkno, buf, 0, vmbuffer);
+				lazy_vacuum_heap_page(vacrel, blkno, buf, 0, vmbuffer, page_lsn);
 
 				/* Forget the LP_DEAD items that we just vacuumed */
 				dead_items->num_items = 0;
@@ -1091,6 +1127,7 @@ lazy_scan_heap(LVRelState *vacrel)
 		if (!all_visible_according_to_vm && prunestate.all_visible)
 		{
 			uint8		flags = VISIBILITYMAP_ALL_VISIBLE;
+			uint8		previous_flags;
 
 			if (prunestate.all_frozen)
 			{
@@ -1113,9 +1150,21 @@ lazy_scan_heap(LVRelState *vacrel)
 			 */
 			PageSetAllVisible(page);
 			MarkBufferDirty(buf);
-			visibilitymap_set(vacrel->rel, blkno, buf, InvalidXLogRecPtr,
-							  vmbuffer, prunestate.visibility_cutoff_xid,
-							  flags);
+			previous_flags = visibilitymap_set(vacrel->rel, blkno, buf, InvalidXLogRecPtr,
+											   vmbuffer, prunestate.visibility_cutoff_xid,
+											   flags);
+
+			if (!(previous_flags & VISIBILITYMAP_ALL_VISIBLE))
+				set_all_vis = true;
+
+			/*
+			 * If we newly set all frozen here, count it. Don't worry about
+			 * updating page age statistics since we are not actually
+			 * modifying the tuples on the page.
+			 */
+			if (prunestate.all_frozen && !PageIsEmpty(page) &&
+				!(previous_flags & VISIBILITYMAP_ALL_FROZEN))
+				vacrel->frz.vm_page_freezes++;
 		}
 
 		/*
@@ -1129,6 +1178,13 @@ lazy_scan_heap(LVRelState *vacrel)
 		{
 			elog(WARNING, "page is not marked all-visible but visibility map bit is set in relation \"%s\" page %u",
 				 vacrel->relname, blkno);
+
+			/*
+			 * In the case of data corruption, we don't bother counting the
+			 * page as unfrozen in the stats. We don't have easy access to the
+			 * page LSN from before any modifications were made by vacuum, so
+			 * it is hard to count it properly here anyway.
+			 */
 			visibilitymap_clear(vacrel->rel, blkno, vmbuffer,
 								VISIBILITYMAP_VALID_BITS);
 		}
@@ -1154,6 +1210,11 @@ lazy_scan_heap(LVRelState *vacrel)
 				 vacrel->relname, blkno);
 			PageClearAllVisible(page);
 			MarkBufferDirty(buf);
+
+			/*
+			 * This unfreeze is not counted in stats for the same reason
+			 * detailed above.
+			 */
 			visibilitymap_clear(vacrel->rel, blkno, vmbuffer,
 								VISIBILITYMAP_VALID_BITS);
 		}
@@ -1167,6 +1228,7 @@ lazy_scan_heap(LVRelState *vacrel)
 				 prunestate.all_frozen &&
 				 !VM_ALL_FROZEN(vacrel->rel, blkno, &vmbuffer))
 		{
+			uint8 previous_flags;
 			/*
 			 * Avoid relying on all_visible_according_to_vm as a proxy for the
 			 * page-level PD_ALL_VISIBLE bit being set, since it might have
@@ -1186,10 +1248,20 @@ lazy_scan_heap(LVRelState *vacrel)
 			 * safe for REDO was logged when the page's tuples were frozen.
 			 */
 			Assert(!TransactionIdIsValid(prunestate.visibility_cutoff_xid));
-			visibilitymap_set(vacrel->rel, blkno, buf, InvalidXLogRecPtr,
+			previous_flags = visibilitymap_set(vacrel->rel, blkno, buf, InvalidXLogRecPtr,
 							  vmbuffer, InvalidTransactionId,
 							  VISIBILITYMAP_ALL_VISIBLE |
 							  VISIBILITYMAP_ALL_FROZEN);
+
+			if (!(previous_flags & VISIBILITYMAP_ALL_VISIBLE))
+				set_all_vis = true;
+
+			/*
+			 * Don't worry about updating page age stats since we only updated
+			 * the VM.
+			 */
+			if (!PageIsEmpty(page))
+				vacrel->frz.vm_page_freezes++;
 		}
 
 		/*
@@ -1225,6 +1297,14 @@ lazy_scan_heap(LVRelState *vacrel)
 
 			UnlockReleaseBuffer(buf);
 			RecordPageWithFreeSpace(vacrel->rel, blkno, freespace);
+		}
+
+		if (set_all_vis && !PageIsEmpty(page))
+		{
+			page_age = insert_lsn - page_lsn;
+			page_age = Max(page_age, 0);
+
+			estimator_insert(&(vacrel->frz.av_age), page_age);
 		}
 	}
 
@@ -1307,6 +1387,9 @@ lazy_scan_skip(LVRelState *vacrel, Buffer *vmbuffer, BlockNumber next_block,
 		uint8		mapbits = visibilitymap_get_status(vacrel->rel,
 													   next_unskippable_block,
 													   vmbuffer);
+
+		if ((mapbits & VISIBILITYMAP_ALL_FROZEN) != 0)
+			vacrel->frz.frozen_pages_start++;
 
 		if ((mapbits & VISIBILITYMAP_ALL_VISIBLE) == 0)
 		{
@@ -1476,6 +1559,9 @@ lazy_scan_new_or_empty(LVRelState *vacrel, Buffer buf, BlockNumber blkno,
 		 */
 		if (!PageIsAllVisible(page))
 		{
+			XLogRecPtr page_age = GetInsertRecPtr() - PageGetLSN(page);
+			page_age = Max(page_age, 0);
+
 			START_CRIT_SECTION();
 
 			/* mark buffer dirty before writing a WAL record */
@@ -1548,6 +1634,8 @@ lazy_scan_prune(LVRelState *vacrel,
 				lpdead_items,
 				live_tuples,
 				recently_dead_tuples;
+	XLogRecPtr	insert_lsn;
+	int64		page_age;
 	HeapPageFreeze pagefrz;
 	int64		fpi_before = pgWalUsage.wal_fpi;
 	OffsetNumber deadoffsets[MaxHeapTuplesPerPage];
@@ -1771,6 +1859,24 @@ lazy_scan_prune(LVRelState *vacrel,
 	 */
 	vacrel->offnum = InvalidOffsetNumber;
 
+	insert_lsn = GetInsertRecPtr();
+
+	/*
+	 * The page may have been modified by pruning, however, we want to know
+	 * how many LSNs since it was last modified by a DML operation.
+	 */
+	page_age = insert_lsn - presult.page_lsn;
+
+	/*
+	 * Because GetInsertRecPtr() returns the approximate insert LSN (it may be
+	 * up to a page behind the real insert LSN), there is a small chance for
+	 * it to be behind page lsn. In this case, the page is basically 0, so
+	 * count it as such.
+	 */
+	page_age = Max(page_age, 0);
+
+	estimator_insert(&(vacrel->frz.age), page_age);
+
 	/*
 	 * Freeze the page when heap_prepare_freeze_tuple indicates that at least
 	 * one XID/MXID from before FreezeLimit/MultiXactCutoff is present.  Also
@@ -1778,8 +1884,10 @@ lazy_scan_prune(LVRelState *vacrel,
 	 * page all-frozen afterwards (might not happen until final heap pass).
 	 */
 	if (pagefrz.freeze_required || tuples_frozen == 0 ||
-		(prunestate->all_visible && prunestate->all_frozen &&
-		 fpi_before != pgWalUsage.wal_fpi))
+		vacuum_opp_freeze(vacrel, page_age,
+						  prunestate->all_visible && prunestate->all_frozen,
+						  fpi_before != pgWalUsage.wal_fpi,
+						  vacrel->frz.mean, vacrel->frz.stddev))
 	{
 		/*
 		 * We're freezing the page.  Our final NewRelfrozenXid doesn't need to
@@ -1809,6 +1917,10 @@ lazy_scan_prune(LVRelState *vacrel,
 			TransactionId snapshotConflictHorizon;
 
 			vacrel->frozen_pages++;
+			fpi_before = pgWalUsage.wal_fpi;
+
+			if (!PageIsEmpty(page))
+				estimator_insert(&(vacrel->frz.af_age), page_age);
 
 			/*
 			 * We can use visibility_cutoff_xid as our cutoff for conflicts
@@ -1833,6 +1945,9 @@ lazy_scan_prune(LVRelState *vacrel,
 			heap_freeze_execute_prepared(vacrel->rel, buf,
 										 snapshotConflictHorizon,
 										 frozen, tuples_frozen);
+
+			if (pgWalUsage.wal_fpi > fpi_before)
+				vacrel->frz.freeze_fpis++;
 		}
 	}
 	else
@@ -2437,6 +2552,7 @@ lazy_vacuum_heap_rel(LVRelState *vacrel)
 		Buffer		buf;
 		Page		page;
 		Size		freespace;
+		XLogRecPtr	page_lsn;
 
 		vacuum_delay_point();
 
@@ -2454,10 +2570,12 @@ lazy_vacuum_heap_rel(LVRelState *vacrel)
 		buf = ReadBufferExtended(vacrel->rel, MAIN_FORKNUM, blkno, RBM_NORMAL,
 								 vacrel->bstrategy);
 		LockBuffer(buf, BUFFER_LOCK_EXCLUSIVE);
-		index = lazy_vacuum_heap_page(vacrel, blkno, buf, index, vmbuffer);
+		page = BufferGetPage(buf);
+		page_lsn = PageGetLSN(page);
+		index = lazy_vacuum_heap_page(vacrel, blkno, buf, index, vmbuffer,
+				page_lsn);
 
 		/* Now that we've vacuumed the page, record its available space */
-		page = BufferGetPage(buf);
 		freespace = PageGetHeapFreeSpace(page);
 
 		UnlockReleaseBuffer(buf);
@@ -2500,7 +2618,7 @@ lazy_vacuum_heap_rel(LVRelState *vacrel)
  */
 static int
 lazy_vacuum_heap_page(LVRelState *vacrel, BlockNumber blkno, Buffer buffer,
-					  int index, Buffer vmbuffer)
+					  int index, Buffer vmbuffer, XLogRecPtr page_lsn)
 {
 	VacDeadItems *dead_items = vacrel->dead_items;
 	Page		page = BufferGetPage(buffer);
@@ -2585,6 +2703,7 @@ lazy_vacuum_heap_page(LVRelState *vacrel, BlockNumber blkno, Buffer buffer,
 	if (heap_page_is_all_visible(vacrel, buffer, &visibility_cutoff_xid,
 								 &all_frozen))
 	{
+		uint8		previous_flags;
 		uint8		flags = VISIBILITYMAP_ALL_VISIBLE;
 
 		if (all_frozen)
@@ -2594,8 +2713,30 @@ lazy_vacuum_heap_page(LVRelState *vacrel, BlockNumber blkno, Buffer buffer,
 		}
 
 		PageSetAllVisible(page);
-		visibilitymap_set(vacrel->rel, blkno, buffer, InvalidXLogRecPtr,
-						  vmbuffer, visibility_cutoff_xid, flags);
+		previous_flags = visibilitymap_set(vacrel->rel, blkno, buffer, InvalidXLogRecPtr,
+										   vmbuffer, visibility_cutoff_xid, flags);
+
+		if (!PageIsEmpty(page) &&
+				!(previous_flags & VISIBILITYMAP_ALL_VISIBLE))
+		{
+			XLogRecPtr insert_lsn = GetInsertRecPtr();
+			XLogRecPtr page_age = insert_lsn - page_lsn;
+
+			page_age = Max(0, page_age);
+
+			estimator_insert(&(vacrel->frz.av_age), page_age);
+		}
+
+		/*
+		 * If we set the page all frozen in the VM and it was not marked as
+		 * such before, count it here. We don't consider page age for max and
+		 * min page age for the purpose of per-vacuum stats here since we will
+		 * not have newly frozen tuples on the page and only will have marked
+		 * the page frozen in the VM.
+		 */
+		if (all_frozen && !PageIsEmpty(page) &&
+				!(previous_flags & VISIBILITYMAP_ALL_FROZEN))
+			vacrel->frz.vm_page_freezes++;
 	}
 
 	/* Revert to the previous phase information for error traceback */
@@ -3500,4 +3641,43 @@ restore_vacuum_error_info(LVRelState *vacrel,
 	vacrel->blkno = saved_vacrel->blkno;
 	vacrel->offnum = saved_vacrel->offnum;
 	vacrel->phase = saved_vacrel->phase;
+}
+
+/*
+ * Determine whether or not vacuum should opportunistically freeze a page.
+ * Given freeze statistics about the relation contained in LVRelState, whether
+ * or not the page will be able to be marked all visible and all frozen, and
+ * whether or not pruning emitted an FPI, return whether or not the page should
+ * be frozen. The LVRelState should not be modified.
+ */
+static bool
+vacuum_opp_freeze(LVRelState *vacrel,
+				  int64 page_age,
+				  bool all_visible_all_frozen,
+				  bool prune_emitted_fpi, double mean, double stddev)
+{
+	if (opp_freeze_algo == 0)
+		return all_visible_all_frozen && prune_emitted_fpi;
+
+	if (opp_freeze_algo == 1)
+		return all_visible_all_frozen;
+	if (opp_freeze_algo == 4)
+	{
+		double normal;
+		double e;
+
+		/* Probability that the page is a "don't freeze" page */
+		double prob;
+
+		normal = ((double) page_age - mean) / stddev;
+		e = (1 + erf(normal / sqrt(2))) / 2;
+		prob = (double) 1 - e;
+		/* if (!strcmp(RelationGetRelationName(vacrel->rel), "pgbench_history")) */
+		/* 	elog(WARNING, "page_age: %ld. mean: %lf. stddev: %lf. normal: %lf e: %lf. PROB: %lf", */
+		/* 			page_age, mean, stddev, normal, e, prob); */
+
+		return all_visible_all_frozen && prob < 0.05;
+	}
+
+	return false;
 }
