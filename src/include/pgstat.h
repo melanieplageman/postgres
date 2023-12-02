@@ -11,13 +11,17 @@
 #ifndef PGSTAT_H
 #define PGSTAT_H
 
+#include "access/xlogdefs.h"
+#include "commands/vacuum.h"
 #include "datatype/timestamp.h"
 #include "portability/instr_time.h"
 #include "postmaster/pgarch.h"	/* for MAX_XFN_CHARS */
+#include "storage/block.h"
 #include "utils/backend_progress.h" /* for backward compatibility */
 #include "utils/backend_status.h"	/* for backward compatibility */
 #include "utils/relcache.h"
 #include "utils/wait_event.h"	/* for backward compatibility */
+#include <math.h>
 
 
 /* ----------
@@ -393,6 +397,161 @@ typedef struct PgStat_StatSubEntry
 	TimestampTz stat_reset_timestamp;
 } PgStat_StatSubEntry;
 
+typedef struct PgStat_Estimator
+{
+	/* Number of values in this estimator */
+	uint64 n;
+
+	/* Sum of values */
+	double s;
+
+	/* Sum of squared values */
+	double q;
+} PgStat_Estimator;
+
+static inline void estimator_insert(PgStat_Estimator *estimator, double v)
+{
+	estimator->n++;
+	estimator->s += v;
+	estimator->q += pow(v, 2);
+}
+
+static inline double estimator_remove(PgStat_Estimator *estimator)
+{
+	double result;
+
+	Assert(estimator->n > 0);
+
+	result = estimator->s / estimator->n;
+
+	estimator->n--;
+	estimator->s -= result;
+	estimator->q -= pow(result, 2);
+
+	return result;
+}
+
+static inline void estimator_combine(PgStat_Estimator *target, PgStat_Estimator *source)
+{
+	target->n += source->n;
+	target->s += source->s;
+	target->q += source->q;
+}
+
+#ifndef M_PI
+#define M_PI 3.14159265358979323846
+#endif
+
+
+static inline void estimator_calculate(PgStat_Estimator *estimator, double *mean,
+		double *stddev)
+{
+	double variance;
+
+	*mean = 0;
+	*stddev = 0;
+
+	if (estimator->n <= 0)
+		return;
+
+	*mean = estimator->s / estimator->n;
+	variance = (estimator->q - pow(estimator->s, 2) / estimator->n) / estimator->n;
+	*stddev = sqrt(variance);
+}
+
+
+/*
+ * Each PgStat_Frz is a bucket in a ring buffer containing stats from one or
+ * more freeze periods, PgStat_StatTabEntry->frz_buckets. Each freeze period is
+ * a single vacuum of a single relation. Once VAC_FRZ_STATS_MAX_NBUCKETS # of
+ * freeze periods have been recorded, multiple older freeze periods are
+ * combined into single buckets (PgStat_Frz).
+ *
+ * Pages frozen by vacuum are tracked in the current PgStat_Frz. Once those
+ * pages are modified, those "unfreezes" are tracked in the PgStat_Frz bucket
+ * whose LSN span (start_lsn -> end_lsn) covers the page freeze LSN.
+ *
+ * Because each PgStat_Frz may contain stats from multiple freeze periods, many
+ * of the stats only make sense when used to calculate a ratio. For example,
+ * adding the relsize at the end of a vacuum across multiple vacuums is
+ * meaningless. However, we use frozen_pages_end and relsize_end to calculate
+ * the percentage of the relation that is frozen at the end of the vacuum. This
+ * is effectively an average when calculated across multiple vacuums in the
+ * same bucket.
+ */
+typedef struct PgStat_Frz
+{
+	/* insert LSN at the start of the oldest freeze period in this bucket */
+	XLogRecPtr	start_lsn;
+	/* insert LSN at the end of the newest freeze period in this bucket */
+	XLogRecPtr	end_lsn;
+	/* start time of the oldest freeze period in this bucket */
+	TimestampTz start_time;
+	/* end time of the newest freeze period in this bucket */
+	TimestampTz end_time;
+	/* number of freeze periods we have combined into this bucket */
+	int			count;
+
+	/*
+	 * number of pages newly marked frozen in the visibility map by vacuum
+	 * during all freeze periods in this bucket
+	 */
+	int64		vm_page_freezes;
+
+	/*
+	 * a subset of unfreezes, this is the number of pages frozen during all
+	 * freeze periods in this bucket which were unfrozen before
+	 * target_page_freeze_duration seconds had elapsed
+	 */
+	int64		early_unfreezes;
+
+	/*
+	 * The number of pages set AV in the VM by this vacuum which were AV >= the
+	 * target freeze duration.
+	 */
+	int64		missed_freezes;
+
+	/*
+	 * Number of pages of this relation marked all frozen in the visibility
+	 * map at the end of all freeze periods in this bucket
+	 */
+	int64		frozen_pages_end;
+
+	/*
+	 * Number of pages of this relation marked all frozen in the visibility
+	 * map at the start of this freeze period.
+	 */
+	int64		frozen_pages_start;
+
+	/*
+	 * number of pages in the relation at the beginning and end of all freeze
+	 * periods in this bucket
+	 */
+	int64		relsize_end;
+	int64		relsize_start;
+
+	/*
+	 * number of freeze records emitted by vacuum containing FPIs during all
+	 * freeze periods in this bucket
+	 */
+	int64		freeze_fpis;
+
+	/* Value of guc target_page_freeze_duration translated to LSNs */
+	XLogRecPtr	target_page_freeze_duration_lsns;
+
+	int64 page_freezes;
+	PgStat_Estimator af_duration;
+	int64 setvis;
+	PgStat_Estimator av_duration;
+
+	int64 scanned_pages;
+
+	double mean;
+	double stddev;
+} PgStat_Frz;
+
+
+#define VAC_FRZ_STATS_MAX_NBUCKETS 30
 typedef struct PgStat_StatTabEntry
 {
 	PgStat_Counter numscans;
@@ -423,6 +582,11 @@ typedef struct PgStat_StatTabEntry
 	PgStat_Counter analyze_count;
 	TimestampTz last_autoanalyze_time;	/* autovacuum initiated */
 	PgStat_Counter autoanalyze_count;
+
+	int			frz_current;
+	int			frz_oldest;
+	int			frz_nbuckets_used;
+	PgStat_Frz	frz_buckets[VAC_FRZ_STATS_MAX_NBUCKETS];
 } PgStat_StatTabEntry;
 
 typedef struct PgStat_WalStats
@@ -592,6 +756,17 @@ extern void pgstat_report_vacuum(Oid tableoid, bool shared,
 extern void pgstat_report_analyze(Relation rel,
 								  PgStat_Counter livetuples, PgStat_Counter deadtuples,
 								  bool resetcounter);
+
+extern void pgstat_setup_vacuum_frz_stats(Oid tableoid, bool shared,
+		const char *relname, PgStat_Frz *target);
+
+void
+pgstat_report_heap_vacfrz(Oid tableoid, bool shared, PgStat_Frz *source);
+
+
+extern void pgstat_count_vm_unset(Oid tableoid, bool shared,
+									   XLogRecPtr page_lsn, XLogRecPtr insert_lsn,
+									   uint8 old_vmbits);
 
 /*
  * If stats are enabled, but pending data hasn't been prepared yet, call

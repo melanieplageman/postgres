@@ -5407,6 +5407,17 @@
   proname => 'pg_stat_get_vacuum_count', provolatile => 's', proparallel => 'r',
   prorettype => 'int8', proargtypes => 'oid',
   prosrc => 'pg_stat_get_vacuum_count' },
+
+{ oid => '9998', descr => 'statistics: number of page freezes for this relation',
+  proname => 'pg_stat_get_page_freezes', provolatile => 's', proparallel => 'r',
+  prorettype => 'int8', proargtypes => 'oid',
+  prosrc => 'pg_stat_get_page_freezes' },
+
+{ oid => '9997', descr => 'statistics: number of page unfreezes for this relation',
+  proname => 'pg_stat_get_page_unfreezes', provolatile => 's', proparallel => 'r',
+  prorettype => 'int8', proargtypes => 'oid',
+  prosrc => 'pg_stat_get_page_unfreezes' },
+
 { oid => '3055', descr => 'statistics: number of auto vacuums for a table',
   proname => 'pg_stat_get_autovacuum_count', provolatile => 's',
   proparallel => 'r', prorettype => 'int8', proargtypes => 'oid',
@@ -5754,6 +5765,15 @@
   proargmodes => '{o,o,o,o,o,o,o,o,o,o,o,o,o,o,o,o,o,o}',
   proargnames => '{backend_type,object,context,reads,read_time,writes,write_time,writebacks,writeback_time,extends,extend_time,op_bytes,hits,evictions,reuses,fsyncs,fsync_time,stats_reset}',
   prosrc => 'pg_stat_get_io' },
+
+{ oid => '9999', descr => 'statistics: table freeze heuristic info',
+  proname => 'pg_stat_get_table_vacuums', prorows => '15', proretset => 't',
+  provolatile => 'v', proparallel => 'r', prorettype => 'record',
+  proargtypes => 'oid',
+  proallargtypes => '{oid,oid,int4,timestamptz,pg_lsn,timestamptz,pg_lsn,float8,int8,int8,int8,int8,int8,int8,int8,int8,int8,float8,float8,float8,float8,int8,int8,int8,int8,int8,float8,float8}',
+  proargmodes => '{i,o,o,o,o,o,o,o,o,o,o,o,o,o,o,o,o,o,o,o,o,o,o,o,o,o,o,o}',
+  proargnames => '{reloid,reloid,members,start_time,start_lsn,end_time,end_lsn,lsn_gen_rate,target_frz_dur,vm_page_freezes,freezes,unfreezes,allvis_set,allvis_unset,early_unfreezes,missed_freezes,freeze_fpis,avg_av_dur,stddev_av_dur,avg_af_dur,stddev_af_dur,npages_start,nfrozen_start,npages_end,nfrozen_end,scanned_pages,mean,stddev}',
+  prosrc => 'pg_stat_get_table_vacuums' },
 
 { oid => '1136', descr => 'statistics: information about WAL activity',
   proname => 'pg_stat_get_wal', proisstrict => 'f', provolatile => 's',
