@@ -11,6 +11,9 @@
 #ifndef PGSTAT_H
 #define PGSTAT_H
 
+#include <math.h>
+
+#include "access/xlogdefs.h"
 #include "datatype/timestamp.h"
 #include "portability/instr_time.h"
 #include "postmaster/pgarch.h"	/* for MAX_XFN_CHARS */
@@ -137,6 +140,69 @@ typedef struct PgStat_BackendSubEntry
 	PgStat_Counter sync_error_count;
 } PgStat_BackendSubEntry;
 
+/*
+ * Used both in backend local and shared memory, this estimator keeps track of
+ * the counters needed to calculate a mean and standard deviation online.
+ */
+typedef struct PgStat_Estimator
+{
+	/* Number of values in this estimator */
+	uint64		n;
+
+	/* Sum of values */
+	double		s;
+
+	/* Sum of squared values */
+	double		q;
+} PgStat_Estimator;
+
+static inline void
+estimator_insert(PgStat_Estimator *estimator, double v)
+{
+	estimator->n++;
+	estimator->s += v;
+	estimator->q += pow(v, 2);
+}
+
+static inline double
+estimator_remove(PgStat_Estimator *estimator)
+{
+	double		result;
+
+	Assert(estimator->n > 0);
+
+	result = estimator->s / estimator->n;
+
+	estimator->n--;
+	estimator->s -= result;
+	estimator->q -= pow(result, 2);
+
+	return result;
+}
+
+static inline void
+estimator_absorb(PgStat_Estimator *target, PgStat_Estimator *source)
+{
+	target->n += source->n;
+	target->s += source->s;
+	target->q += source->q;
+}
+
+static inline void
+estimator_calculate(PgStat_Estimator *estimator, double *mean,
+					double *stddev)
+{
+	*mean = NAN;
+	*stddev = NAN;
+
+	if (estimator->n == 0)
+		return;
+
+	*mean = estimator->s / estimator->n;
+	*stddev = sqrt((estimator->q - pow(estimator->s, 2) / estimator->n) / estimator->n);
+}
+
+
 /* ----------
  * PgStat_TableCounts			The actual per-table counts kept by a backend
  *
@@ -170,6 +236,13 @@ typedef struct PgStat_TableCounts
 	PgStat_Counter tuples_hot_updated;
 	PgStat_Counter tuples_newpage_updated;
 	bool		truncdropped;
+
+	PgStat_Estimator early_vm_unsets;
+
+	PgStat_Counter vm_unfreezes;
+	PgStat_Counter early_unfreezes;
+	PgStat_Counter vm_unvis;
+	PgStat_Counter missed_freezes;
 
 	PgStat_Counter delta_live_tuples;
 	PgStat_Counter delta_dead_tuples;
@@ -393,6 +466,74 @@ typedef struct PgStat_StatSubEntry
 	TimestampTz stat_reset_timestamp;
 } PgStat_StatSubEntry;
 
+
+/*
+ * Each PgStat_VacFrz is a bucket in a ring buffer containing stats from one or
+ * more vacuums of a single relation.
+ *
+ * Because each PgStat_VacFrz may contain stats from multiple vacuums, many of
+ * the stats only make sense when used to calculate a ratio. For example,
+ * adding the relsize at the end of a vacuum across multiple vacuums is
+ * meaningless. However, we use frozen_pages_end and relsize_end to calculate
+ * the percentage of the relation that is frozen at the end of the vacuum. This
+ * is effectively an average when calculated across multiple vacuums in the
+ * same bucket.
+ */
+typedef struct PgStat_VacFrz
+{
+	/* insert LSN at the start of the oldest vacuum in this bucket */
+	XLogRecPtr	start_lsn;
+	/* insert LSN at the end of the newest vacuum in this bucket */
+	XLogRecPtr	end_lsn;
+	/* start time of the oldest vacuum in this bucket */
+	TimestampTz start_time;
+	/* end time of the newest vacuum in this bucket */
+	TimestampTz end_time;
+	/* number of vacuums we have combined into this bucket */
+	int			count;
+
+	/* number of pages set all visible in the VM */
+	int64		vm_vis;
+
+	/* number of pages newly marked frozen in the visibility map by vacuum */
+	int64		vm_freezes;
+
+	/* Number of pages with newly frozen tuples */
+	int64		page_freezes;
+
+	/* Number of pages scanned by vacuum. */
+	int64		scanned_pages;
+
+	/* number of freeze records emitted by vacuum containing FPIs */
+	int64		freeze_fpis;
+
+	/*
+	 * Number of pages of this relation marked all frozen in the visibility
+	 * map at the start and end of all vacuums in this bucket
+	 */
+	int64		frozen_pages_start;
+	int64		frozen_pages_end;
+
+	/*
+	 * number of pages in the relation at the beginning and end of all vacuums
+	 * in this bucket
+	 */
+	int64		relsize_start;
+	int64		relsize_end;
+
+	/* Value of guc target_page_freeze_duration translated to LSNs */
+	XLogRecPtr	target_frz_dur_lsns;
+
+	double		mean;
+	double		stddev;
+} PgStat_VacFrz;
+
+
+/*
+ * Once VACFRZ_STATS_MAX_NBUCKETS have been recorded, multiple older vacuums
+ * are combined into a single PgStat_VacFrz.
+ */
+#define VACFRZ_STATS_MAX_NBUCKETS 30
 typedef struct PgStat_StatTabEntry
 {
 	PgStat_Counter numscans;
@@ -423,6 +564,17 @@ typedef struct PgStat_StatTabEntry
 	PgStat_Counter analyze_count;
 	TimestampTz last_autoanalyze_time;	/* autovacuum initiated */
 	PgStat_Counter autoanalyze_count;
+
+	PgStat_Estimator early_vm_unsets;
+	int64		vm_unfreezes;
+	int64		early_unfreezes;
+	int64		vm_unvis;
+	int64		missed_freezes;
+
+	uint32		vacfrz_current;
+	uint32		vacfrz_oldest;
+	uint32		vacfrz_nbuckets_used;
+	PgStat_VacFrz vacfrz_buckets[VACFRZ_STATS_MAX_NBUCKETS];
 } PgStat_StatTabEntry;
 
 typedef struct PgStat_WalStats
@@ -592,6 +744,15 @@ extern void pgstat_report_vacuum(Oid tableoid, bool shared,
 extern void pgstat_report_analyze(Relation rel,
 								  PgStat_Counter livetuples, PgStat_Counter deadtuples,
 								  bool resetcounter);
+
+extern void pgstat_setup_vacuum_frz_stats(Oid tableoid, bool shared,
+										  PgStat_VacFrz *target);
+
+extern void pgstat_report_heap_vacfrz(Oid tableoid, bool shared,
+									  PgStat_VacFrz *source);
+
+extern void pgstat_count_vm_unset(Relation relation, XLogRecPtr page_lsn,
+								  XLogRecPtr current_lsn, uint8 old_vmbits);
 
 /*
  * If stats are enabled, but pending data hasn't been prepared yet, call

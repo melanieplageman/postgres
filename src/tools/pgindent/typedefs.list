@@ -2060,6 +2060,7 @@ PgStat_CheckpointerStats
 PgStat_Counter
 PgStat_EntryRef
 PgStat_EntryRefHashEntry
+PgStat_Estimator
 PgStat_FetchConsistency
 PgStat_FunctionCallUsage
 PgStat_FunctionCounts
@@ -2084,6 +2085,7 @@ PgStat_SubXactStatus
 PgStat_TableCounts
 PgStat_TableStatus
 PgStat_TableXactStatus
+PgStat_VacFrz
 PgStat_WalStats
 PgXmlErrorContext
 PgXmlStrictness

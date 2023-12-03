@@ -279,6 +279,8 @@ extern PGDLLIMPORT int VacuumCostPageMiss;
 extern PGDLLIMPORT int VacuumCostPageDirty;
 extern PGDLLIMPORT int VacuumCostLimit;
 extern PGDLLIMPORT double VacuumCostDelay;
+extern PGDLLIMPORT int opp_freeze_algo;
+extern PGDLLIMPORT int target_page_freeze_duration;
 
 extern PGDLLIMPORT int64 VacuumPageHit;
 extern PGDLLIMPORT int64 VacuumPageMiss;
@@ -509,5 +511,6 @@ extern void RestoreClientConnectionInfo(char *conninfo);
 
 /* in executor/nodeHash.c */
 extern size_t get_hash_memory_limit(void);
+
 
 #endif							/* MISCADMIN_H */
