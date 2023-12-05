@@ -279,6 +279,7 @@ extern PGDLLIMPORT int VacuumCostPageMiss;
 extern PGDLLIMPORT int VacuumCostPageDirty;
 extern PGDLLIMPORT int VacuumCostLimit;
 extern PGDLLIMPORT double VacuumCostDelay;
+extern PGDLLIMPORT int target_freeze_duration;
 
 extern PGDLLIMPORT int64 VacuumPageHit;
 extern PGDLLIMPORT int64 VacuumPageMiss;
