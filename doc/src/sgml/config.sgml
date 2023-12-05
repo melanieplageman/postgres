@@ -9539,6 +9539,22 @@ COPY postgres_log FROM '/full/path/to/logfile.csv' WITH csv;
       </listitem>
      </varlistentry>
 
+     <varlistentry id="guc-target-freeze-duration" xreflabel="target_freeze_duration">
+      <term><varname>target_freeze_duration</varname> (<type>integer</type>)
+      <indexterm>
+       <primary><varname>target_freeze_duration</varname> configuration parameter</primary>
+      </indexterm>
+      </term>
+      <listitem>
+       <para>
+        Specifies the minimum duration in seconds that pages should stay
+        frozen. <command>VACUUM</command> adapts its eager freezing behavior to
+        target pages that have a high likelihood of staying frozen for this
+        duration.
+       </para>
+      </listitem>
+     </varlistentry>
+
      <varlistentry id="guc-vacuum-failsafe-age" xreflabel="vacuum_failsafe_age">
       <term><varname>vacuum_failsafe_age</varname> (<type>integer</type>)
       <indexterm>
