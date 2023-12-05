@@ -2614,6 +2614,19 @@ struct config_int ConfigureNamesInt[] =
 	},
 
 	{
+		{"target_freeze_duration", PGC_USERSET, AUTOVACUUM,
+			gettext_noop("minimum duration in seconds that a page should stay frozen."),
+			NULL,
+			GUC_UNIT_S
+		},
+		&target_freeze_duration,
+		1, 1,
+		INT_MAX < INT64_MAX / USECS_PER_SEC ?
+		INT_MAX : (int) (INT64_MAX / USECS_PER_SEC),
+		NULL, NULL, NULL
+	},
+
+	{
 		{"max_files_per_process", PGC_POSTMASTER, RESOURCES_KERNEL,
 			gettext_noop("Sets the maximum number of simultaneously open files for each server process."),
 			NULL
