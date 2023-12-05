@@ -2634,6 +2634,19 @@ struct config_int ConfigureNamesInt[] =
 	},
 
 	{
+		{"pgversion", PGC_USERSET, VACUUM_FREEZING,
+			gettext_noop("what algorithm to use for debugging eager scanning"),
+			NULL,
+			GUC_UNIT_S
+		},
+		&pgversion,
+		1, 0,
+		INT_MAX < INT64_MAX / USECS_PER_SEC ?
+		INT_MAX : (int) (INT64_MAX / USECS_PER_SEC),
+		NULL, NULL, NULL
+	},
+
+	{
 		{"max_files_per_process", PGC_POSTMASTER, RESOURCES_KERNEL,
 			gettext_noop("Sets the maximum number of simultaneously open files for each server process."),
 			NULL
