@@ -283,6 +283,7 @@ extern PGDLLIMPORT int VacuumCostPageMiss;
 extern PGDLLIMPORT int VacuumCostPageDirty;
 extern PGDLLIMPORT int VacuumCostLimit;
 extern PGDLLIMPORT double VacuumCostDelay;
+extern PGDLLIMPORT int pgversion;
 
 extern PGDLLIMPORT int VacuumCostBalance;
 extern PGDLLIMPORT bool VacuumCostActive;
