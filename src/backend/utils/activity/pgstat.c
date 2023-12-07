@@ -1714,3 +1714,62 @@ assign_stats_fetch_consistency(int newval, void *extra)
 	if (pgstat_fetch_consistency != newval)
 		force_stats_snapshot_clear = true;
 }
+
+/*
+ * Set *a to be the earlier of *a or *b.
+ */
+static void
+lsntime_absorb(LSNTime *a, const LSNTime *b)
+{
+	LSNTime result;
+
+	if (a->time < b->time)
+		result = *a;
+	else if (b->time < a->time)
+		result = *b;
+	else if (a->lsn < b->lsn)
+		result = *a;
+	else if (b->lsn < a->lsn)
+		result = *b;
+	else
+		result = *a;
+
+	*a = result;
+}
+
+void
+lsntime_insert(LSNTimeline *lsn_gen, TimestampTz time,
+		XLogRecPtr lsn)
+{
+	LSNTime entrant = { .lsn = lsn, .time = time };
+	int buckets = lsn_buckets(lsn_gen);
+
+	if (lsn_gen->members == 0)
+	{
+		lsn_gen->data[0] = entrant;
+		goto done;
+	}
+
+	for (int i = 0; i < buckets; i++)
+	{
+		LSNTime old;
+		uint64 isset;
+
+		isset = (lsn_gen->members >> (buckets - i - 1)) & 1;
+
+		if (!isset)
+		{
+			lsntime_absorb(&lsn_gen->data[i], &entrant);
+			goto done;
+		}
+
+		old = lsn_gen->data[i];
+		lsn_gen->data[i] = entrant;
+		entrant = old;
+	}
+
+	lsn_gen->data[buckets] = entrant;
+
+done:
+	lsn_gen->members++;
+}

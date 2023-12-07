@@ -18,9 +18,11 @@
 #include "postgres.h"
 
 #include "access/twophase_rmgr.h"
+#include "access/visibilitymapdefs.h"
 #include "access/xact.h"
 #include "catalog/partition.h"
 #include "postmaster/autovacuum.h"
+#include "utils/builtins.h"
 #include "utils/memutils.h"
 #include "utils/pgstat_internal.h"
 #include "utils/rel.h"
@@ -49,7 +51,7 @@ static void add_tabstat_xact_level(PgStat_TableStatus *pgstat_info, int nest_lev
 static void ensure_tabstat_xact_level(PgStat_TableStatus *pgstat_info);
 static void save_truncdrop_counters(PgStat_TableXactStatus *trans, bool is_drop);
 static void restore_truncdrop_counters(PgStat_TableXactStatus *trans);
-
+static XLogRecPtr estimate_lsn_at_time(const LSNTimeline *timeline, TimestampTz time);
 
 /*
  * Copy stats between relations. This is used for things like REINDEX
@@ -205,6 +207,163 @@ pgstat_drop_relation(Relation rel)
 	}
 }
 
+
+void
+pgstat_setup_vacuum_frz_stats(Oid tableoid, bool shared, double *mean, double *stddev,
+		float *rep_prob)
+{
+	PgStat_EntryRef *entry_ref;
+	PgStat_StatTabEntry *tabentry;
+	TimestampTz cur_time;
+	XLogRecPtr cur_lsn;
+	TimestampTz target;
+	uint64 target_dur_usecs;
+	Oid			dboid = (shared ? InvalidOid : MyDatabaseId);
+
+	if (!pgstat_track_counts)
+		return;
+
+	target_dur_usecs = target_freeze_duration * USECS_PER_SEC;
+
+	cur_time = GetCurrentTimestamp();
+
+	/* Use exact (not approximate) insert LSN at vacuum start */
+	cur_lsn = GetXLogInsertRecPtr();
+
+	entry_ref = pgstat_get_entry_ref_locked(PGSTAT_KIND_RELATION,
+											dboid, tableoid, false);
+
+	Assert(entry_ref != NULL && entry_ref->shared_stats != NULL);
+
+	tabentry = &((PgStatShared_Relation *) entry_ref->shared_stats)->stats;
+
+	estimator_calculate(&tabentry->vm_unset.early_unsets, mean, stddev);
+
+	/* magic number for sample size */
+	if (tabentry->vm_unset.early_unsets.n < 30)
+		*rep_prob = 0;
+	else
+		*rep_prob = 1;
+
+	target = target_dur_usecs >= cur_time ? 0 : cur_time - target_dur_usecs;
+
+	tabentry->target_frz_dur_lsns = cur_lsn - estimate_lsn_at_time(&tabentry->line, target);
+
+	lsntime_insert(&tabentry->line, cur_time, cur_lsn);
+
+	pgstat_unlock_entry(entry_ref);
+
+	/*
+	 * Flush IO stats at the beginning of the vacuum after setting the start
+	 * time and start LSN for this vacuum. This ensures that pages that are
+	 * unfrozen before the end of the vacuum are still attributed as an
+	 * unfreeze to that vacuum.
+	 */
+	pgstat_flush_io(false);
+
+	return;
+}
+
+XLogRecPtr
+estimate_lsn_at_time(const LSNTimeline *timeline, TimestampTz time)
+{
+	TimestampTz time_elapsed;
+	XLogRecPtr lsns_elapsed;
+	double result;
+
+	LSNTime start = { .time = PgStartTime, .lsn = PgStartLSN };
+	LSNTime end = { .time = GetCurrentTimestamp(), .lsn = GetXLogInsertRecPtr() };
+
+	if (time >= end.time)
+		return end.lsn;
+
+	for (int i = 0; i < lsn_buckets(timeline); i++)
+	{
+		if (timeline->data[i].time > time)
+			continue;
+
+		start = timeline->data[i];
+		if (i > 0)
+			end = timeline->data[i - 1];
+		break;
+	}
+
+	time_elapsed = end.time - start.time;
+	Assert(time_elapsed != 0);
+
+	lsns_elapsed = end.lsn - start.lsn;
+	Assert(lsns_elapsed != 0);
+
+	result = (double) (time - start.time) / time_elapsed * lsns_elapsed + start.lsn;
+	if (result < 0)
+		return InvalidXLogRecPtr;
+	return result;
+}
+
+void
+pgstat_count_vm_unset(Relation relation, XLogRecPtr page_lsn,
+					  XLogRecPtr current_lsn, uint8 old_vmbits,
+					  PgStat_UnsetKind unset_kind)
+{
+	PgStat_StatTabEntry *tabentry;
+	XLogRecPtr	target_frz_duration;
+	XLogRecPtr	vm_duration_lsns;
+	PgStat_TableCounts *tabcounts;
+
+	/*
+	 * Can't be all frozen without being all visible and we shouldn't call
+	 * this function if all bits were unset
+	 */
+	Assert(old_vmbits & VISIBILITYMAP_ALL_VISIBLE);
+
+	if (!pgstat_track_counts)
+		return;
+
+	tabentry = pgstat_fetch_stat_tabentry_ext(relation->rd_rel->relisshared,
+											  RelationGetRelid(relation));
+
+	/*
+	 * MTODO: from a performance standpoint, is it okay that we read it from
+	 * tabentry on each unset?
+	 */
+	target_frz_duration = tabentry->target_frz_dur_lsns;
+
+	vm_duration_lsns = current_lsn - page_lsn;
+	vm_duration_lsns = Max(vm_duration_lsns, 0);
+
+	tabcounts = &relation->pgstat_info->counts;
+
+	tabcounts->unsets.vm_unvis++;
+
+	/*
+	 * If the page is being modified before target_freeze_duration, count
+	 * it as an unset for vacuum freeze statistics. We want to determine the
+	 * likelihood that a page being vacuumed will be modified before that
+	 * amount of time has elapsed, irrespective of whether or not we got it
+	 * right last vacuum.
+	 */
+	if (unset_kind != PGSTAT_UNSET_INSERT &&
+			vm_duration_lsns < target_frz_duration)
+		estimator_insert(&tabcounts->unsets.early_unsets, vm_duration_lsns);
+
+	/*
+	 * If it was frozen and modified before the target duration, it is an
+	 * early unfreeze. If it was not frozen and remained unmodified for longer
+	 * than the target duration, it is a missed opportunity to freeze.
+	 */
+	if (old_vmbits & VISIBILITYMAP_ALL_FROZEN)
+	{
+		tabcounts->unsets.vm_unfreezes[unset_kind]++;
+
+		if (unset_kind != PGSTAT_UNSET_INSERT &&
+				vm_duration_lsns < target_frz_duration)
+			tabcounts->unsets.early_unfreezes++;
+	}
+	else if (vm_duration_lsns >= target_frz_duration)
+		tabcounts->unsets.missed_freezes++;
+}
+
+
 /*
  * Report that the table was just vacuumed and flush IO statistics.
  */
@@ -267,6 +426,32 @@ pgstat_report_vacuum(Oid tableoid, bool shared,
 	 */
 	pgstat_flush_io(false);
 }
+
+void
+pgstat_report_heap_vacfrz(Oid tableoid, bool shared, PgStat_VMSet *vmsets)
+{
+	PgStat_EntryRef *entry_ref;
+	PgStat_StatTabEntry *tabentry;
+	Oid			dboid = (shared ? InvalidOid : MyDatabaseId);
+
+	if (!pgstat_track_counts)
+		return;
+
+
+	/* block acquiring lock for the same reason as pgstat_report_autovac() */
+	entry_ref = pgstat_get_entry_ref_locked(PGSTAT_KIND_RELATION,
+											dboid, tableoid, false);
+
+	tabentry = &((PgStatShared_Relation *) entry_ref->shared_stats)->stats;
+
+	tabentry->vm_set.vm_vis += vmsets->vm_vis;
+	tabentry->vm_set.page_freezes += vmsets->page_freezes;
+	tabentry->vm_set.vm_freezes += vmsets->vm_freezes;
+	tabentry->vm_set.freeze_fpis += vmsets->freeze_fpis;
+
+	pgstat_unlock_entry(entry_ref);
+}
+
 
 /*
  * Report that the table was just analyzed and flush IO statistics.
@@ -844,6 +1029,8 @@ pgstat_relation_flush_cb(PgStat_EntryRef *entry_ref, bool nowait)
 	tabentry->tuples_deleted += lstats->counts.tuples_deleted;
 	tabentry->tuples_hot_updated += lstats->counts.tuples_hot_updated;
 	tabentry->tuples_newpage_updated += lstats->counts.tuples_newpage_updated;
+
+	pgstat_unset_absorb(&tabentry->vm_unset, &lstats->counts.unsets);
 
 	/*
 	 * If table was truncated/dropped, first reset the live/dead counters.

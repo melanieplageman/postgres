@@ -11,6 +11,10 @@
 #ifndef PGSTAT_H
 #define PGSTAT_H
 
+#include <math.h>
+#include <limits.h>
+
+#include "access/xlogdefs.h"
 #include "datatype/timestamp.h"
 #include "portability/instr_time.h"
 #include "postmaster/pgarch.h"	/* for MAX_XFN_CHARS */
@@ -137,6 +141,99 @@ typedef struct PgStat_BackendSubEntry
 	PgStat_Counter sync_error_count;
 } PgStat_BackendSubEntry;
 
+/*
+ * Used both in backend local and shared memory, this estimator keeps track of
+ * the counters needed to calculate a mean and standard deviation online.
+ */
+typedef struct PgStat_Accumulator
+{
+	/* Number of values in this estimator */
+	uint64		n;
+
+	/* Sum of values */
+	double		s;
+
+	/* Sum of squared values */
+	double		q;
+} PgStat_Accumulator;
+
+static inline void
+estimator_insert(PgStat_Accumulator *estimator, double v)
+{
+	estimator->n++;
+	estimator->s += v;
+	estimator->q += pow(v, 2);
+}
+
+static inline double
+estimator_remove(PgStat_Accumulator *estimator)
+{
+	double		result;
+
+	Assert(estimator->n > 0);
+
+	result = estimator->s / estimator->n;
+
+	estimator->n--;
+	estimator->s -= result;
+	estimator->q -= pow(result, 2);
+
+	return result;
+}
+
+static inline void
+estimator_absorb(PgStat_Accumulator *target, PgStat_Accumulator *source)
+{
+	target->n += source->n;
+	target->s += source->s;
+	target->q += source->q;
+}
+
+static inline void
+estimator_calculate(PgStat_Accumulator *estimator, double *mean,
+					double *stddev)
+{
+	*mean = NAN;
+	*stddev = NAN;
+
+	if (estimator->n == 0)
+		return;
+
+	*mean = estimator->s / estimator->n;
+	*stddev = sqrt((estimator->q - pow(estimator->s, 2) / estimator->n) / estimator->n);
+}
+
+typedef enum PgStat_UnsetKind
+{
+	PGSTAT_UNSET_INSERT,
+	PGSTAT_UNSET_MOD,
+} PgStat_UnsetKind;
+
+#define PGSTAT_UNSET_NKINDS (PGSTAT_UNSET_MOD + 1)
+
+// TODO: remove vm from all variable names
+typedef struct PgStat_VMUnset
+{
+	int64		vm_unfreezes[PGSTAT_UNSET_NKINDS];
+	int64		early_unfreezes;
+	int64		vm_unvis;
+	int64		missed_freezes;
+	PgStat_Accumulator early_unsets;
+} PgStat_VMUnset;
+
+static inline void
+pgstat_unset_absorb(PgStat_VMUnset *target, PgStat_VMUnset *source)
+{
+	for (int kind = 0; kind < PGSTAT_UNSET_NKINDS; kind++)
+		target->vm_unfreezes[kind] += source->vm_unfreezes[kind];
+
+	target->early_unfreezes += source->early_unfreezes;
+	target->vm_unvis += source->vm_unvis;
+	target->missed_freezes += source->early_unfreezes;
+
+	estimator_absorb(&target->early_unsets, &source->early_unsets);
+}
+
 /* ----------
  * PgStat_TableCounts			The actual per-table counts kept by a backend
  *
@@ -170,6 +267,8 @@ typedef struct PgStat_TableCounts
 	PgStat_Counter tuples_hot_updated;
 	PgStat_Counter tuples_newpage_updated;
 	bool		truncdropped;
+
+	PgStat_VMUnset unsets;
 
 	PgStat_Counter delta_live_tuples;
 	PgStat_Counter delta_dead_tuples;
@@ -393,6 +492,50 @@ typedef struct PgStat_StatSubEntry
 	TimestampTz stat_reset_timestamp;
 } PgStat_StatSubEntry;
 
+
+typedef struct PgStat_VMSet
+{
+	/* number of pages set all visible in the VM */
+	int64		vm_vis;
+
+	/* number of pages newly marked frozen in the visibility map by vacuum */
+	int64		vm_freezes;
+
+	/* Number of pages with newly frozen tuples */
+	int64		page_freezes;
+
+	/* number of freeze records emitted by vacuum containing FPIs */
+	int64		freeze_fpis;
+} PgStat_VMSet;
+
+/* A time and the insert_lsn recorded at that time. */
+typedef struct LSNTime
+{
+	TimestampTz time;
+	XLogRecPtr lsn;
+} LSNTime;
+
+/*
+ * A timeline of points each consisting of a time and an LSN. An LSN
+ * consumption rate calculated from the timeline can be used to translate time
+ * to LSNs and LSNs to time. Points are combined at an increasing rate as they
+ * become older. Each entry in data is a bucket into which one or more LSNTimes
+ * have been absorbed. Each bucket can hold twice the members as the preceding
+ * bucket.
+ */
+typedef struct LSNTimeline
+{
+	uint64 members;
+	LSNTime data[sizeof(uint64) * CHAR_BIT];
+} LSNTimeline;
+
+/* The number of buckets currently in use by the timeline */
+static inline unsigned int
+lsn_buckets(const LSNTimeline *line)
+{
+	return sizeof(line->members) * CHAR_BIT - __builtin_clzl(line->members);
+}
+
 typedef struct PgStat_StatTabEntry
 {
 	PgStat_Counter numscans;
@@ -415,6 +558,7 @@ typedef struct PgStat_StatTabEntry
 	PgStat_Counter blocks_fetched;
 	PgStat_Counter blocks_hit;
 
+	/* below times are end times */
 	TimestampTz last_vacuum_time;	/* user initiated vacuum */
 	PgStat_Counter vacuum_count;
 	TimestampTz last_autovacuum_time;	/* autovacuum initiated */
@@ -423,6 +567,14 @@ typedef struct PgStat_StatTabEntry
 	PgStat_Counter analyze_count;
 	TimestampTz last_autoanalyze_time;	/* autovacuum initiated */
 	PgStat_Counter autoanalyze_count;
+
+	LSNTimeline line;
+	/* calculated at vac start and used upon unset */
+	XLogRecPtr target_frz_dur_lsns;
+	/* updated upon unset and used to calculate dist for vac . also in stats */
+	PgStat_VMUnset vm_unset;
+	/* updated during vacuum and used in stats */
+	PgStat_VMSet vm_set;
 } PgStat_StatTabEntry;
 
 typedef struct PgStat_WalStats
@@ -485,6 +637,9 @@ extern TimestampTz pgstat_get_stat_snapshot_timestamp(bool *have_snapshot);
 /* helpers */
 extern PgStat_Kind pgstat_get_kind_from_str(char *kind_str);
 extern bool pgstat_have_entry(PgStat_Kind kind, Oid dboid, Oid objoid);
+
+extern void lsntime_insert(LSNTimeline *lsn_gen, TimestampTz time,
+		XLogRecPtr lsn);
 
 
 /*
@@ -592,6 +747,15 @@ extern void pgstat_report_vacuum(Oid tableoid, bool shared,
 extern void pgstat_report_analyze(Relation rel,
 								  PgStat_Counter livetuples, PgStat_Counter deadtuples,
 								  bool resetcounter);
+
+extern void pgstat_setup_vacuum_frz_stats(Oid tableoid, bool shared, double *mean,
+		double *stddev, float *rep_prob);
+
+extern void pgstat_report_heap_vacfrz(Oid tableoid, bool shared, PgStat_VMSet *vmsets);
+
+extern void pgstat_count_vm_unset(Relation relation, XLogRecPtr page_lsn,
+								  XLogRecPtr current_lsn, uint8 old_vmbits,
+								  PgStat_UnsetKind unset_kind);
 
 /*
  * If stats are enabled, but pending data hasn't been prepared yet, call
