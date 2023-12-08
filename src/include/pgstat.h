@@ -267,6 +267,35 @@ accumulator_calculate(PgStat_Accumulator *accumulator, double *mean,
 		);
 }
 
+
+typedef struct PgStat_VMUnset
+{
+	/* times a page marked frozen in the VM was modified */
+	int64		vm_unfreezes;
+	/* times a page was unfrozen before target_freeze_duration elapsed */
+	int64		early_unfreezes;
+	/* times a page marked all visible in the VM was modified */
+	int64		unvis;
+
+	/*
+	 * times a page only marked all visible and not all frozen in the VM
+	 * remained unmodified for longer than target_freeze_duration
+	 */
+	int64		missed_freezes;
+
+	/*
+	 * times that pages marked either all visible or all visible and all
+	 * frozen in the VM were modified before target_freeze_duration elapsed.
+	 * The accumulator tracks their ages as well as occurrences. We include
+	 * pages which were marked all visible but not all frozen because we care
+	 * about how long pages remain unmodified in general. If we only counted
+	 * the ages of early unfreezes, it would skew our data based on our own
+	 * failure to freeze the right pages.
+	 */
+	PgStat_Accumulator early_unsets;
+} PgStat_VMUnset;
+
+
 /* ----------
  * PgStat_TableCounts			The actual per-table counts kept by a backend
  *
@@ -300,6 +329,8 @@ typedef struct PgStat_TableCounts
 	PgStat_Counter tuples_hot_updated;
 	PgStat_Counter tuples_newpage_updated;
 	bool		truncdropped;
+
+	PgStat_VMUnset unsets;
 
 	PgStat_Counter delta_live_tuples;
 	PgStat_Counter delta_dead_tuples;
@@ -556,6 +587,9 @@ typedef struct PgStat_StatTabEntry
 	PgStat_Counter analyze_count;
 	TimestampTz last_autoanalyze_time;	/* autovacuum initiated */
 	PgStat_Counter autoanalyze_count;
+
+	/* updated upon VM unset */
+	PgStat_VMUnset vm_unset;
 } PgStat_StatTabEntry;
 
 /*
@@ -774,6 +808,9 @@ extern void pgstat_report_vacuum(Oid tableoid, bool shared,
 extern void pgstat_report_analyze(Relation rel,
 								  PgStat_Counter livetuples, PgStat_Counter deadtuples,
 								  bool resetcounter);
+
+extern void pgstat_count_vm_unset(Relation relation, XLogRecPtr page_lsn,
+								  XLogRecPtr current_lsn, uint8 old_vmbits);
 
 /*
  * If stats are enabled, but pending data hasn't been prepared yet, call
