@@ -2125,6 +2125,7 @@ PgStatShared_ReplSlot
 PgStatShared_SLRU
 PgStatShared_Subscription
 PgStatShared_Wal
+PgStat_Accumulator
 PgStat_ArchiverStats
 PgStat_BackendSubEntry
 PgStat_BgWriterStats
