@@ -501,6 +501,21 @@ typedef struct PgStat_StatSubEntry
 	TimestampTz stat_reset_timestamp;
 } PgStat_StatSubEntry;
 
+
+typedef struct PgStat_VMSet
+{
+	/* number of pages set all visible in the VM */
+	int64		vis;
+	/* number of pages newly marked frozen in the visibility map by vacuum */
+	int64		vm_freezes;
+	/* Number of pages with newly frozen tuples */
+	int64		page_freezes;
+	/* number of freeze records emitted by vacuum containing FPIs */
+	int64		freeze_fpis;
+} PgStat_VMSet;
+
+
+
 typedef struct PgStat_StatTabEntry
 {
 	PgStat_Counter numscans;
@@ -534,6 +549,8 @@ typedef struct PgStat_StatTabEntry
 
 	/* updated upon VM unset */
 	PgStat_VMUnset vm_unset;
+	/* updated during vacuum and used in stats */
+	PgStat_VMSet vm_set;
 } PgStat_StatTabEntry;
 
 typedef struct PgStat_WalStats
@@ -709,6 +726,8 @@ extern void pgstat_refresh_frz_dur(Oid tableoid, bool shared);
 extern void pgstat_count_vm_unset(Relation relation, XLogRecPtr page_lsn,
 								  TimestampTz page_ts,
 								  XLogRecPtr current_lsn, uint8 old_vmbits);
+
+extern void pgstat_report_heap_vacfrz(Oid tableoid, bool shared, PgStat_VMSet *vmsets);
 
 extern XLogRecPtr pgstat_calc_frz_threshold_min(Oid tableoid, bool shared);
 
