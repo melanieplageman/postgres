@@ -44,6 +44,16 @@ typedef struct TwoPhasePgStatRecord
 	bool		truncdropped;	/* was the relation truncated/dropped? */
 } TwoPhasePgStatRecord;
 
+/*
+ * The Z-score used to calculate the freeze threshold from the distribution of
+ * early unsets. See:
+ *
+ * https://en.wikipedia.org/wiki/Standard_normal_table#Cumulative_(less_than_Z)
+ *
+ * This Z-score has a cumulative probability (from negative infinity) of
+ * approximately 0.94950, or 94.950%.
+ */
+static const double FRZ_THRESHOLD_ZSCORE = 1.64;
 
 static PgStat_TableStatus *pgstat_prep_relation_pending(Oid rel_id, bool isshared);
 static void add_tabstat_xact_level(PgStat_TableStatus *pgstat_info, int nest_level);
@@ -215,8 +225,8 @@ pgstat_drop_relation(Relation rel)
  * want to refresh this translated value periodically. Doing so at the start of
  * each table vacuum is convenient.
  */
-void
-pgstat_refresh_frz_dur(Oid tableoid, bool shared)
+XLogRecPtr
+pgstat_refresh_frz_stats(Oid tableoid, bool shared)
 {
 	PgStat_EntryRef *entry_ref;
 	PgStat_StatTabEntry *tabentry;
@@ -226,10 +236,14 @@ pgstat_refresh_frz_dur(Oid tableoid, bool shared)
 	TimestampTz target_time;
 	XLogRecPtr	target_lsn;
 	uint64		target_dur_usecs;
+	double		mean;
+	double		stddev;
+	double		n;
 	Oid			dboid = (shared ? InvalidOid : MyDatabaseId);
+	XLogRecPtr	frz_threshold_min;
 
 	if (!pgstat_track_counts)
-		return;
+		return InvalidXLogRecPtr;
 
 	target_dur_usecs = target_freeze_duration * USECS_PER_SEC;
 
@@ -281,6 +295,52 @@ pgstat_refresh_frz_dur(Oid tableoid, bool shared)
 	 */
 	tabentry->target_frz_dur_lsns = cur_lsn - target_lsn;
 
+	/*
+	 * Calculate the mean and standard deviation of the distribution of early
+	 * unsets.
+	 *
+	 * Each time an all-visible page is modified, i.e. its all-visible bit is
+	 * unset, and that modification is considered "early", the duration (in
+	 * LSNs) that that page spent all-visible is entered into the early unsets
+	 * accumulator. Here, the data collected in that accumulator is extracted
+	 * into the parameters of a normal distribution (mean and standard
+	 * deviation).
+	 */
+	accumulator_calculate(&tabentry->vm_unset.early_unsets, &mean, &stddev);
+
+	/*
+	 * Calculate the age of the youngest page that should be opportunistically
+	 * frozen.
+	 *
+	 * We'll opportunistically freeze a page if the probability that it will
+	 * be early unset is less than approximately 5%. This threshold occurs
+	 * when the cumulative distribution function of the early unsets
+	 * distribution exceeds 95%. We assume that if a page has survived past
+	 * the age when 95% of early unsets have occurred, then it's safe to
+	 * freeze.
+	 *
+	 * If we couldn't produce a distribution from the accumulator, or the
+	 * standard deviation of that distribution is infinite, then err on the
+	 * side of freezing everything.
+	 */
+	n = mean + FRZ_THRESHOLD_ZSCORE * stddev;
+	if (isnan(n) || isinf(n))
+		frz_threshold_min = InvalidXLogRecPtr;
+	else
+		frz_threshold_min = n;
+
+	/*
+	 * If the number of entries in the accumulator is small, then the mean and
+	 * standard deviation extracted from it may be unreliable. We can probably
+	 * devise a way to represent low confidence using a modifier. For example,
+	 * we could skew the mean and standard deviation to favor more freezing
+	 * (perhaps using standard error). The internet says that a sample size >=
+	 * 30ish is required for the central limit theorem to hold. So, before we
+	 * have 30 unsets, just freeze everything on the given vacuum.
+	 */
+	if (tabentry->vm_unset.early_unsets.n < 30)
+		frz_threshold_min = InvalidXLogRecPtr;
+
 	pgstat_unlock_entry(entry_ref);
 
 	/*
@@ -290,7 +350,7 @@ pgstat_refresh_frz_dur(Oid tableoid, bool shared)
 	 * do this?
 	 */
 
-	return;
+	return frz_threshold_min;
 }
 
 

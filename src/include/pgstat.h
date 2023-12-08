@@ -742,7 +742,7 @@ extern void pgstat_report_analyze(Relation rel,
 								  PgStat_Counter livetuples, PgStat_Counter deadtuples,
 								  bool resetcounter);
 
-extern void pgstat_refresh_frz_dur(Oid tableoid, bool shared);
+extern XLogRecPtr pgstat_refresh_frz_stats(Oid tableoid, bool shared);
 
 extern void pgstat_count_vm_unset(Relation relation, XLogRecPtr page_lsn,
 								  XLogRecPtr current_lsn, uint8 old_vmbits);
