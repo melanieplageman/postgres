@@ -11,6 +11,8 @@
 #ifndef PGSTAT_H
 #define PGSTAT_H
 
+#include <math.h>
+
 #include "access/xlogdefs.h"
 #include "datatype/timestamp.h"
 #include "portability/instr_time.h"
@@ -166,6 +168,104 @@ typedef struct PgStat_BackendSubEntry
 	PgStat_Counter apply_error_count;
 	PgStat_Counter sync_error_count;
 } PgStat_BackendSubEntry;
+
+/*
+ * An accumulator representing some data set consisting of numeric values. It
+ * keeps track of the counters needed to calculate a mean and standard
+ * deviation online. All operations on the accumulator assume no access to the
+ * underlying data set it represents.
+ */
+typedef struct PgStat_Accumulator
+{
+	/* Number of values in this accumulator */
+	uint64		n;
+
+	/* Sum of values */
+	double		s;
+
+	/* Sum of squared values */
+	double		q;
+} PgStat_Accumulator;
+
+/*
+ * Insert a new value into the accumulator
+ */
+static inline void
+accumulator_insert(PgStat_Accumulator *accumulator, double v)
+{
+	accumulator->n++;
+	accumulator->s += v;
+	accumulator->q += pow(v, 2);
+}
+
+/*
+ * Add all of the values represented in the source accumulator into the
+ * target. This can be useful when stats are tracked locally in a backend and
+ * later added to shared stats.
+ */
+static inline void
+accumulator_absorb(PgStat_Accumulator *target, PgStat_Accumulator *source)
+{
+	target->n += source->n;
+	target->s += source->s;
+	target->q += source->q;
+}
+
+/*
+ * Remove one or more values from the accumulator while maintaining the mean
+ * and standard deviation. Decreasing the sum and sum of squares using the
+ * average value increases the standard deviation but that effect will be
+ * blunted by inserting new values.
+ */
+static inline void
+accumulator_remove(PgStat_Accumulator *accumulator,
+				   uint64 n_remove)
+{
+	uint64		n;
+	double		s;
+
+	Assert(accumulator->n > 0 && n_remove > 0);
+
+	/* save the original values */
+	n = accumulator->n;
+	s = accumulator->s;
+
+	if (n_remove >= n)
+	{
+		memset(accumulator, 0, sizeof(*accumulator));
+		return;
+	}
+
+	accumulator->n -= n_remove;
+
+	accumulator->s -= s / n * n_remove;
+	Assert(accumulator->s > 0);
+
+	accumulator->q -= pow((s / n), 2) * n_remove;
+	Assert(accumulator->q > 0);
+}
+
+/*
+ * Calculate the mean and standard deviation given a PgStat_Accumulator with a
+ * count, sum, and sum of squares.
+ */
+static inline void
+accumulator_calculate(PgStat_Accumulator *accumulator, double *mean,
+					  double *stddev)
+{
+	*mean = NAN;
+	*stddev = INFINITY;
+
+	if (accumulator->n == 0)
+		return;
+
+	*mean = accumulator->s / accumulator->n;
+	*stddev = sqrt(
+				   (accumulator->q -
+					(pow(accumulator->s, 2) / accumulator->n)) /
+				   accumulator->n
+		);
+}
 
 /* ----------
  * PgStat_TableCounts			The actual per-table counts kept by a backend
