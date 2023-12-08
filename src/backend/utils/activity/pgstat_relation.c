@@ -18,6 +18,7 @@
 #include "postgres.h"
 
 #include "access/twophase_rmgr.h"
+#include "access/visibilitymapdefs.h"
 #include "access/xact.h"
 #include "catalog/catalog.h"
 #include "postmaster/autovacuum.h"
@@ -202,6 +203,109 @@ pgstat_drop_relation(Relation rel)
 		pgstat_info->trans->tuples_updated = 0;
 		pgstat_info->trans->tuples_deleted = 0;
 	}
+}
+
+
+/*
+ * Upon update, delete, or tuple lock, if the page being modified was
+ * previously marked all visible in the visibility map, check and record
+ * whether or not the page has remained unmodified for longer than
+ * target_freeze_duration. Record both the page age and the page's former
+ * status in the VM. The distribution of ages can be used to predict whether or
+ * not a given page is likely to remain unmodified for longer than
+ * target_freeze_duration.
+ *
+ * Note that we do not count when an insert unsets the visibility map bits for
+ * a formerly all visible page. Logically, inserts are not unfreezing tuples,
+ * so it doesn't make sense to count them as a reason to avoid more freezing.
+ * Even more practically, counting them would skew our data accuracy. Vacuum
+ * updates the freespace map after vacuuming a page. The next insert is likely
+ * to be to this page, so the page's age at insert is unrelated to the page
+ * modification pattern.
+ */
+void
+pgstat_count_vm_unset(Relation relation, XLogRecPtr page_lsn,
+					  XLogRecPtr current_lsn, uint8 old_vmbits)
+{
+	XLogRecPtr	target_frz_duration;
+	XLogRecPtr	vm_duration_lsns;
+	PgStat_TableCounts *tabcounts;
+	PgStat_WalStats *wal_stats;
+
+	Assert(old_vmbits & VISIBILITYMAP_ALL_VISIBLE);
+
+	if (!pgstat_track_counts)
+		return;
+
+	wal_stats = pgstat_fetch_stat_wal();
+
+	target_frz_duration = wal_stats->target_frz_dur_lsns;
+
+	vm_duration_lsns = current_lsn - page_lsn;
+	vm_duration_lsns = Max(vm_duration_lsns, 0);
+
+	tabcounts = &relation->pgstat_info->counts;
+
+	tabcounts->unsets.unvis++;
+
+	/*
+	 * If the page is being modified before target_freeze_duration, count it
+	 * as an unset for vacuum freeze statistics. We want to determine the
+	 * likelihood that a page being vacuumed will be modified before that
+	 * amount of time has elapsed, irrespective of whether or not we got it
+	 * right last vacuum. Note that we don't worry about exceeding
+	 * FRZ_UNSET_CAPACITY because we will handle that before flushing this
+	 * backends accumulated values to the shared memory version.
+	 */
+	if (vm_duration_lsns < target_frz_duration)
+		accumulator_insert(&tabcounts->unsets.early_unsets, vm_duration_lsns);
+
+	/*
+	 * If it was frozen and modified before the target duration, it is an
+	 * early unfreeze. If it was not frozen and remained unmodified for longer
+	 * than the target duration, it is a missed opportunity to freeze.
+	 */
+	if (old_vmbits & VISIBILITYMAP_ALL_FROZEN)
+	{
+		tabcounts->unsets.vm_unfreezes++;
+
+		if (vm_duration_lsns < target_frz_duration)
+			tabcounts->unsets.early_unfreezes++;
+	}
+	else if (vm_duration_lsns >= target_frz_duration)
+		tabcounts->unsets.missed_freezes++;
+}
+
+
+/*
+ * Given two PgStat_VMUnsets, add the contents of source into target. If the
+ * new target PgStat_VMUnset would represent more than FRZ_UNSET_CAPACITY
+ * values, remove enough values to fall below FRZ_UNSET_CAPACITY.
+ */
+static inline void
+pgstat_unset_absorb(PgStat_VMUnset *target, PgStat_VMUnset *source)
+{
+	uint64		new_total_unsets;
+	uint64		n_remove = 0;
+
+	target->vm_unfreezes += source->vm_unfreezes;
+	target->early_unfreezes += source->early_unfreezes;
+	target->unvis += source->unvis;
+	target->missed_freezes += source->missed_freezes;
+
+	new_total_unsets = target->early_unsets.n + source->early_unsets.n;
+	if (new_total_unsets > FRZ_UNSET_CAPACITY)
+		n_remove = new_total_unsets - FRZ_UNSET_CAPACITY;
+
+	/*
+	 * To ensure the accumulator stays current with the table's access
+	 * pattern, remove values in excess of FRZ_UNSET_CAPACITY before absorbing
+	 * in new values.
+	 */
+	if (n_remove > 0)
+		accumulator_remove(&target->early_unsets, FRZ_UNSET_CAPACITY);
+
+	accumulator_absorb(&target->early_unsets, &source->early_unsets);
 }
 
 /*
@@ -843,6 +947,8 @@ pgstat_relation_flush_cb(PgStat_EntryRef *entry_ref, bool nowait)
 	tabentry->tuples_deleted += lstats->counts.tuples_deleted;
 	tabentry->tuples_hot_updated += lstats->counts.tuples_hot_updated;
 	tabentry->tuples_newpage_updated += lstats->counts.tuples_newpage_updated;
+
+	pgstat_unset_absorb(&tabentry->vm_unset, &lstats->counts.unsets);
 
 	/*
 	 * If table was truncated/dropped, first reset the live/dead counters.
