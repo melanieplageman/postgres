@@ -11,6 +11,8 @@
 #ifndef PGSTAT_H
 #define PGSTAT_H
 
+#include <math.h>
+
 #include "access/xlogdefs.h"
 #include "datatype/timestamp.h"
 #include "portability/instr_time.h"
@@ -137,6 +139,68 @@ typedef struct PgStat_BackendSubEntry
 	PgStat_Counter apply_error_count;
 	PgStat_Counter sync_error_count;
 } PgStat_BackendSubEntry;
+
+/*
+ * Used both in backend local and shared memory, this accumulator keeps track of
+ * the counters needed to calculate a mean and standard deviation online.
+ */
+typedef struct PgStat_Accumulator
+{
+	/* Number of values in this accumulator */
+	uint64		n;
+
+	/* Sum of values */
+	double		s;
+
+	/* Sum of squared values */
+	double		q;
+} PgStat_Accumulator;
+
+static inline void
+accumulator_insert(PgStat_Accumulator *accumulator, double v)
+{
+	accumulator->n++;
+	accumulator->s += v;
+	accumulator->q += pow(v, 2);
+}
+
+static inline double
+accumulator_remove(PgStat_Accumulator *accumulator)
+{
+	double		result;
+
+	Assert(accumulator->n > 0);
+
+	result = accumulator->s / accumulator->n;
+
+	accumulator->n--;
+	accumulator->s -= result;
+	accumulator->q -= pow(result, 2);
+
+	return result;
+}
+
+static inline void
+accumulator_absorb(PgStat_Accumulator *target, PgStat_Accumulator *source)
+{
+	target->n += source->n;
+	target->s += source->s;
+	target->q += source->q;
+}
+
+static inline void
+accumulator_calculate(PgStat_Accumulator *accumulator, double *mean,
+					  double *stddev)
+{
+	*mean = NAN;
+	*stddev = INFINITY;
+
+	if (accumulator->n == 0)
+		return;
+
+	*mean = accumulator->s / accumulator->n;
+	*stddev = sqrt((accumulator->q - pow(accumulator->s, 2) / accumulator->n) / accumulator->n);
+}
 
 /* ----------
  * PgStat_TableCounts			The actual per-table counts kept by a backend
