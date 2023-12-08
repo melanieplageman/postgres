@@ -489,6 +489,8 @@ heap_vacuum_rel(Relation rel, VacuumParams *params,
 							vacrel->relname)));
 	}
 
+	pgstat_refresh_frz_dur(RelationGetRelid(rel), rel->rd_rel->relisshared);
+
 	/*
 	 * Allocate dead_items array memory using dead_items_alloc.  This handles
 	 * parallel VACUUM initialization as part of allocating shared memory
