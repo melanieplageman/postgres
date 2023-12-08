@@ -485,6 +485,32 @@ pgstat_report_vacuum(Oid tableoid, bool shared,
 	pgstat_flush_io(false);
 }
 
+void
+pgstat_report_heap_vacfrz(Oid tableoid, bool shared, PgStat_VMSet *vmsets)
+{
+	PgStat_EntryRef *entry_ref;
+	PgStat_StatTabEntry *tabentry;
+	Oid			dboid = (shared ? InvalidOid : MyDatabaseId);
+
+	if (!pgstat_track_counts)
+		return;
+
+
+	/* block acquiring lock for the same reason as pgstat_report_autovac() */
+	entry_ref = pgstat_get_entry_ref_locked(PGSTAT_KIND_RELATION,
+											dboid, tableoid, false);
+
+	tabentry = &((PgStatShared_Relation *) entry_ref->shared_stats)->stats;
+
+	tabentry->vm_set.vis += vmsets->vis;
+	tabentry->vm_set.page_freezes += vmsets->page_freezes;
+	tabentry->vm_set.vm_freezes += vmsets->vm_freezes;
+	tabentry->vm_set.freeze_fpis += vmsets->freeze_fpis;
+
+	pgstat_unlock_entry(entry_ref);
+}
+
+
 /*
  * Report that the table was just analyzed and flush IO statistics.
  *
