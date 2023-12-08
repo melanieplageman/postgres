@@ -1554,6 +1554,36 @@ pg_stat_lsntime_stream(PG_FUNCTION_ARGS)
 	return (Datum) 0;
 }
 
+Datum
+pg_stat_table_page_age_distribution(PG_FUNCTION_ARGS)
+{
+	Oid			relid = PG_GETARG_OID(0);
+	PgStat_StatTabEntry *tabentry;
+	TupleDesc	tupdesc;
+	Datum		values[3] = {0};
+	bool		nulls[3] = {0};
+
+	if ((tabentry = pgstat_fetch_stat_tabentry(relid)) == NULL)
+		PG_RETURN_NULL();
+
+	tupdesc = CreateTemplateTupleDesc(3);
+	TupleDescInitEntry(tupdesc, (AttrNumber) 1, "count",
+					   INT8OID, -1, 0);
+	TupleDescInitEntry(tupdesc, (AttrNumber) 2, "sum",
+					   FLOAT8OID, -1, 0);
+	TupleDescInitEntry(tupdesc, (AttrNumber) 3, "sum_squares",
+					   FLOAT8OID, -1, 0);
+	BlessTupleDesc(tupdesc);
+
+	values[0] = UInt64GetDatum(tabentry->vm_unsets.n);
+	values[1] = Float8GetDatum(tabentry->vm_unsets.s);
+	values[2] = Float8GetDatum(tabentry->vm_unsets.q);
+
+	PG_RETURN_DATUM(HeapTupleGetDatum(heap_form_tuple(tupdesc,
+													  values,
+													  nulls)));
+}
+
 /*
  * Returns statistics of SLRU caches.
  */

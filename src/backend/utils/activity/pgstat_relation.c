@@ -18,6 +18,7 @@
 #include "postgres.h"
 
 #include "access/twophase_rmgr.h"
+#include "access/visibilitymapdefs.h"
 #include "access/xact.h"
 #include "catalog/catalog.h"
 #include "postmaster/autovacuum.h"
@@ -49,6 +50,8 @@ static void ensure_tabstat_xact_level(PgStat_TableStatus *pgstat_info);
 static void save_truncdrop_counters(PgStat_TableXactStatus *trans, bool is_drop);
 static void restore_truncdrop_counters(PgStat_TableXactStatus *trans);
 
+static void pgstat_unset_accum_absorb(PgStat_Accumulator *target,
+									  PgStat_Accumulator *source);
 
 /*
  * Copy stats between relations. This is used for things like REINDEX
@@ -203,6 +206,84 @@ pgstat_drop_relation(Relation rel)
 		pgstat_info->trans->tuples_deleted = 0;
 	}
 }
+
+/*
+ * Upon update, delete, or tuple lock, if the page being modified was
+ * previously marked all-visible in the visibility map, record the page's
+ * all-visible duration. The distribution of all-visible durations can be used
+ * to predict whether or not a given page is likely to remain unmodified for
+ * longer than target_freeze_duration.
+ *
+ * Note that we do not count when an insert unsets the visibility map bits for
+ * a formerly all-visible page. Logically, inserts are not unfreezing tuples,
+ * so it doesn't make sense to count them as a reason to avoid more freezing.
+ * Also, counting them would skew our data accuracy. Vacuum updates the
+ * freespace map after vacuuming a page. The next insert is likely to be to
+ * this page, so the page's all-visible duration at insert is unrelated to the
+ * page modification pattern.
+ */
+void
+pgstat_count_vm_unset(Relation relation, XLogRecPtr page_lsn,
+					  XLogRecPtr current_lsn, uint8 old_vmbits)
+{
+	LSNInterval vm_duration_lsns;
+
+	Assert(old_vmbits & VISIBILITYMAP_ALL_VISIBLE);
+
+	if (!pgstat_track_counts)
+		return;
+
+	Assert(current_lsn >= page_lsn);
+	vm_duration_lsns = current_lsn - page_lsn;
+
+	/*
+	 * Add the page's all-visible duration to the accumulator. We will use this
+	 * to determine the likelihood that a page being vacuumed will be modified
+	 * before target_freeze_duration. We count all-visible duration even if the
+	 * page was not frozen so that we don't have a dependency on having
+	 * correctly chosen to freeze pages in the past.
+	 *
+	 * Note that we don't worry about exceeding UNSET_ACCUMULATOR_CAPACITY
+	 * because we will handle that before flushing this backend's accumulated
+	 * values to shared memory.
+	 */
+	accumulator_insert(&relation->pgstat_info->counts.vm_unsets,
+						vm_duration_lsns);
+}
+
+/*
+ * The max number of all-visible duration values we want to represent in the
+ * accumulator at a given time. Once we reach max capacity, we remove values
+ * before inserting new ones. This allows the accumulator to more accurately
+ * reflect the table as the access pattern changes over time.
+ */
+#define UNSET_ACCUMULATOR_CAPACITY 10000
+
+/* The accumulator is not useful with a sample size of less than 30. */
+StaticAssertDecl(UNSET_ACCUMULATOR_CAPACITY >= 30,
+		"UNSET_ACCUMULATOR_CAPACITY >= 30");
+
+/*
+ * Add the contents of source into target. This is a helper for
+ * pgstat_relation_flush_cb() to add a backend's pending stats related to
+ * modifying all-visible pages to the corresponding shared stats.
+ */
+static void
+pgstat_unset_accum_absorb(PgStat_Accumulator *target, PgStat_Accumulator *source)
+{
+	/*
+	 * We assume source contains newer values than target, so if adding in
+	 * source would exceed UNSET_ACCUMULATOR_CAPACITY, remove some of target's
+	 * values first to keep the accumulator current with the table's access
+	 * pattern.
+	 */
+	if (target->n + source->n > UNSET_ACCUMULATOR_CAPACITY)
+		accumulator_remove(target,
+						   target->n + source->n - UNSET_ACCUMULATOR_CAPACITY);
+
+	accumulator_absorb(target, source);
+}
+
 
 /*
  * Report that the table was just vacuumed and flush IO statistics.
@@ -843,6 +924,8 @@ pgstat_relation_flush_cb(PgStat_EntryRef *entry_ref, bool nowait)
 	tabentry->tuples_deleted += lstats->counts.tuples_deleted;
 	tabentry->tuples_hot_updated += lstats->counts.tuples_hot_updated;
 	tabentry->tuples_newpage_updated += lstats->counts.tuples_newpage_updated;
+
+	pgstat_unset_accum_absorb(&tabentry->vm_unsets, &lstats->counts.vm_unsets);
 
 	/*
 	 * If table was truncated/dropped, first reset the live/dead counters.
