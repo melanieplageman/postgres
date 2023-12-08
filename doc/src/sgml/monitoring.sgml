@@ -3932,6 +3932,19 @@ description | Waiting for a newly initialized WAL file to reach durable storage
    </tgroup>
   </table>
 
+  <para>
+   In addition to these table stats, the inputs to the parameters of a normal
+   distribution of the ages of pages from a given table modified before
+   <xref linkend="guc-target-freeze-duration"/>
+   can be viewed via the function
+   <function>pg_stat_table_page_age_distribution</function>
+    (<parameter>relid</parameter> <type> oid </type> )
+   <returnvalue>record</returnvalue>
+   ( <parameter>count</parameter> <type>bigint</type>,
+   <parameter>sum</parameter> <type>double precision</type>,
+   <parameter>sum_squares</parameter> <type>double precision</type>).
+  </para>
+
  </sect2>
 
  <sect2 id="monitoring-pg-stat-all-indexes-view">

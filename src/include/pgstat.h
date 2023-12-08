@@ -285,6 +285,10 @@ accumulator_calculate(PgStat_Accumulator *accumulator, double *mean,
  * actions, regardless of whether the transaction committed.  delta_live_tuples,
  * delta_dead_tuples, and changed_tuples are set depending on commit or abort.
  * Note that delta_live_tuples and delta_dead_tuples can be negative!
+ *
+ * vm_unsets count all-visible pages in this table that were modified sooner
+ * than target_freeze_duration. These stats are used by vacuum to determine
+ * which pages to eagerly freeze.
  * ----------
  */
 typedef struct PgStat_TableCounts
@@ -300,6 +304,8 @@ typedef struct PgStat_TableCounts
 	PgStat_Counter tuples_hot_updated;
 	PgStat_Counter tuples_newpage_updated;
 	bool		truncdropped;
+
+	PgStat_Accumulator vm_unsets;
 
 	PgStat_Counter delta_live_tuples;
 	PgStat_Counter delta_dead_tuples;
@@ -556,6 +562,15 @@ typedef struct PgStat_StatTabEntry
 	PgStat_Counter analyze_count;
 	TimestampTz last_autoanalyze_time;	/* autovacuum initiated */
 	PgStat_Counter autoanalyze_count;
+
+	/*
+	 * When a previously all-visible page in this table is modified, its
+	 * associated bits in the visibility map are unset. If it was all-visible
+	 * for less than target_freeze_duration, the page's all-visible duration
+	 * gets added to this accumulator for use by vacuum when deciding whether
+	 * or not to eagerly freeze pages in the future.
+	 */
+	PgStat_Accumulator vm_unsets;
 } PgStat_StatTabEntry;
 
 /*
@@ -798,6 +813,9 @@ extern void pgstat_report_vacuum(Oid tableoid, bool shared,
 extern void pgstat_report_analyze(Relation rel,
 								  PgStat_Counter livetuples, PgStat_Counter deadtuples,
 								  bool resetcounter);
+
+extern void pgstat_count_vm_unset(Relation relation, XLogRecPtr page_lsn,
+								  XLogRecPtr current_lsn, uint8 old_vmbits);
 
 /*
  * If stats are enabled, but pending data hasn't been prepared yet, call

@@ -12264,4 +12264,13 @@
   proargmodes => '{o,o}', proargnames => '{lsn,time}',
   prosrc => 'pg_stat_lsntime_stream' },
 
+{ oid => '9995',
+  descr => 'print the inputs to the parameters of a normal distribution of the ages of pages from the input table modified before target_freeze_duration',
+  proname => 'pg_stat_table_page_age_distribution', proargtypes => 'oid',
+  provolatile => 'v', proparallel => 'u',
+  proretset => 'f', prorettype => 'record',
+  proallargtypes => '{oid,int8,float8,float8}',
+  proargmodes => '{i,o,o,o}', proargnames => '{relname,count,sum,sum_squares}',
+  prosrc => 'pg_stat_table_page_age_distribution' },
+
 ]
