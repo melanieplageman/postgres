@@ -11,6 +11,10 @@
 #ifndef PGSTAT_H
 #define PGSTAT_H
 
+#include <math.h>
+#include <limits.h>
+
+#include "access/xlogdefs.h"
 #include "datatype/timestamp.h"
 #include "portability/instr_time.h"
 #include "postmaster/pgarch.h"	/* for MAX_XFN_CHARS */
@@ -425,6 +429,43 @@ typedef struct PgStat_StatTabEntry
 	PgStat_Counter autoanalyze_count;
 } PgStat_StatTabEntry;
 
+/* A time and the insert_lsn recorded at that time. */
+typedef struct LSNTime
+{
+	TimestampTz time;
+	XLogRecPtr	lsn;
+} LSNTime;
+
+/*
+ * A timeline of points each consisting of a time and an LSN. An LSN
+ * consumption rate calculated from the timeline can be used to translate time
+ * to LSNs and LSNs to time. Points are combined at an increasing rate as they
+ * become older. Each entry in data is a bucket into which one or more LSNTimes
+ * have been absorbed. Each bucket can hold twice the members as the preceding
+ * bucket.
+ */
+typedef struct LSNTimeline
+{
+	uint64		members;
+	LSNTime		data[sizeof(uint64) * CHAR_BIT];
+} LSNTimeline;
+
+/*
+ * The number of buckets currently in use by the timeline
+ * MTODO: portability
+ */
+static inline unsigned int
+lsn_buckets(const LSNTimeline *line)
+{
+	return sizeof(line->members) * CHAR_BIT - __builtin_clzl(line->members);
+}
+
+/*
+ * MTODO: Add LSNTimeline to PgStat_PendingWalStats and add logic to flush it
+ * to PgStat_WalStats and check for it in has_pending_wal_stats. I didn't do
+ * this in this version because efficiently combining two timelines is a bit
+ * tricky.
+ */
 typedef struct PgStat_WalStats
 {
 	PgStat_Counter wal_records;
@@ -435,6 +476,7 @@ typedef struct PgStat_WalStats
 	PgStat_Counter wal_sync;
 	PgStat_Counter wal_write_time;
 	PgStat_Counter wal_sync_time;
+	LSNTimeline timeline;
 	TimestampTz stat_reset_timestamp;
 } PgStat_WalStats;
 
@@ -716,6 +758,9 @@ extern void pgstat_execute_transactional_drops(int ndrops, struct xl_xact_stats_
 
 extern void pgstat_report_wal(bool force);
 extern PgStat_WalStats *pgstat_fetch_stat_wal(void);
+
+extern XLogRecPtr estimate_lsn_at_time(const LSNTimeline *timeline, TimestampTz time);
+extern void lsntime_insert(LSNTimeline *timeline, TimestampTz time, XLogRecPtr lsn);
 
 
 /*

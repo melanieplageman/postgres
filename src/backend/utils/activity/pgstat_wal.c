@@ -17,8 +17,11 @@
 
 #include "postgres.h"
 
+#include "access/xlog.h"
 #include "utils/pgstat_internal.h"
 #include "executor/instrument.h"
+#include "utils/builtins.h"
+#include "utils/timestamp.h"
 
 
 PgStat_PendingWalStats PendingWalStats = {0};
@@ -183,4 +186,100 @@ pgstat_wal_snapshot_cb(void)
 	memcpy(&pgStatLocal.snapshot.wal, &stats_shmem->stats,
 		   sizeof(pgStatLocal.snapshot.wal));
 	LWLockRelease(&stats_shmem->lock);
+}
+
+/*
+ * Set *a to be the earlier of *a or *b.
+ */
+static void
+lsntime_absorb(LSNTime *a, const LSNTime *b)
+{
+	LSNTime		result;
+
+	if (a->time < b->time)
+		result = *a;
+	else if (b->time < a->time)
+		result = *b;
+	else if (a->lsn < b->lsn)
+		result = *a;
+	else if (b->lsn < a->lsn)
+		result = *b;
+	else
+		result = *a;
+
+	*a = result;
+}
+
+void
+lsntime_insert(LSNTimeline *timeline, TimestampTz time,
+			   XLogRecPtr lsn)
+{
+	LSNTime		entrant = {.lsn = lsn,.time = time};
+	int			buckets = lsn_buckets(timeline);
+
+	if (timeline->members == 0)
+	{
+		timeline->data[0] = entrant;
+		goto done;
+	}
+
+	for (int i = 0; i < buckets; i++)
+	{
+		LSNTime		old;
+		uint64		isset;
+
+		isset = (timeline->members >> (buckets - i - 1)) & 1;
+
+		if (!isset)
+		{
+			lsntime_absorb(&timeline->data[i], &entrant);
+			goto done;
+		}
+
+		old = timeline->data[i];
+		timeline->data[i] = entrant;
+		entrant = old;
+	}
+
+	timeline->data[buckets] = entrant;
+
+done:
+	timeline->members++;
+}
+
+
+XLogRecPtr
+estimate_lsn_at_time(const LSNTimeline *timeline, TimestampTz time)
+{
+	TimestampTz time_elapsed;
+	XLogRecPtr	lsns_elapsed;
+	double		result;
+
+	LSNTime		start = {.time = PgStartTime,.lsn = PgStartLSN};
+	LSNTime		end = {.time = GetCurrentTimestamp(),.lsn = GetXLogInsertRecPtr()};
+
+	if (time >= end.time)
+		return end.lsn;
+
+	for (int i = 0; i < lsn_buckets(timeline); i++)
+	{
+		if (timeline->data[i].time > time)
+			continue;
+
+		start = timeline->data[i];
+		if (i > 0)
+			end = timeline->data[i - 1];
+		break;
+	}
+
+	time_elapsed = end.time - start.time;
+	Assert(time_elapsed != 0);
+
+	lsns_elapsed = end.lsn - start.lsn;
+	Assert(lsns_elapsed != 0);
+
+	result = (double) (time - start.time) / time_elapsed * lsns_elapsed + start.lsn;
+	if (result < 0)
+		return InvalidXLogRecPtr;
+	return result;
 }
