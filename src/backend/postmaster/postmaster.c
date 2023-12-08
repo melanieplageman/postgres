@@ -117,6 +117,7 @@
 #include "storage/proc.h"
 #include "tcop/backend_startup.h"
 #include "tcop/tcopprot.h"
+#include "utils/builtins.h"
 #include "utils/datetime.h"
 #include "utils/memutils.h"
 #include "utils/pidfile.h"
