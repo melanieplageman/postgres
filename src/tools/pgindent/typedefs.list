@@ -1584,6 +1584,8 @@ LogicalTapeSet
 LsnReadQueue
 LsnReadQueueNextFun
 LsnReadQueueNextStatus
+LSNTime
+LSNTimeStream
 LtreeGistOptions
 LtreeSignature
 MAGIC
