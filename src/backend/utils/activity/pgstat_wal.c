@@ -36,10 +36,10 @@ static WalUsage prevWalUsage;
 
 
 static void lsntime_absorb(LSNTime *a, const LSNTime *b);
-void lsntime_insert(LSNTimeline *timeline, TimestampTz time, XLogRecPtr lsn);
+static void lsntime_insert(LSNTimeline *timeline, TimestampTz time, XLogRecPtr lsn);
 
-XLogRecPtr estimate_lsn_at_time(const LSNTimeline *timeline, TimestampTz time);
-TimestampTz estimate_time_at_lsn(const LSNTimeline *timeline, XLogRecPtr lsn);
+static XLogRecPtr estimate_lsn_at_time(const LSNTimeline *timeline, TimestampTz time);
+static TimestampTz estimate_time_at_lsn(const LSNTimeline *timeline, XLogRecPtr lsn);
 
 /*
  * Calculate how much WAL usage counters have increased and update
@@ -222,7 +222,7 @@ lsntime_absorb(LSNTime *a, const LSNTime *b)
  * Insert a new LSNTime into the LSNTimeline in the first element with spare
  * capacity.
  */
-void
+static void
 lsntime_insert(LSNTimeline *timeline, TimestampTz time,
 			   XLogRecPtr lsn)
 {
@@ -284,7 +284,7 @@ lsntime_insert(LSNTimeline *timeline, TimestampTz time,
  * Translate time to a LSN using the provided timeline. The timeline will not
  * be modified.
  */
-XLogRecPtr
+static XLogRecPtr
 estimate_lsn_at_time(const LSNTimeline *timeline, TimestampTz time)
 {
 	TimestampTz time_elapsed;
@@ -336,7 +336,7 @@ estimate_lsn_at_time(const LSNTimeline *timeline, TimestampTz time)
  * Translate lsn to a time using the provided timeline. The timeline will not
  * be modified.
  */
-TimestampTz
+static TimestampTz
 estimate_time_at_lsn(const LSNTimeline *timeline, XLogRecPtr lsn)
 {
 	TimestampTz time_elapsed;
@@ -382,4 +382,40 @@ estimate_time_at_lsn(const LSNTimeline *timeline, XLogRecPtr lsn)
 	if (result < 0)
 		return 0;
 	return result;
+}
+
+XLogRecPtr
+pgstat_wal_estimate_lsn_at_time(TimestampTz time)
+{
+	XLogRecPtr	result;
+	PgStatShared_Wal *stats_shmem = &pgStatLocal.shmem->wal;
+
+	LWLockAcquire(&stats_shmem->lock, LW_SHARED);
+	result = estimate_lsn_at_time(&stats_shmem->stats.timeline, time);
+	LWLockRelease(&stats_shmem->lock);
+
+	return result;
+}
+
+TimestampTz
+pgstat_wal_estimate_time_at_lsn(XLogRecPtr lsn)
+{
+	TimestampTz result;
+	PgStatShared_Wal *stats_shmem = &pgStatLocal.shmem->wal;
+
+	LWLockAcquire(&stats_shmem->lock, LW_SHARED);
+	result = estimate_time_at_lsn(&stats_shmem->stats.timeline, lsn);
+	LWLockRelease(&stats_shmem->lock);
+
+	return result;
+}
+
+void
+pgstat_wal_update_lsntimeline(TimestampTz time, XLogRecPtr lsn)
+{
+	PgStatShared_Wal *stats_shmem = &pgStatLocal.shmem->wal;
+
+	LWLockAcquire(&stats_shmem->lock, LW_EXCLUSIVE);
+	lsntime_insert(&stats_shmem->stats.timeline, time, lsn);
+	LWLockRelease(&stats_shmem->lock);
 }

@@ -472,6 +472,7 @@ typedef struct PgStat_WalStats
 	PgStat_Counter wal_sync;
 	PgStat_Counter wal_write_time;
 	PgStat_Counter wal_sync_time;
+	LSNTimeline timeline;
 	TimestampTz stat_reset_timestamp;
 } PgStat_WalStats;
 
@@ -753,6 +754,11 @@ extern void pgstat_execute_transactional_drops(int ndrops, struct xl_xact_stats_
 
 extern void pgstat_report_wal(bool force);
 extern PgStat_WalStats *pgstat_fetch_stat_wal(void);
+
+/* Helpers for maintaining the LSNTimeline */
+extern XLogRecPtr pgstat_wal_estimate_lsn_at_time(TimestampTz time);
+extern TimestampTz pgstat_wal_estimate_time_at_lsn(XLogRecPtr lsn);
+extern void pgstat_wal_update_lsntimeline(TimestampTz time, XLogRecPtr lsn);
 
 
 /*
