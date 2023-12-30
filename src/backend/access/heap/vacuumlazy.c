@@ -1302,8 +1302,7 @@ static BlockNumber
 lazy_scan_skip(LVRelState *vacrel, Buffer *vmbuffer, BlockNumber next_block,
 			   bool *next_unskippable_allvis, bool *skipping_current_range)
 {
-	BlockNumber next_unskippable_block = next_block,
-				nskippable_blocks = 0;
+	BlockNumber next_unskippable_block = next_block;
 	bool		skipsallvis = false;
 
 	*next_unskippable_allvis = true;
@@ -1360,7 +1359,6 @@ lazy_scan_skip(LVRelState *vacrel, Buffer *vmbuffer, BlockNumber next_block,
 
 		vacuum_delay_point();
 		next_unskippable_block++;
-		nskippable_blocks++;
 	}
 
 	/*
@@ -1373,7 +1371,7 @@ lazy_scan_skip(LVRelState *vacrel, Buffer *vmbuffer, BlockNumber next_block,
 	 * non-aggressive VACUUMs.  If the range has any all-visible pages then
 	 * skipping makes updating relfrozenxid unsafe, which is a real downside.
 	 */
-	if (nskippable_blocks < SKIP_PAGES_THRESHOLD)
+	if (next_unskippable_block - next_block < SKIP_PAGES_THRESHOLD)
 		*skipping_current_range = false;
 	else
 	{
