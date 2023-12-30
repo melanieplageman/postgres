@@ -1302,13 +1302,12 @@ static BlockNumber
 lazy_scan_skip(LVRelState *vacrel, Buffer *vmbuffer, BlockNumber next_block,
 			   bool *next_unskippable_allvis, bool *skipping_current_range)
 {
-	BlockNumber rel_pages = vacrel->rel_pages,
-				next_unskippable_block = next_block,
+	BlockNumber next_unskippable_block = next_block,
 				nskippable_blocks = 0;
 	bool		skipsallvis = false;
 
 	*next_unskippable_allvis = true;
-	while (next_unskippable_block < rel_pages)
+	while (next_unskippable_block < vacrel->rel_pages)
 	{
 		uint8		mapbits = visibilitymap_get_status(vacrel->rel,
 													   next_unskippable_block,
@@ -1331,7 +1330,7 @@ lazy_scan_skip(LVRelState *vacrel, Buffer *vmbuffer, BlockNumber next_block,
 		 *
 		 * Implement this by always treating the last block as unsafe to skip.
 		 */
-		if (next_unskippable_block == rel_pages - 1)
+		if (next_unskippable_block == vacrel->rel_pages - 1)
 			break;
 
 		/* DISABLE_PAGE_SKIPPING makes all skipping unsafe */
