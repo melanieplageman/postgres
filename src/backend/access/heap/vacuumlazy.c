@@ -238,13 +238,22 @@ typedef struct LVSavedErrInfo
 	VacErrPhase phase;
 } LVSavedErrInfo;
 
+/*
+ * Parameters maintained by vacuum to manage skipping ranges of pages greater
+ * than SKIP_PAGES_THRESHOLD.
+ */
+typedef struct VacSkipState {
+	/* Next unskippable block */
+	BlockNumber nblock;
+	/* Next unskippable block's visibility status */
+	bool n_all_vis;
+} VacSkipState;
 
 /* non-export function prototypes */
 static void lazy_scan_heap(LVRelState *vacrel);
-static BlockNumber lazy_scan_skip(LVRelState *vacrel, Buffer *vmbuffer,
-								  BlockNumber next_block,
-								  bool *next_unskippable_allvis,
-								  bool *skipping_current_range);
+
+static BlockNumber lazy_scan_skip(LVRelState *vacrel, VacSkipState *skip_state,
+		BlockNumber blkno, Buffer *vmbuffer, bool *all_visible_according_to_vm);
 static bool lazy_scan_new_or_empty(LVRelState *vacrel, Buffer buf,
 								   BlockNumber blkno, Page page,
 								   bool sharelock, Buffer vmbuffer);
@@ -825,13 +834,12 @@ static void
 lazy_scan_heap(LVRelState *vacrel)
 {
 	BlockNumber rel_pages = vacrel->rel_pages,
-				blkno,
-				next_unskippable_block,
 				next_fsm_block_to_vacuum = 0;
+	BlockNumber blkno = InvalidBlockNumber;
+	bool all_visible_according_to_vm = false;
+	VacSkipState skip_state = {.nblock = InvalidBlockNumber, .n_all_vis = false};
 	VacDeadItems *dead_items = vacrel->dead_items;
 	Buffer		vmbuffer = InvalidBuffer;
-	bool		next_unskippable_allvis,
-				skipping_current_range;
 	const int	initprog_index[] = {
 		PROGRESS_VACUUM_PHASE,
 		PROGRESS_VACUUM_TOTAL_HEAP_BLKS,
@@ -845,42 +853,13 @@ lazy_scan_heap(LVRelState *vacrel)
 	initprog_val[2] = dead_items->max_items;
 	pgstat_progress_update_multi_param(3, initprog_index, initprog_val);
 
-	/* Set up an initial range of skippable blocks using the visibility map */
-	next_unskippable_block = lazy_scan_skip(vacrel, &vmbuffer, 0,
-											&next_unskippable_allvis,
-											&skipping_current_range);
-	for (blkno = 0; blkno < rel_pages; blkno++)
+	while ((blkno = lazy_scan_skip(vacrel, &skip_state, blkno,
+					&vmbuffer, &all_visible_according_to_vm))
+					!= InvalidBlockNumber)
 	{
 		Buffer		buf;
 		Page		page;
-		bool		all_visible_according_to_vm;
 		LVPagePruneState prunestate;
-
-		if (blkno == next_unskippable_block)
-		{
-			/*
-			 * Can't skip this page safely.  Must scan the page.  But
-			 * determine the next skippable range after the page first.
-			 */
-			all_visible_according_to_vm = next_unskippable_allvis;
-			next_unskippable_block = lazy_scan_skip(vacrel, &vmbuffer,
-													blkno + 1,
-													&next_unskippable_allvis,
-													&skipping_current_range);
-
-			Assert(next_unskippable_block >= blkno + 1);
-		}
-		else
-		{
-			/* Last page always scanned (may need to set nonempty_pages) */
-			Assert(blkno < rel_pages - 1);
-
-			if (skipping_current_range)
-				continue;
-
-			/* Current range is too small to skip -- just scan the page */
-			all_visible_according_to_vm = true;
-		}
 
 		vacrel->scanned_pages++;
 
@@ -1274,116 +1253,6 @@ lazy_scan_heap(LVRelState *vacrel)
 	/* Do final index cleanup (call each index's amvacuumcleanup routine) */
 	if (vacrel->nindexes > 0 && vacrel->do_index_cleanup)
 		lazy_cleanup_all_indexes(vacrel);
-}
-
-/*
- *	lazy_scan_skip() -- set up range of skippable blocks using visibility map.
- *
- * lazy_scan_heap() calls here every time it needs to set up a new range of
- * blocks to skip via the visibility map.  Caller passes the next block in
- * line.  We return a next_unskippable_block for this range.  When there are
- * no skippable blocks we just return caller's next_block.  The all-visible
- * status of the returned block is set in *next_unskippable_allvis for caller,
- * too.  Block usually won't be all-visible (since it's unskippable), but it
- * can be during aggressive VACUUMs (as well as in certain edge cases).
- *
- * Sets *skipping_current_range to indicate if caller should skip this range.
- * Costs and benefits drive our decision.  Very small ranges won't be skipped.
- *
- * Note: our opinion of which blocks can be skipped can go stale immediately.
- * It's okay if caller "misses" a page whose all-visible or all-frozen marking
- * was concurrently cleared, though.  All that matters is that caller scan all
- * pages whose tuples might contain XIDs < OldestXmin, or MXIDs < OldestMxact.
- * (Actually, non-aggressive VACUUMs can choose to skip all-visible pages with
- * older XIDs/MXIDs.  The vacrel->skippedallvis flag will be set here when the
- * choice to skip such a range is actually made, making everything safe.)
- */
-static BlockNumber
-lazy_scan_skip(LVRelState *vacrel, Buffer *vmbuffer, BlockNumber next_block,
-			   bool *next_unskippable_allvis, bool *skipping_current_range)
-{
-	BlockNumber rel_pages = vacrel->rel_pages,
-				next_unskippable_block = next_block,
-				nskippable_blocks = 0;
-	bool		skipsallvis = false;
-
-	*next_unskippable_allvis = true;
-	while (next_unskippable_block < rel_pages)
-	{
-		uint8		mapbits = visibilitymap_get_status(vacrel->rel,
-													   next_unskippable_block,
-													   vmbuffer);
-
-		if ((mapbits & VISIBILITYMAP_ALL_VISIBLE) == 0)
-		{
-			Assert((mapbits & VISIBILITYMAP_ALL_FROZEN) == 0);
-			*next_unskippable_allvis = false;
-			break;
-		}
-
-		/*
-		 * Caller must scan the last page to determine whether it has tuples
-		 * (caller must have the opportunity to set vacrel->nonempty_pages).
-		 * This rule avoids having lazy_truncate_heap() take access-exclusive
-		 * lock on rel to attempt a truncation that fails anyway, just because
-		 * there are tuples on the last page (it is likely that there will be
-		 * tuples on other nearby pages as well, but those can be skipped).
-		 *
-		 * Implement this by always treating the last block as unsafe to skip.
-		 */
-		if (next_unskippable_block == rel_pages - 1)
-			break;
-
-		/* DISABLE_PAGE_SKIPPING makes all skipping unsafe */
-		if (!vacrel->skipwithvm)
-		{
-			/* Caller shouldn't rely on all_visible_according_to_vm */
-			*next_unskippable_allvis = false;
-			break;
-		}
-
-		/*
-		 * Aggressive VACUUM caller can't skip pages just because they are
-		 * all-visible.  They may still skip all-frozen pages, which can't
-		 * contain XIDs < OldestXmin (XIDs that aren't already frozen by now).
-		 */
-		if ((mapbits & VISIBILITYMAP_ALL_FROZEN) == 0)
-		{
-			if (vacrel->aggressive)
-				break;
-
-			/*
-			 * All-visible block is safe to skip in non-aggressive case.  But
-			 * remember that the final range contains such a block for later.
-			 */
-			skipsallvis = true;
-		}
-
-		vacuum_delay_point();
-		next_unskippable_block++;
-		nskippable_blocks++;
-	}
-
-	/*
-	 * We only skip a range with at least SKIP_PAGES_THRESHOLD consecutive
-	 * pages.  Since we're reading sequentially, the OS should be doing
-	 * readahead for us, so there's no gain in skipping a page now and then.
-	 * Skipping such a range might even discourage sequential detection.
-	 *
-	 * This test also enables more frequent relfrozenxid advancement during
-	 * non-aggressive VACUUMs.  If the range has any all-visible pages then
-	 * skipping makes updating relfrozenxid unsafe, which is a real downside.
-	 */
-	if (nskippable_blocks < SKIP_PAGES_THRESHOLD)
-		*skipping_current_range = false;
-	else
-	{
-		*skipping_current_range = true;
-		if (skipsallvis)
-			vacrel->skippedallvis = true;
-	}
-
-	return next_unskippable_block;
 }
 
 /*
@@ -2396,6 +2265,135 @@ lazy_vacuum_all_indexes(LVRelState *vacrel)
 	pgstat_progress_update_multi_param(3, progress_end_index, progress_end_val);
 
 	return allindexes;
+}
+
+
+/*
+ *	lazy_scan_skip() -- set up range of skippable blocks using visibility map.
+ *
+ * lazy_scan_heap() calls here to get the next block to prune and vacuum,
+ * passing in the block it just processed (or block 0).
+ *
+ * A block is unskippable if it is not all visible according to the visibility
+ * map. It is also unskippable if it is the last block in the relation, if the
+ * vacuum is an aggressive vacuum, or if DISABLE_PAGE_SKIPPING was passed to
+ * vacuum.
+ *
+ * Even if a block is skippable, we may choose not to skip it if the range of
+ * skippable blocks is too small (below SKIP_PAGES_THRESHOLD). As a
+ * consequence, we must keep track of the next truly unskippable block and its
+ * visibility status separate from the next block lazy_scan_heap() should
+ * process (and its visibility status).
+ *
+ * The block number and visibility status of the next unskippable block are set
+ * in skip_state->nblock and n_all_vis. The caller should not concern itself
+ * with anything in skip_state. This is only used by lazy_scan_skip() to keep
+ * track of this state across invocations.
+ *
+ * The caller passes blkno, which is the block that was just processed (or
+ * block 0). lazy_scan_skip() then returns the next block to process, saves
+ * that block's visibility status in all_visible_according_to_vm, and reads the
+ * VM block containing the VM status for that block into vmbuffer.
+ *
+ * Note: our opinion of which blocks can be skipped can go stale immediately.
+ * It's okay if caller "misses" a page whose all-visible or all-frozen marking
+ * was concurrently cleared, though.  All that matters is that caller scan all
+ * pages whose tuples might contain XIDs < OldestXmin, or MXIDs < OldestMxact.
+ * (Actually, non-aggressive VACUUMs can choose to skip all-visible pages with
+ * older XIDs/MXIDs.  The vacrel->skippedallvis flag will be set here when the
+ * choice to skip such a range is actually made, making everything safe.)
+ */
+static BlockNumber
+lazy_scan_skip(LVRelState *vacrel, VacSkipState *skip_state,
+		BlockNumber blkno, Buffer *vmbuffer,
+		bool *all_visible_according_to_vm)
+{
+	bool		skipsallvis = false;
+	/* relies on InvalidBlockNumber overflowing to 0 */
+	BlockNumber next_block = blkno + 1;
+
+	if (next_block >= vacrel->rel_pages)
+		return InvalidBlockNumber;
+
+	if (next_block > skip_state->nblock || skip_state->nblock == InvalidBlockNumber)
+	{
+		while (++skip_state->nblock < vacrel->rel_pages)
+		{
+			uint8 mapbits = visibilitymap_get_status(vacrel->rel,
+					skip_state->nblock, vmbuffer);
+
+			skip_state->n_all_vis = mapbits & VISIBILITYMAP_ALL_VISIBLE;
+
+			if (!skip_state->n_all_vis)
+			{
+				Assert((mapbits & VISIBILITYMAP_ALL_FROZEN) == 0);
+				break;
+			}
+
+			/*
+			* Caller must scan the last page to determine whether it has tuples
+			* (caller must have the opportunity to set vacrel->nonempty_pages).
+			* This rule avoids having lazy_truncate_heap() take access-exclusive
+			* lock on rel to attempt a truncation that fails anyway, just because
+			* there are tuples on the last page (it is likely that there will be
+			* tuples on other nearby pages as well, but those can be skipped).
+			*
+			* Implement this by always treating the last block as unsafe to skip.
+			*/
+			if (skip_state->nblock == vacrel->rel_pages - 1)
+				break;
+
+			/* DISABLE_PAGE_SKIPPING makes all skipping unsafe */
+			if (!vacrel->skipwithvm)
+			{
+				/* Caller shouldn't rely on all_visible_according_to_vm */
+				skip_state->n_all_vis = false;
+				break;
+			}
+
+
+			/*
+			* Aggressive VACUUM caller can't skip pages just because they are
+			* all-visible.  They may still skip all-frozen pages, which can't
+			* contain XIDs < OldestXmin (XIDs that aren't already frozen by now).
+			*/
+			if ((mapbits & VISIBILITYMAP_ALL_FROZEN) == 0)
+			{
+				if (vacrel->aggressive)
+					break;
+
+				/*
+				* All-visible block is safe to skip in non-aggressive case.  But
+				* remember that the final range contains such a block for later.
+				*/
+				skipsallvis = true;
+			}
+		}
+
+		/*
+		* We only skip a range with at least SKIP_PAGES_THRESHOLD consecutive
+		* pages.  Since we're reading sequentially, the OS should be doing
+		* readahead for us, so there's no gain in skipping a page now and then.
+		* Skipping such a range might even discourage sequential detection.
+		*
+		* This test also enables more frequent relfrozenxid advancement during
+		* non-aggressive VACUUMs.  If the range has any all-visible pages then
+		* skipping makes updating relfrozenxid unsafe, which is a real downside.
+		*/
+		if (skip_state->nblock - next_block >= SKIP_PAGES_THRESHOLD)
+			next_block = skip_state->nblock;
+	}
+
+	if (next_block == skip_state->nblock)
+	{
+		*all_visible_according_to_vm = skip_state->n_all_vis;
+		if (skipsallvis)
+			vacrel->skippedallvis = true;
+	}
+	else
+		*all_visible_according_to_vm = true;
+
+	return next_block;
 }
 
 /*

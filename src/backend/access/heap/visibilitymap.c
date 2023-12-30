@@ -98,7 +98,7 @@
 #include "utils/inval.h"
 
 
-/*#define TRACE_VISIBILITYMAP */
+/* #define TRACE_VISIBILITYMAP */
 
 /*
  * Size of the bitmap on each visibility map page, in bytes. There's no
