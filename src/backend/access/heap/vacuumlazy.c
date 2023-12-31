@@ -1389,8 +1389,6 @@ lazy_scan_skip(VacSkipState *vacskip,
 				 */
 				skipsallvis = true;
 			}
-
-			vacuum_delay_point();
 		}
 
 		/*
