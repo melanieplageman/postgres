@@ -1384,8 +1384,6 @@ heap_vac_scan_get_next_block(LVRelState *vacrel, BlockNumber next_block,
 				 */
 				skipsallvis = true;
 			}
-
-			vacuum_delay_point();
 		}
 
 		vacrel->skip.next_unskippable_block = next_unskippable_block;
