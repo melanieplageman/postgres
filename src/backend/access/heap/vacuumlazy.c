@@ -248,6 +248,8 @@ typedef struct VacSkipState
 	BlockNumber next_unskippable_block;
 	/* Next unskippable block's visibility status */
 	bool		next_unskippable_allvis;
+	/* Next unskippable block's vmbuffer */
+	Buffer		vmbuffer;
 	/* reference to whole relation vac state */
 	LVRelState *vacrel;
 } VacSkipState;
@@ -255,7 +257,7 @@ typedef struct VacSkipState
 /* non-export function prototypes */
 static void lazy_scan_heap(LVRelState *vacrel);
 static BlockNumber lazy_scan_skip(VacSkipState *vacskip,
-								  BlockNumber blkno, Buffer *vmbuffer,
+								  BlockNumber blkno,
 								  bool *all_visible_according_to_vm);
 static bool lazy_scan_new_or_empty(LVRelState *vacrel, Buffer buf,
 								   BlockNumber blkno, Page page,
@@ -844,10 +846,10 @@ lazy_scan_heap(LVRelState *vacrel)
 	BlockNumber blkno = InvalidBlockNumber;
 	VacSkipState vacskip = {
 		.next_unskippable_block = InvalidBlockNumber,
+		.vmbuffer = InvalidBuffer,
 		.vacrel = vacrel
 	};
 	VacDeadItems *dead_items = vacrel->dead_items;
-	Buffer		vmbuffer = InvalidBuffer;
 	const int	initprog_index[] = {
 		PROGRESS_VACUUM_PHASE,
 		PROGRESS_VACUUM_TOTAL_HEAP_BLKS,
@@ -868,7 +870,7 @@ lazy_scan_heap(LVRelState *vacrel)
 		LVPagePruneState prunestate;
 
 		blkno = lazy_scan_skip(&vacskip, blkno + 1,
-							   &vmbuffer, &all_visible_according_to_vm);
+							   &all_visible_according_to_vm);
 
 		if (blkno == InvalidBlockNumber)
 			break;
@@ -909,10 +911,10 @@ lazy_scan_heap(LVRelState *vacrel)
 			 * correctness, but we do it anyway to avoid holding the pin
 			 * across a lengthy, unrelated operation.
 			 */
-			if (BufferIsValid(vmbuffer))
+			if (BufferIsValid(vacskip.vmbuffer))
 			{
-				ReleaseBuffer(vmbuffer);
-				vmbuffer = InvalidBuffer;
+				ReleaseBuffer(vacskip.vmbuffer);
+				vacskip.vmbuffer = InvalidBuffer;
 			}
 
 			/* Perform a round of index and heap vacuuming */
@@ -937,7 +939,7 @@ lazy_scan_heap(LVRelState *vacrel)
 		 * all-visible.  In most cases this will be very cheap, because we'll
 		 * already have the correct page pinned anyway.
 		 */
-		visibilitymap_pin(vacrel->rel, blkno, &vmbuffer);
+		visibilitymap_pin(vacrel->rel, blkno, &vacskip.vmbuffer);
 
 		/*
 		 * We need a buffer cleanup lock to prune HOT chains and defragment
@@ -957,7 +959,7 @@ lazy_scan_heap(LVRelState *vacrel)
 
 			/* Check for new or empty pages before lazy_scan_noprune call */
 			if (lazy_scan_new_or_empty(vacrel, buf, blkno, page, true,
-									   vmbuffer))
+									   vacskip.vmbuffer))
 			{
 				/* Processed as new/empty page (lock and pin released) */
 				continue;
@@ -995,7 +997,8 @@ lazy_scan_heap(LVRelState *vacrel)
 		}
 
 		/* Check for new or empty pages before lazy_scan_prune call */
-		if (lazy_scan_new_or_empty(vacrel, buf, blkno, page, false, vmbuffer))
+		if (lazy_scan_new_or_empty(vacrel, buf, blkno, page, false,
+								   vacskip.vmbuffer))
 		{
 			/* Processed as new/empty page (lock and pin released) */
 			continue;
@@ -1032,7 +1035,7 @@ lazy_scan_heap(LVRelState *vacrel)
 			{
 				Size		freespace;
 
-				lazy_vacuum_heap_page(vacrel, blkno, buf, 0, vmbuffer);
+				lazy_vacuum_heap_page(vacrel, blkno, buf, 0, vacskip.vmbuffer);
 
 				/* Forget the LP_DEAD items that we just vacuumed */
 				dead_items->num_items = 0;
@@ -1111,7 +1114,7 @@ lazy_scan_heap(LVRelState *vacrel)
 			PageSetAllVisible(page);
 			MarkBufferDirty(buf);
 			visibilitymap_set(vacrel->rel, blkno, buf, InvalidXLogRecPtr,
-							  vmbuffer, prunestate.visibility_cutoff_xid,
+							  vacskip.vmbuffer, prunestate.visibility_cutoff_xid,
 							  flags);
 		}
 
@@ -1122,11 +1125,12 @@ lazy_scan_heap(LVRelState *vacrel)
 		 * with buffer lock before concluding that the VM is corrupt.
 		 */
 		else if (all_visible_according_to_vm && !PageIsAllVisible(page) &&
-				 visibilitymap_get_status(vacrel->rel, blkno, &vmbuffer) != 0)
+				 visibilitymap_get_status(vacrel->rel,
+										  blkno, &vacskip.vmbuffer) != 0)
 		{
 			elog(WARNING, "page is not marked all-visible but visibility map bit is set in relation \"%s\" page %u",
 				 vacrel->relname, blkno);
-			visibilitymap_clear(vacrel->rel, blkno, vmbuffer,
+			visibilitymap_clear(vacrel->rel, blkno, vacskip.vmbuffer,
 								VISIBILITYMAP_VALID_BITS);
 		}
 
@@ -1151,7 +1155,7 @@ lazy_scan_heap(LVRelState *vacrel)
 				 vacrel->relname, blkno);
 			PageClearAllVisible(page);
 			MarkBufferDirty(buf);
-			visibilitymap_clear(vacrel->rel, blkno, vmbuffer,
+			visibilitymap_clear(vacrel->rel, blkno, vacskip.vmbuffer,
 								VISIBILITYMAP_VALID_BITS);
 		}
 
@@ -1162,7 +1166,7 @@ lazy_scan_heap(LVRelState *vacrel)
 		 */
 		else if (all_visible_according_to_vm && prunestate.all_visible &&
 				 prunestate.all_frozen &&
-				 !VM_ALL_FROZEN(vacrel->rel, blkno, &vmbuffer))
+				 !VM_ALL_FROZEN(vacrel->rel, blkno, &vacskip.vmbuffer))
 		{
 			/*
 			 * Avoid relying on all_visible_according_to_vm as a proxy for the
@@ -1184,7 +1188,7 @@ lazy_scan_heap(LVRelState *vacrel)
 			 */
 			Assert(!TransactionIdIsValid(prunestate.visibility_cutoff_xid));
 			visibilitymap_set(vacrel->rel, blkno, buf, InvalidXLogRecPtr,
-							  vmbuffer, InvalidTransactionId,
+							  vacskip.vmbuffer, InvalidTransactionId,
 							  VISIBILITYMAP_ALL_VISIBLE |
 							  VISIBILITYMAP_ALL_FROZEN);
 		}
@@ -1226,8 +1230,11 @@ lazy_scan_heap(LVRelState *vacrel)
 	}
 
 	vacrel->blkno = InvalidBlockNumber;
-	if (BufferIsValid(vmbuffer))
-		ReleaseBuffer(vmbuffer);
+	if (BufferIsValid(vacskip.vmbuffer))
+	{
+		ReleaseBuffer(vacskip.vmbuffer);
+		vacskip.vmbuffer = InvalidBuffer;
+	}
 
 	/* report that everything is now scanned */
 	pgstat_progress_update_param(PROGRESS_VACUUM_HEAP_BLKS_SCANNED, blkno);
@@ -1316,7 +1323,7 @@ lazy_scan_heap(LVRelState *vacrel)
  */
 static BlockNumber
 lazy_scan_skip(VacSkipState *vacskip,
-			   BlockNumber next_block, Buffer *vmbuffer,
+			   BlockNumber next_block,
 			   bool *all_visible_according_to_vm)
 {
 	bool		skipsallvis = false;
@@ -1331,7 +1338,7 @@ lazy_scan_skip(VacSkipState *vacskip,
 		{
 			uint8		mapbits = visibilitymap_get_status(vacskip->vacrel->rel,
 														   vacskip->next_unskippable_block,
-														   vmbuffer);
+														   &vacskip->vmbuffer);
 
 			vacskip->next_unskippable_allvis = mapbits & VISIBILITYMAP_ALL_VISIBLE;
 
