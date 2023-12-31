@@ -248,11 +248,13 @@ typedef struct VacSkipState
 	BlockNumber next_unskippable_block;
 	/* Next unskippable block's visibility status */
 	bool		next_unskippable_allvis;
+	/* reference to whole relation vac state */
+	LVRelState *vacrel;
 } VacSkipState;
 
 /* non-export function prototypes */
 static void lazy_scan_heap(LVRelState *vacrel);
-static BlockNumber lazy_scan_skip(LVRelState *vacrel, VacSkipState *vacskip,
+static BlockNumber lazy_scan_skip(VacSkipState *vacskip,
 								  BlockNumber blkno, Buffer *vmbuffer,
 								  bool *all_visible_according_to_vm);
 static bool lazy_scan_new_or_empty(LVRelState *vacrel, Buffer buf,
@@ -840,7 +842,10 @@ lazy_scan_heap(LVRelState *vacrel)
 
 	/* relies on InvalidBlockNumber overflowing to 0 */
 	BlockNumber blkno = InvalidBlockNumber;
-	VacSkipState vacskip = {.next_unskippable_block = InvalidBlockNumber};
+	VacSkipState vacskip = {
+		.next_unskippable_block = InvalidBlockNumber,
+		.vacrel = vacrel
+	};
 	VacDeadItems *dead_items = vacrel->dead_items;
 	Buffer		vmbuffer = InvalidBuffer;
 	const int	initprog_index[] = {
@@ -862,8 +867,8 @@ lazy_scan_heap(LVRelState *vacrel)
 		Page		page;
 		LVPagePruneState prunestate;
 
-		blkno = lazy_scan_skip(vacrel, &vacskip, blkno + 1,
-									&vmbuffer, &all_visible_according_to_vm);
+		blkno = lazy_scan_skip(&vacskip, blkno + 1,
+							   &vmbuffer, &all_visible_according_to_vm);
 
 		if (blkno == InvalidBlockNumber)
 			break;
@@ -1290,9 +1295,10 @@ lazy_scan_heap(LVRelState *vacrel)
  * lazy_scan_skip() returns the next block for vacuum to process and sets its
  * visibility status in the output parameter, all_visible_according_to_vm.
  *
- * vacrel is an in/out parameter here; vacuum options and information about the
- * relation are read and vacrel->skippedallvis is set to ensure we don't
- * advance relfrozenxid when we have skipped vacuuming all visible blocks.
+ * vacskip->vacrel is an in/out parameter here; vacuum options and information
+ * about the relation are read and vacrel->skippedallvis is set to ensure we
+ * don't advance relfrozenxid when we have skipped vacuuming all visible
+ * blocks.
  *
  * vmbuffer will contain the block from the VM containing visibility
  * information for the next unskippable heap block. We may end up needed a
@@ -1309,21 +1315,21 @@ lazy_scan_heap(LVRelState *vacrel)
  * choice to skip such a range is actually made, making everything safe.)
  */
 static BlockNumber
-lazy_scan_skip(LVRelState *vacrel, VacSkipState *vacskip,
+lazy_scan_skip(VacSkipState *vacskip,
 			   BlockNumber next_block, Buffer *vmbuffer,
 			   bool *all_visible_according_to_vm)
 {
 	bool		skipsallvis = false;
 
-	if (next_block >= vacrel->rel_pages)
+	if (next_block >= vacskip->vacrel->rel_pages)
 		return InvalidBlockNumber;
 
 	if (vacskip->next_unskippable_block == InvalidBlockNumber ||
 		next_block > vacskip->next_unskippable_block)
 	{
-		while (++vacskip->next_unskippable_block < vacrel->rel_pages)
+		while (++vacskip->next_unskippable_block < vacskip->vacrel->rel_pages)
 		{
-			uint8		mapbits = visibilitymap_get_status(vacrel->rel,
+			uint8		mapbits = visibilitymap_get_status(vacskip->vacrel->rel,
 														   vacskip->next_unskippable_block,
 														   vmbuffer);
 
@@ -1347,11 +1353,11 @@ lazy_scan_skip(LVRelState *vacrel, VacSkipState *vacskip,
 			 * Implement this by always treating the last block as unsafe to
 			 * skip.
 			 */
-			if (vacskip->next_unskippable_block == vacrel->rel_pages - 1)
+			if (vacskip->next_unskippable_block == vacskip->vacrel->rel_pages - 1)
 				break;
 
 			/* DISABLE_PAGE_SKIPPING makes all skipping unsafe */
-			if (!vacrel->skipwithvm)
+			if (!vacskip->vacrel->skipwithvm)
 			{
 				/* Caller shouldn't rely on all_visible_according_to_vm */
 				vacskip->next_unskippable_allvis = false;
@@ -1366,7 +1372,7 @@ lazy_scan_skip(LVRelState *vacrel, VacSkipState *vacskip,
 			 */
 			if ((mapbits & VISIBILITYMAP_ALL_FROZEN) == 0)
 			{
-				if (vacrel->aggressive)
+				if (vacskip->vacrel->aggressive)
 					break;
 
 				/*
@@ -1396,7 +1402,7 @@ lazy_scan_skip(LVRelState *vacrel, VacSkipState *vacskip,
 		{
 			next_block = vacskip->next_unskippable_block;
 			if (skipsallvis)
-				vacrel->skippedallvis = true;
+				vacskip->vacrel->skippedallvis = true;
 		}
 	}
 
