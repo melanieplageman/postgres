@@ -207,6 +207,12 @@ typedef struct LVRelState
 	 */
 	BlockNumber blkno_prefetch;
 
+	/*
+	 * The index of the next TID in dead_items to reap in the second vacuum
+	 * pass.
+	 */
+	int			idx_prefetch;
+
 	/* Statistics output by us, for table */
 	double		new_rel_tuples; /* new estimated total # of tuples */
 	double		new_live_tuples;	/* new estimated total # of live tuples */
@@ -240,6 +246,15 @@ typedef struct LVPagePruneState
 	bool		all_visible;	/* Every item visible to all? */
 	bool		all_frozen;		/* provided all_visible is also true */
 	TransactionId visibility_cutoff_xid;	/* For recovery conflicts */
+
+	/*
+	 * Temporarily required to support lazy_vacuum_heap_page() call for each
+	 * block with removable tuples in tables with no indexes. Will be removed
+	 * when the following is merged:
+	 * https://postgr.es/m/CAAKRu_bgvb_k0gKOXWzNKWHt560R0smrGe3E8zewKPs8fiMKkw%40mail.gmail.com
+	 */
+	int			start_idx;
+	int			end_idx;
 } LVPagePruneState;
 
 /* Struct for saving and restoring vacuum error information. */
@@ -249,6 +264,23 @@ typedef struct LVSavedErrInfo
 	OffsetNumber offnum;
 	VacErrPhase phase;
 } LVSavedErrInfo;
+
+/*
+ * State set up in streaming read callback during vacuum's second pass which
+ * removes dead items referring to dead tuples cataloged in the first pass
+ */
+typedef struct VacReapBlkState
+{
+	BlockNumber blkno;
+
+	/*
+	 * The indexes of the TIDs of the first and last dead tuples in a single
+	 * block in the currently vacuumed relation. The callback will set these
+	 * up prior to adding this block to the stream.
+	 */
+	int			start_idx;
+	int			end_idx;
+} VacReapBlkState;
 
 /*
  * State set up in streaming read callback during vacuum's first pass which HOT
@@ -296,8 +328,9 @@ static bool lazy_scan_noprune(LVRelState *vacrel, Buffer buf,
 static void lazy_vacuum(LVRelState *vacrel);
 static bool lazy_vacuum_all_indexes(LVRelState *vacrel);
 static void lazy_vacuum_heap_rel(LVRelState *vacrel);
-static int	lazy_vacuum_heap_page(LVRelState *vacrel, BlockNumber blkno,
-								  Buffer buffer, int index, Buffer vmbuffer);
+static void lazy_vacuum_heap_page(LVRelState *vacrel,
+								  VacReapBlkState *rbstate,
+								  Buffer buffer, Buffer vmbuffer);
 static bool lazy_check_wraparound_failsafe(LVRelState *vacrel);
 static void lazy_cleanup_all_indexes(LVRelState *vacrel);
 static IndexBulkDeleteResult *lazy_vacuum_one_index(Relation indrel,
@@ -1103,8 +1136,20 @@ lazy_scan_heap(LVRelState *vacrel)
 			if (prunestate.has_lpdead_items)
 			{
 				Size		freespace;
+				VacReapBlkState rbstate;
 
-				lazy_vacuum_heap_page(vacrel, sbstate->blkno, buf, 0, vacskip.vmbuffer);
+				/*
+				 * https://postgr.es/m/CAAKRu_bgvb_k0gKOXWzNKWHt560R0smrGe3E8zewKPs8fiMKkw%40mail.gmail.com
+				 * will remove this call to lazy_vacuum_heap_page(), allowing
+				 * us to remove the prunestate.start_idx and end_idx and this
+				 * construction of a VacReapBlkState.
+				 */
+				rbstate.blkno = sbstate->blkno;
+				rbstate.start_idx = prunestate.start_idx;
+				rbstate.end_idx = prunestate.end_idx;
+
+				/* Assume vacskip.vmbuffer is pinned */
+				lazy_vacuum_heap_page(vacrel, &rbstate, buf, vacskip.vmbuffer);
 
 				/* Forget the LP_DEAD items that we just vacuumed */
 				dead_items->num_items = 0;
@@ -1991,11 +2036,13 @@ lazy_scan_prune(LVRelState *vacrel,
 
 		ItemPointerSetBlockNumber(&tmp, blkno);
 
+		prunestate->start_idx = dead_items->num_items;
 		for (int i = 0; i < lpdead_items; i++)
 		{
 			ItemPointerSetOffsetNumber(&tmp, deadoffsets[i]);
 			dead_items->items[dead_items->num_items++] = tmp;
 		}
+		prunestate->end_idx = dead_items->num_items;
 
 		Assert(dead_items->num_items <= dead_items->max_items);
 		pgstat_progress_update_param(PROGRESS_VACUUM_NUM_DEAD_TUPLES,
@@ -2501,6 +2548,44 @@ lazy_vacuum_all_indexes(LVRelState *vacrel)
 	return allindexes;
 }
 
+static bool
+vacuum_reap_lp_pgsr_next(PgStreamingRead *pgsr,
+						 uintptr_t pgsr_private,
+						 void *io_private,
+						 BufferManagerRelation *bmr, ForkNumber *forkNum,
+						 BlockNumber *block,
+						 ReadBufferMode *mode)
+{
+	LVRelState *vacrel = (LVRelState *) pgsr_private;
+	VacReapBlkState *rbstate = io_private;
+
+	VacDeadItems *dead_items = vacrel->dead_items;
+
+	if (vacrel->idx_prefetch == dead_items->num_items)
+		return false;
+
+	rbstate->blkno = ItemPointerGetBlockNumber(&dead_items->items[vacrel->idx_prefetch]);
+	rbstate->start_idx = vacrel->idx_prefetch;
+
+	for (; vacrel->idx_prefetch < dead_items->num_items; vacrel->idx_prefetch++)
+	{
+		BlockNumber curblkno =
+			ItemPointerGetBlockNumber(&dead_items->items[vacrel->idx_prefetch]);
+
+		if (rbstate->blkno != curblkno)
+			break;				/* past end of tuples for this block */
+	}
+
+	rbstate->end_idx = vacrel->idx_prefetch;
+
+	*bmr = BMR_REL(vacrel->rel);
+	*forkNum = MAIN_FORKNUM;
+	*block = rbstate->blkno;
+	*mode = RBM_NORMAL;
+
+	return true;
+}
+
 /*
  *	lazy_vacuum_heap_rel() -- second pass over the heap for two pass strategy
  *
@@ -2522,10 +2607,10 @@ lazy_vacuum_all_indexes(LVRelState *vacrel)
 static void
 lazy_vacuum_heap_rel(LVRelState *vacrel)
 {
-	int			index = 0;
 	BlockNumber vacuumed_pages = 0;
 	Buffer		vmbuffer = InvalidBuffer;
 	LVSavedErrInfo saved_err_info;
+	PgStreamingRead *pgsr;
 
 	Assert(vacrel->do_index_vacuuming);
 	Assert(vacrel->do_index_cleanup);
@@ -2540,37 +2625,55 @@ lazy_vacuum_heap_rel(LVRelState *vacrel)
 							 VACUUM_ERRCB_PHASE_VACUUM_HEAP,
 							 InvalidBlockNumber, InvalidOffsetNumber);
 
-	while (index < vacrel->dead_items->num_items)
+	pgsr = pg_streaming_read_buffer_alloc_ext(512,
+											  sizeof(VacReapBlkState),
+											  (uintptr_t) vacrel,
+											  vacrel->bstrategy,
+											  vacuum_reap_lp_pgsr_next);
+
+	while (true)
 	{
-		BlockNumber blkno;
 		Buffer		buf;
 		Page		page;
 		Size		freespace;
+		VacReapBlkState *rbstate;
 
 		vacuum_delay_point();
 
-		blkno = ItemPointerGetBlockNumber(&vacrel->dead_items->items[index]);
-		vacrel->blkno = blkno;
+		buf = pg_streaming_read_buffer_get_next(pgsr, (void **) &rbstate);
+
+		if (!BufferIsValid(buf))
+		{
+			/*
+			 * We set all LP_DEAD items from the first heap pass to LP_UNUSED
+			 * during the second heap pass.  No more, no less.
+			 */
+			Assert(vacrel->num_index_scans > 1 ||
+				   (rbstate->end_idx == vacrel->lpdead_items &&
+					vacuumed_pages == vacrel->lpdead_item_pages));
+			break;
+		}
+
+		Assert(rbstate->blkno == BufferGetBlockNumber(buf));
+		vacrel->blkno = rbstate->blkno;
 
 		/*
 		 * Pin the visibility map page in case we need to mark the page
 		 * all-visible.  In most cases this will be very cheap, because we'll
 		 * already have the correct page pinned anyway.
 		 */
-		visibilitymap_pin(vacrel->rel, blkno, &vmbuffer);
+		visibilitymap_pin(vacrel->rel, rbstate->blkno, &vmbuffer);
 
 		/* We need a non-cleanup exclusive lock to mark dead_items unused */
-		buf = ReadBufferExtended(vacrel->rel, MAIN_FORKNUM, blkno, RBM_NORMAL,
-								 vacrel->bstrategy);
 		LockBuffer(buf, BUFFER_LOCK_EXCLUSIVE);
-		index = lazy_vacuum_heap_page(vacrel, blkno, buf, index, vmbuffer);
+		lazy_vacuum_heap_page(vacrel, rbstate, buf, vmbuffer);
 
 		/* Now that we've vacuumed the page, record its available space */
 		page = BufferGetPage(buf);
 		freespace = PageGetHeapFreeSpace(page);
 
 		UnlockReleaseBuffer(buf);
-		RecordPageWithFreeSpace(vacrel->rel, blkno, freespace);
+		RecordPageWithFreeSpace(vacrel->rel, rbstate->blkno, freespace);
 		vacuumed_pages++;
 	}
 
@@ -2578,14 +2681,7 @@ lazy_vacuum_heap_rel(LVRelState *vacrel)
 	if (BufferIsValid(vmbuffer))
 		ReleaseBuffer(vmbuffer);
 
-	/*
-	 * We set all LP_DEAD items from the first heap pass to LP_UNUSED during
-	 * the second heap pass.  No more, no less.
-	 */
-	Assert(index > 0);
-	Assert(vacrel->num_index_scans > 1 ||
-		   (index == vacrel->lpdead_items &&
-			vacuumed_pages == vacrel->lpdead_item_pages));
+	pg_streaming_read_free(pgsr);
 
 	ereport(DEBUG2,
 			(errmsg("table \"%s\": removed %lld dead item identifiers in %u pages",
@@ -2596,6 +2692,7 @@ lazy_vacuum_heap_rel(LVRelState *vacrel)
 }
 
 /*
+ *
  *	lazy_vacuum_heap_page() -- free page's LP_DEAD items listed in the
  *						  vacrel->dead_items array.
  *
@@ -2603,13 +2700,12 @@ lazy_vacuum_heap_rel(LVRelState *vacrel)
  * cleanup lock is also acceptable).  vmbuffer must be valid and already have
  * a pin on blkno's visibility map page.
  *
- * index is an offset into the vacrel->dead_items array for the first listed
- * LP_DEAD item on the page.  The return value is the first index immediately
- * after all LP_DEAD items for the same page in the array.
+ * Given a block and dead items recorded during the first pass, set those items
+ * dead and truncate the line pointer array. Update the VM as appropriate.
  */
-static int
-lazy_vacuum_heap_page(LVRelState *vacrel, BlockNumber blkno, Buffer buffer,
-					  int index, Buffer vmbuffer)
+static void
+lazy_vacuum_heap_page(LVRelState *vacrel, VacReapBlkState *rbstate,
+					  Buffer buffer, Buffer vmbuffer)
 {
 	VacDeadItems *dead_items = vacrel->dead_items;
 	Page		page = BufferGetPage(buffer);
@@ -2621,28 +2717,31 @@ lazy_vacuum_heap_page(LVRelState *vacrel, BlockNumber blkno, Buffer buffer,
 
 	Assert(vacrel->nindexes == 0 || vacrel->do_index_vacuuming);
 
-	pgstat_progress_update_param(PROGRESS_VACUUM_HEAP_BLKS_VACUUMED, blkno);
+	pgstat_progress_update_param(PROGRESS_VACUUM_HEAP_BLKS_VACUUMED,
+								 rbstate->blkno);
 
 	/* Update error traceback information */
 	update_vacuum_error_info(vacrel, &saved_err_info,
-							 VACUUM_ERRCB_PHASE_VACUUM_HEAP, blkno,
+							 VACUUM_ERRCB_PHASE_VACUUM_HEAP, rbstate->blkno,
 							 InvalidOffsetNumber);
 
 	START_CRIT_SECTION();
 
-	for (; index < dead_items->num_items; index++)
+	for (int i = rbstate->start_idx; i < rbstate->end_idx; i++)
 	{
-		BlockNumber tblk;
-		OffsetNumber toff;
+		ItemPointerData *dead_item;
 		ItemId		itemid;
+		OffsetNumber toff;
 
-		tblk = ItemPointerGetBlockNumber(&dead_items->items[index]);
-		if (tblk != blkno)
-			break;				/* past end of tuples for this block */
-		toff = ItemPointerGetOffsetNumber(&dead_items->items[index]);
+		dead_item = &dead_items->items[i];
+
+		Assert(ItemPointerGetBlockNumber(dead_item) == rbstate->blkno);
+
+		toff = ItemPointerGetOffsetNumber(dead_item);
 		itemid = PageGetItemId(page, toff);
 
 		Assert(ItemIdIsDead(itemid) && !ItemIdHasStorage(itemid));
+
 		ItemIdSetUnused(itemid);
 		unused[nunused++] = toff;
 	}
@@ -2703,13 +2802,12 @@ lazy_vacuum_heap_page(LVRelState *vacrel, BlockNumber blkno, Buffer buffer,
 		}
 
 		PageSetAllVisible(page);
-		visibilitymap_set(vacrel->rel, blkno, buffer, InvalidXLogRecPtr,
+		visibilitymap_set(vacrel->rel, rbstate->blkno, buffer, InvalidXLogRecPtr,
 						  vmbuffer, visibility_cutoff_xid, flags);
 	}
 
 	/* Revert to the previous phase information for error traceback */
 	restore_vacuum_error_info(vacrel, &saved_err_info);
-	return index;
 }
 
 /*

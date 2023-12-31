@@ -2947,6 +2947,7 @@ VacOptValue
 VacuumParams
 VacuumRelation
 VacuumStmt
+VacReapBlkState
 VacScanBlkState
 VacSkipState
 ValidIOData
