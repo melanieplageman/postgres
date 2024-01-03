@@ -164,20 +164,30 @@ accumulator_insert(PgStat_Accumulator *accumulator, double v)
 	accumulator->q += pow(v, 2);
 }
 
-static inline double
+/*
+ * Remove a single value from the accumulator while maintaining the mean and
+ * standard deviation. Decrement the count. Decrease the sum by subtracting a
+ * value equal to the mean. Removing a value from the sum of squares while
+ * maintaining the standard deviation is a bit trickier but simplifies to the
+ * equation below.
+ */
+static inline void
 accumulator_remove(PgStat_Accumulator *accumulator)
 {
-	double		result;
+	uint64		n;
+	double		s;
+	double		q;
 
 	Assert(accumulator->n > 0);
 
-	result = accumulator->s / accumulator->n;
+	/* save the original values */
+	n = accumulator->n;
+	s = accumulator->s;
+	q = accumulator->q;
 
 	accumulator->n--;
-	accumulator->s -= result;
-	accumulator->q -= pow(result, 2);
-
-	return result;
+	accumulator->s -= s / n;
+	accumulator->q = q * (2 * n - 1) / pow(n, 2);
 }
 
 static inline void
