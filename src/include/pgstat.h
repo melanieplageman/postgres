@@ -212,6 +212,12 @@ accumulator_calculate(PgStat_Accumulator *accumulator, double *mean,
 	*stddev = sqrt((accumulator->q - pow(accumulator->s, 2) / accumulator->n) / accumulator->n);
 }
 
+/*
+ * Start removing data from the accumulator when inserting new unsets after
+ * this capacity has been reached.
+ */
+#define FRZ_UNSET_CAPACITY 2000
+
 typedef struct PgStat_VMUnset
 {
 	/* times a page marked frozen in the VM was modified */
@@ -242,10 +248,22 @@ typedef struct PgStat_VMUnset
 static inline void
 pgstat_unset_absorb(PgStat_VMUnset *target, PgStat_VMUnset *source)
 {
+	uint64 new_target;
+
 	target->vm_unfreezes += source->vm_unfreezes;
 	target->early_unfreezes += source->early_unfreezes;
 	target->unvis += source->unvis;
 	target->missed_freezes += source->missed_freezes;
+
+	new_target = target->early_unsets.n + source->early_unsets.n;
+
+	/*
+	 * To ensure the accumulator stays current with the table's access pattern,
+	 * remove values in excess of FRZ_UNSET_CAPACITY before absorbing in new
+	 * values.
+	 */
+	while (new_target-- >= FRZ_UNSET_CAPACITY)
+		accumulator_remove(&target->early_unsets);
 
 	accumulator_absorb(&target->early_unsets, &source->early_unsets);
 }
