@@ -234,8 +234,7 @@ static void lazy_scan_prune(LVRelState *vacrel, Buffer buf,
 							BlockNumber blkno, Page page,
 							Buffer vmbuffer, bool all_visible_according_to_vm);
 static bool lazy_scan_noprune(LVRelState *vacrel, Buffer buf,
-							  BlockNumber blkno, Page page,
-							  bool *recordfreespace);
+							  BlockNumber blkno, Page page);
 static void lazy_vacuum(LVRelState *vacrel);
 static bool lazy_vacuum_all_indexes(LVRelState *vacrel);
 static void lazy_vacuum_heap_rel(LVRelState *vacrel);
@@ -941,8 +940,6 @@ lazy_scan_heap(LVRelState *vacrel)
 		page = BufferGetPage(buf);
 		if (!ConditionalLockBufferForCleanup(buf))
 		{
-			bool		recordfreespace;
-
 			LockBuffer(buf, BUFFER_LOCK_SHARE);
 
 			/* Check for new or empty pages before lazy_scan_noprune call */
@@ -955,24 +952,14 @@ lazy_scan_heap(LVRelState *vacrel)
 
 			/*
 			 * Collect LP_DEAD items in dead_items array, count tuples,
-			 * determine if rel truncation is safe
+			 * determine if rel truncation is safe, and update the FSM.
 			 */
-			if (lazy_scan_noprune(vacrel, buf, blkno, page,
-								  &recordfreespace))
+			if (lazy_scan_noprune(vacrel, buf, blkno, page))
 			{
-				Size		freespace = 0;
-
 				/*
-				 * Processed page successfully (without cleanup lock) -- just
-				 * need to update the FSM, much like the lazy_scan_prune case.
-				 * Don't bother trying to match its visibility map setting
-				 * steps, though.
+				 * Processed page successfully (without cleanup lock).
+				 * Buffer lock and pin released.
 				 */
-				if (recordfreespace)
-					freespace = PageGetHeapFreeSpace(page);
-				UnlockReleaseBuffer(buf);
-				if (recordfreespace)
-					RecordPageWithFreeSpace(vacrel->rel, blkno, freespace);
 				continue;
 			}
 
@@ -1902,8 +1889,7 @@ static bool
 lazy_scan_noprune(LVRelState *vacrel,
 				  Buffer buf,
 				  BlockNumber blkno,
-				  Page page,
-				  bool *recordfreespace)
+				  Page page)
 {
 	OffsetNumber offnum,
 				maxoff;
@@ -1912,6 +1898,8 @@ lazy_scan_noprune(LVRelState *vacrel,
 				recently_dead_tuples,
 				missed_dead_tuples;
 	bool		hastup;
+	bool		recordfreespace;
+	Size		freespace = 0;
 	HeapTupleHeader tupleheader;
 	TransactionId NoFreezePageRelfrozenXid = vacrel->NewRelfrozenXid;
 	MultiXactId NoFreezePageRelminMxid = vacrel->NewRelminMxid;
@@ -1920,7 +1908,7 @@ lazy_scan_noprune(LVRelState *vacrel,
 	Assert(BufferGetBlockNumber(buf) == blkno);
 
 	hastup = false;				/* for now */
-	*recordfreespace = false;	/* for now */
+	recordfreespace = false;	/* for now */
 
 	lpdead_items = 0;
 	live_tuples = 0;
@@ -2063,7 +2051,7 @@ lazy_scan_noprune(LVRelState *vacrel,
 			missed_dead_tuples += lpdead_items;
 		}
 
-		*recordfreespace = true;
+		recordfreespace = true;
 	}
 	else if (lpdead_items == 0)
 	{
@@ -2071,7 +2059,7 @@ lazy_scan_noprune(LVRelState *vacrel,
 		 * Won't be vacuuming this page later, so record page's freespace in
 		 * the FSM now
 		 */
-		*recordfreespace = true;
+		recordfreespace = true;
 	}
 	else
 	{
@@ -2103,7 +2091,7 @@ lazy_scan_noprune(LVRelState *vacrel,
 		 * Assume that we'll go on to vacuum this heap page during final pass
 		 * over the heap.  Don't record free space until then.
 		 */
-		*recordfreespace = false;
+		recordfreespace = false;
 	}
 
 	/*
@@ -2119,7 +2107,18 @@ lazy_scan_noprune(LVRelState *vacrel,
 	if (hastup)
 		vacrel->nonempty_pages = blkno + 1;
 
-	/* Caller won't need to call lazy_scan_prune with same page */
+	/*
+	* Since we processed page successfully without cleanup lock, caller won't
+	* need to call lazy_scan_prune() with the same page. Now, we just need to
+	* update the FSM, much like the lazy_scan_prune case. Don't bother trying
+	* to match its visibility map setting steps, though.
+	*/
+	if (recordfreespace)
+		freespace = PageGetHeapFreeSpace(page);
+	UnlockReleaseBuffer(buf);
+	if (recordfreespace)
+		RecordPageWithFreeSpace(vacrel->rel, blkno, freespace);
+
 	return true;
 }
 
