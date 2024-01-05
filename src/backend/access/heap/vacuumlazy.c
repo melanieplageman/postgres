@@ -212,24 +212,6 @@ typedef struct LVRelState
 	int64		missed_dead_tuples; /* # removable, but not removed */
 } LVRelState;
 
-/*
- * State returned by lazy_scan_prune()
- */
-typedef struct LVPagePruneState
-{
-	bool		hastup;			/* Page prevents rel truncation? */
-	bool		has_lpdead_items;	/* includes existing LP_DEAD items */
-
-	/*
-	 * State describes the proper VM bit states to set for the page following
-	 * pruning and freezing.  all_visible implies !has_lpdead_items, but don't
-	 * trust all_frozen result unless all_visible is also set to true.
-	 */
-	bool		all_visible;	/* Every item visible to all? */
-	bool		all_frozen;		/* provided all_visible is also true */
-	TransactionId visibility_cutoff_xid;	/* For recovery conflicts */
-} LVPagePruneState;
-
 /* Struct for saving and restoring vacuum error information. */
 typedef struct LVSavedErrInfo
 {
@@ -251,7 +233,7 @@ static bool lazy_scan_new_or_empty(LVRelState *vacrel, Buffer buf,
 static void lazy_scan_prune(LVRelState *vacrel, Buffer buf,
 							BlockNumber blkno, Page page,
 							Buffer vmbuffer, bool all_visible_according_to_vm,
-							LVPagePruneState *prunestate, bool *recordfreespace);
+							bool *recordfreespace, bool *hastup);
 static bool lazy_scan_noprune(LVRelState *vacrel, Buffer buf,
 							  BlockNumber blkno, Page page,
 							  bool *hastup, bool *recordfreespace);
@@ -835,6 +817,7 @@ lazy_scan_heap(LVRelState *vacrel)
 	bool		next_unskippable_allvis,
 				skipping_current_range;
 	bool		recordfreespace;
+	bool		hastup;
 	const int	initprog_index[] = {
 		PROGRESS_VACUUM_PHASE,
 		PROGRESS_VACUUM_TOTAL_HEAP_BLKS,
@@ -857,7 +840,6 @@ lazy_scan_heap(LVRelState *vacrel)
 		Buffer		buf;
 		Page		page;
 		bool		all_visible_according_to_vm;
-		LVPagePruneState prunestate;
 
 		if (blkno == next_unskippable_block)
 		{
@@ -962,8 +944,6 @@ lazy_scan_heap(LVRelState *vacrel)
 		page = BufferGetPage(buf);
 		if (!ConditionalLockBufferForCleanup(buf))
 		{
-			bool		hastup;
-
 			LockBuffer(buf, BUFFER_LOCK_SHARE);
 
 			/* Check for new or empty pages before lazy_scan_noprune call */
@@ -1025,10 +1005,10 @@ lazy_scan_heap(LVRelState *vacrel)
 		 */
 		lazy_scan_prune(vacrel, buf, blkno, page,
 						vmbuffer, all_visible_according_to_vm,
-						&prunestate, &recordfreespace);
+						&recordfreespace, &hastup);
 
 		/* Remember the location of the last page with nonremovable tuples */
-		if (prunestate.hastup)
+		if (hastup)
 			vacrel->nonempty_pages = blkno + 1;
 
 		/*
@@ -1385,8 +1365,8 @@ lazy_scan_prune(LVRelState *vacrel,
 				Page page,
 				Buffer vmbuffer,
 				bool all_visible_according_to_vm,
-				LVPagePruneState *prunestate,
-				bool *recordfreespace)
+				bool *recordfreespace,
+				bool *hastup)
 {
 	Relation	rel = vacrel->rel;
 	OffsetNumber offnum,
@@ -1394,11 +1374,14 @@ lazy_scan_prune(LVRelState *vacrel,
 	ItemId		itemid;
 	PruneResult presult;
 	int			tuples_frozen,
-				lpdead_items,
 				live_tuples,
 				recently_dead_tuples;
 	HeapPageFreeze pagefrz;
 	bool		no_indexes;
+	bool		all_visible,
+				all_frozen;
+	TransactionId visibility_cutoff_xid;
+	int			lpdead_items;	/* includes existing LP_DEAD items */
 	int64		fpi_before = pgWalUsage.wal_fpi;
 	OffsetNumber deadoffsets[MaxHeapTuplesPerPage];
 	HeapTupleFreeze frozen[MaxHeapTuplesPerPage];
@@ -1438,14 +1421,23 @@ lazy_scan_prune(LVRelState *vacrel,
 
 	/*
 	 * Now scan the page to collect LP_DEAD items and check for tuples
-	 * requiring freezing among remaining tuples with storage
+	 * requiring freezing among remaining tuples with storage. lpdead_items
+	 * includes existing LP_DEAD items.
 	 */
-	prunestate->hastup = false;
-	prunestate->has_lpdead_items = false;
-	prunestate->all_visible = true;
-	prunestate->all_frozen = true;
-	prunestate->visibility_cutoff_xid = InvalidTransactionId;
 	*recordfreespace = false;
+	*hastup = false;
+	/* for recovery conflicts */
+	visibility_cutoff_xid = InvalidTransactionId;
+
+	/*
+	 * We will update the VM after collecting LP_DEAD items and freezing
+	 * tuples. Keep track of whether or not the page is all_visible and
+	 * all_frozen and use this information to update the VM. all_visible
+	 * implies lpdead_items == 0, but don't trust all_frozen result unless
+	 * all_visible is also set to true.
+	 */
+	all_visible = true;
+	all_frozen = true;
 
 	for (offnum = FirstOffsetNumber;
 		 offnum <= maxoff;
@@ -1468,7 +1460,7 @@ lazy_scan_prune(LVRelState *vacrel,
 		if (ItemIdIsRedirected(itemid))
 		{
 			/* page makes rel truncation unsafe */
-			prunestate->hastup = true;
+			*hastup = true;
 			continue;
 		}
 
@@ -1533,13 +1525,13 @@ lazy_scan_prune(LVRelState *vacrel,
 				 * asynchronously. See SetHintBits for more info. Check that
 				 * the tuple is hinted xmin-committed because of that.
 				 */
-				if (prunestate->all_visible)
+				if (all_visible)
 				{
 					TransactionId xmin;
 
 					if (!HeapTupleHeaderXminCommitted(htup))
 					{
-						prunestate->all_visible = false;
+						all_visible = false;
 						break;
 					}
 
@@ -1551,14 +1543,14 @@ lazy_scan_prune(LVRelState *vacrel,
 					if (!TransactionIdPrecedes(xmin,
 											   vacrel->cutoffs.OldestXmin))
 					{
-						prunestate->all_visible = false;
+						all_visible = false;
 						break;
 					}
 
 					/* Track newest xmin on page. */
-					if (TransactionIdFollows(xmin, prunestate->visibility_cutoff_xid) &&
+					if (TransactionIdFollows(xmin, visibility_cutoff_xid) &&
 						TransactionIdIsNormal(xmin))
-						prunestate->visibility_cutoff_xid = xmin;
+						visibility_cutoff_xid = xmin;
 				}
 				break;
 			case HEAPTUPLE_RECENTLY_DEAD:
@@ -1569,7 +1561,7 @@ lazy_scan_prune(LVRelState *vacrel,
 				 * pruning.)
 				 */
 				recently_dead_tuples++;
-				prunestate->all_visible = false;
+				all_visible = false;
 				break;
 			case HEAPTUPLE_INSERT_IN_PROGRESS:
 
@@ -1580,11 +1572,11 @@ lazy_scan_prune(LVRelState *vacrel,
 				 * results.  This assumption is a bit shaky, but it is what
 				 * acquire_sample_rows() does, so be consistent.
 				 */
-				prunestate->all_visible = false;
+				all_visible = false;
 				break;
 			case HEAPTUPLE_DELETE_IN_PROGRESS:
 				/* This is an expected case during concurrent vacuum */
-				prunestate->all_visible = false;
+				all_visible = false;
 
 				/*
 				 * Count such rows as live.  As above, we assume the deleting
@@ -1598,7 +1590,7 @@ lazy_scan_prune(LVRelState *vacrel,
 				break;
 		}
 
-		prunestate->hastup = true;	/* page makes rel truncation unsafe */
+		*hastup = true;			/* page makes rel truncation unsafe */
 
 		/* Tuple with storage -- consider need to freeze */
 		if (heap_prepare_freeze_tuple(htup, &vacrel->cutoffs, &pagefrz,
@@ -1614,7 +1606,7 @@ lazy_scan_prune(LVRelState *vacrel,
 		 * definitely cannot be set all-frozen in the visibility map later on
 		 */
 		if (!totally_frozen)
-			prunestate->all_frozen = false;
+			all_frozen = false;
 	}
 
 	/*
@@ -1632,7 +1624,7 @@ lazy_scan_prune(LVRelState *vacrel,
 	 * page all-frozen afterwards (might not happen until final heap pass).
 	 */
 	if (pagefrz.freeze_required || tuples_frozen == 0 ||
-		(prunestate->all_visible && prunestate->all_frozen &&
+		(all_visible && all_frozen &&
 		 fpi_before != pgWalUsage.wal_fpi))
 	{
 		/*
@@ -1670,11 +1662,11 @@ lazy_scan_prune(LVRelState *vacrel,
 			 * once we're done with it.  Otherwise we generate a conservative
 			 * cutoff by stepping back from OldestXmin.
 			 */
-			if (prunestate->all_visible && prunestate->all_frozen)
+			if (all_visible && all_frozen)
 			{
 				/* Using same cutoff when setting VM is now unnecessary */
-				snapshotConflictHorizon = prunestate->visibility_cutoff_xid;
-				prunestate->visibility_cutoff_xid = InvalidTransactionId;
+				snapshotConflictHorizon = visibility_cutoff_xid;
+				visibility_cutoff_xid = InvalidTransactionId;
 			}
 			else
 			{
@@ -1697,7 +1689,7 @@ lazy_scan_prune(LVRelState *vacrel,
 		 */
 		vacrel->NewRelfrozenXid = pagefrz.NoFreezePageRelfrozenXid;
 		vacrel->NewRelminMxid = pagefrz.NoFreezePageRelminMxid;
-		prunestate->all_frozen = false;
+		all_frozen = false;
 		tuples_frozen = 0;		/* avoid miscounts in instrumentation */
 	}
 
@@ -1710,16 +1702,17 @@ lazy_scan_prune(LVRelState *vacrel,
 	 */
 #ifdef USE_ASSERT_CHECKING
 	/* Note that all_frozen value does not matter when !all_visible */
-	if (prunestate->all_visible && lpdead_items == 0)
+	if (all_visible && lpdead_items == 0)
 	{
-		TransactionId cutoff;
-		bool		all_frozen;
+		TransactionId debug_cutoff;
+		bool		debug_all_frozen;
 
-		if (!heap_page_is_all_visible(vacrel, buf, &cutoff, &all_frozen))
+		if (!heap_page_is_all_visible(vacrel, buf,
+									  &debug_cutoff, &debug_all_frozen))
 			Assert(false);
 
-		Assert(!TransactionIdIsValid(cutoff) ||
-			   cutoff == prunestate->visibility_cutoff_xid);
+		Assert(!TransactionIdIsValid(debug_cutoff) ||
+			   debug_cutoff == visibility_cutoff_xid);
 	}
 #endif
 
@@ -1732,7 +1725,6 @@ lazy_scan_prune(LVRelState *vacrel,
 		ItemPointerData tmp;
 
 		vacrel->lpdead_item_pages++;
-		prunestate->has_lpdead_items = true;
 
 		ItemPointerSetBlockNumber(&tmp, blkno);
 
@@ -1757,7 +1749,7 @@ lazy_scan_prune(LVRelState *vacrel,
 		 * Now that freezing has been finalized, unset all_visible.  It needs
 		 * to reflect the present state of things, as expected by our caller.
 		 */
-		prunestate->all_visible = false;
+		all_visible = false;
 	}
 
 	/* Finally, add page-local counts to whole-VACUUM counts */
@@ -1776,19 +1768,20 @@ lazy_scan_prune(LVRelState *vacrel,
 		!vacrel->do_index_vacuuming || lpdead_items == 0)
 		*recordfreespace = true;
 
-	Assert(!prunestate->all_visible || !prunestate->has_lpdead_items);
+	Assert(!all_visible || lpdead_items == 0);
 
 	/*
 	 * Handle setting visibility map bit based on information from the VM (as
-	 * of last lazy_scan_skip() call), and from prunestate
+	 * of last lazy_scan_skip() call), and from all_visible and all_frozen
+	 * variables
 	 */
-	if (!all_visible_according_to_vm && prunestate->all_visible)
+	if (!all_visible_according_to_vm && all_visible)
 	{
 		uint8		flags = VISIBILITYMAP_ALL_VISIBLE;
 
-		if (prunestate->all_frozen)
+		if (all_frozen)
 		{
-			Assert(!TransactionIdIsValid(prunestate->visibility_cutoff_xid));
+			Assert(!TransactionIdIsValid(visibility_cutoff_xid));
 			flags |= VISIBILITYMAP_ALL_FROZEN;
 		}
 
@@ -1808,7 +1801,7 @@ lazy_scan_prune(LVRelState *vacrel,
 		PageSetAllVisible(page);
 		MarkBufferDirty(buf);
 		visibilitymap_set(vacrel->rel, blkno, buf, InvalidXLogRecPtr,
-						  vmbuffer, prunestate->visibility_cutoff_xid,
+						  vmbuffer, visibility_cutoff_xid,
 						  flags);
 	}
 
@@ -1841,7 +1834,7 @@ lazy_scan_prune(LVRelState *vacrel,
 	 * There should never be LP_DEAD items on a page with PD_ALL_VISIBLE set,
 	 * however.
 	 */
-	else if (prunestate->has_lpdead_items && PageIsAllVisible(page))
+	else if (lpdead_items > 0 && PageIsAllVisible(page))
 	{
 		elog(WARNING, "page containing LP_DEAD items is marked as all-visible in relation \"%s\" page %u",
 			 vacrel->relname, blkno);
@@ -1854,16 +1847,16 @@ lazy_scan_prune(LVRelState *vacrel,
 	/*
 	 * If the all-visible page is all-frozen but not marked as such yet, mark
 	 * it as all-frozen.  Note that all_frozen is only valid if all_visible is
-	 * true, so we must check both prunestate fields.
+	 * true, so we must check both all_visible and all_frozen.
 	 */
-	else if (all_visible_according_to_vm && prunestate->all_visible &&
-			 prunestate->all_frozen &&
+	else if (all_visible_according_to_vm && all_visible &&
+			 all_frozen &&
 			 !VM_ALL_FROZEN(vacrel->rel, blkno, &vmbuffer))
 	{
 		/*
 		 * Avoid relying on all_visible_according_to_vm as a proxy for the
 		 * page-level PD_ALL_VISIBLE bit being set, since it might have become
-		 * stale -- even when all_visible is set in prunestate
+		 * stale -- even when all_visible is set
 		 */
 		if (!PageIsAllVisible(page))
 		{
@@ -1878,7 +1871,7 @@ lazy_scan_prune(LVRelState *vacrel,
 		 * since a snapshotConflictHorizon sufficient to make everything safe
 		 * for REDO was logged when the page's tuples were frozen.
 		 */
-		Assert(!TransactionIdIsValid(prunestate->visibility_cutoff_xid));
+		Assert(!TransactionIdIsValid(visibility_cutoff_xid));
 		visibilitymap_set(vacrel->rel, blkno, buf, InvalidXLogRecPtr,
 						  vmbuffer, InvalidTransactionId,
 						  VISIBILITYMAP_ALL_VISIBLE |
