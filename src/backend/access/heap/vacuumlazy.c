@@ -212,15 +212,6 @@ typedef struct LVRelState
 	int64		missed_dead_tuples; /* # removable, but not removed */
 } LVRelState;
 
-/*
- * State returned by lazy_scan_prune()
- */
-typedef struct LVPagePruneState
-{
-	/* whether or not caller should do FSM processing for block */
-	bool		recordfreespace;
-} LVPagePruneState;
-
 /* Struct for saving and restoring vacuum error information. */
 typedef struct LVSavedErrInfo
 {
@@ -242,7 +233,7 @@ static bool lazy_scan_new_or_empty(LVRelState *vacrel, Buffer buf,
 static void lazy_scan_prune(LVRelState *vacrel, Buffer buf,
 							BlockNumber blkno, Page page,
 							Buffer vmbuffer, bool all_visible_according_to_vm,
-							LVPagePruneState *prunestate);
+							bool *recordfreespace);
 static bool lazy_scan_noprune(LVRelState *vacrel, Buffer buf,
 							  BlockNumber blkno, Page page,
 							  bool *recordfreespace);
@@ -825,6 +816,7 @@ lazy_scan_heap(LVRelState *vacrel)
 	int			tuples_already_deleted;
 	bool		next_unskippable_allvis,
 				skipping_current_range;
+	bool		recordfreespace;
 	const int	initprog_index[] = {
 		PROGRESS_VACUUM_PHASE,
 		PROGRESS_VACUUM_TOTAL_HEAP_BLKS,
@@ -847,7 +839,6 @@ lazy_scan_heap(LVRelState *vacrel)
 		Buffer		buf;
 		Page		page;
 		bool		all_visible_according_to_vm;
-		LVPagePruneState prunestate;
 
 		if (blkno == next_unskippable_block)
 		{
@@ -952,8 +943,6 @@ lazy_scan_heap(LVRelState *vacrel)
 		page = BufferGetPage(buf);
 		if (!ConditionalLockBufferForCleanup(buf))
 		{
-			bool		recordfreespace;
-
 			LockBuffer(buf, BUFFER_LOCK_SHARE);
 
 			/* Check for new or empty pages before lazy_scan_noprune call */
@@ -1004,6 +993,7 @@ lazy_scan_heap(LVRelState *vacrel)
 		}
 
 		tuples_already_deleted = vacrel->tuples_deleted;
+		recordfreespace = false;
 
 		/*
 		 * Prune, freeze, and count tuples.
@@ -1016,7 +1006,7 @@ lazy_scan_heap(LVRelState *vacrel)
 		 */
 		lazy_scan_prune(vacrel, buf, blkno, page,
 						vmbuffer, all_visible_according_to_vm,
-						&prunestate);
+						&recordfreespace);
 
 
 		/*
@@ -1036,7 +1026,7 @@ lazy_scan_heap(LVRelState *vacrel)
 		 * little free space anyway. (Besides, we start recording free space
 		 * in the FSM once index vacuuming has been abandoned.)
 		 */
-		if (prunestate.recordfreespace)
+		if (recordfreespace)
 		{
 			Size		freespace = PageGetHeapFreeSpace(page);
 
@@ -1373,7 +1363,7 @@ lazy_scan_prune(LVRelState *vacrel,
 				Page page,
 				Buffer vmbuffer,
 				bool all_visible_according_to_vm,
-				LVPagePruneState *prunestate)
+				bool *recordfreespace)
 {
 	Relation	rel = vacrel->rel;
 	OffsetNumber offnum,
@@ -1436,7 +1426,6 @@ lazy_scan_prune(LVRelState *vacrel,
 	has_lpdead_items = false;
 	/* for recovery conflicts */
 	visibility_cutoff_xid = InvalidTransactionId;
-	prunestate->recordfreespace = false;
 
 	/*
 	 * We will update the VM after collecting LP_DEAD items and freezing
@@ -1776,7 +1765,7 @@ lazy_scan_prune(LVRelState *vacrel,
 	 */
 	if (vacrel->nindexes == 0 ||
 		!vacrel->do_index_vacuuming || lpdead_items == 0)
-		prunestate->recordfreespace = true;
+		*recordfreespace = true;
 
 	/* Remember the location of the last page with nonremovable tuples */
 	if (hastup)
