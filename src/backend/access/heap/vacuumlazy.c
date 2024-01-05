@@ -817,6 +817,7 @@ lazy_scan_heap(LVRelState *vacrel)
 	bool		next_unskippable_allvis,
 				skipping_current_range;
 	bool		recordfreespace;
+	bool		do_prune = true;
 	const int	initprog_index[] = {
 		PROGRESS_VACUUM_PHASE,
 		PROGRESS_VACUUM_TOTAL_HEAP_BLKS,
@@ -955,45 +956,34 @@ lazy_scan_heap(LVRelState *vacrel)
 
 			/*
 			 * Collect LP_DEAD items in dead_items array, count tuples,
-			 * determine if rel truncation is safe
+			 * determine if rel truncation is safe. If lazy_scan_noprune()
+			 * returns false, we must get a cleanup lock and call
+			 * lazy_scan_prune().
 			 */
-			if (lazy_scan_noprune(vacrel, buf, blkno, page,
-								  &recordfreespace))
-			{
-				Size		freespace = 0;
-
-				/*
-				 * Processed page successfully (without cleanup lock) -- just
-				 * need to update the FSM, much like the lazy_scan_prune case.
-				 * Don't bother trying to match its visibility map setting
-				 * steps, though.
-				 */
-				if (recordfreespace)
-					freespace = PageGetHeapFreeSpace(page);
-				UnlockReleaseBuffer(buf);
-				if (recordfreespace)
-					RecordPageWithFreeSpace(vacrel->rel, blkno, freespace);
-				continue;
-			}
+			do_prune = !lazy_scan_noprune(vacrel, buf, blkno, page,
+										  &recordfreespace);
 
 			/*
 			 * lazy_scan_noprune could not do all required processing.  Wait
 			 * for a cleanup lock, and call lazy_scan_prune in the usual way.
 			 */
-			Assert(vacrel->aggressive);
-			LockBuffer(buf, BUFFER_LOCK_UNLOCK);
-			LockBufferForCleanup(buf);
+			if (do_prune)
+			{
+				Assert(vacrel->aggressive);
+				LockBuffer(buf, BUFFER_LOCK_UNLOCK);
+				LockBufferForCleanup(buf);
+			}
 		}
 
-		/* Check for new or empty pages before lazy_scan_prune call */
-		if (lazy_scan_new_or_empty(vacrel, buf, blkno, page, false, vmbuffer))
+		tuples_already_deleted = vacrel->tuples_deleted;
+
+		/* Check for new or empty pages before lazy_scan_prune processing */
+		if (do_prune &&
+			lazy_scan_new_or_empty(vacrel, buf, blkno, page, false, vmbuffer))
 		{
 			/* Processed as new/empty page (lock and pin released) */
 			continue;
 		}
-
-		tuples_already_deleted = vacrel->tuples_deleted;
-		recordfreespace = false;
 
 		/*
 		 * Prune, freeze, and count tuples.
@@ -1004,10 +994,10 @@ lazy_scan_heap(LVRelState *vacrel)
 		 * were pruned some time earlier.  Also considers freezing XIDs in the
 		 * tuple headers of remaining items with storage.
 		 */
-		lazy_scan_prune(vacrel, buf, blkno, page,
-						vmbuffer, all_visible_according_to_vm,
-						&recordfreespace);
-
+		if (do_prune)
+			lazy_scan_prune(vacrel, buf, blkno, page,
+							vmbuffer, all_visible_according_to_vm,
+							&recordfreespace);
 
 		/*
 		 * Final steps for block: drop cleanup lock, record free space in the
@@ -1386,6 +1376,8 @@ lazy_scan_prune(LVRelState *vacrel,
 	HeapTupleFreeze frozen[MaxHeapTuplesPerPage];
 
 	Assert(BufferGetBlockNumber(buf) == blkno);
+
+	*recordfreespace = false;
 
 	/*
 	 * maxoff might be reduced following line pointer array truncation in
