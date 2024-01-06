@@ -67,8 +67,10 @@ static int	heap_prune_chain(Buffer buffer,
 static void heap_prune_record_prunable(PruneState *prstate, TransactionId xid);
 static void heap_prune_record_redirect(PruneState *prstate,
 									   OffsetNumber offnum, OffsetNumber rdoffnum);
-static void heap_prune_record_dead(PruneState *prstate, OffsetNumber offnum);
-static void heap_prune_record_dead_or_unused(PruneState *prstate, OffsetNumber offnum);
+static void heap_prune_record_dead(PruneState *prstate, OffsetNumber offnum,
+								   PruneResult *presult);
+static void heap_prune_record_dead_or_unused(PruneState *prstate, OffsetNumber offnum,
+											 PruneResult *presult);
 static void heap_prune_record_unused(PruneState *prstate, OffsetNumber offnum);
 static void page_verify_redirects(Page page);
 
@@ -251,6 +253,14 @@ heap_page_prune(Relation relation, Buffer buffer,
 	presult->ndeleted = 0;
 	presult->nnewlpdead = 0;
 
+	/*
+	 * Keep track of whether or not the page is all_visible in case the caller
+	 * wants to use this information to update the VM.
+	 */
+	presult->all_visible = true;
+	/* for recovery conflicts */
+	presult->frz_conflict_horizon = InvalidTransactionId;
+
 	maxoff = PageGetMaxOffsetNumber(page);
 	tup.t_tableOid = RelationGetRelid(prstate.rel);
 
@@ -302,7 +312,91 @@ heap_page_prune(Relation relation, Buffer buffer,
 
 		presult->htsv[offnum] = heap_prune_satisfies_vacuum(&prstate, &tup,
 															buffer);
+		switch (presult->htsv[offnum])
+		{
+			case HEAPTUPLE_DEAD:
+
+				/*
+				 * Deliberately delay unsetting all_visible until later during
+				 * pruning. Removable dead tuples shouldn't preclude freezing
+				 * the page. After finishing this first pass of tuple
+				 * visibility checks, initialize all_visible_except_removable
+				 * with the current value of all_visible to indicate whether
+				 * or not the page is all visible except for dead tuples. This
+				 * will allow us to attempt to freeze the page after pruning.
+				 * Later during pruning, if we encounter an LP_DEAD item or
+				 * are setting an item LP_DEAD, we will unset all_visible. As
+				 * long as we unset it before updating the visibility map,
+				 * this will be correct.
+				 */
+				break;
+			case HEAPTUPLE_LIVE:
+
+				/*
+				 * Is the tuple definitely visible to all transactions?
+				 *
+				 * NB: Like with per-tuple hint bits, we can't set the
+				 * PD_ALL_VISIBLE flag if the inserter committed
+				 * asynchronously. See SetHintBits for more info. Check that
+				 * the tuple is hinted xmin-committed because of that.
+				 */
+				if (presult->all_visible)
+				{
+					TransactionId xmin;
+
+					if (!HeapTupleHeaderXminCommitted(htup))
+					{
+						presult->all_visible = false;
+						break;
+					}
+
+					/*
+					 * The inserter definitely committed. But is it old enough
+					 * that everyone sees it as committed?
+					 */
+					xmin = HeapTupleHeaderGetXmin(htup);
+					if (!GlobalVisTestIsRemovableXid(vistest, xmin))
+					{
+						presult->all_visible = false;
+						break;
+					}
+
+					/* Track newest xmin on page. */
+					if (TransactionIdFollows(xmin, presult->frz_conflict_horizon) &&
+						TransactionIdIsNormal(xmin))
+						presult->frz_conflict_horizon = xmin;
+				}
+				break;
+			case HEAPTUPLE_RECENTLY_DEAD:
+				presult->all_visible = false;
+				break;
+			case HEAPTUPLE_INSERT_IN_PROGRESS:
+				presult->all_visible = false;
+				break;
+			case HEAPTUPLE_DELETE_IN_PROGRESS:
+				/* This is an expected case during concurrent vacuum */
+				presult->all_visible = false;
+				break;
+			default:
+				elog(ERROR, "unexpected HeapTupleSatisfiesVacuum result");
+				break;
+		}
 	}
+
+	/*
+	 * For vacuum, if the whole page will become frozen, we consider
+	 * opportunistically freezing tuples. Dead tuples which will be removed by
+	 * the end of vacuuming should not preclude us from opportunistically
+	 * freezing. We will not be able to freeze the whole page if there are
+	 * tuples present which are not visible to everyone or if there are dead
+	 * tuples which are not yet removable. We need all_visible to be false if
+	 * LP_DEAD tuples remain after pruning so that we do not incorrectly
+	 * update the visibility map or page hint bit. So, we will update
+	 * presult->all_visible to reflect the presence of LP_DEAD items while
+	 * pruning and keep all_visible_except_removable to permit freezing if the
+	 * whole page will eventually become all visible after removing tuples.
+	 */
+	presult->all_visible_except_removable = presult->all_visible;
 
 	/* Scan the page */
 	for (offnum = FirstOffsetNumber;
@@ -598,10 +692,14 @@ heap_prune_chain(Buffer buffer, OffsetNumber rootoffnum,
 			/*
 			 * If the caller set mark_unused_now true, we can set dead line
 			 * pointers LP_UNUSED now. We don't increment ndeleted here since
-			 * the LP was already marked dead.
+			 * the LP was already marked dead. If it will not be marked
+			 * LP_UNUSED, it will remain LP_DEAD, making the page not
+			 * all_visible.
 			 */
 			if (unlikely(prstate->mark_unused_now))
 				heap_prune_record_unused(prstate, offnum);
+			else
+				presult->all_visible = false;
 
 			break;
 		}
@@ -738,7 +836,7 @@ heap_prune_chain(Buffer buffer, OffsetNumber rootoffnum,
 		 * redirect the root to the correct chain member.
 		 */
 		if (i >= nchain)
-			heap_prune_record_dead_or_unused(prstate, rootoffnum);
+			heap_prune_record_dead_or_unused(prstate, rootoffnum, presult);
 		else
 			heap_prune_record_redirect(prstate, rootoffnum, chainitems[i]);
 	}
@@ -751,7 +849,7 @@ heap_prune_chain(Buffer buffer, OffsetNumber rootoffnum,
 		 * redirect item.  We can clean up by setting the redirect item to
 		 * DEAD state or LP_UNUSED if the caller indicated.
 		 */
-		heap_prune_record_dead_or_unused(prstate, rootoffnum);
+		heap_prune_record_dead_or_unused(prstate, rootoffnum, presult);
 	}
 
 	return ndeleted;
@@ -788,13 +886,20 @@ heap_prune_record_redirect(PruneState *prstate,
 
 /* Record line pointer to be marked dead */
 static void
-heap_prune_record_dead(PruneState *prstate, OffsetNumber offnum)
+heap_prune_record_dead(PruneState *prstate, OffsetNumber offnum,
+					   PruneResult *presult)
 {
 	Assert(prstate->ndead < MaxHeapTuplesPerPage);
 	prstate->nowdead[prstate->ndead] = offnum;
 	prstate->ndead++;
 	Assert(!prstate->marked[offnum]);
 	prstate->marked[offnum] = true;
+
+	/*
+	 * Setting the line pointer LP_DEAD means the page will definitely not be
+	 * all_visible.
+	 */
+	presult->all_visible = false;
 }
 
 /*
@@ -804,7 +909,8 @@ heap_prune_record_dead(PruneState *prstate, OffsetNumber offnum)
  * pointers LP_DEAD if mark_unused_now is true.
  */
 static void
-heap_prune_record_dead_or_unused(PruneState *prstate, OffsetNumber offnum)
+heap_prune_record_dead_or_unused(PruneState *prstate, OffsetNumber offnum,
+								 PruneResult *presult)
 {
 	/*
 	 * If the caller set mark_unused_now to true, we can remove dead tuples
@@ -815,7 +921,7 @@ heap_prune_record_dead_or_unused(PruneState *prstate, OffsetNumber offnum)
 	if (unlikely(prstate->mark_unused_now))
 		heap_prune_record_unused(prstate, offnum);
 	else
-		heap_prune_record_dead(prstate, offnum);
+		heap_prune_record_dead(prstate, offnum, presult);
 }
 
 /* Record line pointer to be marked unused */
