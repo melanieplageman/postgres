@@ -198,6 +198,8 @@ typedef struct PruneResult
 {
 	int			ndeleted;		/* Number of tuples deleted from the page */
 	int			nnewlpdead;		/* Number of newly LP_DEAD items */
+	bool		all_visible;	/* Whether or not the page is all visible */
+	TransactionId frz_conflict_horizon; /* Newest xmin on the page */
 
 	/*
 	 * Tuple visibility is only computed once for each tuple, for correctness
@@ -209,6 +211,7 @@ typedef struct PruneResult
 	 * 1. Otherwise every access would need to subtract 1.
 	 */
 	int8		htsv[MaxHeapTuplesPerPage + 1];
+	bool		all_visible_except_removable;
 } PruneResult;
 
 /*
