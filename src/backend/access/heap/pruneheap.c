@@ -63,8 +63,7 @@ static HTSV_Result heap_prune_satisfies_vacuum(PruneState *prstate,
 											   Buffer buffer);
 static int	heap_prune_chain(Buffer buffer,
 							 OffsetNumber rootoffnum,
-							 int8 *htsv,
-							 PruneState *prstate);
+							 PruneState *prstate, PruneResult *presult);
 static void heap_prune_record_prunable(PruneState *prstate, TransactionId xid);
 static void heap_prune_record_redirect(PruneState *prstate,
 									   OffsetNumber offnum, OffsetNumber rdoffnum);
@@ -327,7 +326,7 @@ heap_page_prune(Relation relation, Buffer buffer,
 
 		/* Process this item or chain of items */
 		presult->ndeleted += heap_prune_chain(buffer, offnum,
-											  presult->htsv, &prstate);
+											  &prstate, presult);
 	}
 
 	/* Clear the offset information once we have processed the given page. */
@@ -456,7 +455,7 @@ heap_prune_satisfies_vacuum(PruneState *prstate, HeapTuple tup, Buffer buffer)
 /*
  * Prune specified line pointer or a HOT chain originating at line pointer.
  *
- * Tuple visibility information is provided in htsv.
+ * Tuple visibility information is provided in presult->htsv.
  *
  * If the item is an index-referenced tuple (i.e. not a heap-only tuple),
  * the HOT chain is pruned by removing all DEAD tuples at the start of the HOT
@@ -486,7 +485,7 @@ heap_prune_satisfies_vacuum(PruneState *prstate, HeapTuple tup, Buffer buffer)
  */
 static int
 heap_prune_chain(Buffer buffer, OffsetNumber rootoffnum,
-				 int8 *htsv, PruneState *prstate)
+				 PruneState *prstate, PruneResult *presult)
 {
 	int			ndeleted = 0;
 	Page		dp = (Page) BufferGetPage(buffer);
@@ -507,7 +506,7 @@ heap_prune_chain(Buffer buffer, OffsetNumber rootoffnum,
 	 */
 	if (ItemIdIsNormal(rootlp))
 	{
-		Assert(htsv[rootoffnum] != -1);
+		Assert(presult->htsv[rootoffnum] != -1);
 		htup = (HeapTupleHeader) PageGetItem(dp, rootlp);
 
 		if (HeapTupleHeaderIsHeapOnly(htup))
@@ -530,7 +529,7 @@ heap_prune_chain(Buffer buffer, OffsetNumber rootoffnum,
 			 * either here or while following a chain below.  Whichever path
 			 * gets there first will mark the tuple unused.
 			 */
-			if (htsv[rootoffnum] == HEAPTUPLE_DEAD &&
+			if (presult->htsv[rootoffnum] == HEAPTUPLE_DEAD &&
 				!HeapTupleHeaderIsHotUpdated(htup))
 			{
 				heap_prune_record_unused(prstate, rootoffnum);
@@ -627,7 +626,7 @@ heap_prune_chain(Buffer buffer, OffsetNumber rootoffnum,
 		 */
 		tupdead = recent_dead = false;
 
-		switch (htsv_get_valid_status(htsv[offnum]))
+		switch (htsv_get_valid_status(presult->htsv[offnum]))
 		{
 			case HEAPTUPLE_DEAD:
 				tupdead = true;
