@@ -1392,6 +1392,7 @@ lazy_scan_prune(LVRelState *vacrel,
 	pagefrz.FreezePageRelminMxid = vacrel->NewRelminMxid;
 	pagefrz.NoFreezePageRelfrozenXid = vacrel->NewRelfrozenXid;
 	pagefrz.NoFreezePageRelminMxid = vacrel->NewRelminMxid;
+	pagefrz.cutoffs = &vacrel->cutoffs;
 	tuples_frozen = 0;
 	lpdead_items = 0;
 	live_tuples = 0;
@@ -1537,7 +1538,7 @@ lazy_scan_prune(LVRelState *vacrel,
 		*hastup = true;			/* page makes rel truncation unsafe */
 
 		/* Tuple with storage -- consider need to freeze */
-		if (heap_prepare_freeze_tuple(htup, &vacrel->cutoffs, &pagefrz,
+		if (heap_prepare_freeze_tuple(htup, &pagefrz,
 									  &frozen[tuples_frozen], &totally_frozen))
 		{
 			/* Save prepared freeze plan for later */
