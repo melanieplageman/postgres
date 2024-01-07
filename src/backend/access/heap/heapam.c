@@ -95,9 +95,6 @@ static void compute_new_xmax_infomask(TransactionId xmax, uint16 old_infomask,
 static TM_Result heap_lock_updated_tuple(Relation rel, HeapTuple tuple,
 										 ItemPointer ctid, TransactionId xid,
 										 LockTupleMode mode);
-static int	heap_log_freeze_plan(HeapTupleFreeze *tuples, int ntuples,
-								 xl_heap_freeze_plan *plans_out,
-								 OffsetNumber *offsets_out);
 static void GetMultiXactIdHintBits(MultiXactId multi, uint16 *new_infomask,
 								   uint16 *new_infomask2);
 static TransactionId MultiXactIdGetUpdateXid(TransactionId xmax,
@@ -6891,7 +6888,7 @@ heap_log_freeze_new_plan(xl_heap_freeze_plan *plan, HeapTupleFreeze *frz)
  * (actually there is one array per freeze plan, but that's not of immediate
  * concern to our caller).
  */
-static int
+int
 heap_log_freeze_plan(HeapTupleFreeze *tuples, int ntuples,
 					 xl_heap_freeze_plan *plans_out,
 					 OffsetNumber *offsets_out)
