@@ -270,6 +270,8 @@ static void update_vacuum_error_info(LVRelState *vacrel,
 static void restore_vacuum_error_info(LVRelState *vacrel,
 									  const LVSavedErrInfo *saved_vacrel);
 
+static TransactionId heap_frz_conflict_horizon(PruneResult *presult,
+											   HeapPageFreeze *pagefrz);
 
 /*
  *	heap_vacuum_rel() -- perform VACUUM for one heap relation
@@ -1331,6 +1333,33 @@ lazy_scan_new_or_empty(LVRelState *vacrel, Buffer buf, BlockNumber blkno,
 }
 
 /*
+ * Determine the snapshotConflictHorizon for freezing. Must only be called
+ * after pruning and determining if the page is freezable.
+ */
+static TransactionId
+heap_frz_conflict_horizon(PruneResult *presult, HeapPageFreeze *pagefrz)
+{
+	TransactionId result;
+
+	/*
+	 * We can use visibility_cutoff_xid as our cutoff for conflicts when the
+	 * whole page is eligible to become all-frozen in the VM once we're done
+	 * with it.  Otherwise we generate a conservative cutoff by stepping back
+	 * from OldestXmin.
+	 */
+	if (presult->consider_opp_frz && presult->all_frozen)
+		result = presult->visibility_cutoff_xid;
+	else
+	{
+		/* Avoids false conflicts when hot_standby_feedback in use */
+		result = pagefrz->cutoffs->OldestXmin;
+		TransactionIdRetreat(result);
+	}
+
+	return result;
+}
+
+/*
  *	lazy_scan_prune() -- lazy_scan_heap() pruning and freezing.
  *
  * Caller must hold pin and buffer cleanup lock on the buffer.
@@ -1546,24 +1575,11 @@ lazy_scan_prune(LVRelState *vacrel,
 
 		vacrel->frozen_pages++;
 
-		/*
-		 * We can use visibility_cutoff_xid as our cutoff for conflicts when
-		 * the whole page is eligible to become all-frozen in the VM once
-		 * we're done with it.  Otherwise we generate a conservative cutoff by
-		 * stepping back from OldestXmin.
-		 */
+		snapshotConflictHorizon = heap_frz_conflict_horizon(&presult, &pagefrz);
+
+		/* Using same cutoff when setting VM is now unnecessary */
 		if (presult.consider_opp_frz && presult.all_frozen)
-		{
-			/* Using same cutoff when setting VM is now unnecessary */
-			snapshotConflictHorizon = presult.visibility_cutoff_xid;
 			presult.visibility_cutoff_xid = InvalidTransactionId;
-		}
-		else
-		{
-			/* Avoids false conflicts when hot_standby_feedback in use */
-			snapshotConflictHorizon = vacrel->cutoffs.OldestXmin;
-			TransactionIdRetreat(snapshotConflictHorizon);
-		}
 
 		/* Execute all freeze plans for page as a single atomic action */
 		heap_freeze_execute_prepared(vacrel->rel, buf,
