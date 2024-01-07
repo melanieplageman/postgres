@@ -497,7 +497,26 @@ heap_page_prune(Relation relation, Buffer buffer,
 	START_CRIT_SECTION();
 
 	/* Have we found any prunable items? */
-	if (do_prune)
+	if (!do_prune)
+	{
+		/*
+		 * If we didn't prune anything, but have found a new value for the
+		 * pd_prune_xid field, update it and mark the buffer dirty. This is
+		 * treated as a non-WAL-logged hint.
+		 *
+		 * Also clear the "page is full" flag if it is set, since there's no
+		 * point in repeating the prune/defrag process until something else
+		 * happens to the page.
+		 */
+		if (((PageHeader) page)->pd_prune_xid != prstate.new_prune_xid ||
+			PageIsFull(page))
+		{
+			((PageHeader) page)->pd_prune_xid = prstate.new_prune_xid;
+			PageClearFull(page);
+			MarkBufferDirtyHint(buffer, true);
+		}
+	}
+	else
 	{
 		/*
 		 * Apply the planned item changes, then repair page fragmentation, and
@@ -562,25 +581,6 @@ heap_page_prune(Relation relation, Buffer buffer,
 			recptr = XLogInsert(RM_HEAP2_ID, XLOG_HEAP2_PRUNE);
 
 			PageSetLSN(BufferGetPage(buffer), recptr);
-		}
-	}
-	else
-	{
-		/*
-		 * If we didn't prune anything, but have found a new value for the
-		 * pd_prune_xid field, update it and mark the buffer dirty. This is
-		 * treated as a non-WAL-logged hint.
-		 *
-		 * Also clear the "page is full" flag if it is set, since there's no
-		 * point in repeating the prune/defrag process until something else
-		 * happens to the page.
-		 */
-		if (((PageHeader) page)->pd_prune_xid != prstate.new_prune_xid ||
-			PageIsFull(page))
-		{
-			((PageHeader) page)->pd_prune_xid = prstate.new_prune_xid;
-			PageClearFull(page);
-			MarkBufferDirtyHint(buffer, true);
 		}
 	}
 
