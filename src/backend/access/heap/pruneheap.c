@@ -483,6 +483,15 @@ heap_page_prune(Relation relation, Buffer buffer,
 		heap_pre_freeze_checks(buffer, presult->frozen, presult->nfrozen);
 		frz_conflict_horizon = heap_frz_conflict_horizon(presult, pagefrz);
 	}
+	else if (!pagefrz || !presult->all_frozen || presult->nfrozen > 0)
+	{
+		/*
+		 * Page requires "no freeze" processing.  It might be set all-visible
+		 * in the visibility map, but it can never be set all-frozen.
+		 */
+		presult->all_frozen = false;
+		presult->nfrozen = 0;	/* avoid miscounts in instrumentation */
+	}
 
 	/* Any error while applying the changes is critical */
 	START_CRIT_SECTION();
@@ -592,15 +601,6 @@ heap_page_prune(Relation relation, Buffer buffer,
 									 presult->frozen, presult->nfrozen);
 
 		END_CRIT_SECTION();
-	}
-	else if (!pagefrz || !presult->all_frozen || presult->nfrozen > 0)
-	{
-		/*
-		 * Page requires "no freeze" processing.  It might be set all-visible
-		 * in the visibility map, but it can never be set all-frozen.
-		 */
-		presult->all_frozen = false;
-		presult->nfrozen = 0;	/* avoid miscounts in instrumentation */
 	}
 }
 
