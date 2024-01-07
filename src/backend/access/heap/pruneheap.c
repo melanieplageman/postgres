@@ -584,24 +584,17 @@ heap_page_prune(Relation relation, Buffer buffer,
 		}
 	}
 
+	if (do_freeze)
+	{
+		heap_freeze_execute_prepared(relation, buffer,
+									 frz_conflict_horizon,
+									 presult->frozen, presult->nfrozen);
+	}
+
 	END_CRIT_SECTION();
 
 	/* Record number of newly-set-LP_DEAD items for caller */
 	presult->nnewlpdead = prstate.ndead;
-
-	if (do_freeze)
-	{
-
-
-		START_CRIT_SECTION();
-
-		/* Execute all freeze plans for page as a single atomic action */
-		heap_freeze_execute_prepared(relation, buffer,
-									 frz_conflict_horizon,
-									 presult->frozen, presult->nfrozen);
-
-		END_CRIT_SECTION();
-	}
 }
 
 
