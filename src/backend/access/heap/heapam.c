@@ -6664,35 +6664,19 @@ heap_execute_freeze_tuple(HeapTupleHeader tuple, HeapTupleFreeze *frz)
 }
 
 /*
- * heap_freeze_execute_prepared
- *
- * Executes freezing of one or more heap tuples on a page on behalf of caller.
- * Caller passes an array of tuple plans from heap_prepare_freeze_tuple.
- * Caller must set 'offset' in each plan for us.  Note that we destructively
- * sort caller's tuples array in-place, so caller had better be done with it.
- *
- * WAL-logs the changes so that VACUUM can advance the rel's relfrozenxid
- * later on without any risk of unsafe pg_xact lookups, even following a hard
- * crash (or when querying from a standby).  We represent freezing by setting
- * infomask bits in tuple headers, but this shouldn't be thought of as a hint.
- * See section on buffer access rules in src/backend/storage/buffer/README.
- */
+* Perform xmin/xmax XID status sanity checks before calling
+* heap_freeze_execute_prepared().
+*
+* heap_prepare_freeze_tuple doesn't perform these checks directly because
+* pg_xact lookups are relatively expensive.  They shouldn't be repeated
+* by successive VACUUMs that each decide against freezing the same page.
+*/
 void
-heap_freeze_execute_prepared(Relation rel, Buffer buffer,
-							 TransactionId snapshotConflictHorizon,
-							 HeapTupleFreeze *tuples, int ntuples)
+heap_pre_freeze_checks(Buffer buffer,
+					   HeapTupleFreeze *tuples, int ntuples)
 {
 	Page		page = BufferGetPage(buffer);
 
-	Assert(ntuples > 0);
-
-	/*
-	 * Perform xmin/xmax XID status sanity checks before critical section.
-	 *
-	 * heap_prepare_freeze_tuple doesn't perform these checks directly because
-	 * pg_xact lookups are relatively expensive.  They shouldn't be repeated
-	 * by successive VACUUMs that each decide against freezing the same page.
-	 */
 	for (int i = 0; i < ntuples; i++)
 	{
 		HeapTupleFreeze *frz = tuples + i;
@@ -6731,6 +6715,30 @@ heap_freeze_execute_prepared(Relation rel, Buffer buffer,
 										 xmax)));
 		}
 	}
+}
+
+/*
+ * heap_freeze_execute_prepared
+ *
+ * Executes freezing of one or more heap tuples on a page on behalf of caller.
+ * Caller passes an array of tuple plans from heap_prepare_freeze_tuple.
+ * Caller must set 'offset' in each plan for us.  Note that we destructively
+ * sort caller's tuples array in-place, so caller had better be done with it.
+ *
+ * WAL-logs the changes so that VACUUM can advance the rel's relfrozenxid
+ * later on without any risk of unsafe pg_xact lookups, even following a hard
+ * crash (or when querying from a standby).  We represent freezing by setting
+ * infomask bits in tuple headers, but this shouldn't be thought of as a hint.
+ * See section on buffer access rules in src/backend/storage/buffer/README.
+ */
+void
+heap_freeze_execute_prepared(Relation rel, Buffer buffer,
+							 TransactionId snapshotConflictHorizon,
+							 HeapTupleFreeze *tuples, int ntuples)
+{
+	Page		page = BufferGetPage(buffer);
+
+	Assert(ntuples > 0);
 
 	START_CRIT_SECTION();
 
