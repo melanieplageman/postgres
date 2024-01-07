@@ -231,23 +231,35 @@ typedef struct xl_heap_update
  * during opportunistic pruning)
  *
  * The array of OffsetNumbers following the fixed part of the record contains:
+ *	* for each freeze plan: the freeze plan
  *	* for each redirected item: the item offset, then the offset redirected to
  *	* for each now-dead item: the item offset
  *	* for each now-unused item: the item offset
- * The total number of OffsetNumbers is therefore 2*nredirected+ndead+nunused.
- * Note that nunused is not explicitly stored, but may be found by reference
- * to the total record length.
+ *	* for each tuple frozen by the freeze plans: the offset of the item corresponding to that tuple
+ * The total number of OffsetNumbers is therefore
+ * (2*nredirected) + ndead + nunused + (sum[plan.ntuples for plan in plans])
  *
  * Acquires a full cleanup lock.
  */
 typedef struct xl_heap_prune
 {
 	TransactionId snapshotConflictHorizon;
+	uint16		nplans;
 	uint16		nredirected;
 	uint16		ndead;
+	uint16		nunused;
 	bool		isCatalogRel;	/* to handle recovery conflict during logical
 								 * decoding on standby */
-	/* OFFSET NUMBERS are in the block reference 0 */
+	/*
+	 * OFFSET NUMBERS and freeze plans are in the block reference 0 in the
+	 * following order:
+	 *
+	 *		* xl_heap_freeze_plan plans[nplans];
+	 * 		* OffsetNumber redirected[2 * nredirected];
+	 * 		* OffsetNumber nowdead[ndead];
+	 *		* OffsetNumber nowunused[nunused];
+	 * 		* OffsetNumber frz_offsets[...];
+	 */
 } xl_heap_prune;
 
 #define SizeOfHeapPrune (offsetof(xl_heap_prune, isCatalogRel) + sizeof(bool))
