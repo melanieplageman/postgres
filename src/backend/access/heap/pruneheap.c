@@ -64,6 +64,9 @@ static HTSV_Result heap_prune_satisfies_vacuum(PruneState *prstate,
 static int	heap_prune_chain(Buffer buffer,
 							 OffsetNumber rootoffnum,
 							 PruneState *prstate, PruneResult *presult);
+
+static void prune_prepare_freeze_tuple(Page page, OffsetNumber offnum,
+									   HeapPageFreeze *pagefrz, PruneResult *presult);
 static void heap_prune_record_prunable(PruneState *prstate, TransactionId xid);
 static void heap_prune_record_redirect(PruneState *prstate,
 									   OffsetNumber offnum, OffsetNumber rdoffnum);
@@ -150,7 +153,7 @@ heap_page_prune_opt(Relation relation, Buffer buffer)
 		{
 			PruneResult presult;
 
-			heap_page_prune(relation, buffer, vistest, false,
+			heap_page_prune(relation, buffer, vistest, false, NULL,
 							&presult, NULL);
 
 			/*
@@ -210,6 +213,7 @@ void
 heap_page_prune(Relation relation, Buffer buffer,
 				GlobalVisState *vistest,
 				bool no_indexes,
+				HeapPageFreeze *pagefrz,
 				PruneResult *presult,
 				OffsetNumber *off_loc)
 {
@@ -245,6 +249,7 @@ heap_page_prune(Relation relation, Buffer buffer,
 	 */
 	presult->ndeleted = 0;
 	presult->nnewlpdead = 0;
+	presult->nfrozen = 0;
 
 	/*
 	 * Keep track of whether or not the page is all_visible in case the caller
@@ -387,12 +392,31 @@ heap_page_prune(Relation relation, Buffer buffer,
 	 */
 	presult->consider_opp_frz = presult->all_visible;
 
+	/*
+	 * We will update the VM after collecting LP_DEAD items and freezing
+	 * tuples. Keep track of whether or not the page is all_visible and
+	 * all_frozen and use this information to update the VM. all_visible
+	 * implies lpdead_items == 0, but don't trust all_frozen result unless
+	 * all_visible is also set to true.
+	 */
+	presult->all_frozen = true;
+
 	/* Scan the page */
 	for (offnum = FirstOffsetNumber;
 		 offnum <= maxoff;
 		 offnum = OffsetNumberNext(offnum))
 	{
 		ItemId		itemid;
+
+		/*
+		 * For callers providing pagefrz, consider whether or not to freeze
+		 * tuples referred by LP_NORMAL items. LP_DEAD items should be
+		 * vacuumed in indexes later. LP_REDIRECT and LP_UNUSED items are also
+		 * not a concern.
+		 */
+		if (pagefrz)
+			prune_prepare_freeze_tuple(page, offnum,
+									   pagefrz, presult);
 
 		/* Ignore items already processed as part of an earlier chain */
 		if (prstate.marked[offnum])
@@ -840,6 +864,47 @@ heap_prune_chain(Buffer buffer, OffsetNumber rootoffnum,
 	}
 
 	return ndeleted;
+}
+
+static void
+prune_prepare_freeze_tuple(Page page, OffsetNumber offnum,
+						   HeapPageFreeze *pagefrz,
+						   PruneResult *presult)
+{
+	bool		totally_frozen;
+	HeapTupleHeader htup;
+	ItemId		itemid;
+
+	Assert(pagefrz);
+
+	/* We do not consider freezing tuples which will be removed. */
+	if (presult->htsv[offnum] == HEAPTUPLE_DEAD ||
+		presult->htsv[offnum] == -1)
+		return;
+
+	itemid = PageGetItemId(page, offnum);
+
+	if (!ItemIdIsNormal(itemid))
+		return;
+
+	htup = (HeapTupleHeader) PageGetItem(page, itemid);
+
+	/* Tuple with storage -- consider need to freeze */
+	if ((heap_prepare_freeze_tuple(htup, pagefrz,
+								   &presult->frozen[presult->nfrozen],
+								   &totally_frozen)))
+	{
+		/* Save prepared freeze plan for later */
+		presult->frozen[presult->nfrozen++].offset = offnum;
+	}
+
+	/*
+	 * If any tuple isn't either totally frozen already or eligible to become
+	 * totally frozen (according to its freeze plan), then the page definitely
+	 * cannot be set all-frozen in the visibility map later on
+	 */
+	if (!totally_frozen)
+		presult->all_frozen = false;
 }
 
 /* Record lowest soon-prunable XID */
