@@ -308,6 +308,9 @@ extern TransactionId heap_frz_conflict_horizon(PruneResult *presult,
 extern bool heap_prepare_freeze_tuple(HeapTupleHeader tuple,
 									  HeapPageFreeze *pagefrz,
 									  HeapTupleFreeze *frz, bool *totally_frozen);
+
+extern void heap_pre_freeze_checks(Buffer buffer,
+								   HeapTupleFreeze *tuples, int ntuples);
 extern void heap_freeze_execute_prepared(Relation rel, Buffer buffer,
 										 TransactionId snapshotConflictHorizon,
 										 HeapTupleFreeze *tuples, int ntuples);
