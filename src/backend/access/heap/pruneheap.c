@@ -604,10 +604,53 @@ heap_page_prune(Relation relation, Buffer buffer,
 
 	if (do_freeze)
 	{
-		/* Execute all freeze plans for page as a single atomic action */
-		heap_freeze_execute_prepared(relation, buffer,
-									 frz_conflict_horizon,
-									 frozen, presult->nfrozen);
+		START_CRIT_SECTION();
+
+		Assert(presult->nfrozen > 0);
+
+		heap_freeze_prepared_tuples(buffer, frozen, presult->nfrozen);
+
+		MarkBufferDirty(buffer);
+
+		/* Now WAL-log freezing if necessary */
+		if (RelationNeedsWAL(relation))
+		{
+			xl_heap_freeze_plan plans[MaxHeapTuplesPerPage];
+			OffsetNumber offsets[MaxHeapTuplesPerPage];
+			int			nplans;
+			xl_heap_freeze_page xlrec;
+			XLogRecPtr	recptr;
+
+			/*
+			 * Prepare deduplicated representation for use in WAL record
+			 * Destructively sorts tuples array in-place.
+			 */
+			nplans = heap_log_freeze_plan(frozen, presult->nfrozen, plans, offsets);
+
+			xlrec.snapshotConflictHorizon = frz_conflict_horizon;
+			xlrec.isCatalogRel = RelationIsAccessibleInLogicalDecoding(relation);
+			xlrec.nplans = nplans;
+
+			XLogBeginInsert();
+			XLogRegisterData((char *) &xlrec, SizeOfHeapFreezePage);
+
+			/*
+			 * The freeze plan array and offset array are not actually in the
+			 * buffer, but pretend that they are.  When XLogInsert stores the
+			 * whole buffer, the arrays need not be stored too.
+			 */
+			XLogRegisterBuffer(0, buffer, REGBUF_STANDARD);
+			XLogRegisterBufData(0, (char *) plans,
+								nplans * sizeof(xl_heap_freeze_plan));
+			XLogRegisterBufData(0, (char *) offsets,
+								presult->nfrozen * sizeof(OffsetNumber));
+
+			recptr = XLogInsert(RM_HEAP2_ID, XLOG_HEAP2_FREEZE_PAGE);
+
+			PageSetLSN(page, recptr);
+		}
+
+		END_CRIT_SECTION();
 	}
 	else if (!pagefrz || !presult->all_frozen || presult->nfrozen > 0)
 	{
