@@ -1562,6 +1562,10 @@ lazy_scan_prune(LVRelState *vacrel,
 		 */
 		if (presult.nfrozen > 0)
 			vacrel->frozen_pages++;
+
+		/* Using same cutoff when setting VM is now unnecessary */
+		if (presult.nfrozen > 0 && presult.all_frozen)
+			presult.visibility_cutoff_xid = InvalidTransactionId;
 	}
 	else
 	{

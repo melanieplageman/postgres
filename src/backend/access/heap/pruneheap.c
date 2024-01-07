@@ -226,6 +226,7 @@ heap_page_prune(Relation relation, Buffer buffer,
 	HeapTupleData tup;
 	bool		do_freeze;
 	bool		do_prune;
+	TransactionId frz_conflict_horizon = InvalidTransactionId;
 
 	/*
 	 * Our strategy is to scan the page and make lists of items to change,
@@ -478,7 +479,10 @@ heap_page_prune(Relation relation, Buffer buffer,
 		do_freeze = false;
 
 	if (do_freeze)
+	{
 		heap_pre_freeze_checks(buffer, presult->frozen, presult->nfrozen);
+		frz_conflict_horizon = heap_frz_conflict_horizon(presult, pagefrz);
+	}
 
 	/* Any error while applying the changes is critical */
 	START_CRIT_SECTION();
@@ -578,20 +582,13 @@ heap_page_prune(Relation relation, Buffer buffer,
 
 	if (do_freeze)
 	{
-		TransactionId snapshotConflictHorizon;
-
-		snapshotConflictHorizon = heap_frz_conflict_horizon(presult, pagefrz);
-
-		/* Using same cutoff when setting VM is now unnecessary */
-		if (presult->consider_opp_frz && presult->all_frozen)
-			presult->visibility_cutoff_xid = InvalidTransactionId;
 
 
 		START_CRIT_SECTION();
 
 		/* Execute all freeze plans for page as a single atomic action */
 		heap_freeze_execute_prepared(relation, buffer,
-									 snapshotConflictHorizon,
+									 frz_conflict_horizon,
 									 presult->frozen, presult->nfrozen);
 
 		END_CRIT_SECTION();
