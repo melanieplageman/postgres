@@ -305,6 +305,9 @@ extern TM_Result heap_lock_tuple(Relation relation, HeapTuple tuple,
 								 Buffer *buffer, struct TM_FailureData *tmfd);
 
 extern void heap_inplace_update(Relation relation, HeapTuple tuple);
+
+extern TransactionId heap_frz_conflict_horizon(PruneResult *presult,
+											   HeapPageFreeze *pagefrz);
 extern bool heap_prepare_freeze_tuple(HeapTupleHeader tuple,
 									  HeapPageFreeze *pagefrz,
 									  HeapTupleFreeze *frz, bool *totally_frozen);

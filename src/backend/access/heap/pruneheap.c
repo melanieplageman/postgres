@@ -21,6 +21,7 @@
 #include "access/xlog.h"
 #include "access/xloginsert.h"
 #include "catalog/catalog.h"
+#include "executor/instrument.h"
 #include "miscadmin.h"
 #include "pgstat.h"
 #include "storage/bufmgr.h"
@@ -223,6 +224,8 @@ heap_page_prune(Relation relation, Buffer buffer,
 				maxoff;
 	PruneState	prstate;
 	HeapTupleData tup;
+	bool		do_freeze;
+	int64		fpi_before = pgWalUsage.wal_fpi;
 
 	/*
 	 * Our strategy is to scan the page and make lists of items to change,
@@ -535,6 +538,45 @@ heap_page_prune(Relation relation, Buffer buffer,
 
 	/* Record number of newly-set-LP_DEAD items for caller */
 	presult->nnewlpdead = prstate.ndead;
+
+	/*
+	 * Freeze the page when heap_prepare_freeze_tuple indicates that at least
+	 * one XID/MXID from before FreezeLimit/MultiXactCutoff is present.  Also
+	 * freeze when pruning generated an FPI, if doing so means that we set the
+	 * page all-frozen afterwards (might not happen until final heap pass).
+	 */
+	if (pagefrz)
+		do_freeze = pagefrz->freeze_required ||
+			(presult->consider_opp_frz && presult->all_frozen &&
+			presult->nfrozen > 0 &&
+			fpi_before != pgWalUsage.wal_fpi);
+	else
+		do_freeze = false;
+
+	if (do_freeze)
+	{
+		TransactionId snapshotConflictHorizon;
+
+		snapshotConflictHorizon = heap_frz_conflict_horizon(presult, pagefrz);
+
+		/* Using same cutoff when setting VM is now unnecessary */
+		if (presult->consider_opp_frz && presult->all_frozen)
+			presult->visibility_cutoff_xid = InvalidTransactionId;
+
+		/* Execute all freeze plans for page as a single atomic action */
+		heap_freeze_execute_prepared(relation, buffer,
+									 snapshotConflictHorizon,
+									 presult->frozen, presult->nfrozen);
+	}
+	else if (!pagefrz || !presult->all_frozen || presult->nfrozen > 0)
+	{
+		/*
+		 * Page requires "no freeze" processing.  It might be set all-visible
+		 * in the visibility map, but it can never be set all-frozen.
+		 */
+		presult->all_frozen = false;
+		presult->nfrozen = 0;	/* avoid miscounts in instrumentation */
+	}
 }
 
 
