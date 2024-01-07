@@ -212,7 +212,19 @@ typedef struct PruneResult
 	 * 1. Otherwise every access would need to subtract 1.
 	 */
 	int8		htsv[MaxHeapTuplesPerPage + 1];
+
 	bool		all_visible_except_removable;
+
+	/* Whether or not the page can be set all frozen in the VM */
+	bool		all_frozen;
+
+	/* Number of newly frozen tuples */
+	int			nfrozen;
+
+	/*
+	 * One entry for every tuple that we may freeze.
+	 */
+	HeapTupleFreeze frozen[MaxHeapTuplesPerPage];
 } PruneResult;
 
 /*
@@ -324,6 +336,7 @@ extern void heap_page_prune_opt(Relation relation, Buffer buffer);
 extern void heap_page_prune(Relation relation, Buffer buffer,
 							struct GlobalVisState *vistest,
 							bool no_indexes,
+							HeapPageFreeze *pagefrz,
 							PruneResult *presult,
 							OffsetNumber *off_loc);
 extern void heap_page_prune_execute(Buffer buffer, bool no_indexes,
