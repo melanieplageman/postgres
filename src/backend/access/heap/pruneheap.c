@@ -21,6 +21,7 @@
 #include "access/xlog.h"
 #include "access/xloginsert.h"
 #include "catalog/catalog.h"
+#include "executor/instrument.h"
 #include "miscadmin.h"
 #include "pgstat.h"
 #include "storage/bufmgr.h"
@@ -66,7 +67,8 @@ static int	heap_prune_chain(Buffer buffer,
 							 PruneState *prstate, PruneResult *presult);
 
 static void prune_prepare_freeze_tuple(Page page, OffsetNumber offnum,
-									   HeapPageFreeze *pagefrz, PruneResult *presult);
+									   HeapPageFreeze *pagefrz, HeapTupleFreeze *frozen,
+									   PruneResult *presult);
 static void heap_prune_record_prunable(PruneState *prstate, TransactionId xid);
 static void heap_prune_record_redirect(PruneState *prstate,
 									   OffsetNumber offnum, OffsetNumber rdoffnum);
@@ -233,6 +235,14 @@ heap_page_prune(Relation relation, Buffer buffer,
 				maxoff;
 	PruneState	prstate;
 	HeapTupleData tup;
+	bool		do_freeze;
+	int64		fpi_before = pgWalUsage.wal_fpi;
+	TransactionId frz_conflict_horizon = InvalidTransactionId;
+
+	/*
+	 * One entry for every tuple that we may freeze.
+	 */
+	HeapTupleFreeze frozen[MaxHeapTuplesPerPage];
 
 	/*
 	 * Our strategy is to scan the page and make lists of items to change,
@@ -428,7 +438,7 @@ heap_page_prune(Relation relation, Buffer buffer,
 
 		if (pagefrz)
 			prune_prepare_freeze_tuple(page, offnum,
-									   pagefrz, presult);
+									   pagefrz, frozen, presult);
 
 		/* Ignore items already processed as part of an earlier chain */
 		if (prstate.marked[offnum])
@@ -543,6 +553,41 @@ heap_page_prune(Relation relation, Buffer buffer,
 
 	/* Record number of newly-set-LP_DEAD items for caller */
 	presult->nnewlpdead = prstate.ndead;
+
+	/*
+	 * Freeze the page when heap_prepare_freeze_tuple indicates that at least
+	 * one XID/MXID from before FreezeLimit/MultiXactCutoff is present.  Also
+	 * freeze when pruning generated an FPI, if doing so means that we set the
+	 * page all-frozen afterwards (might not happen until final heap pass).
+	 */
+	if (pagefrz)
+		do_freeze = pagefrz->freeze_required ||
+			(presult->all_visible_except_removable && presult->all_frozen &&
+			 presult->nfrozen > 0 &&
+			 fpi_before != pgWalUsage.wal_fpi);
+	else
+		do_freeze = false;
+
+	if (do_freeze)
+	{
+
+		frz_conflict_horizon = heap_frz_conflict_horizon(presult, pagefrz);
+
+		/* Execute all freeze plans for page as a single atomic action */
+		heap_freeze_execute_prepared(relation, buffer,
+									 frz_conflict_horizon,
+									 frozen, presult->nfrozen);
+	}
+	else if (!pagefrz || !presult->all_frozen || presult->nfrozen > 0)
+	{
+		/*
+		 * If we will neither freeze tuples on the page nor set the page all
+		 * frozen in the visibility map, the page is not all frozen and there
+		 * will be no newly frozen tuples.
+		 */
+		presult->all_frozen = false;
+		presult->nfrozen = 0;	/* avoid miscounts in instrumentation */
+	}
 }
 
 
@@ -885,6 +930,7 @@ heap_prune_chain(Buffer buffer, OffsetNumber rootoffnum,
 static void
 prune_prepare_freeze_tuple(Page page, OffsetNumber offnum,
 						   HeapPageFreeze *pagefrz,
+						   HeapTupleFreeze *frozen,
 						   PruneResult *presult)
 {
 	bool		totally_frozen;
@@ -907,11 +953,11 @@ prune_prepare_freeze_tuple(Page page, OffsetNumber offnum,
 
 	/* Tuple with storage -- consider need to freeze */
 	if ((heap_prepare_freeze_tuple(htup, pagefrz,
-								   &presult->frozen[presult->nfrozen],
+								   &frozen[presult->nfrozen],
 								   &totally_frozen)))
 	{
 		/* Save prepared freeze plan for later */
-		presult->frozen[presult->nfrozen++].offset = offnum;
+		frozen[presult->nfrozen++].offset = offnum;
 	}
 
 	/*
