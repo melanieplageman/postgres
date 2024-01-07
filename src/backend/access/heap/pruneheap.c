@@ -584,10 +584,15 @@ heap_page_prune(Relation relation, Buffer buffer,
 			presult->visibility_cutoff_xid = InvalidTransactionId;
 
 		heap_pre_freeze_checks(buffer, presult->frozen, presult->nfrozen);
+
+		START_CRIT_SECTION();
+
 		/* Execute all freeze plans for page as a single atomic action */
 		heap_freeze_execute_prepared(relation, buffer,
 									 snapshotConflictHorizon,
 									 presult->frozen, presult->nfrozen);
+
+		END_CRIT_SECTION();
 	}
 	else if (!pagefrz || !presult->all_frozen || presult->nfrozen > 0)
 	{

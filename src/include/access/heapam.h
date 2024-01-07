@@ -317,6 +317,9 @@ extern void heap_pre_freeze_checks(Buffer buffer,
 extern void heap_freeze_execute_prepared(Relation rel, Buffer buffer,
 										 TransactionId snapshotConflictHorizon,
 										 HeapTupleFreeze *tuples, int ntuples);
+
+extern void heap_freeze_prepared_tuples(Buffer buffer,
+										HeapTupleFreeze *tuples, int ntuples);
 extern bool heap_freeze_tuple(HeapTupleHeader tuple,
 							  TransactionId relfrozenxid, TransactionId relminmxid,
 							  TransactionId FreezeLimit, TransactionId MultiXactCutoff);
