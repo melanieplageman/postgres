@@ -505,80 +505,27 @@ heap_page_prune(Relation relation, Buffer buffer,
 		heap_pre_freeze_checks(buffer, frozen, presult->nfrozen);
 		frz_conflict_horizon = heap_frz_conflict_horizon(presult, pagefrz);
 	}
+	else if (!pagefrz || !presult->all_frozen || presult->nfrozen > 0)
+	{
+		/*
+		 * If we will neither freeze tuples on the page nor set the page all
+		 * frozen in the visibility map, the page is not all frozen and there
+		 * will be no newly frozen tuples.
+		 */
+		presult->all_frozen = false;
+		presult->nfrozen = 0;	/* avoid miscounts in instrumentation */
+	}
 
-	/* Any error while applying the changes is critical */
-	START_CRIT_SECTION();
+	/* Record number of newly-set-LP_DEAD items for caller */
+	presult->nnewlpdead = prstate.ndead;
+
 
 	/* Have we found any prunable items? */
-	if (do_prune)
+	if (!do_prune)
 	{
-		/*
-		 * Apply the planned item changes, then repair page fragmentation, and
-		 * update the page's hint bit about whether it has free line pointers.
-		 */
-		heap_page_prune_execute(buffer,
-								prstate.redirected, prstate.nredirected,
-								prstate.nowdead, prstate.ndead,
-								prstate.nowunused, prstate.nunused);
+		/* Any error while applying the changes is critical */
+		START_CRIT_SECTION();
 
-		/*
-		 * Update the page's pd_prune_xid field to either zero, or the lowest
-		 * XID of any soon-prunable tuple.
-		 */
-		((PageHeader) page)->pd_prune_xid = prstate.new_prune_xid;
-
-		/*
-		 * Also clear the "page is full" flag, since there's no point in
-		 * repeating the prune/defrag process until something else happens to
-		 * the page.
-		 */
-		PageClearFull(page);
-
-		MarkBufferDirty(buffer);
-
-		/*
-		 * Emit a WAL XLOG_HEAP2_PRUNE record showing what we did
-		 */
-		if (RelationNeedsWAL(relation))
-		{
-			xl_heap_prune xlrec;
-			XLogRecPtr	recptr;
-
-			xlrec.isCatalogRel = RelationIsAccessibleInLogicalDecoding(relation);
-			xlrec.snapshotConflictHorizon = prstate.snapshotConflictHorizon;
-			xlrec.nredirected = prstate.nredirected;
-			xlrec.ndead = prstate.ndead;
-
-			XLogBeginInsert();
-			XLogRegisterData((char *) &xlrec, SizeOfHeapPrune);
-
-			XLogRegisterBuffer(0, buffer, REGBUF_STANDARD);
-
-			/*
-			 * The OffsetNumber arrays are not actually in the buffer, but we
-			 * pretend that they are.  When XLogInsert stores the whole
-			 * buffer, the offset arrays need not be stored too.
-			 */
-			if (prstate.nredirected > 0)
-				XLogRegisterBufData(0, (char *) prstate.redirected,
-									prstate.nredirected *
-									sizeof(OffsetNumber) * 2);
-
-			if (prstate.ndead > 0)
-				XLogRegisterBufData(0, (char *) prstate.nowdead,
-									prstate.ndead * sizeof(OffsetNumber));
-
-			if (prstate.nunused > 0)
-				XLogRegisterBufData(0, (char *) prstate.nowunused,
-									prstate.nunused * sizeof(OffsetNumber));
-
-			recptr = XLogInsert(RM_HEAP2_ID, XLOG_HEAP2_PRUNE);
-
-			PageSetLSN(BufferGetPage(buffer), recptr);
-		}
-	}
-	else
-	{
 		/*
 		 * If we didn't prune anything, but have found a new value for the
 		 * pd_prune_xid field, update it and mark the buffer dirty. This is
@@ -595,17 +542,104 @@ heap_page_prune(Relation relation, Buffer buffer,
 			PageClearFull(page);
 			MarkBufferDirtyHint(buffer, true);
 		}
+
+		hint_bit_fpi = fpi_before != pgWalUsage.wal_fpi;
+
+		/*
+		 * We may have decided not to opportunistically freeze above because
+		 * pruning would not emit an FPI. Now, however, if checksums are
+		 * enabled, setting the hint bit may have emitted an FPI. Check again
+		 * if we should freeze.
+		 */
+		if (!do_freeze && hint_bit_fpi)
+			do_freeze = pagefrz &&
+				(pagefrz->freeze_required ||
+				 (whole_page_freezable && presult->nfrozen > 0));
+
+		if (do_freeze)
+		{
+			heap_freeze_execute_prepared(relation, buffer,
+										 frz_conflict_horizon,
+										 frozen, presult->nfrozen);
+		}
+		else if (!pagefrz || !presult->all_frozen || presult->nfrozen > 0)
+		{
+			presult->all_frozen = false;
+			presult->nfrozen = 0;
+		}
+
+		END_CRIT_SECTION();
+		return;
 	}
 
-	END_CRIT_SECTION();
+	START_CRIT_SECTION();
 
-	/* Record number of newly-set-LP_DEAD items for caller */
-	presult->nnewlpdead = prstate.ndead;
+	/*
+	 * Apply the planned item changes, then repair page fragmentation, and
+	 * update the page's hint bit about whether it has free line pointers.
+	 */
+	heap_page_prune_execute(buffer,
+							prstate.redirected, prstate.nredirected,
+							prstate.nowdead, prstate.ndead,
+							prstate.nowunused, prstate.nunused);
+
+	/*
+	 * Update the page's pd_prune_xid field to either zero, or the lowest XID
+	 * of any soon-prunable tuple.
+	 */
+	((PageHeader) page)->pd_prune_xid = prstate.new_prune_xid;
+
+	/*
+	 * Also clear the "page is full" flag, since there's no point in repeating
+	 * the prune/defrag process until something else happens to the page.
+	 */
+	PageClearFull(page);
+
+	MarkBufferDirty(buffer);
+
+	/*
+	 * Emit a WAL XLOG_HEAP2_PRUNE record showing what we did
+	 */
+	if (RelationNeedsWAL(relation))
+	{
+		xl_heap_prune xlrec;
+		XLogRecPtr	recptr;
+
+		xlrec.isCatalogRel = RelationIsAccessibleInLogicalDecoding(relation);
+		xlrec.snapshotConflictHorizon = prstate.snapshotConflictHorizon;
+		xlrec.nredirected = prstate.nredirected;
+		xlrec.ndead = prstate.ndead;
+
+		XLogBeginInsert();
+		XLogRegisterData((char *) &xlrec, SizeOfHeapPrune);
+
+		XLogRegisterBuffer(0, buffer, REGBUF_STANDARD);
+
+		/*
+		 * The OffsetNumber arrays are not actually in the buffer, but we
+		 * pretend that they are.  When XLogInsert stores the whole buffer,
+		 * the offset arrays need not be stored too.
+		 */
+		if (prstate.nredirected > 0)
+			XLogRegisterBufData(0, (char *) prstate.redirected,
+								prstate.nredirected *
+								sizeof(OffsetNumber) * 2);
+
+		if (prstate.ndead > 0)
+			XLogRegisterBufData(0, (char *) prstate.nowdead,
+								prstate.ndead * sizeof(OffsetNumber));
+
+		if (prstate.nunused > 0)
+			XLogRegisterBufData(0, (char *) prstate.nowunused,
+								prstate.nunused * sizeof(OffsetNumber));
+
+		recptr = XLogInsert(RM_HEAP2_ID, XLOG_HEAP2_PRUNE);
+
+		PageSetLSN(BufferGetPage(buffer), recptr);
+	}
 
 	if (do_freeze)
 	{
-		START_CRIT_SECTION();
-
 		Assert(presult->nfrozen > 0);
 
 		heap_freeze_prepared_tuples(buffer, frozen, presult->nfrozen);
@@ -649,19 +683,9 @@ heap_page_prune(Relation relation, Buffer buffer,
 
 			PageSetLSN(page, recptr);
 		}
+	}
 
-		END_CRIT_SECTION();
-	}
-	else if (!pagefrz || !presult->all_frozen || presult->nfrozen > 0)
-	{
-		/*
-		 * If we will neither freeze tuples on the page nor set the page all
-		 * frozen in the visibility map, the page is not all frozen and there
-		 * will be no newly frozen tuples.
-		 */
-		presult->all_frozen = false;
-		presult->nfrozen = 0;	/* avoid miscounts in instrumentation */
-	}
+	END_CRIT_SECTION();
 }
 
 
