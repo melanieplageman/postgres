@@ -236,6 +236,10 @@ heap_page_prune(Relation relation, Buffer buffer,
 	PruneState	prstate;
 	HeapTupleData tup;
 	bool		do_freeze;
+	bool		do_prune;
+	bool		whole_page_freezable;
+	bool		hint_bit_fpi;
+	bool		prune_fpi = false;
 	int64		fpi_before = pgWalUsage.wal_fpi;
 	TransactionId frz_conflict_horizon = InvalidTransactionId;
 
@@ -402,6 +406,13 @@ heap_page_prune(Relation relation, Buffer buffer,
 	}
 
 	/*
+	 * If checksums are enabled, heap_prune_satisfies_vacuum() may have caused
+	 * an FPI to be emitted. Then reset fpi_before for no prune case.
+	 */
+	hint_bit_fpi = fpi_before != pgWalUsage.wal_fpi;
+	fpi_before = pgWalUsage.wal_fpi;
+
+	/*
 	 * For vacuum, if the whole page will become frozen, we consider
 	 * opportunistically freezing tuples. Dead tuples which will be removed by
 	 * the end of vacuuming should not preclude us from opportunistically
@@ -458,11 +469,42 @@ heap_page_prune(Relation relation, Buffer buffer,
 	if (off_loc)
 		*off_loc = InvalidOffsetNumber;
 
+	do_prune = prstate.nredirected > 0 ||
+		prstate.ndead > 0 ||
+		prstate.nunused > 0;
+
+	/*
+	 * Only incur overhead of checking if we will do an FPI if we might use
+	 * the information.
+	 */
+	if (do_prune && pagefrz)
+		prune_fpi = XLogCheckBufferNeedsBackup(buffer);
+
+	/* Is the whole page freezable? And is there something to freeze */
+	whole_page_freezable = presult->all_visible_except_removable &&
+		presult->all_frozen;
+
+	/*
+	 * Freeze the page when heap_prepare_freeze_tuple indicates that at least
+	 * one XID/MXID from before FreezeLimit/MultiXactCutoff is present.  Also
+	 * freeze when pruning generated an FPI, if doing so means that we set the
+	 * page all-frozen afterwards (might not happen until final heap pass).
+	 * XXX: Previously, we knew if pruning emitted an FPI by checking
+	 * pgWalUsage.wal_fpi before and after pruning. Once the freeze and prune
+	 * records are combined, this heuristic couldn't be used anymore. The
+	 * opportunistic freeze heuristic must be improved; however, for now, try
+	 * to approximate it.
+	 */
+
+	do_freeze = pagefrz &&
+		(pagefrz->freeze_required ||
+		 (whole_page_freezable && presult->nfrozen > 0 && (prune_fpi || hint_bit_fpi)));
+
 	/* Any error while applying the changes is critical */
 	START_CRIT_SECTION();
 
 	/* Have we found any prunable items? */
-	if (prstate.nredirected > 0 || prstate.ndead > 0 || prstate.nunused > 0)
+	if (do_prune)
 	{
 		/*
 		 * Apply the planned item changes, then repair page fragmentation, and
@@ -553,20 +595,6 @@ heap_page_prune(Relation relation, Buffer buffer,
 
 	/* Record number of newly-set-LP_DEAD items for caller */
 	presult->nnewlpdead = prstate.ndead;
-
-	/*
-	 * Freeze the page when heap_prepare_freeze_tuple indicates that at least
-	 * one XID/MXID from before FreezeLimit/MultiXactCutoff is present.  Also
-	 * freeze when pruning generated an FPI, if doing so means that we set the
-	 * page all-frozen afterwards (might not happen until final heap pass).
-	 */
-	if (pagefrz)
-		do_freeze = pagefrz->freeze_required ||
-			(presult->all_visible_except_removable && presult->all_frozen &&
-			 presult->nfrozen > 0 &&
-			 fpi_before != pgWalUsage.wal_fpi);
-	else
-		do_freeze = false;
 
 	if (do_freeze)
 	{
