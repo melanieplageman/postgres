@@ -489,6 +489,12 @@ heap_page_prune(Relation relation, Buffer buffer,
 		(pagefrz->freeze_required ||
 		 (whole_page_freezable && presult->nfrozen > 0 && (prune_fpi || hint_bit_fpi)));
 
+	if (do_freeze)
+	{
+		heap_pre_freeze_checks(buffer, frozen, presult->nfrozen);
+		frz_conflict_horizon = heap_frz_conflict_horizon(presult, pagefrz);
+	}
+
 	/* Any error while applying the changes is critical */
 	START_CRIT_SECTION();
 
@@ -587,9 +593,6 @@ heap_page_prune(Relation relation, Buffer buffer,
 
 	if (do_freeze)
 	{
-
-		frz_conflict_horizon = heap_frz_conflict_horizon(presult, pagefrz);
-
 		/* Execute all freeze plans for page as a single atomic action */
 		heap_freeze_execute_prepared(relation, buffer,
 									 frz_conflict_horizon,
