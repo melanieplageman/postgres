@@ -270,9 +270,6 @@ static void update_vacuum_error_info(LVRelState *vacrel,
 static void restore_vacuum_error_info(LVRelState *vacrel,
 									  const LVSavedErrInfo *saved_vacrel);
 
-static TransactionId heap_frz_conflict_horizon(PruneResult *presult,
-											   HeapPageFreeze *pagefrz);
-
 /*
  *	heap_vacuum_rel() -- perform VACUUM for one heap relation
  *
@@ -1336,7 +1333,7 @@ lazy_scan_new_or_empty(LVRelState *vacrel, Buffer buf, BlockNumber blkno,
  * Determine the snapshotConflictHorizon for freezing. Must only be called
  * after pruning and determining if the page is freezable.
  */
-static TransactionId
+TransactionId
 heap_frz_conflict_horizon(PruneResult *presult, HeapPageFreeze *pagefrz)
 {
 	TransactionId result;
@@ -1399,9 +1396,7 @@ lazy_scan_prune(LVRelState *vacrel,
 				recently_dead_tuples;
 	HeapPageFreeze pagefrz;
 	bool		no_indexes;
-	bool		do_freeze;
 	int			lpdead_items;	/* includes existing LP_DEAD items */
-	int64		fpi_before = pgWalUsage.wal_fpi;
 	OffsetNumber deadoffsets[MaxHeapTuplesPerPage];
 
 	Assert(BufferGetBlockNumber(buf) == blkno);
@@ -1551,21 +1546,8 @@ lazy_scan_prune(LVRelState *vacrel,
 
 	vacrel->offnum = InvalidOffsetNumber;
 
-	/*
-	 * Freeze the page when heap_prepare_freeze_tuple indicates that at least
-	 * one XID/MXID from before FreezeLimit/MultiXactCutoff is present.  Also
-	 * freeze when pruning generated an FPI, if doing so means that we set the
-	 * page all-frozen afterwards (might not happen until final heap pass).
-	 */
-	do_freeze = pagefrz.freeze_required ||
-		(presult.all_visible_except_removable && presult.all_frozen &&
-		 presult.nfrozen > 0 &&
-		 fpi_before != pgWalUsage.wal_fpi);
-
-	if (do_freeze)
+	if (presult.all_frozen || presult.nfrozen > 0)
 	{
-		TransactionId snapshotConflictHorizon;
-
 		/*
 		 * We're freezing the page.  Our final NewRelfrozenXid doesn't need to
 		 * be affected by the XIDs that are just about to be frozen anyway.
@@ -1573,50 +1555,26 @@ lazy_scan_prune(LVRelState *vacrel,
 		vacrel->NewRelfrozenXid = pagefrz.FreezePageRelfrozenXid;
 		vacrel->NewRelminMxid = pagefrz.FreezePageRelminMxid;
 
-		vacrel->frozen_pages++;
-
-		snapshotConflictHorizon = heap_frz_conflict_horizon(&presult, &pagefrz);
+		/*
+		 * We never increment the frozen_pages instrumentation counter when
+		 * nfrozen == 0, since it only counts pages with newly frozen tuples
+		 * (don't confuse that with pages newly set all-frozen in VM).
+		 */
+		if (presult.nfrozen > 0)
+			vacrel->frozen_pages++;
 
 		/* Using same cutoff when setting VM is now unnecessary */
-		if (presult.all_visible_except_removable && presult.all_frozen)
+		if (presult.nfrozen > 0 && presult.all_frozen)
 			presult.frz_conflict_horizon = InvalidTransactionId;
-
-		/* Execute all freeze plans for page as a single atomic action */
-		heap_freeze_execute_prepared(vacrel->rel, buf,
-									 snapshotConflictHorizon,
-									 presult.frozen, presult.nfrozen);
-	}
-	else if (presult.all_frozen && presult.nfrozen == 0)
-	{
-		/* Page should be all visible except to-be-removed tuples */
-		Assert(presult.all_visible_except_removable);
-
-		/*
-		 * We have no freeze plans to execute, so there's no added cost from
-		 * following the freeze path.  That's why it was chosen. This is
-		 * important in the case where the page only contains totally frozen
-		 * tuples at this point (perhaps only following pruning). Such pages
-		 * can be marked all-frozen in the VM by our caller, even though none
-		 * of its tuples were newly frozen here (note that the "no freeze"
-		 * path never sets pages all-frozen).
-		 *
-		 * We never increment the frozen_pages instrumentation counter here,
-		 * since it only counts pages with newly frozen tuples (don't confuse
-		 * that with pages newly set all-frozen in VM).
-		 */
-		vacrel->NewRelfrozenXid = pagefrz.FreezePageRelfrozenXid;
-		vacrel->NewRelminMxid = pagefrz.FreezePageRelminMxid;
 	}
 	else
 	{
 		/*
-		 * Page requires "no freeze" processing.  It might be set all-visible
-		 * in the visibility map, but it can never be set all-frozen.
+		 * Page was "no freeze" processed. It might be set all-visible in the
+		 * visibility map, but it can never be set all-frozen.
 		 */
 		vacrel->NewRelfrozenXid = pagefrz.NoFreezePageRelfrozenXid;
 		vacrel->NewRelminMxid = pagefrz.NoFreezePageRelminMxid;
-		presult.all_frozen = false;
-		presult.nfrozen = 0;	/* avoid miscounts in instrumentation */
 	}
 
 	/*
