@@ -477,6 +477,9 @@ heap_page_prune(Relation relation, Buffer buffer,
 	else
 		do_freeze = false;
 
+	if (do_freeze)
+		heap_pre_freeze_checks(buffer, presult->frozen, presult->nfrozen);
+
 	/* Any error while applying the changes is critical */
 	START_CRIT_SECTION();
 
@@ -583,7 +586,6 @@ heap_page_prune(Relation relation, Buffer buffer,
 		if (presult->consider_opp_frz && presult->all_frozen)
 			presult->visibility_cutoff_xid = InvalidTransactionId;
 
-		heap_pre_freeze_checks(buffer, presult->frozen, presult->nfrozen);
 
 		START_CRIT_SECTION();
 
