@@ -567,10 +567,37 @@ heap_page_prune(Relation relation, Buffer buffer,
 		xl_heap_prune xlrec;
 		XLogRecPtr	recptr;
 
+		xl_heap_freeze_plan plans[MaxHeapTuplesPerPage];
+		OffsetNumber offsets[MaxHeapTuplesPerPage];
+
 		xlrec.isCatalogRel = RelationIsAccessibleInLogicalDecoding(relation);
-		xlrec.snapshotConflictHorizon = prstate.snapshotConflictHorizon;
 		xlrec.nredirected = prstate.nredirected;
 		xlrec.ndead = prstate.ndead;
+		xlrec.nunused = prstate.nunused;
+		xlrec.nplans = 0;
+
+		/*
+		 * The snapshotConflictHorizon for the whole record should be the most
+		 * conservative of all the horizons calculated for any of the possible
+		 * modifications. If this record will prune tuples, any transactions
+		 * on the standby older than the youngest xmax of the most recently
+		 * removed tuple this record will prune will conflict. If this record
+		 * will freeze tuples, any transactions on the standby with xids older
+		 * than the youngest tuple this record will freeze will conflict.
+		 */
+		if (do_freeze)
+			xlrec.snapshotConflictHorizon = Max(prstate.snapshotConflictHorizon,
+												frz_conflict_horizon);
+		else
+			xlrec.snapshotConflictHorizon = prstate.snapshotConflictHorizon;
+
+		/*
+		 * Prepare deduplicated representation for use in WAL record
+		 * Destructively sorts tuples array in-place.
+		 */
+		if (do_freeze)
+			xlrec.nplans = heap_log_freeze_plan(presult->frozen,
+												presult->nfrozen, plans, offsets);
 
 		XLogBeginInsert();
 		XLogRegisterData((char *) &xlrec, SizeOfHeapPrune);
@@ -582,6 +609,10 @@ heap_page_prune(Relation relation, Buffer buffer,
 		 * pretend that they are.  When XLogInsert stores the whole buffer,
 		 * the offset arrays need not be stored too.
 		 */
+		if (xlrec.nplans > 0)
+			XLogRegisterBufData(0, (char *) plans,
+								xlrec.nplans * sizeof(xl_heap_freeze_plan));
+
 		if (prstate.nredirected > 0)
 			XLogRegisterBufData(0, (char *) prstate.redirected,
 								prstate.nredirected *
@@ -595,47 +626,13 @@ heap_page_prune(Relation relation, Buffer buffer,
 			XLogRegisterBufData(0, (char *) prstate.nowunused,
 								prstate.nunused * sizeof(OffsetNumber));
 
+		if (xlrec.nplans > 0)
+			XLogRegisterBufData(0, (char *) offsets,
+								presult->nfrozen * sizeof(OffsetNumber));
+
 		recptr = XLogInsert(RM_HEAP2_ID, XLOG_HEAP2_PRUNE);
 
 		PageSetLSN(BufferGetPage(buffer), recptr);
-	}
-
-	/* Now WAL-log freezing if necessary */
-	if (do_freeze && RelationNeedsWAL(relation))
-	{
-		xl_heap_freeze_plan plans[MaxHeapTuplesPerPage];
-		OffsetNumber offsets[MaxHeapTuplesPerPage];
-		int			nplans;
-		xl_heap_freeze_page xlrec;
-		XLogRecPtr	recptr;
-
-		/*
-		 * Prepare deduplicated representation for use in WAL record
-		 * Destructively sorts tuples array in-place.
-		 */
-		nplans = heap_log_freeze_plan(presult->frozen, presult->nfrozen, plans, offsets);
-
-		xlrec.snapshotConflictHorizon = frz_conflict_horizon;
-		xlrec.isCatalogRel = RelationIsAccessibleInLogicalDecoding(relation);
-		xlrec.nplans = nplans;
-
-		XLogBeginInsert();
-		XLogRegisterData((char *) &xlrec, SizeOfHeapFreezePage);
-
-		/*
-		 * The freeze plan array and offset array are not actually in the
-		 * buffer, but pretend that they are.  When XLogInsert stores the
-		 * whole buffer, the arrays need not be stored too.
-		 */
-		XLogRegisterBuffer(0, buffer, REGBUF_STANDARD);
-		XLogRegisterBufData(0, (char *) plans,
-							nplans * sizeof(xl_heap_freeze_plan));
-		XLogRegisterBufData(0, (char *) offsets,
-							presult->nfrozen * sizeof(OffsetNumber));
-
-		recptr = XLogInsert(RM_HEAP2_ID, XLOG_HEAP2_FREEZE_PAGE);
-
-		PageSetLSN(page, recptr);
 	}
 
 	END_CRIT_SECTION();
