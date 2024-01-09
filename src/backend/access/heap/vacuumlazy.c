@@ -232,11 +232,9 @@ static bool lazy_scan_new_or_empty(LVRelState *vacrel, Buffer buf,
 								   bool sharelock, Buffer vmbuffer);
 static void lazy_scan_prune(LVRelState *vacrel, Buffer buf,
 							BlockNumber blkno, Page page,
-							Buffer vmbuffer, bool all_visible_according_to_vm,
-							bool *recordfreespace);
+							Buffer vmbuffer, bool all_visible_according_to_vm);
 static bool lazy_scan_noprune(LVRelState *vacrel, Buffer buf,
-							  BlockNumber blkno, Page page,
-							  bool *recordfreespace);
+							  BlockNumber blkno, Page page);
 static void lazy_vacuum(LVRelState *vacrel);
 static bool lazy_vacuum_all_indexes(LVRelState *vacrel);
 static void lazy_vacuum_heap_rel(LVRelState *vacrel);
@@ -816,7 +814,6 @@ lazy_scan_heap(LVRelState *vacrel)
 	int			tuples_already_deleted;
 	bool		next_unskippable_allvis,
 				skipping_current_range;
-	bool		recordfreespace;
 	const int	initprog_index[] = {
 		PROGRESS_VACUUM_PHASE,
 		PROGRESS_VACUUM_TOTAL_HEAP_BLKS,
@@ -955,24 +952,14 @@ lazy_scan_heap(LVRelState *vacrel)
 
 			/*
 			 * Collect LP_DEAD items in dead_items array, count tuples,
-			 * determine if rel truncation is safe
+			 * determine if rel truncation is safe, and update the FSM.
 			 */
-			if (lazy_scan_noprune(vacrel, buf, blkno, page,
-								  &recordfreespace))
+			if (lazy_scan_noprune(vacrel, buf, blkno, page))
 			{
-				Size		freespace = 0;
-
 				/*
-				 * Processed page successfully (without cleanup lock) -- just
-				 * need to update the FSM, much like the lazy_scan_prune case.
-				 * Don't bother trying to match its visibility map setting
-				 * steps, though.
+				 * Processed page successfully (without cleanup lock). Buffer
+				 * lock and pin released.
 				 */
-				if (recordfreespace)
-					freespace = PageGetHeapFreeSpace(page);
-				UnlockReleaseBuffer(buf);
-				if (recordfreespace)
-					RecordPageWithFreeSpace(vacrel->rel, blkno, freespace);
 				continue;
 			}
 
@@ -1002,38 +989,11 @@ lazy_scan_heap(LVRelState *vacrel)
 		 * pruned ourselves, as well as existing LP_DEAD line pointers that
 		 * were pruned some time earlier.  Also considers freezing XIDs in the
 		 * tuple headers of remaining items with storage. It also determines
-		 * if truncating this block is safe.
+		 * if truncating this block is safe and updates the FSM (if relevant).
+		 * Buffer is returned with lock and pin released.
 		 */
 		lazy_scan_prune(vacrel, buf, blkno, page,
-						vmbuffer, all_visible_according_to_vm,
-						&recordfreespace);
-
-		/*
-		 * Final steps for block: drop cleanup lock, record free space in the
-		 * FSM.
-		 *
-		 * If we will likely do index vacuuming, wait until
-		 * lazy_vacuum_heap_rel() to save free space. This doesn't just save
-		 * us some cycles; it also allows us to record any additional free
-		 * space that lazy_vacuum_heap_page() will make available in cases
-		 * where it's possible to truncate the page's line pointer array.
-		 *
-		 * Note: It's not in fact 100% certain that we really will call
-		 * lazy_vacuum_heap_rel() -- lazy_vacuum() might yet opt to skip index
-		 * vacuuming (and so must skip heap vacuuming).  This is deemed okay
-		 * because it only happens in emergencies, or when there is very
-		 * little free space anyway. (Besides, we start recording free space
-		 * in the FSM once index vacuuming has been abandoned.)
-		 */
-		if (recordfreespace)
-		{
-			Size		freespace = PageGetHeapFreeSpace(page);
-
-			UnlockReleaseBuffer(buf);
-			RecordPageWithFreeSpace(vacrel->rel, blkno, freespace);
-		}
-		else
-			UnlockReleaseBuffer(buf);
+						vmbuffer, all_visible_according_to_vm);
 
 		/*
 		 * Periodically perform FSM vacuuming to make newly-freed space
@@ -1361,8 +1321,7 @@ lazy_scan_prune(LVRelState *vacrel,
 				BlockNumber blkno,
 				Page page,
 				Buffer vmbuffer,
-				bool all_visible_according_to_vm,
-				bool *recordfreespace)
+				bool all_visible_according_to_vm)
 {
 	Relation	rel = vacrel->rel;
 	OffsetNumber offnum,
@@ -1377,6 +1336,7 @@ lazy_scan_prune(LVRelState *vacrel,
 	bool		hastup = false;
 	bool		all_visible,
 				all_frozen;
+	bool		recordfreespace;
 	TransactionId visibility_cutoff_xid;
 	int64		fpi_before = pgWalUsage.wal_fpi;
 	OffsetNumber deadoffsets[MaxHeapTuplesPerPage];
@@ -1419,7 +1379,7 @@ lazy_scan_prune(LVRelState *vacrel,
 	 * the visibility cutoff xid for recovery conflicts.
 	 */
 	visibility_cutoff_xid = InvalidTransactionId;
-	*recordfreespace = false;
+	recordfreespace = false;
 
 	/*
 	 * We will update the VM after collecting LP_DEAD items and freezing
@@ -1758,7 +1718,7 @@ lazy_scan_prune(LVRelState *vacrel,
 	 */
 	if (vacrel->nindexes == 0 ||
 		!vacrel->do_index_vacuuming || lpdead_items == 0)
-		*recordfreespace = true;
+		recordfreespace = true;
 
 	/* Can't truncate this page */
 	if (hastup)
@@ -1873,6 +1833,32 @@ lazy_scan_prune(LVRelState *vacrel,
 						  VISIBILITYMAP_ALL_VISIBLE |
 						  VISIBILITYMAP_ALL_FROZEN);
 	}
+
+	/*
+	 * Final steps for block: drop cleanup lock, record free space in the FSM.
+	 *
+	 * If we will likely do index vacuuming, wait until lazy_vacuum_heap_rel()
+	 * to save free space. This doesn't just save us some cycles; it also
+	 * allows us to record any additional free space that
+	 * lazy_vacuum_heap_page() will make available in cases where it's
+	 * possible to truncate the page's line pointer array.
+	 *
+	 * Note: It's not in fact 100% certain that we really will call
+	 * lazy_vacuum_heap_rel() -- lazy_vacuum() might yet opt to skip index
+	 * vacuuming (and so must skip heap vacuuming).  This is deemed okay
+	 * because it only happens in emergencies, or when there is very little
+	 * free space anyway. (Besides, we start recording free space in the FSM
+	 * once index vacuuming has been abandoned.)
+	 */
+	if (recordfreespace)
+	{
+		Size		freespace = PageGetHeapFreeSpace(page);
+
+		UnlockReleaseBuffer(buf);
+		RecordPageWithFreeSpace(vacrel->rel, blkno, freespace);
+	}
+	else
+		UnlockReleaseBuffer(buf);
 }
 
 /*
@@ -1897,8 +1883,7 @@ static bool
 lazy_scan_noprune(LVRelState *vacrel,
 				  Buffer buf,
 				  BlockNumber blkno,
-				  Page page,
-				  bool *recordfreespace)
+				  Page page)
 {
 	OffsetNumber offnum,
 				maxoff;
@@ -1907,6 +1892,8 @@ lazy_scan_noprune(LVRelState *vacrel,
 				recently_dead_tuples,
 				missed_dead_tuples;
 	bool		hastup;
+	bool		recordfreespace;
+	Size		freespace = 0;
 	HeapTupleHeader tupleheader;
 	TransactionId NoFreezePageRelfrozenXid = vacrel->NewRelfrozenXid;
 	MultiXactId NoFreezePageRelminMxid = vacrel->NewRelminMxid;
@@ -1915,7 +1902,7 @@ lazy_scan_noprune(LVRelState *vacrel,
 	Assert(BufferGetBlockNumber(buf) == blkno);
 
 	hastup = false;				/* for now */
-	*recordfreespace = false;	/* for now */
+	recordfreespace = false;	/* for now */
 
 	lpdead_items = 0;
 	live_tuples = 0;
@@ -2058,7 +2045,7 @@ lazy_scan_noprune(LVRelState *vacrel,
 			missed_dead_tuples += lpdead_items;
 		}
 
-		*recordfreespace = true;
+		recordfreespace = true;
 	}
 	else if (lpdead_items == 0)
 	{
@@ -2066,7 +2053,7 @@ lazy_scan_noprune(LVRelState *vacrel,
 		 * Won't be vacuuming this page later, so record page's freespace in
 		 * the FSM now
 		 */
-		*recordfreespace = true;
+		recordfreespace = true;
 	}
 	else
 	{
@@ -2098,7 +2085,7 @@ lazy_scan_noprune(LVRelState *vacrel,
 		 * Assume that we'll go on to vacuum this heap page during final pass
 		 * over the heap.  Don't record free space until then.
 		 */
-		*recordfreespace = false;
+		recordfreespace = false;
 	}
 
 	/*
@@ -2114,7 +2101,18 @@ lazy_scan_noprune(LVRelState *vacrel,
 	if (hastup)
 		vacrel->nonempty_pages = blkno + 1;
 
-	/* Caller won't need to call lazy_scan_prune with same page */
+	/*
+	 * Since we processed page successfully without cleanup lock, caller won't
+	 * need to call lazy_scan_prune() with the same page. Now, we just need to
+	 * update the FSM, much like the lazy_scan_prune case. Don't bother trying
+	 * to match its visibility map setting steps, though.
+	 */
+	if (recordfreespace)
+		freespace = PageGetHeapFreeSpace(page);
+	UnlockReleaseBuffer(buf);
+	if (recordfreespace)
+		RecordPageWithFreeSpace(vacrel->rel, blkno, freespace);
+
 	return true;
 }
 
