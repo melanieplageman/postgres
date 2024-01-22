@@ -12,6 +12,7 @@ backend_sources += files(
   'execMain.c',
   'execParallel.c',
   'execPartition.c',
+	'execPrefetch.c',
   'execProcnode.c',
   'execReplication.c',
   'execSRF.c',
