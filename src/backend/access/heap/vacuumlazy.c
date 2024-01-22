@@ -1409,21 +1409,10 @@ lazy_scan_prune(LVRelState *vacrel,
 				bool *has_lpdead_items)
 {
 	Relation	rel = vacrel->rel;
-	OffsetNumber offnum,
-				maxoff;
-	ItemId		itemid;
 	PruneResult presult;
 	HeapPageFreeze pagefrz;
-	OffsetNumber deadoffsets[MaxHeapTuplesPerPage];
 
 	Assert(BufferGetBlockNumber(buf) == blkno);
-
-	/*
-	 * maxoff might be reduced following line pointer array truncation in
-	 * heap_page_prune.  That's safe for us to ignore, since the reclaimed
-	 * space will continue to look like LP_UNUSED items below.
-	 */
-	maxoff = PageGetMaxOffsetNumber(page);
 
 	/* Initialize (or reset) page-level state */
 	pagefrz.freeze_required = false;
@@ -1432,15 +1421,14 @@ lazy_scan_prune(LVRelState *vacrel,
 	pagefrz.NoFreezePageRelfrozenXid = vacrel->NewRelfrozenXid;
 	pagefrz.NoFreezePageRelminMxid = vacrel->NewRelminMxid;
 	pagefrz.cutoffs = &vacrel->cutoffs;
-	lpdead_items = 0;
 
 	/*
 	 * Prune all HOT-update chains in this page.
 	 *
 	 * We count the number of tuples removed from the page by the pruning step
-	 * in presult.ndeleted. It should not be confused with lpdead_items;
-	 * lpdead_items's final value can be thought of as the number of tuples
-	 * that were deleted from indexes.
+	 * in presult.ndeleted. It should not be confused with
+	 * presult.lpdead_items; presult.lpdead_items's final value can be thought
+	 * of as the number of tuples that were deleted from indexes.
 	 *
 	 * If the relation has no indexes, we can immediately mark would-be dead
 	 * items LP_UNUSED, so mark_unused_now should be true if no indexes and
@@ -1450,32 +1438,10 @@ lazy_scan_prune(LVRelState *vacrel,
 					&pagefrz, &presult, &vacrel->offnum);
 
 	/*
-	 * Now scan the page to collect LP_DEAD items and check for tuples
-	 * requiring freezing among remaining tuples with storage. We will update
-	 * the VM after collecting LP_DEAD items and freezing tuples. Pruning will
-	 * have determined whether or not the page is all_visible and able to
-	 * become all_frozen.
+	 * We will update the VM after collecting LP_DEAD items and freezing
+	 * tuples. Pruning will have determined whether or not the page is
+	 * all_visible.
 	 */
-	for (offnum = FirstOffsetNumber;
-		 offnum <= maxoff;
-		 offnum = OffsetNumberNext(offnum))
-	{
-		/*
-		 * Set the offset number so that we can display it along with any
-		 * error that occurred while processing this tuple.
-		 */
-		vacrel->offnum = offnum;
-		itemid = PageGetItemId(page, offnum);
-
-
-		if (ItemIdIsDead(itemid))
-		{
-			deadoffsets[lpdead_items++] = offnum;
-			continue;
-		}
-
-	}
-
 	vacrel->offnum = InvalidOffsetNumber;
 
 	if (presult.all_frozen || presult.nfrozen > 0)
@@ -1523,7 +1489,7 @@ lazy_scan_prune(LVRelState *vacrel,
 		TransactionId debug_cutoff;
 		bool		debug_all_frozen;
 
-		Assert(lpdead_items == 0);
+		Assert(presult.lpdead_items == 0);
 
 		if (!heap_page_is_all_visible(vacrel, buf,
 									  &debug_cutoff, &debug_all_frozen))
@@ -1539,7 +1505,7 @@ lazy_scan_prune(LVRelState *vacrel,
 	/*
 	 * Now save details of the LP_DEAD items from the page in vacrel
 	 */
-	if (lpdead_items > 0)
+	if (presult.lpdead_items > 0)
 	{
 		VacDeadItems *dead_items = vacrel->dead_items;
 		ItemPointerData tmp;
@@ -1548,9 +1514,9 @@ lazy_scan_prune(LVRelState *vacrel,
 
 		ItemPointerSetBlockNumber(&tmp, blkno);
 
-		for (int i = 0; i < lpdead_items; i++)
+		for (int i = 0; i < presult.lpdead_items; i++)
 		{
-			ItemPointerSetOffsetNumber(&tmp, deadoffsets[i]);
+			ItemPointerSetOffsetNumber(&tmp, presult.deadoffsets[i]);
 			dead_items->items[dead_items->num_items++] = tmp;
 		}
 
@@ -1562,7 +1528,7 @@ lazy_scan_prune(LVRelState *vacrel,
 	/* Finally, add page-local counts to whole-VACUUM counts */
 	vacrel->tuples_deleted += presult.ndeleted;
 	vacrel->tuples_frozen += presult.nfrozen;
-	vacrel->lpdead_items += lpdead_items;
+	vacrel->lpdead_items += presult.lpdead_items;
 	vacrel->live_tuples += presult.live_tuples;
 	vacrel->recently_dead_tuples += presult.recently_dead_tuples;
 
@@ -1571,7 +1537,7 @@ lazy_scan_prune(LVRelState *vacrel,
 		vacrel->nonempty_pages = blkno + 1;
 
 	/* Did we find LP_DEAD items? */
-	*has_lpdead_items = (lpdead_items > 0);
+	*has_lpdead_items = (presult.lpdead_items > 0);
 
 	Assert(!presult.all_visible || !(*has_lpdead_items));
 
@@ -1639,7 +1605,7 @@ lazy_scan_prune(LVRelState *vacrel,
 	 * There should never be LP_DEAD items on a page with PD_ALL_VISIBLE set,
 	 * however.
 	 */
-	else if (lpdead_items > 0 && PageIsAllVisible(page))
+	else if (presult.lpdead_items > 0 && PageIsAllVisible(page))
 	{
 		elog(WARNING, "page containing LP_DEAD items is marked as all-visible in relation \"%s\" page %u",
 			 vacrel->relname, blkno);
