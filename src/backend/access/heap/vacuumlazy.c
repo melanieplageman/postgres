@@ -1417,7 +1417,6 @@ lazy_scan_prune(LVRelState *vacrel,
 				live_tuples,
 				recently_dead_tuples;
 	HeapPageFreeze pagefrz;
-	bool		hastup = false;
 	OffsetNumber deadoffsets[MaxHeapTuplesPerPage];
 
 	Assert(BufferGetBlockNumber(buf) == blkno);
@@ -1461,7 +1460,6 @@ lazy_scan_prune(LVRelState *vacrel,
 	 * the VM after collecting LP_DEAD items and freezing tuples. Pruning will
 	 * have determined whether or not the page is all_visible and able to
 	 * become all_frozen.
-	 *
 	 */
 	for (offnum = FirstOffsetNumber;
 		 offnum <= maxoff;
@@ -1474,28 +1472,12 @@ lazy_scan_prune(LVRelState *vacrel,
 		vacrel->offnum = offnum;
 		itemid = PageGetItemId(page, offnum);
 
-		if (!ItemIdIsUsed(itemid))
-			continue;
-
 		/* Redirect items mustn't be touched */
-		if (ItemIdIsRedirected(itemid))
-		{
-			/* page makes rel truncation unsafe */
-			hastup = true;
+		if (ItemIdIsRedirected(itemid) || !ItemIdIsUsed(itemid))
 			continue;
-		}
 
 		if (ItemIdIsDead(itemid))
 		{
-			/*
-			 * Deliberately don't set hastup for LP_DEAD items.  We make the
-			 * soft assumption that any LP_DEAD items encountered here will
-			 * become LP_UNUSED later on, before count_nondeletable_pages is
-			 * reached.  If we don't make this assumption then rel truncation
-			 * will only happen every other VACUUM, at most.  Besides, VACUUM
-			 * must treat hastup/nonempty_pages as provisional no matter how
-			 * LP_DEAD items are handled (handled here, or handled later on).
-			 */
 			deadoffsets[lpdead_items++] = offnum;
 			continue;
 		}
@@ -1563,9 +1545,6 @@ lazy_scan_prune(LVRelState *vacrel,
 				elog(ERROR, "unexpected HeapTupleSatisfiesVacuum result");
 				break;
 		}
-
-		hastup = true;			/* page makes rel truncation unsafe */
-
 	}
 
 	vacrel->offnum = InvalidOffsetNumber;
@@ -1659,7 +1638,7 @@ lazy_scan_prune(LVRelState *vacrel,
 	vacrel->recently_dead_tuples += recently_dead_tuples;
 
 	/* Can't truncate this page */
-	if (hastup)
+	if (presult.hastup)
 		vacrel->nonempty_pages = blkno + 1;
 
 	/* Did we find LP_DEAD items? */

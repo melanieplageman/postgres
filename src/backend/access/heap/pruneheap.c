@@ -71,7 +71,8 @@ static void prune_prepare_freeze_tuple(Page page, OffsetNumber offnum,
 									   PruneResult *presult);
 static void heap_prune_record_prunable(PruneState *prstate, TransactionId xid);
 static void heap_prune_record_redirect(PruneState *prstate,
-									   OffsetNumber offnum, OffsetNumber rdoffnum);
+									   OffsetNumber offnum, OffsetNumber rdoffnum,
+									   PruneResult *presult);
 static void heap_prune_record_dead(PruneState *prstate, OffsetNumber offnum,
 								   PruneResult *presult);
 static void heap_prune_record_dead_or_unused(PruneState *prstate, OffsetNumber offnum,
@@ -275,6 +276,8 @@ heap_page_prune(Relation relation, Buffer buffer,
 	presult->nnewlpdead = 0;
 	presult->nfrozen = 0;
 
+	presult->hastup = false;
+
 	/*
 	 * Keep track of whether or not the page is all_visible in case the caller
 	 * wants to use this information to update the VM.
@@ -451,18 +454,37 @@ heap_page_prune(Relation relation, Buffer buffer,
 			prune_prepare_freeze_tuple(page, offnum,
 									   pagefrz, frozen, presult);
 
+		itemid = PageGetItemId(page, offnum);
+
+		if (ItemIdIsNormal(itemid) &&
+			presult->htsv[offnum] != HEAPTUPLE_DEAD)
+		{
+			Assert(presult->htsv[offnum] != -1);
+
+			/*
+			 * Deliberately don't set hastup for LP_DEAD items.  We make the
+			 * soft assumption that any LP_DEAD items encountered here will
+			 * become LP_UNUSED later on, before count_nondeletable_pages is
+			 * reached.  If we don't make this assumption then rel truncation
+			 * will only happen every other VACUUM, at most.  Besides, VACUUM
+			 * must treat hastup/nonempty_pages as provisional no matter how
+			 * LP_DEAD items are handled (handled here, or handled later on).
+			 */
+			presult->hastup = true;
+		}
+
 		/* Ignore items already processed as part of an earlier chain */
 		if (prstate.marked[offnum])
 			continue;
 
 		/* Nothing to do if slot is empty */
-		itemid = PageGetItemId(page, offnum);
 		if (!ItemIdIsUsed(itemid))
 			continue;
 
 		/* Process this item or chain of items */
 		presult->ndeleted += heap_prune_chain(buffer, offnum,
 											  &prstate, presult);
+
 	}
 
 	/* Clear the offset information once we have processed the given page. */
@@ -993,7 +1015,7 @@ heap_prune_chain(Buffer buffer, OffsetNumber rootoffnum,
 		if (i >= nchain)
 			heap_prune_record_dead_or_unused(prstate, rootoffnum, presult);
 		else
-			heap_prune_record_redirect(prstate, rootoffnum, chainitems[i]);
+			heap_prune_record_redirect(prstate, rootoffnum, chainitems[i], presult);
 	}
 	else if (nchain < 2 && ItemIdIsRedirected(rootlp))
 	{
@@ -1075,7 +1097,8 @@ heap_prune_record_prunable(PruneState *prstate, TransactionId xid)
 /* Record line pointer to be redirected */
 static void
 heap_prune_record_redirect(PruneState *prstate,
-						   OffsetNumber offnum, OffsetNumber rdoffnum)
+						   OffsetNumber offnum, OffsetNumber rdoffnum,
+						   PruneResult *presult)
 {
 	Assert(prstate->nredirected < MaxHeapTuplesPerPage);
 	prstate->redirected[prstate->nredirected * 2] = offnum;
@@ -1085,6 +1108,8 @@ heap_prune_record_redirect(PruneState *prstate,
 	prstate->marked[offnum] = true;
 	Assert(!prstate->marked[rdoffnum]);
 	prstate->marked[rdoffnum] = true;
+
+	presult->hastup = true;
 }
 
 /* Record line pointer to be marked dead */

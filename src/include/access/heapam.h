@@ -201,6 +201,7 @@ typedef struct PruneResult
 	int			ndeleted;		/* Number of tuples deleted from the page */
 	int			nnewlpdead;		/* Number of newly LP_DEAD items */
 	bool		all_visible;	/* Whether or not the page is all visible */
+	bool		hastup;			/* Does page make rel truncation unsafe */
 	TransactionId frz_conflict_horizon; /* Newest xmin on the page */
 
 	/*
