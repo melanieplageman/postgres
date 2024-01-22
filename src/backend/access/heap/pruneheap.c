@@ -290,6 +290,7 @@ heap_page_prune(Relation relation, Buffer buffer,
 
 	presult->live_tuples = 0;
 	presult->recently_dead_tuples = 0;
+	presult->lpdead_items = 0;
 
 	/*
 	 * Keep track of whether or not the page is all_visible in case the caller
@@ -951,7 +952,10 @@ heap_prune_chain(Buffer buffer, OffsetNumber rootoffnum,
 			if (unlikely(prstate->mark_unused_now))
 				heap_prune_record_unused(prstate, offnum);
 			else
+			{
 				presult->all_visible = false;
+				presult->deadoffsets[presult->lpdead_items++] = offnum;
+			}
 
 			break;
 		}
@@ -1203,6 +1207,9 @@ heap_prune_record_dead(PruneState *prstate, OffsetNumber offnum,
 	 * all_visible.
 	 */
 	presult->all_visible = false;
+
+	/* Record the dead offset for vacuum */
+	presult->deadoffsets[presult->lpdead_items++] = offnum;
 }
 
 /*

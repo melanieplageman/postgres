@@ -213,6 +213,8 @@ typedef struct PruneResult
 
 	/* Number of newly frozen tuples */
 	int			nfrozen;
+	OffsetNumber deadoffsets[MaxHeapTuplesPerPage];
+	int			lpdead_items;	/* includes existing LP_DEAD items */
 } PruneResult;
 
 /* ----------------
