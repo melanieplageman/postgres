@@ -1413,9 +1413,6 @@ lazy_scan_prune(LVRelState *vacrel,
 				maxoff;
 	ItemId		itemid;
 	PruneResult presult;
-	int			lpdead_items,
-				live_tuples,
-				recently_dead_tuples;
 	HeapPageFreeze pagefrz;
 	OffsetNumber deadoffsets[MaxHeapTuplesPerPage];
 
@@ -1436,8 +1433,6 @@ lazy_scan_prune(LVRelState *vacrel,
 	pagefrz.NoFreezePageRelminMxid = vacrel->NewRelminMxid;
 	pagefrz.cutoffs = &vacrel->cutoffs;
 	lpdead_items = 0;
-	live_tuples = 0;
-	recently_dead_tuples = 0;
 
 	/*
 	 * Prune all HOT-update chains in this page.
@@ -1472,9 +1467,6 @@ lazy_scan_prune(LVRelState *vacrel,
 		vacrel->offnum = offnum;
 		itemid = PageGetItemId(page, offnum);
 
-		/* Redirect items mustn't be touched */
-		if (ItemIdIsRedirected(itemid) || !ItemIdIsUsed(itemid))
-			continue;
 
 		if (ItemIdIsDead(itemid))
 		{
@@ -1482,69 +1474,6 @@ lazy_scan_prune(LVRelState *vacrel,
 			continue;
 		}
 
-		Assert(ItemIdIsNormal(itemid));
-
-		/*
-		 * The criteria for counting a tuple as live in this block need to
-		 * match what analyze.c's acquire_sample_rows() does, otherwise VACUUM
-		 * and ANALYZE may produce wildly different reltuples values, e.g.
-		 * when there are many recently-dead tuples.
-		 *
-		 * The logic here is a bit simpler than acquire_sample_rows(), as
-		 * VACUUM can't run inside a transaction block, which makes some cases
-		 * impossible (e.g. in-progress insert from the same transaction).
-		 *
-		 * We treat LP_DEAD items (which are the closest thing to DEAD tuples
-		 * that might be seen here) differently, too: we assume that they'll
-		 * become LP_UNUSED before VACUUM finishes.  This difference is only
-		 * superficial.  VACUUM effectively agrees with ANALYZE about DEAD
-		 * items, in the end.  VACUUM won't remember LP_DEAD items, but only
-		 * because they're not supposed to be left behind when it is done.
-		 * (Cases where we bypass index vacuuming will violate this optimistic
-		 * assumption, but the overall impact of that should be negligible.)
-		 */
-		switch (htsv_get_valid_status(presult.htsv[offnum]))
-		{
-			case HEAPTUPLE_LIVE:
-
-				/*
-				 * Count it as live.  Not only is this natural, but it's also
-				 * what acquire_sample_rows() does.
-				 */
-				live_tuples++;
-				break;
-			case HEAPTUPLE_RECENTLY_DEAD:
-
-				/*
-				 * If tuple is recently dead then we must not remove it from
-				 * the relation.  (We only remove items that are LP_DEAD from
-				 * pruning.)
-				 */
-				recently_dead_tuples++;
-				break;
-			case HEAPTUPLE_INSERT_IN_PROGRESS:
-
-				/*
-				 * We do not count these rows as live, because we expect the
-				 * inserting transaction to update the counters at commit, and
-				 * we assume that will happen only after we report our
-				 * results.  This assumption is a bit shaky, but it is what
-				 * acquire_sample_rows() does, so be consistent.
-				 */
-				break;
-			case HEAPTUPLE_DELETE_IN_PROGRESS:
-
-				/*
-				 * This an expected case during concurrent vacuum. Count such
-				 * rows as live.  As above, we assume the deleting transaction
-				 * will commit and update the counters after we report.
-				 */
-				live_tuples++;
-				break;
-			default:
-				elog(ERROR, "unexpected HeapTupleSatisfiesVacuum result");
-				break;
-		}
 	}
 
 	vacrel->offnum = InvalidOffsetNumber;
@@ -1634,8 +1563,8 @@ lazy_scan_prune(LVRelState *vacrel,
 	vacrel->tuples_deleted += presult.ndeleted;
 	vacrel->tuples_frozen += presult.nfrozen;
 	vacrel->lpdead_items += lpdead_items;
-	vacrel->live_tuples += live_tuples;
-	vacrel->recently_dead_tuples += recently_dead_tuples;
+	vacrel->live_tuples += presult.live_tuples;
+	vacrel->recently_dead_tuples += presult.recently_dead_tuples;
 
 	/* Can't truncate this page */
 	if (presult.hastup)

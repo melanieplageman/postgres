@@ -56,6 +56,17 @@ typedef struct
 	 * 1. Otherwise every access would need to subtract 1.
 	 */
 	bool		marked[MaxHeapTuplesPerPage + 1];
+
+	/*
+	 * Tuple visibility is only computed once for each tuple, for correctness
+	 * and efficiency reasons; see comment in heap_page_prune() for details.
+	 * This is of type int8[], instead of HTSV_Result[], so we can use -1 to
+	 * indicate no visibility has been computed, e.g. for LP_DEAD items.
+	 *
+	 * This needs to be MaxHeapTuplesPerPage + 1 long as FirstOffsetNumber is
+	 * 1. Otherwise every access would need to subtract 1.
+	 */
+	int8		htsv[MaxHeapTuplesPerPage + 1];
 } PruneState;
 
 /* Local functions */
@@ -66,7 +77,8 @@ static int	heap_prune_chain(Buffer buffer,
 							 OffsetNumber rootoffnum,
 							 PruneState *prstate, PruneResult *presult);
 
-static void prune_prepare_freeze_tuple(Page page, OffsetNumber offnum,
+static inline HTSV_Result htsv_get_valid_status(int status);
+static void prune_prepare_freeze_tuple(Page page, OffsetNumber offnum, PruneState *prstate,
 									   HeapPageFreeze *pagefrz, HeapTupleFreeze *frozen,
 									   PruneResult *presult);
 static void heap_prune_record_prunable(PruneState *prstate, TransactionId xid);
@@ -278,6 +290,9 @@ heap_page_prune(Relation relation, Buffer buffer,
 
 	presult->hastup = false;
 
+	presult->live_tuples = 0;
+	presult->recently_dead_tuples = 0;
+
 	/*
 	 * Keep track of whether or not the page is all_visible in case the caller
 	 * wants to use this information to update the VM.
@@ -319,7 +334,7 @@ heap_page_prune(Relation relation, Buffer buffer,
 		/* Nothing to do if slot doesn't contain a tuple */
 		if (!ItemIdIsNormal(itemid))
 		{
-			presult->htsv[offnum] = -1;
+			prstate.htsv[offnum] = -1;
 			continue;
 		}
 
@@ -335,9 +350,30 @@ heap_page_prune(Relation relation, Buffer buffer,
 		if (off_loc)
 			*off_loc = offnum;
 
-		presult->htsv[offnum] = heap_prune_satisfies_vacuum(&prstate, &tup,
-															buffer);
-		switch (presult->htsv[offnum])
+		prstate.htsv[offnum] = heap_prune_satisfies_vacuum(&prstate, &tup,
+														   buffer);
+		Assert(ItemIdIsNormal(itemid));
+
+		/*
+		 * The criteria for counting a tuple as live in this block need to
+		 * match what analyze.c's acquire_sample_rows() does, otherwise VACUUM
+		 * and ANALYZE may produce wildly different reltuples values, e.g.
+		 * when there are many recently-dead tuples.
+		 *
+		 * The logic here is a bit simpler than acquire_sample_rows(), as
+		 * VACUUM can't run inside a transaction block, which makes some cases
+		 * impossible (e.g. in-progress insert from the same transaction).
+		 *
+		 * We treat LP_DEAD items (which are the closest thing to DEAD tuples
+		 * that might be seen here) differently, too: we assume that they'll
+		 * become LP_UNUSED before VACUUM finishes.  This difference is only
+		 * superficial.  VACUUM effectively agrees with ANALYZE about DEAD
+		 * items, in the end.  VACUUM won't remember LP_DEAD items, but only
+		 * because they're not supposed to be left behind when it is done.
+		 * (Cases where we bypass index vacuuming will violate this optimistic
+		 * assumption, but the overall impact of that should be negligible.)
+		 */
+		switch (prstate.htsv[offnum])
 		{
 			case HEAPTUPLE_DEAD:
 
@@ -356,6 +392,12 @@ heap_page_prune(Relation relation, Buffer buffer,
 				 */
 				break;
 			case HEAPTUPLE_LIVE:
+
+				/*
+				 * Count it as live.  Not only is this natural, but it's also
+				 * what acquire_sample_rows() does.
+				 */
+				presult->live_tuples++;
 
 				/*
 				 * Is the tuple definitely visible to all transactions?
@@ -393,13 +435,34 @@ heap_page_prune(Relation relation, Buffer buffer,
 				}
 				break;
 			case HEAPTUPLE_RECENTLY_DEAD:
+
+				/*
+				 * If tuple is recently dead then we must not remove it from
+				 * the relation.  (We only remove items that are LP_DEAD from
+				 * pruning.)
+				 */
+				presult->recently_dead_tuples++;
 				presult->all_visible = false;
 				break;
 			case HEAPTUPLE_INSERT_IN_PROGRESS:
+
+				/*
+				 * We do not count these rows as live, because we expect the
+				 * inserting transaction to update the counters at commit, and
+				 * we assume that will happen only after we report our
+				 * results.  This assumption is a bit shaky, but it is what
+				 * acquire_sample_rows() does, so be consistent.
+				 */
 				presult->all_visible = false;
 				break;
 			case HEAPTUPLE_DELETE_IN_PROGRESS:
-				/* This is an expected case during concurrent vacuum */
+
+				/*
+				 * This an expected case during concurrent vacuum. Count such
+				 * rows as live.  As above, we assume the deleting transaction
+				 * will commit and update the counters after we report.
+				 */
+				presult->live_tuples++;
 				presult->all_visible = false;
 				break;
 			default:
@@ -451,15 +514,15 @@ heap_page_prune(Relation relation, Buffer buffer,
 			*off_loc = offnum;
 
 		if (pagefrz)
-			prune_prepare_freeze_tuple(page, offnum,
+			prune_prepare_freeze_tuple(page, offnum, &prstate,
 									   pagefrz, frozen, presult);
 
 		itemid = PageGetItemId(page, offnum);
 
 		if (ItemIdIsNormal(itemid) &&
-			presult->htsv[offnum] != HEAPTUPLE_DEAD)
+			prstate.htsv[offnum] != HEAPTUPLE_DEAD)
 		{
-			Assert(presult->htsv[offnum] != -1);
+			Assert(prstate.htsv[offnum] != -1);
 
 			/*
 			 * Deliberately don't set hastup for LP_DEAD items.  We make the
@@ -724,9 +787,23 @@ heap_prune_satisfies_vacuum(PruneState *prstate, HeapTuple tup, Buffer buffer)
 
 
 /*
+ * Pruning calculates tuple visibility once and saves the results in an array
+ * of int8. See PruneState.htsv for details. This helper function is meant to
+ * guard against examining visibility status array members which have not yet
+ * been computed.
+ */
+static inline HTSV_Result
+htsv_get_valid_status(int status)
+{
+	Assert(status >= HEAPTUPLE_DEAD &&
+		   status <= HEAPTUPLE_DELETE_IN_PROGRESS);
+	return (HTSV_Result) status;
+}
+
+/*
  * Prune specified line pointer or a HOT chain originating at line pointer.
  *
- * Tuple visibility information is provided in presult->htsv.
+ * Tuple visibility information is provided in prstate->htsv.
  *
  * If the item is an index-referenced tuple (i.e. not a heap-only tuple),
  * the HOT chain is pruned by removing all DEAD tuples at the start of the HOT
@@ -777,7 +854,7 @@ heap_prune_chain(Buffer buffer, OffsetNumber rootoffnum,
 	 */
 	if (ItemIdIsNormal(rootlp))
 	{
-		Assert(presult->htsv[rootoffnum] != -1);
+		Assert(prstate->htsv[rootoffnum] != -1);
 		htup = (HeapTupleHeader) PageGetItem(dp, rootlp);
 
 		if (HeapTupleHeaderIsHeapOnly(htup))
@@ -800,7 +877,7 @@ heap_prune_chain(Buffer buffer, OffsetNumber rootoffnum,
 			 * either here or while following a chain below.  Whichever path
 			 * gets there first will mark the tuple unused.
 			 */
-			if (presult->htsv[rootoffnum] == HEAPTUPLE_DEAD &&
+			if (prstate->htsv[rootoffnum] == HEAPTUPLE_DEAD &&
 				!HeapTupleHeaderIsHotUpdated(htup))
 			{
 				heap_prune_record_unused(prstate, rootoffnum);
@@ -901,7 +978,7 @@ heap_prune_chain(Buffer buffer, OffsetNumber rootoffnum,
 		 */
 		tupdead = recent_dead = false;
 
-		switch (htsv_get_valid_status(presult->htsv[offnum]))
+		switch (htsv_get_valid_status(prstate->htsv[offnum]))
 		{
 			case HEAPTUPLE_DEAD:
 				tupdead = true;
@@ -1039,7 +1116,7 @@ heap_prune_chain(Buffer buffer, OffsetNumber rootoffnum,
  * want to consider freezing normal tuples which will not be removed.
 */
 static void
-prune_prepare_freeze_tuple(Page page, OffsetNumber offnum,
+prune_prepare_freeze_tuple(Page page, OffsetNumber offnum, PruneState *prstate,
 						   HeapPageFreeze *pagefrz,
 						   HeapTupleFreeze *frozen,
 						   PruneResult *presult)
@@ -1056,8 +1133,8 @@ prune_prepare_freeze_tuple(Page page, OffsetNumber offnum,
 		return;
 
 	/* We do not consider freezing tuples which will be removed. */
-	if (presult->htsv[offnum] == HEAPTUPLE_DEAD ||
-		presult->htsv[offnum] == -1)
+	if (prstate->htsv[offnum] == HEAPTUPLE_DEAD ||
+		prstate->htsv[offnum] == -1)
 		return;
 
 	htup = (HeapTupleHeader) PageGetItem(page, itemid);
