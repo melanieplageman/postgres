@@ -14,6 +14,7 @@
 #ifndef GENAM_H
 #define GENAM_H
 
+#include "access/relscan.h"
 #include "access/sdir.h"
 #include "access/skey.h"
 #include "nodes/tidbitmap.h"
@@ -173,8 +174,28 @@ extern void index_parallelrescan(IndexScanDesc scan);
 extern IndexScanDesc index_beginscan_parallel(Relation heaprel,
 											  Relation indexrel, int nkeys, int norderbys,
 											  ParallelIndexScanDesc pscan);
+extern ItemPointer index_fetch_tids(IndexScanDescData * scan,
+									ScanDirection direction, bool consider_skip_fetch);
 extern ItemPointer index_getnext_tid(IndexScanDesc scan,
-									 ScanDirection direction);
+									 ScanDirection direction, bool consider_skip_fetch);
+
+extern void index_pgsr_alloc(IndexScanDesc scan);
+#define TID_QUEUE_FULL(tid_queue) (ItemPointerIsValid(tid_queue))
+/* If it were a real queue empty and full wouldn't be opposites */
+#define TID_QUEUE_EMPTY(tid_queue) (!ItemPointerIsValid(tid_queue))
+
+static inline bool
+index_scan_done(IndexScanDesc scan, ItemPointer tid)
+{
+	if (tid)
+		return false;
+
+	if (scan->xs_heapfetch->pgsr)
+		return true;
+
+	return TID_QUEUE_EMPTY(&scan->tid_queue);
+}
+
 struct TupleTableSlot;
 extern bool index_fetch_heap(IndexScanDesc scan, struct TupleTableSlot *slot);
 extern bool index_getnext_slot(IndexScanDesc scan, ScanDirection direction,

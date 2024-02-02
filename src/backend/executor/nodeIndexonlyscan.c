@@ -99,7 +99,7 @@ IndexOnlyNext(IndexOnlyScanState *node)
 
 		/* Set it up for index-only scan */
 		node->ioss_ScanDesc->xs_want_itup = true;
-		node->ioss_VMBuffer = InvalidBuffer;
+		scandesc->vmbuffer = InvalidBuffer;
 
 		/*
 		 * If no run-time keys to calculate or they are ready, go ahead and
@@ -111,12 +111,14 @@ IndexOnlyNext(IndexOnlyScanState *node)
 						 node->ioss_NumScanKeys,
 						 node->ioss_OrderByKeys,
 						 node->ioss_NumOrderByKeys);
+
+		index_pgsr_alloc(scandesc);
 	}
 
 	/*
 	 * OK, now that we have what we need, fetch the next tuple.
 	 */
-	while ((tid = index_getnext_tid(scandesc, direction)) != NULL)
+	while (true)
 	{
 		bool		tuple_from_heap = false;
 
@@ -156,9 +158,16 @@ IndexOnlyNext(IndexOnlyScanState *node)
 		 * It's worth going through this complexity to avoid needing to lock
 		 * the VM buffer, which could cause significant contention.
 		 */
-		if (!VM_ALL_VISIBLE(scandesc->heapRelation,
-							ItemPointerGetBlockNumber(tid),
-							&node->ioss_VMBuffer))
+		tid = index_fetch_tids(scandesc, direction, true);
+
+		/*
+		 * TODO: not sure if I need to call index_fetch_heap() one time after
+		 * this condition is met before breaking (see IndexNext())
+		 */
+		if (index_scan_done(scandesc, tid))
+			break;
+
+		if (!tid || !scandesc->skip_table_fetch)
 		{
 			/*
 			 * Rats, we have to visit the heap to check visibility.
@@ -248,6 +257,8 @@ IndexOnlyNext(IndexOnlyScanState *node)
 
 		return slot;
 	}
+
+	Assert(TID_QUEUE_EMPTY(&scandesc->tid_queue));
 
 	/*
 	 * if we get here it means the index scan failed so we are at the end of
@@ -372,13 +383,6 @@ ExecEndIndexOnlyScan(IndexOnlyScanState *node)
 	 */
 	indexRelationDesc = node->ioss_RelationDesc;
 	indexScanDesc = node->ioss_ScanDesc;
-
-	/* Release VM buffer pin, if any. */
-	if (node->ioss_VMBuffer != InvalidBuffer)
-	{
-		ReleaseBuffer(node->ioss_VMBuffer);
-		node->ioss_VMBuffer = InvalidBuffer;
-	}
 
 	/*
 	 * close the index relation (no-op if we didn't open it)
@@ -660,7 +664,7 @@ ExecIndexOnlyScanInitializeDSM(IndexOnlyScanState *node,
 								 node->ioss_NumOrderByKeys,
 								 piscan);
 	node->ioss_ScanDesc->xs_want_itup = true;
-	node->ioss_VMBuffer = InvalidBuffer;
+	node->ioss_ScanDesc->vmbuffer = InvalidBuffer;
 
 	/*
 	 * If no run-time keys to calculate or they are ready, go ahead and pass

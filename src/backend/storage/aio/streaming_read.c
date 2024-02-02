@@ -34,6 +34,7 @@ struct PgStreamingRead
 	int			pinned_buffers_trigger;
 	int			next_tail_buffer;
 	bool		finished;
+	bool		resumable;
 	void	   *pgsr_private;
 	PgStreamingReadBufferCB callback;
 	BufferAccessStrategy strategy;
@@ -292,7 +293,8 @@ pg_streaming_read_look_ahead(PgStreamingRead *pgsr)
 		blocknum = pgsr->callback(pgsr, pgsr->pgsr_private, per_buffer_data);
 		if (blocknum == InvalidBlockNumber)
 		{
-			pgsr->finished = true;
+			if (!pgsr->resumable)
+				pgsr->finished = true;
 			break;
 		}
 		bmr = pgsr->bmr;
@@ -432,4 +434,10 @@ pg_streaming_read_free(PgStreamingRead *pgsr)
 	if (pgsr->per_buffer_data)
 		pfree(pgsr->per_buffer_data);
 	pfree(pgsr);
+}
+
+void
+pg_streaming_read_set_resumable(PgStreamingRead *pgsr)
+{
+	pgsr->resumable = true;
 }

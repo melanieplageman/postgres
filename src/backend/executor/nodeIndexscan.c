@@ -123,32 +123,47 @@ IndexNext(IndexScanState *node)
 			index_rescan(scandesc,
 						 node->iss_ScanKeys, node->iss_NumScanKeys,
 						 node->iss_OrderByKeys, node->iss_NumOrderByKeys);
+
+		index_pgsr_alloc(scandesc);
 	}
 
 	/*
 	 * ok, now that we have what we need, fetch the next tuple.
 	 */
-	while (index_getnext_slot(scandesc, direction, slot))
+
+	while (true)
 	{
+		ItemPointer tid;
+
 		CHECK_FOR_INTERRUPTS();
 
-		/*
-		 * If the index was lossy, we have to recheck the index quals using
-		 * the fetched tuple.
-		 */
-		if (scandesc->xs_recheck)
+		tid = index_fetch_tids(scandesc, direction, false);
+
+		if (index_fetch_heap(scandesc, slot))
 		{
-			econtext->ecxt_scantuple = slot;
-			if (!ExecQualAndReset(node->indexqualorig, econtext))
+			/*
+			 * If the index was lossy, we have to recheck the index quals
+			 * using the fetched tuple.
+			 */
+			if (scandesc->xs_recheck)
 			{
-				/* Fails recheck, so drop it and loop back for another */
-				InstrCountFiltered2(node, 1);
-				continue;
+				econtext->ecxt_scantuple = slot;
+				if (!ExecQualAndReset(node->indexqualorig, econtext))
+				{
+					/* Fails recheck, so drop it and loop back for another */
+					InstrCountFiltered2(node, 1);
+					continue;
+				}
 			}
+
+			return slot;
 		}
 
-		return slot;
+		if (index_scan_done(scandesc, tid))
+			break;
 	}
+
+	Assert(TID_QUEUE_EMPTY(&scandesc->tid_queue));
 
 	/*
 	 * if we get here it means the index scan failed so we are at the end of

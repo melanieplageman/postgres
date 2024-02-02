@@ -127,9 +127,23 @@ heapam_index_fetch_tuple(struct IndexFetchTableData *scan,
 		/* Switch to correct buffer if we don't have it already */
 		Buffer		prev_buf = hscan->xs_cbuf;
 
-		hscan->xs_cbuf = ReleaseAndReadBuffer(hscan->xs_cbuf,
-											  hscan->xs_base.rel,
-											  ItemPointerGetBlockNumber(tid));
+		if (scan->pgsr)
+		{
+			if (BufferIsValid(hscan->xs_cbuf))
+				ReleaseBuffer(hscan->xs_cbuf);
+			hscan->xs_cbuf = pg_streaming_read_buffer_get_next(scan->pgsr, (void **) &tid);
+			if (!BufferIsValid(hscan->xs_cbuf))
+				return false;
+		}
+		else
+		{
+			if (!ItemPointerIsValid(tid))
+				return false;
+			hscan->xs_cbuf = ReleaseAndReadBuffer(hscan->xs_cbuf,
+												  hscan->xs_base.rel,
+												  ItemPointerGetBlockNumber(tid));
+		}
+
 
 		/*
 		 * Prune page, but only if we weren't already on this page

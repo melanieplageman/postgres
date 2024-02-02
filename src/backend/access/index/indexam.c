@@ -50,6 +50,7 @@
 #include "access/tableam.h"
 #include "access/transam.h"
 #include "access/xlog.h"
+#include "access/visibilitymap.h"
 #include "catalog/index.h"
 #include "catalog/pg_amproc.h"
 #include "catalog/pg_type.h"
@@ -248,6 +249,54 @@ index_insert_cleanup(Relation indexRelation,
 		indexRelation->rd_indam->aminsertcleanup(indexInfo);
 }
 
+static ItemPointerData
+index_tid_dequeue(ItemPointer tid_queue)
+{
+	ItemPointerData result = *tid_queue;
+
+	ItemPointerSet(tid_queue, InvalidBlockNumber, InvalidOffsetNumber);
+	return result;
+}
+
+static void
+index_tid_enqueue(ItemPointer tid, ItemPointer tid_queue)
+{
+	Assert(!ItemPointerIsValid(tid_queue));
+	ItemPointerSet(tid_queue, ItemPointerGetBlockNumber(tid),
+				   ItemPointerGetOffsetNumber(tid));
+}
+
+static BlockNumber
+index_pgsr_next_single(PgStreamingRead *pgsr, void *pgsr_private, void *per_buffer_data)
+{
+	IndexScanDesc scan = (IndexScanDesc) pgsr_private;
+	ItemPointerData data = index_tid_dequeue(&scan->tid_queue);
+
+	ItemPointer dest = per_buffer_data;
+
+	*dest = data;
+
+	if (!ItemPointerIsValid(&data))
+		return InvalidBlockNumber;
+	return ItemPointerGetBlockNumber(&data);
+}
+
+void
+index_pgsr_alloc(IndexScanDesc scan)
+{
+	if (scan->xs_heapfetch->pgsr)
+		pg_streaming_read_free(scan->xs_heapfetch->pgsr);
+	scan->xs_heapfetch->pgsr = pg_streaming_read_buffer_alloc(PGSR_FLAG_DEFAULT,
+															  scan,
+															  sizeof(ItemPointerData),
+															  NULL,
+															  BMR_REL(scan->heapRelation),
+															  MAIN_FORKNUM,
+															  index_pgsr_next_single);
+
+	pg_streaming_read_set_resumable(scan->xs_heapfetch->pgsr);
+}
+
 /*
  * index_beginscan - start a scan of an index with amgettuple
  *
@@ -333,6 +382,10 @@ index_beginscan_internal(Relation indexRelation,
 	/* Initialize information for parallel scan. */
 	scan->parallel_scan = pscan;
 	scan->xs_temp_snap = temp_snap;
+	scan->vmbuffer = InvalidBuffer;
+	scan->skip_table_fetch = false;
+	ItemPointerSet(&scan->tid_queue, InvalidBlockNumber,
+				   InvalidOffsetNumber);
 
 	return scan;
 }
@@ -364,6 +417,13 @@ index_rescan(IndexScanDesc scan,
 	if (scan->xs_heapfetch)
 		table_index_fetch_reset(scan->xs_heapfetch);
 
+	ItemPointerSet(&scan->tid_queue,
+				   InvalidBlockNumber, InvalidOffsetNumber);
+	scan->skip_table_fetch = false;
+	if (BufferIsValid(scan->vmbuffer))
+		ReleaseBuffer(scan->vmbuffer);
+	scan->vmbuffer = InvalidBuffer;
+
 	scan->kill_prior_tuple = false; /* for safety */
 	scan->xs_heap_continue = false;
 
@@ -387,6 +447,10 @@ index_endscan(IndexScanDesc scan)
 		table_index_fetch_end(scan->xs_heapfetch);
 		scan->xs_heapfetch = NULL;
 	}
+
+	if (BufferIsValid(scan->vmbuffer))
+		ReleaseBuffer(scan->vmbuffer);
+	scan->vmbuffer = InvalidBuffer;
 
 	/* End the AM's scan */
 	scan->indexRelation->rd_indam->amendscan(scan);
@@ -530,6 +594,13 @@ index_parallelrescan(IndexScanDesc scan)
 	if (scan->xs_heapfetch)
 		table_index_fetch_reset(scan->xs_heapfetch);
 
+	ItemPointerSet(&scan->tid_queue, InvalidBlockNumber,
+				   InvalidOffsetNumber);
+	scan->skip_table_fetch = false;
+	if (BufferIsValid(scan->vmbuffer))
+		ReleaseBuffer(scan->vmbuffer);
+	scan->vmbuffer = InvalidBuffer;
+
 	/* amparallelrescan is optional; assume no-op if not provided by AM */
 	if (scan->indexRelation->rd_indam->amparallelrescan != NULL)
 		scan->indexRelation->rd_indam->amparallelrescan(scan);
@@ -566,6 +637,35 @@ index_beginscan_parallel(Relation heaprel, Relation indexrel, int nkeys,
 	return scan;
 }
 
+/*
+ * Get the next TID or stream of TIDs from an index scan.
+ */
+ItemPointer
+index_fetch_tids(IndexScanDesc scan, ScanDirection direction,
+				 bool consider_skip_fetch)
+{
+	ItemPointer tid;
+
+	if (!scan->xs_heapfetch->pgsr)
+		return index_getnext_tid(scan, direction, consider_skip_fetch);
+
+	Assert(!TID_QUEUE_FULL(&scan->tid_queue));
+	do
+	{
+		tid = index_getnext_tid(scan, direction, consider_skip_fetch);
+
+		if (!tid)
+			break;
+
+		if (scan->skip_table_fetch)
+			break;
+
+		index_tid_enqueue(tid, &scan->tid_queue);
+	} while (!TID_QUEUE_FULL(&scan->tid_queue));
+
+	return tid;
+}
+
 /* ----------------
  * index_getnext_tid - get the next TID from a scan
  *
@@ -574,7 +674,8 @@ index_beginscan_parallel(Relation heaprel, Relation indexrel, int nkeys,
  * ----------------
  */
 ItemPointer
-index_getnext_tid(IndexScanDesc scan, ScanDirection direction)
+index_getnext_tid(IndexScanDesc scan, ScanDirection direction,
+				  bool consider_skip_fetch)
 {
 	bool		found;
 
@@ -603,11 +704,18 @@ index_getnext_tid(IndexScanDesc scan, ScanDirection direction)
 		if (scan->xs_heapfetch)
 			table_index_fetch_reset(scan->xs_heapfetch);
 
+		ItemPointerSet(&scan->xs_heaptid, InvalidBlockNumber, InvalidOffsetNumber);
 		return NULL;
 	}
 	Assert(ItemPointerIsValid(&scan->xs_heaptid));
 
 	pgstat_count_index_tuples(scan->indexRelation, 1);
+
+	/* XXX: this should likely be pushed into the index AM function */
+	if (consider_skip_fetch)
+		scan->skip_table_fetch = VM_ALL_VISIBLE(scan->heapRelation,
+												ItemPointerGetBlockNumber(&scan->xs_heaptid),
+												&scan->vmbuffer);
 
 	/* Return the TID of the tuple we found. */
 	return &scan->xs_heaptid;
@@ -682,7 +790,7 @@ index_getnext_slot(IndexScanDesc scan, ScanDirection direction, TupleTableSlot *
 			ItemPointer tid;
 
 			/* Time to fetch the next TID from the index */
-			tid = index_getnext_tid(scan, direction);
+			tid = index_getnext_tid(scan, direction, false);
 
 			/* If we're out of index entries, we're done */
 			if (tid == NULL)
