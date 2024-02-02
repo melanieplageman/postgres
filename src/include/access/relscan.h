@@ -18,6 +18,7 @@
 #include "access/itup.h"
 #include "port/atomics.h"
 #include "storage/buf.h"
+#include "storage/streaming_read.h"
 #include "storage/spin.h"
 #include "utils/relcache.h"
 
@@ -104,6 +105,7 @@ typedef struct ParallelBlockTableScanWorkerData *ParallelBlockTableScanWorker;
 typedef struct IndexFetchTableData
 {
 	Relation	rel;
+	PgStreamingRead *pgsr;
 } IndexFetchTableData;
 
 /*
@@ -148,6 +150,8 @@ typedef struct IndexScanDescData
 	bool		xs_heap_continue;	/* T if must keep walking, potential
 									 * further results */
 	IndexFetchTableData *xs_heapfetch;
+	ItemPointerData tid_queue;
+	Buffer		vmbuffer;
 
 	bool		xs_recheck;		/* T means scan keys must be rechecked */
 

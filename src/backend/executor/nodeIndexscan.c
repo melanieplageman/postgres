@@ -69,6 +69,23 @@ static void reorderqueue_push(IndexScanState *node, TupleTableSlot *slot,
 							  Datum *orderbyvals, bool *orderbynulls);
 static HeapTuple reorderqueue_pop(IndexScanState *node);
 
+static bool
+index_fill_tid_queue(IndexScanDesc scan, ScanDirection direction)
+{
+	ItemPointer tid;
+	do
+	{
+		tid = index_getnext_tid(scan, direction, NULL);
+
+		if (!tid)
+			break;
+
+		index_tid_enqueue(tid, &scan->tid_queue);
+	} while (!TID_QUEUE_FULL(&scan->tid_queue));
+
+	return tid == NULL;
+}
+
 
 /* ----------------------------------------------------------------
  *		IndexNext
@@ -123,31 +140,48 @@ IndexNext(IndexScanState *node)
 			index_rescan(scandesc,
 						 node->iss_ScanKeys, node->iss_NumScanKeys,
 						 node->iss_OrderByKeys, node->iss_NumOrderByKeys);
+
+		index_pgsr_alloc(scandesc);
 	}
 
 	/*
 	 * ok, now that we have what we need, fetch the next tuple.
 	 */
-	while (index_getnext_slot(scandesc, direction, slot))
+
+	while (true)
 	{
+		bool index_exhausted = false;
+
 		CHECK_FOR_INTERRUPTS();
 
-		/*
-		 * If the index was lossy, we have to recheck the index quals using
-		 * the fetched tuple.
-		 */
-		if (scandesc->xs_recheck)
+		if (scandesc->xs_heapfetch->pgsr)
+			index_exhausted = index_fill_tid_queue(scandesc, direction);
+		else
+			index_exhausted = !index_getnext_tid(scandesc, direction, NULL);
+
+		if (index_scan_done(scandesc, index_exhausted))
+			break;
+
+		if (index_fetch_heap(scandesc, slot))
 		{
-			econtext->ecxt_scantuple = slot;
-			if (!ExecQualAndReset(node->indexqualorig, econtext))
+			/*
+			 * If the index was lossy, we have to recheck the index quals
+			 * using the fetched tuple.
+			 */
+			if (scandesc->xs_recheck)
 			{
-				/* Fails recheck, so drop it and loop back for another */
-				InstrCountFiltered2(node, 1);
-				continue;
+				econtext->ecxt_scantuple = slot;
+				if (!ExecQualAndReset(node->indexqualorig, econtext))
+				{
+					/* Fails recheck, so drop it and loop back for another */
+					InstrCountFiltered2(node, 1);
+					continue;
+				}
 			}
+
+			return slot;
 		}
 
-		return slot;
 	}
 
 	/*

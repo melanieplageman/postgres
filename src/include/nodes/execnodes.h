@@ -1623,7 +1623,6 @@ typedef struct IndexOnlyScanState
 	Relation	ioss_RelationDesc;
 	struct IndexScanDescData *ioss_ScanDesc;
 	TupleTableSlot *ioss_TableSlot;
-	Buffer		ioss_VMBuffer;
 	Size		ioss_PscanLen;
 } IndexOnlyScanState;
 

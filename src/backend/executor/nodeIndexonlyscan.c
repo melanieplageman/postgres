@@ -49,6 +49,27 @@ static TupleTableSlot *IndexOnlyNext(IndexOnlyScanState *node);
 static void StoreIndexTuple(TupleTableSlot *slot, IndexTuple itup,
 							TupleDesc itupdesc);
 
+static bool
+index_only_fill_tid_queue(IndexScanDesc scan, ScanDirection direction,
+		bool *skip_fetch)
+{
+	ItemPointer tid;
+	do
+	{
+		tid = index_getnext_tid(scan, direction, skip_fetch);
+
+		if (!tid)
+			break;
+
+		if (*skip_fetch)
+			break;
+
+		index_tid_enqueue(tid, &scan->tid_queue);
+	} while (!TID_QUEUE_FULL(&scan->tid_queue));
+
+	return tid == NULL;
+}
+
 
 /* ----------------------------------------------------------------
  *		IndexOnlyNext
@@ -64,7 +85,6 @@ IndexOnlyNext(IndexOnlyScanState *node)
 	ScanDirection direction;
 	IndexScanDesc scandesc;
 	TupleTableSlot *slot;
-	ItemPointer tid;
 
 	/*
 	 * extract necessary information from index scan node
@@ -99,7 +119,7 @@ IndexOnlyNext(IndexOnlyScanState *node)
 
 		/* Set it up for index-only scan */
 		node->ioss_ScanDesc->xs_want_itup = true;
-		node->ioss_VMBuffer = InvalidBuffer;
+		scandesc->vmbuffer = InvalidBuffer;
 
 		/*
 		 * If no run-time keys to calculate or they are ready, go ahead and
@@ -111,14 +131,18 @@ IndexOnlyNext(IndexOnlyScanState *node)
 						 node->ioss_NumScanKeys,
 						 node->ioss_OrderByKeys,
 						 node->ioss_NumOrderByKeys);
+
+		index_pgsr_alloc(scandesc);
 	}
 
 	/*
 	 * OK, now that we have what we need, fetch the next tuple.
 	 */
-	while ((tid = index_getnext_tid(scandesc, direction)) != NULL)
+	while (true)
 	{
 		bool		tuple_from_heap = false;
+		bool		index_exhausted = false;
+		bool		skip_fetch = false;
 
 		CHECK_FOR_INTERRUPTS();
 
@@ -156,9 +180,15 @@ IndexOnlyNext(IndexOnlyScanState *node)
 		 * It's worth going through this complexity to avoid needing to lock
 		 * the VM buffer, which could cause significant contention.
 		 */
-		if (!VM_ALL_VISIBLE(scandesc->heapRelation,
-							ItemPointerGetBlockNumber(tid),
-							&node->ioss_VMBuffer))
+		if (scandesc->xs_heapfetch->pgsr)
+			index_exhausted = index_only_fill_tid_queue(scandesc, direction, &skip_fetch);
+		else
+			index_exhausted = !index_getnext_tid(scandesc, direction, &skip_fetch);
+
+		if (index_scan_done(scandesc, index_exhausted))
+			break;
+
+		if (index_exhausted || !skip_fetch)
 		{
 			/*
 			 * Rats, we have to visit the heap to check visibility.
@@ -243,7 +273,7 @@ IndexOnlyNext(IndexOnlyScanState *node)
 		 */
 		if (!tuple_from_heap)
 			PredicateLockPage(scandesc->heapRelation,
-							  ItemPointerGetBlockNumber(tid),
+							  ItemPointerGetBlockNumber(&scandesc->xs_heaptid),
 							  estate->es_snapshot);
 
 		return slot;
@@ -372,13 +402,6 @@ ExecEndIndexOnlyScan(IndexOnlyScanState *node)
 	 */
 	indexRelationDesc = node->ioss_RelationDesc;
 	indexScanDesc = node->ioss_ScanDesc;
-
-	/* Release VM buffer pin, if any. */
-	if (node->ioss_VMBuffer != InvalidBuffer)
-	{
-		ReleaseBuffer(node->ioss_VMBuffer);
-		node->ioss_VMBuffer = InvalidBuffer;
-	}
 
 	/*
 	 * close the index relation (no-op if we didn't open it)
@@ -660,7 +683,7 @@ ExecIndexOnlyScanInitializeDSM(IndexOnlyScanState *node,
 								 node->ioss_NumOrderByKeys,
 								 piscan);
 	node->ioss_ScanDesc->xs_want_itup = true;
-	node->ioss_VMBuffer = InvalidBuffer;
+	node->ioss_ScanDesc->vmbuffer = InvalidBuffer;
 
 	/*
 	 * If no run-time keys to calculate or they are ready, go ahead and pass
