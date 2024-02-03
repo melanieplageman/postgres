@@ -179,10 +179,22 @@ extern ItemPointer index_getnext_tid(IndexScanDesc scan,
 
 extern void index_pgsr_alloc(IndexScanDesc scan);
 
-extern void index_tid_enqueue(ItemPointer tid, ItemPointer tid_queue);
-#define TID_QUEUE_FULL(tid_queue) (ItemPointerIsValid(tid_queue))
-/* If it were a real queue empty and full wouldn't be opposites */
-#define TID_QUEUE_EMPTY(tid_queue) (!ItemPointerIsValid(tid_queue))
+
+extern void tid_queue_reset(TIDQueue *q);
+
+extern void index_tid_enqueue(ItemPointer tid, TIDQueue *tid_queue);
+
+static inline bool
+TID_QUEUE_FULL(TIDQueue *q)
+{
+	return q->tail - q->head == TID_QUEUE_SIZE;
+}
+
+static inline bool
+TID_QUEUE_EMPTY(TIDQueue *q)
+{
+	return q->head == q->tail;
+}
 
 static inline bool
 index_scan_done(IndexScanDesc scan, bool index_exhausted)

@@ -73,17 +73,23 @@ static bool
 index_fill_tid_queue(IndexScanDesc scan, ScanDirection direction)
 {
 	ItemPointer tid;
-	do
+
+	while (!TID_QUEUE_FULL(&scan->tid_queue))
 	{
 		tid = index_getnext_tid(scan, direction, NULL);
 
 		if (!tid)
-			break;
+			return true;
+
+		BlockNumber blkno = ItemPointerGetBlockNumber(tid);
+		elog(WARNING, "Enqueing blkno: %d, offset: %d",
+				blkno,
+				ItemPointerGetOffsetNumber(tid));
 
 		index_tid_enqueue(tid, &scan->tid_queue);
-	} while (!TID_QUEUE_FULL(&scan->tid_queue));
+	};
 
-	return tid == NULL;
+	return false;
 }
 
 

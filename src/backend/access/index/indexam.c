@@ -249,37 +249,58 @@ index_insert_cleanup(Relation indexRelation,
 		indexRelation->rd_indam->aminsertcleanup(indexInfo);
 }
 
-static ItemPointerData
-index_tid_dequeue(ItemPointer tid_queue)
+void
+tid_queue_reset(TIDQueue *q)
 {
-	ItemPointerData result = *tid_queue;
+	for (int i = 0; i < TID_QUEUE_SIZE; i++)
+		ItemPointerSet(&q->data[i], InvalidBlockNumber, InvalidOffsetNumber);
+	q->head = 0;
+	q->tail = 0;
+}
 
-	ItemPointerSet(tid_queue, InvalidBlockNumber, InvalidOffsetNumber);
+static ItemPointer
+index_tid_dequeue(TIDQueue *tid_queue)
+{
+	ItemPointer result;
+	Assert(tid_queue->tail >= tid_queue->head);
+	if (TID_QUEUE_EMPTY(tid_queue))
+		return NULL;
+	result = &tid_queue->data[tid_queue->head % TID_QUEUE_SIZE];
+	tid_queue->head++;
 	return result;
 }
 
 void
-index_tid_enqueue(ItemPointer tid, ItemPointer tid_queue)
+index_tid_enqueue(ItemPointer tid, TIDQueue *tid_queue)
 {
-	Assert(!ItemPointerIsValid(tid_queue));
+	Assert(tid_queue->tail >= tid_queue->head);
 	Assert(!TID_QUEUE_FULL(tid_queue));
-	ItemPointerSet(tid_queue, ItemPointerGetBlockNumber(tid),
+	ItemPointerSet(&tid_queue->data[tid_queue->tail % TID_QUEUE_SIZE],
+			ItemPointerGetBlockNumber(tid),
 				   ItemPointerGetOffsetNumber(tid));
+	tid_queue->tail++;
 }
 
 static BlockNumber
 index_pgsr_next_single(PgStreamingRead *pgsr, void *pgsr_private, void *per_buffer_data)
 {
+	BlockNumber blkno;
 	IndexScanDesc scan = (IndexScanDesc) pgsr_private;
-	ItemPointerData data = index_tid_dequeue(&scan->tid_queue);
+	ItemPointer data = index_tid_dequeue(&scan->tid_queue);
 
-	ItemPointer dest = per_buffer_data;
-
-	*dest = data;
-
-	if (!ItemPointerIsValid(&data))
+	if (!data)
 		return InvalidBlockNumber;
-	return ItemPointerGetBlockNumber(&data);
+
+	blkno = ItemPointerGetBlockNumber(data);
+	elog(WARNING, "q->head: %ld. q->tail: %ld. blkno: %d. current queue size: %ld",
+			scan->tid_queue.head,
+			scan->tid_queue.tail, blkno,
+			scan->tid_queue.tail - scan->tid_queue.head);
+
+	ItemPointerSet(per_buffer_data,
+			blkno, ItemPointerGetOffsetNumber(data));
+
+	return blkno;
 }
 
 void
@@ -384,8 +405,7 @@ index_beginscan_internal(Relation indexRelation,
 	scan->parallel_scan = pscan;
 	scan->xs_temp_snap = temp_snap;
 	scan->vmbuffer = InvalidBuffer;
-	ItemPointerSet(&scan->tid_queue, InvalidBlockNumber,
-				   InvalidOffsetNumber);
+	tid_queue_reset(&scan->tid_queue);
 
 	return scan;
 }
@@ -420,8 +440,7 @@ index_rescan(IndexScanDesc scan,
 	if (BufferIsValid(scan->vmbuffer))
 		ReleaseBuffer(scan->vmbuffer);
 	scan->vmbuffer = InvalidBuffer;
-	ItemPointerSet(&scan->tid_queue,
-				   InvalidBlockNumber, InvalidOffsetNumber);
+	tid_queue_reset(&scan->tid_queue);
 
 	scan->kill_prior_tuple = false; /* for safety */
 	scan->xs_heap_continue = false;
@@ -597,8 +616,7 @@ index_parallelrescan(IndexScanDesc scan)
 	if (BufferIsValid(scan->vmbuffer))
 		ReleaseBuffer(scan->vmbuffer);
 	scan->vmbuffer = InvalidBuffer;
-	ItemPointerSet(&scan->tid_queue, InvalidBlockNumber,
-				   InvalidOffsetNumber);
+	tid_queue_reset(&scan->tid_queue);
 
 	/* amparallelrescan is optional; assume no-op if not provided by AM */
 	if (scan->indexRelation->rd_indam->amparallelrescan != NULL)

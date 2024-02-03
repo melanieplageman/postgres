@@ -129,9 +129,11 @@ heapam_index_fetch_tuple(struct IndexFetchTableData *scan,
 
 		if (scan->pgsr)
 		{
+			ItemPointerData mytid;
 			if (BufferIsValid(hscan->xs_cbuf))
 				ReleaseBuffer(hscan->xs_cbuf);
-			hscan->xs_cbuf = pg_streaming_read_buffer_get_next(scan->pgsr, (void **) &tid);
+			// TODO: maybe something with this
+			hscan->xs_cbuf = pg_streaming_read_buffer_get_next(scan->pgsr, (void **) &mytid);
 			if (!BufferIsValid(hscan->xs_cbuf))
 				return false;
 		}

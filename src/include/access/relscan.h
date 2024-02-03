@@ -108,6 +108,16 @@ typedef struct IndexFetchTableData
 	PgStreamingRead *pgsr;
 } IndexFetchTableData;
 
+
+// TODO: find a way to put back in genam.h without circular include
+#define TID_QUEUE_SIZE 5
+
+typedef struct TIDQueue {
+	uint64 head;
+	uint64 tail;
+	ItemPointerData data[TID_QUEUE_SIZE];
+} TIDQueue;
+
 /*
  * We use the same IndexScanDescData structure for both amgettuple-based
  * and amgetbitmap-based index scans.  Some fields are only relevant in
@@ -150,7 +160,7 @@ typedef struct IndexScanDescData
 	bool		xs_heap_continue;	/* T if must keep walking, potential
 									 * further results */
 	IndexFetchTableData *xs_heapfetch;
-	ItemPointerData tid_queue;
+	TIDQueue tid_queue;
 	Buffer		vmbuffer;
 
 	bool		xs_recheck;		/* T means scan keys must be rechecked */
