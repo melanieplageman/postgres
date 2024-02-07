@@ -413,11 +413,14 @@ standard_planner(Query *parse, const char *query_string, int cursorOptions,
 	root = subquery_planner(glob, parse, NULL,
 							false, tuple_fraction);
 
+	root->allow_prefetch = true;
+
 	/* Select best Path and turn it into a Plan */
 	final_rel = fetch_upper_rel(root, UPPERREL_FINAL, NULL);
 	best_path = get_cheapest_fractional_path(final_rel, tuple_fraction);
 
 	top_plan = create_plan(root, best_path);
+	top_plan->allow_prefetch = root->allow_prefetch;
 
 	/*
 	 * If creating a plan for a scrollable cursor, make sure it can run

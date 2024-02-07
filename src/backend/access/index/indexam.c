@@ -248,6 +248,91 @@ index_insert_cleanup(Relation indexRelation,
 		indexRelation->rd_indam->aminsertcleanup(indexInfo);
 }
 
+void
+tid_queue_reset(TIDQueue *q)
+{
+	q->head = q->tail = 0;
+}
+
+TIDQueue *
+tid_queue_alloc(int size)
+{
+	TIDQueue   *result;
+
+	result = palloc(sizeof(TIDQueue) + (sizeof(TIDQueueItem) * size));
+	result->size = size;
+	tid_queue_reset(result);
+	return result;
+}
+
+static TIDQueueItem
+index_tid_dequeue(TIDQueue *tid_queue)
+{
+	TIDQueueItem result;
+
+	Assert(tid_queue->tail > tid_queue->head);
+	result = tid_queue->data[tid_queue->head % tid_queue->size];
+	tid_queue->head++;
+
+	return result;
+}
+
+void
+index_tid_enqueue(TIDQueue *tid_queue, ItemPointer tid, bool recheck,
+				  HeapTuple htup, IndexTuple itup)
+{
+	TIDQueueItem *cur;
+
+	Assert(tid_queue->tail >= tid_queue->head);
+	Assert(!TID_QUEUE_FULL(tid_queue));
+	cur = &tid_queue->data[tid_queue->tail % tid_queue->size];
+	ItemPointerSet(&cur->tid,
+				   ItemPointerGetBlockNumber(tid), ItemPointerGetOffsetNumber(tid));
+	cur->recheck = recheck;
+	cur->itup = NULL;
+	cur->htup = NULL;
+
+	if (itup)
+		cur->itup = CopyIndexTuple(itup);
+
+	if (htup)
+		cur->htup = heap_copytuple(htup);
+
+	tid_queue->tail++;
+}
+
+static BlockNumber
+index_pgsr_next_single(PgStreamingRead *pgsr, void *pgsr_private, void *per_buffer_data)
+{
+	IndexScanDesc scan = pgsr_private;
+	TIDQueueItem *result = per_buffer_data;
+
+	scan->kill_prior_tuple = false;
+	scan->xs_heap_continue = false;
+
+	if (TID_QUEUE_EMPTY(scan->tid_queue))
+		return InvalidBlockNumber;
+
+	*result = index_tid_dequeue(scan->tid_queue);
+	return ItemPointerGetBlockNumber(&result->tid);
+}
+
+void
+index_pgsr_alloc(IndexScanDesc scan)
+{
+	if (scan->xs_heapfetch->pgsr)
+		pg_streaming_read_free(scan->xs_heapfetch->pgsr);
+	scan->xs_heapfetch->pgsr = pg_streaming_read_buffer_alloc(PGSR_FLAG_DEFAULT,
+															  scan,
+															  sizeof(TIDQueueItem),
+															  NULL,
+															  BMR_REL(scan->heapRelation),
+															  MAIN_FORKNUM,
+															  index_pgsr_next_single);
+
+	pg_streaming_read_set_resumable(scan->xs_heapfetch->pgsr);
+}
+
 /*
  * index_beginscan - start a scan of an index with amgettuple
  *
@@ -333,6 +418,8 @@ index_beginscan_internal(Relation indexRelation,
 	/* Initialize information for parallel scan. */
 	scan->parallel_scan = pscan;
 	scan->xs_temp_snap = temp_snap;
+	scan->index_done = false;
+	scan->tid_queue = NULL;
 
 	return scan;
 }
@@ -364,8 +451,12 @@ index_rescan(IndexScanDesc scan,
 	if (scan->xs_heapfetch)
 		table_index_fetch_reset(scan->xs_heapfetch);
 
+	scan->index_done = false;
+
 	scan->kill_prior_tuple = false; /* for safety */
 	scan->xs_heap_continue = false;
+	if (scan->tid_queue)
+		tid_queue_reset(scan->tid_queue);
 
 	scan->indexRelation->rd_indam->amrescan(scan, keys, nkeys,
 											orderbys, norderbys);
@@ -384,9 +475,16 @@ index_endscan(IndexScanDesc scan)
 	/* Release resources (like buffer pins) from table accesses */
 	if (scan->xs_heapfetch)
 	{
+		if (scan->xs_heapfetch->pgsr)
+			pg_streaming_read_free(scan->xs_heapfetch->pgsr);
+		scan->xs_heapfetch->pgsr = NULL;
 		table_index_fetch_end(scan->xs_heapfetch);
 		scan->xs_heapfetch = NULL;
 	}
+
+	if (scan->tid_queue)
+		pfree(scan->tid_queue);
+	scan->tid_queue = NULL;
 
 	/* End the AM's scan */
 	scan->indexRelation->rd_indam->amendscan(scan);
@@ -530,6 +628,9 @@ index_parallelrescan(IndexScanDesc scan)
 	if (scan->xs_heapfetch)
 		table_index_fetch_reset(scan->xs_heapfetch);
 
+	if (scan->tid_queue)
+		tid_queue_reset(scan->tid_queue);
+
 	/* amparallelrescan is optional; assume no-op if not provided by AM */
 	if (scan->indexRelation->rd_indam->amparallelrescan != NULL)
 		scan->indexRelation->rd_indam->amparallelrescan(scan);
@@ -603,6 +704,7 @@ index_getnext_tid(IndexScanDesc scan, ScanDirection direction)
 		if (scan->xs_heapfetch)
 			table_index_fetch_reset(scan->xs_heapfetch);
 
+		scan->index_done = true;
 		return NULL;
 	}
 	Assert(ItemPointerIsValid(&scan->xs_heaptid));
@@ -651,7 +753,7 @@ index_fetch_heap(IndexScanDesc scan, TupleTableSlot *slot)
 	 * recovery because it may violate MVCC to do so.  See comments in
 	 * RelationGetIndexScan().
 	 */
-	if (!scan->xactStartedInRecovery)
+	if (!scan->xactStartedInRecovery && !scan->xs_heapfetch->pgsr)
 		scan->kill_prior_tuple = all_dead;
 
 	return found;

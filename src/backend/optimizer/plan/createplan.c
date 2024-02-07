@@ -4719,6 +4719,7 @@ create_mergejoin_plan(PlannerInfo *root,
 
 	/* Costs of sort and material steps are included in path cost already */
 	copy_generic_path_info(&join_plan->join.plan, &best_path->jpath.path);
+	root->allow_prefetch = false;
 
 	return join_plan;
 }

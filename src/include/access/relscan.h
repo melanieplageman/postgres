@@ -18,6 +18,7 @@
 #include "access/itup.h"
 #include "port/atomics.h"
 #include "storage/buf.h"
+#include "storage/streaming_read.h"
 #include "storage/spin.h"
 #include "utils/relcache.h"
 
@@ -104,7 +105,15 @@ typedef struct ParallelBlockTableScanWorkerData *ParallelBlockTableScanWorker;
 typedef struct IndexFetchTableData
 {
 	Relation	rel;
+	PgStreamingRead *pgsr;
+
+	ItemPointerData tid;
+	bool		recheck;
+	IndexTuple	itup;
+	HeapTuple	htup;
 } IndexFetchTableData;
+
+typedef struct TIDQueue TIDQueue;
 
 /*
  * We use the same IndexScanDescData structure for both amgettuple-based
@@ -148,6 +157,8 @@ typedef struct IndexScanDescData
 	bool		xs_heap_continue;	/* T if must keep walking, potential
 									 * further results */
 	IndexFetchTableData *xs_heapfetch;
+	TIDQueue   *tid_queue;
+	bool		index_done;
 
 	bool		xs_recheck;		/* T means scan keys must be rechecked */
 

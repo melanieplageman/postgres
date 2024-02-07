@@ -203,6 +203,7 @@ struct PlannerInfo
 
 	/* 1 at the outermost Query */
 	Index		query_level;
+	bool		allow_prefetch;
 
 	/* NULL at outermost Query */
 	PlannerInfo *parent_root pg_node_attr(read_write_ignore);

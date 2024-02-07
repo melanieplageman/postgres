@@ -125,12 +125,71 @@ IndexNext(IndexScanState *node)
 						 node->iss_OrderByKeys, node->iss_NumOrderByKeys);
 	}
 
+	if (!scandesc->tid_queue)
+	{
+		/* Fall back to a queue size of 1 for now */
+		int			queue_size = 1;
+
+		if (estate->es_use_prefetching && ScanDirectionIsForward(direction))
+			queue_size = TID_QUEUE_SIZE;
+		scandesc->tid_queue = tid_queue_alloc(queue_size);
+		index_pgsr_alloc(scandesc);
+	}
+
 	/*
 	 * ok, now that we have what we need, fetch the next tuple.
 	 */
-	while (index_getnext_slot(scandesc, direction, slot))
+	for (;;)
 	{
+		ItemPointerData last_tid = scandesc->xs_heaptid;
+
+		/*
+		 * If we haven't exhausted TIDs from the index, then fill the queue
+		 * with TIDs from the index until the queue is full. Mark the index as
+		 * exhausted if we reach the end of it.
+		 */
+		if (!scandesc->index_done)
+		{
+			while (!TID_QUEUE_FULL(scandesc->tid_queue))
+			{
+				ItemPointer tid;
+
+				if ((tid = index_getnext_tid(scandesc, direction)) == NULL)
+				{
+					scandesc->index_done = true;
+					break;
+				}
+
+				index_tid_enqueue(scandesc->tid_queue, tid, scandesc->xs_recheck,
+								  NULL, NULL);
+			}
+		}
+
+		if (scandesc->xs_heap_continue)
+			scandesc->xs_heaptid = last_tid;
+
+		/*
+		 * index_fetch_heap() returns false when either the tuple isn't
+		 * visible or when there's no more to read
+		 */
+		if (!index_fetch_heap(scandesc, slot))
+		{
+			if (ItemPointerIsValid(&scandesc->xs_heaptid))
+				continue;
+
+			if (!scandesc->index_done)
+				continue;
+
+			if (scandesc->xs_heap_continue)
+				continue;
+
+			break;
+		}
+
 		CHECK_FOR_INTERRUPTS();
+
+		scandesc->xs_recheck = scandesc->xs_heapfetch->recheck;
+		scandesc->xs_heaptid = scandesc->xs_heapfetch->tid;
 
 		/*
 		 * If the index was lossy, we have to recheck the index quals using

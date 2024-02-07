@@ -1652,6 +1652,10 @@ ExecutePlan(EState *estate,
 	if (!execute_once)
 		use_parallel_mode = false;
 
+	estate->es_use_prefetching = execute_once;
+	if (!planstate->plan->allow_prefetch)
+		estate->es_use_prefetching = false;
+
 	estate->es_use_parallel_mode = use_parallel_mode;
 	if (use_parallel_mode)
 		EnterParallelMode();

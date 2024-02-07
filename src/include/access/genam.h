@@ -14,6 +14,7 @@
 #ifndef GENAM_H
 #define GENAM_H
 
+#include "access/relscan.h"
 #include "access/sdir.h"
 #include "access/skey.h"
 #include "nodes/tidbitmap.h"
@@ -23,6 +24,22 @@
 
 /* We don't want this file to depend on execnodes.h. */
 struct IndexInfo;
+
+typedef struct TIDQueueItem
+{
+	ItemPointerData tid;
+	bool		recheck;
+	IndexTuple	itup;
+	HeapTuple	htup;
+} TIDQueueItem;
+
+typedef struct TIDQueue
+{
+	uint64		head;
+	uint64		tail;
+	int			size;
+	TIDQueueItem data[FLEXIBLE_ARRAY_MEMBER /* size */ ];
+} TIDQueue;
 
 /*
  * Struct for statistics returned by ambuild
@@ -175,6 +192,30 @@ extern IndexScanDesc index_beginscan_parallel(Relation heaprel,
 											  ParallelIndexScanDesc pscan);
 extern ItemPointer index_getnext_tid(IndexScanDesc scan,
 									 ScanDirection direction);
+
+extern void index_pgsr_alloc(IndexScanDesc scan);
+
+extern void tid_queue_reset(TIDQueue *q);
+
+extern void index_tid_enqueue(TIDQueue *tid_queue, ItemPointer tid, bool recheck,
+							  HeapTuple htup, IndexTuple itup);
+
+#define TID_QUEUE_SIZE 6
+
+extern TIDQueue *tid_queue_alloc(int size);
+
+static inline bool
+TID_QUEUE_FULL(TIDQueue *q)
+{
+	return q->tail - q->head == q->size;
+}
+
+static inline bool
+TID_QUEUE_EMPTY(TIDQueue *q)
+{
+	return q->head == q->tail;
+}
+
 struct TupleTableSlot;
 extern bool index_fetch_heap(IndexScanDesc scan, struct TupleTableSlot *slot);
 extern bool index_getnext_slot(IndexScanDesc scan, ScanDirection direction,

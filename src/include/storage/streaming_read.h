@@ -42,4 +42,6 @@ extern void pg_streaming_read_prefetch(PgStreamingRead *pgsr);
 extern Buffer pg_streaming_read_buffer_get_next(PgStreamingRead *pgsr, void **per_buffer_private);
 extern void pg_streaming_read_free(PgStreamingRead *pgsr);
 
+extern void pg_streaming_read_set_resumable(PgStreamingRead *pgsr);
+
 #endif

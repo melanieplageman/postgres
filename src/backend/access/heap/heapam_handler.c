@@ -108,6 +108,12 @@ heapam_index_fetch_end(IndexFetchTableData *scan)
 	pfree(hscan);
 }
 
+/*
+ * For those using the streaming read user, tid is an output parameter set with
+ * the latest TID obtained from the streaming read API. For non-streaming read
+ * users, tid is an input parameter and contains the next block to be read from
+ * the heap.
+ */
 static bool
 heapam_index_fetch_tuple(struct IndexFetchTableData *scan,
 						 ItemPointer tid,
@@ -127,9 +133,52 @@ heapam_index_fetch_tuple(struct IndexFetchTableData *scan,
 		/* Switch to correct buffer if we don't have it already */
 		Buffer		prev_buf = hscan->xs_cbuf;
 
-		hscan->xs_cbuf = ReleaseAndReadBuffer(hscan->xs_cbuf,
-											  hscan->xs_base.rel,
-											  ItemPointerGetBlockNumber(tid));
+		if (scan->pgsr)
+		{
+			TIDQueueItem *result;
+
+			if (BufferIsValid(hscan->xs_cbuf))
+				ReleaseBuffer(hscan->xs_cbuf);
+
+			hscan->xs_cbuf = pg_streaming_read_buffer_get_next(scan->pgsr, (void **) &result);
+			if (!BufferIsValid(hscan->xs_cbuf))
+			{
+				/*
+				 * Invalidate the item pointer to allow the caller to
+				 * distinguish between index_fetch_heap() returning false
+				 * because the tuple is not visible and because the streaming
+				 * read callback ran out of queue items.
+				 */
+				ItemPointerSetInvalid(tid);
+				return false;
+			}
+
+			/* Set this for use below */
+			*tid = result->tid;
+
+			scan->tid = result->tid;
+			scan->recheck = result->recheck;
+
+			if (scan->itup)
+				pfree(scan->itup);
+			scan->itup = NULL;
+
+			if (scan->htup)
+				pfree(scan->htup);
+			scan->htup = NULL;
+
+			if (result->itup)
+				scan->itup = CopyIndexTuple(result->itup);
+			if (result->htup)
+				scan->htup = heap_copytuple(result->htup);
+		}
+		else
+		{
+			hscan->xs_cbuf = ReleaseAndReadBuffer(hscan->xs_cbuf,
+												  hscan->xs_base.rel,
+												  ItemPointerGetBlockNumber(tid));
+		}
+
 
 		/*
 		 * Prune page, but only if we weren't already on this page

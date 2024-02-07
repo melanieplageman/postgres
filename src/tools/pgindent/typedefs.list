@@ -2726,6 +2726,8 @@ TBMSharedIteratorState
 TBMStatus
 TBlockState
 TIDBitmap
+TIDQueue
+TIDQueueItem
 TM_FailureData
 TM_IndexDelete
 TM_IndexDeleteOp

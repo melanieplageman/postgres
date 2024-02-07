@@ -113,61 +113,109 @@ IndexOnlyNext(IndexOnlyScanState *node)
 						 node->ioss_NumOrderByKeys);
 	}
 
+	if (!scandesc->tid_queue)
+	{
+		/* Fall back to a queue size of 1 for now */
+		int			queue_size = 1;
+
+		if (estate->es_use_prefetching && ScanDirectionIsForward(direction))
+			queue_size = TID_QUEUE_SIZE;
+		scandesc->tid_queue = tid_queue_alloc(queue_size);
+		index_pgsr_alloc(scandesc);
+	}
+
 	/*
 	 * OK, now that we have what we need, fetch the next tuple.
 	 */
-	while ((tid = index_getnext_tid(scandesc, direction)) != NULL)
+	for (;;)
 	{
-		bool		tuple_from_heap = false;
+		bool		tuple_from_heap = true;
 
 		CHECK_FOR_INTERRUPTS();
 
-		/*
-		 * We can skip the heap fetch if the TID references a heap page on
-		 * which all tuples are known visible to everybody.  In any case,
-		 * we'll use the index tuple not the heap tuple as the data source.
-		 *
-		 * Note on Memory Ordering Effects: visibilitymap_get_status does not
-		 * lock the visibility map buffer, and therefore the result we read
-		 * here could be slightly stale.  However, it can't be stale enough to
-		 * matter.
-		 *
-		 * We need to detect clearing a VM bit due to an insert right away,
-		 * because the tuple is present in the index page but not visible. The
-		 * reading of the TID by this scan (using a shared lock on the index
-		 * buffer) is serialized with the insert of the TID into the index
-		 * (using an exclusive lock on the index buffer). Because the VM bit
-		 * is cleared before updating the index, and locking/unlocking of the
-		 * index page acts as a full memory barrier, we are sure to see the
-		 * cleared bit if we see a recently-inserted TID.
-		 *
-		 * Deletes do not update the index page (only VACUUM will clear out
-		 * the TID), so the clearing of the VM bit by a delete is not
-		 * serialized with this test below, and we may see a value that is
-		 * significantly stale. However, we don't care about the delete right
-		 * away, because the tuple is still visible until the deleting
-		 * transaction commits or the statement ends (if it's our
-		 * transaction). In either case, the lock on the VM buffer will have
-		 * been released (acting as a write barrier) after clearing the bit.
-		 * And for us to have a snapshot that includes the deleting
-		 * transaction (making the tuple invisible), we must have acquired
-		 * ProcArrayLock after that time, acting as a read barrier.
-		 *
-		 * It's worth going through this complexity to avoid needing to lock
-		 * the VM buffer, which could cause significant contention.
-		 */
-		if (!VM_ALL_VISIBLE(scandesc->heapRelation,
-							ItemPointerGetBlockNumber(tid),
-							&node->ioss_VMBuffer))
+		if (!scandesc->index_done)
+		{
+			while (!TID_QUEUE_FULL(scandesc->tid_queue))
+			{
+				if ((tid = index_getnext_tid(scandesc, direction)) == NULL)
+				{
+					scandesc->index_done = true;
+					break;
+				}
+
+				/*
+				 * We can skip the heap fetch if the TID references a heap
+				 * page on which all tuples are known visible to everybody. In
+				 * any case, we'll use the index tuple not the heap tuple as
+				 * the data source.
+				 *
+				 * Note on Memory Ordering Effects: visibilitymap_get_status
+				 * does not lock the visibility map buffer, and therefore the
+				 * result we read here could be slightly stale.  However, it
+				 * can't be stale enough to matter.
+				 *
+				 * We need to detect clearing a VM bit due to an insert right
+				 * away, because the tuple is present in the index page but
+				 * not visible. The reading of the TID by this scan (using a
+				 * shared lock on the index buffer) is serialized with the
+				 * insert of the TID into the index (using an exclusive lock
+				 * on the index buffer). Because the VM bit is cleared before
+				 * updating the index, and locking/unlocking of the index page
+				 * acts as a full memory barrier, we are sure to see the
+				 * cleared bit if we see a recently-inserted TID.
+				 *
+				 * Deletes do not update the index page (only VACUUM will
+				 * clear out the TID), so the clearing of the VM bit by a
+				 * delete is not serialized with this test below, and we may
+				 * see a value that is significantly stale. However, we don't
+				 * care about the delete right away, because the tuple is
+				 * still visible until the deleting transaction commits or the
+				 * statement ends (if it's our transaction). In either case,
+				 * the lock on the VM buffer will have been released (acting
+				 * as a write barrier) after clearing the bit. And for us to
+				 * have a snapshot that includes the deleting transaction
+				 * (making the tuple invisible), we must have acquired
+				 * ProcArrayLock after that time, acting as a read barrier.
+				 *
+				 * It's worth going through this complexity to avoid needing
+				 * to lock the VM buffer, which could cause significant
+				 * contention.
+				 */
+
+				if (VM_ALL_VISIBLE(scandesc->heapRelation,
+								   ItemPointerGetBlockNumber(tid),
+								   &node->ioss_VMBuffer))
+				{
+					tuple_from_heap = false;
+					break;
+				}
+
+				index_tid_enqueue(scandesc->tid_queue, tid, scandesc->xs_recheck,
+								  scandesc->xs_hitup, scandesc->xs_itup);
+			}
+		}
+
+		if (tuple_from_heap)
 		{
 			/*
 			 * Rats, we have to visit the heap to check visibility.
 			 */
 			InstrCountTuples2(node, 1);
-			if (!index_fetch_heap(scandesc, node->ioss_TableSlot))
-				continue;		/* no visible tuple, try next index entry */
 
-			ExecClearTuple(node->ioss_TableSlot);
+			if (!index_fetch_heap(scandesc, node->ioss_TableSlot))
+			{
+				/*
+				 * Either there is no visible tuple or the streaming read ran
+				 * out of queue items and it is time to add more.
+				 */
+				if (ItemPointerIsValid(&scandesc->xs_heaptid))
+					continue;
+
+				if (!scandesc->index_done)
+					continue;
+
+				break;
+			}
 
 			/*
 			 * Only MVCC snapshots are supported here, so there should be no
@@ -185,15 +233,32 @@ IndexOnlyNext(IndexOnlyScanState *node)
 			 * entry might require a visit to the same heap page.
 			 */
 
-			tuple_from_heap = true;
+			/*
+			 * If we visit the underlying table, we need to reset the
+			 * IndexScanDesc's fields to match the per tuple state returned by
+			 * the streaming read API. The most recent index tuple fetched
+			 * will not necessarily match the current TID being processed
+			 * after returning from index_fetch_heap().
+			 */
+			scandesc->xs_recheck = scandesc->xs_heapfetch->recheck;
+			scandesc->xs_heaptid = scandesc->xs_heapfetch->tid;
+
+			scandesc->xs_hitup = scandesc->xs_heapfetch->htup;
+			scandesc->xs_itup = scandesc->xs_heapfetch->itup;
 		}
 
 		/*
 		 * Fill the scan tuple slot with data from the index.  This might be
-		 * provided in either HeapTuple or IndexTuple format.  Conceivably an
+		 * provided in either HeapTuple or IndexTuple format. Conceivably an
 		 * index AM might fill both fields, in which case we prefer the heap
-		 * format, since it's probably a bit cheaper to fill a slot from.
+		 * format, since it's probably a bit cheaper to fill a slot from. As
+		 * soon as we encounter a tuple from an all visible block, we stop
+		 * prefetching and yield the tuple. As such, we can use the IndexTuple
+		 * and HeapTuple that the index AM filled in the scan descriptor
+		 * instead of having to get them from the per tuple state yielded by
+		 * the streaming read API.
 		 */
+		ExecClearTuple(node->ioss_TableSlot);
 		if (scandesc->xs_hitup)
 		{
 			/*

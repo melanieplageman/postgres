@@ -169,6 +169,7 @@ typedef struct Plan
 	 */
 	Bitmapset  *extParam;
 	Bitmapset  *allParam;
+	bool		allow_prefetch;
 } Plan;
 
 /* ----------------
