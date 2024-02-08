@@ -27,6 +27,7 @@
 #include "access/syncscan.h"
 #include "access/tableam.h"
 #include "access/tsmapi.h"
+#include "access/visibilitymap.h"
 #include "access/xact.h"
 #include "catalog/catalog.h"
 #include "catalog/index.h"
@@ -2113,27 +2114,66 @@ heapam_estimate_rel_size(Relation rel, int32 *attr_widths,
 
 static bool
 heapam_scan_bitmap_next_block(TableScanDesc scan,
-							  TBMIterateResult *tbmres)
+							  bool *recheck, BlockNumber *blockno)
 {
 	HeapScanDesc hscan = (HeapScanDesc) scan;
-	BlockNumber block = tbmres->blockno;
+	BlockNumber block;
 	Buffer		buffer;
 	Snapshot	snapshot;
 	int			ntup;
+	TBMIterateResult *tbmres;
 
 	hscan->rs_cindex = 0;
 	hscan->rs_ntuples = 0;
 
+	*blockno = InvalidBlockNumber;
+	*recheck = true;
+
+	do
+	{
+		if (scan->shared_tbmiterator)
+			tbmres = tbm_shared_iterate(scan->shared_tbmiterator);
+		else
+			tbmres = tbm_iterate(scan->tbmiterator);
+
+		if (tbmres == NULL)
+		{
+			/* no more entries in the bitmap */
+			Assert(hscan->empty_tuples == 0);
+			return false;
+		}
+
+		/*
+		 * Ignore any claimed entries past what we think is the end of the
+		 * relation. It may have been extended after the start of our scan (we
+		 * only hold an AccessShareLock, and it could be inserts from this
+		 * backend).  We don't take this optimization in SERIALIZABLE
+		 * isolation though, as we need to examine all invisible tuples
+		 * reachable by the index.
+		 */
+	} while (!IsolationIsSerializable() && tbmres->blockno >= hscan->rs_nblocks);
+
+	/* Got a valid block */
+	*blockno = tbmres->blockno;
+	*recheck = tbmres->recheck;
+
 	/*
-	 * Ignore any claimed entries past what we think is the end of the
-	 * relation. It may have been extended after the start of our scan (we
-	 * only hold an AccessShareLock, and it could be inserts from this
-	 * backend).  We don't take this optimization in SERIALIZABLE isolation
-	 * though, as we need to examine all invisible tuples reachable by the
-	 * index.
+	 * We can skip fetching the heap page if we don't need any fields from the
+	 * heap, and the bitmap entries don't need rechecking, and all tuples on
+	 * the page are visible to our transaction.
 	 */
-	if (!IsolationIsSerializable() && block >= hscan->rs_nblocks)
-		return false;
+	if (scan->rs_flags & SO_CAN_SKIP_FETCH &&
+		!tbmres->recheck &&
+		VM_ALL_VISIBLE(scan->rs_rd, tbmres->blockno, &hscan->vmbuffer))
+	{
+		/* can't be lossy in the skip_fetch case */
+		Assert(tbmres->ntuples >= 0);
+
+		hscan->empty_tuples += tbmres->ntuples;
+		return true;
+	}
+
+	block = tbmres->blockno;
 
 	/*
 	 * Acquire pin on the target heap page, trading in any pin we held before.
@@ -2222,19 +2262,33 @@ heapam_scan_bitmap_next_block(TableScanDesc scan,
 
 	Assert(ntup <= MaxHeapTuplesPerPage);
 	hscan->rs_ntuples = ntup;
+	/* Only count exact and lossy pages with visible tuples */
+	if (ntup > 0)
+	{
+		if (tbmres->ntuples >= 0)
+			scan->exact_pages++;
+		else
+			scan->lossy_pages++;
+	}
 
-	return ntup > 0;
+	return true;
 }
 
 static bool
 heapam_scan_bitmap_next_tuple(TableScanDesc scan,
-							  TBMIterateResult *tbmres,
 							  TupleTableSlot *slot)
 {
 	HeapScanDesc hscan = (HeapScanDesc) scan;
 	OffsetNumber targoffset;
 	Page		page;
 	ItemId		lp;
+
+	if (hscan->empty_tuples > 0)
+	{
+		ExecStoreAllNullTuple(slot);
+		hscan->empty_tuples--;
+		return true;
+	}
 
 	/*
 	 * Out of range?  If so, nothing more to look at on this page

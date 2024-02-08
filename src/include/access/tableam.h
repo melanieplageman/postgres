@@ -62,6 +62,7 @@ typedef enum ScanOptions
 
 	/* unregister snapshot at scan end? */
 	SO_TEMP_SNAPSHOT = 1 << 9,
+	SO_CAN_SKIP_FETCH = 1 << 10,
 }			ScanOptions;
 
 /*
@@ -804,7 +805,7 @@ typedef struct TableAmRoutine
 	 * scan_bitmap_next_tuple need to exist, or neither.
 	 */
 	bool		(*scan_bitmap_next_block) (TableScanDesc scan,
-										   struct TBMIterateResult *tbmres);
+										   bool *recheck, BlockNumber *blockno);
 
 	/*
 	 * Fetch the next tuple of a bitmap table scan into `slot` and return true
@@ -818,7 +819,6 @@ typedef struct TableAmRoutine
 	 * scan_bitmap_next_tuple need to exist, or neither.
 	 */
 	bool		(*scan_bitmap_next_tuple) (TableScanDesc scan,
-										   struct TBMIterateResult *tbmres,
 										   TupleTableSlot *slot);
 
 	/*
@@ -937,18 +937,30 @@ table_beginscan_strat(Relation rel, Snapshot snapshot,
 }
 
 /*
+ * Update snapshot used by the scan.
+ */
+extern void table_scan_update_snapshot(TableScanDesc scan, Snapshot snapshot);
+
+/*
  * table_beginscan_bm is an alternative entry point for setting up a
  * TableScanDesc for a bitmap heap scan.  Although that scan technology is
  * really quite unlike a standard seqscan, there is just enough commonality to
  * make it worth using the same data structure.
  */
 static inline TableScanDesc
-table_beginscan_bm(Relation rel, Snapshot snapshot,
-				   int nkeys, struct ScanKeyData *key)
+table_beginscan_bm(Relation rel, Snapshot snapshot, Snapshot worker_snapshot,
+				   int nkeys, struct ScanKeyData *key, bool can_skip_fetch)
 {
+	TableScanDesc result;
 	uint32		flags = SO_TYPE_BITMAPSCAN | SO_ALLOW_PAGEMODE;
 
-	return rel->rd_tableam->scan_begin(rel, snapshot, nkeys, key, NULL, flags);
+	if (can_skip_fetch)
+		flags |= SO_CAN_SKIP_FETCH;
+
+	result = rel->rd_tableam->scan_begin(rel, snapshot, nkeys, key, NULL, flags);
+	if (worker_snapshot)
+		table_scan_update_snapshot(result, worker_snapshot);
+	return result;
 }
 
 /*
@@ -1037,11 +1049,6 @@ table_rescan_set_params(TableScanDesc scan, struct ScanKeyData *key,
 										 allow_strat, allow_sync,
 										 allow_pagemode);
 }
-
-/*
- * Update snapshot used by the scan.
- */
-extern void table_scan_update_snapshot(TableScanDesc scan, Snapshot snapshot);
 
 /*
  * Return next tuple from `scan`, store in slot.
@@ -1956,7 +1963,7 @@ table_relation_estimate_size(Relation rel, int32 *attr_widths,
  */
 static inline bool
 table_scan_bitmap_next_block(TableScanDesc scan,
-							 struct TBMIterateResult *tbmres)
+							 bool *recheck, BlockNumber *blockno)
 {
 	/*
 	 * We don't expect direct calls to table_scan_bitmap_next_block with valid
@@ -1966,8 +1973,7 @@ table_scan_bitmap_next_block(TableScanDesc scan,
 	if (unlikely(TransactionIdIsValid(CheckXidAlive) && !bsysscan))
 		elog(ERROR, "unexpected table_scan_bitmap_next_block call during logical decoding");
 
-	return scan->rs_rd->rd_tableam->scan_bitmap_next_block(scan,
-														   tbmres);
+	return scan->rs_rd->rd_tableam->scan_bitmap_next_block(scan, recheck, blockno);
 }
 
 /*
@@ -1980,7 +1986,6 @@ table_scan_bitmap_next_block(TableScanDesc scan,
  */
 static inline bool
 table_scan_bitmap_next_tuple(TableScanDesc scan,
-							 struct TBMIterateResult *tbmres,
 							 TupleTableSlot *slot)
 {
 	/*
@@ -1992,7 +1997,6 @@ table_scan_bitmap_next_tuple(TableScanDesc scan,
 		elog(ERROR, "unexpected table_scan_bitmap_next_tuple call during logical decoding");
 
 	return scan->rs_rd->rd_tableam->scan_bitmap_next_tuple(scan,
-														   tbmres,
 														   slot);
 }
 
