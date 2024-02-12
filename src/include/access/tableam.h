@@ -944,9 +944,10 @@ table_beginscan_strat(Relation rel, Snapshot snapshot,
  */
 static inline TableScanDesc
 table_beginscan_bm(Relation rel, Snapshot snapshot,
-				   int nkeys, struct ScanKeyData *key)
+				   int nkeys, struct ScanKeyData *key,
+				   uint32 extra_flags)
 {
-	uint32		flags = SO_TYPE_BITMAPSCAN | SO_ALLOW_PAGEMODE;
+	uint32		flags = SO_TYPE_BITMAPSCAN | SO_ALLOW_PAGEMODE | extra_flags;
 
 	return rel->rd_tableam->scan_begin(rel, snapshot, nkeys, key, NULL, flags);
 }
@@ -1037,11 +1038,6 @@ table_rescan_set_params(TableScanDesc scan, struct ScanKeyData *key,
 										 allow_strat, allow_sync,
 										 allow_pagemode);
 }
-
-/*
- * Update snapshot used by the scan.
- */
-extern void table_scan_update_snapshot(TableScanDesc scan, Snapshot snapshot);
 
 /*
  * Return next tuple from `scan`, store in slot.
