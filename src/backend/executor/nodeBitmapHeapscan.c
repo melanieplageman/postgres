@@ -58,7 +58,7 @@ static inline void BitmapAdjustPrefetchIterator(BitmapHeapScanState *node,
 												TBMIterateResult *tbmres);
 static inline void BitmapAdjustPrefetchTarget(BitmapHeapScanState *node);
 static inline void BitmapPrefetch(BitmapHeapScanState *node,
-								  TableScanDesc scan);
+								  TableScanDesc scan, bool can_skip_fetch);
 static bool BitmapShouldInitializeSharedState(ParallelBitmapHeapState *pstate);
 
 
@@ -80,6 +80,17 @@ BitmapHeapNext(BitmapHeapScanState *node)
 	TupleTableSlot *slot;
 	ParallelBitmapHeapState *pstate = node->pstate;
 	dsa_area   *dsa = node->ss.ps.state->es_query_dsa;
+	bool		can_skip_fetch;
+
+	/*
+	 * We can potentially skip fetching heap pages if we do not need any
+	 * columns of the table, either for checking non-indexable quals or for
+	 * returning data.  This test is a bit simplistic, as it checks the
+	 * stronger condition that there's no qual or return tlist at all.  But in
+	 * most cases it's probably not worth working harder than that.
+	 */
+	can_skip_fetch = (node->ss.ps.plan->qual == NIL &&
+					  node->ss.ps.plan->targetlist == NIL);
 
 	/*
 	 * extract necessary information from index scan node
@@ -215,7 +226,7 @@ BitmapHeapNext(BitmapHeapScanState *node)
 			 * XXX: It's a layering violation that we do these checks above
 			 * tableam, they should probably moved below it at some point.
 			 */
-			skip_fetch = (node->can_skip_fetch &&
+			skip_fetch = (can_skip_fetch &&
 						  !tbmres->recheck &&
 						  VM_ALL_VISIBLE(node->ss.ss_currentRelation,
 										 tbmres->blockno,
@@ -284,7 +295,7 @@ BitmapHeapNext(BitmapHeapScanState *node)
 		 * XXX: It's a layering violation that we do these checks above
 		 * tableam, they should probably moved below it at some point.
 		 */
-		BitmapPrefetch(node, scan);
+		BitmapPrefetch(node, scan, can_skip_fetch);
 
 		if (node->return_empty_tuples > 0)
 		{
@@ -461,7 +472,8 @@ BitmapAdjustPrefetchTarget(BitmapHeapScanState *node)
  * BitmapPrefetch - Prefetch, if prefetch_pages are behind prefetch_target
  */
 static inline void
-BitmapPrefetch(BitmapHeapScanState *node, TableScanDesc scan)
+BitmapPrefetch(BitmapHeapScanState *node, TableScanDesc scan,
+			   bool can_skip_fetch)
 {
 #ifdef USE_PREFETCH
 	ParallelBitmapHeapState *pstate = node->pstate;
@@ -497,7 +509,7 @@ BitmapPrefetch(BitmapHeapScanState *node, TableScanDesc scan)
 				 * it did for the current heap page; which is not a certainty
 				 * but is true in many cases.
 				 */
-				skip_fetch = (node->can_skip_fetch &&
+				skip_fetch = (can_skip_fetch &&
 							  (node->tbmres ? !node->tbmres->recheck : false) &&
 							  VM_ALL_VISIBLE(node->ss.ss_currentRelation,
 											 tbmpre->blockno,
@@ -548,7 +560,7 @@ BitmapPrefetch(BitmapHeapScanState *node, TableScanDesc scan)
 				}
 
 				/* As above, skip prefetch if we expect not to need page */
-				skip_fetch = (node->can_skip_fetch &&
+				skip_fetch = (can_skip_fetch &&
 							  (node->tbmres ? !node->tbmres->recheck : false) &&
 							  VM_ALL_VISIBLE(node->ss.ss_currentRelation,
 											 tbmpre->blockno,
@@ -729,16 +741,6 @@ ExecInitBitmapHeapScan(BitmapHeapScan *node, EState *estate, int eflags)
 	scanstate->shared_tbmiterator = NULL;
 	scanstate->shared_prefetch_iterator = NULL;
 	scanstate->pstate = NULL;
-
-	/*
-	 * We can potentially skip fetching heap pages if we do not need any
-	 * columns of the table, either for checking non-indexable quals or for
-	 * returning data.  This test is a bit simplistic, as it checks the
-	 * stronger condition that there's no qual or return tlist at all.  But in
-	 * most cases it's probably not worth working harder than that.
-	 */
-	scanstate->can_skip_fetch = (node->scan.plan.qual == NIL &&
-								 node->scan.plan.targetlist == NIL);
 
 	/*
 	 * Miscellaneous initialization
