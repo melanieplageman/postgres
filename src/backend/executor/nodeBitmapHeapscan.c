@@ -181,6 +181,34 @@ BitmapHeapNext(BitmapHeapScanState *node)
 			}
 #endif							/* USE_PREFETCH */
 		}
+
+		/*
+		 * If this is the first scan of the underlying table, create the table
+		 * scan descriptor and begin the scan.
+		 */
+		if (!scan)
+		{
+			Snapshot	snapshot = node->ss.ps.state->es_snapshot;
+			uint32		extra_flags = 0;
+
+			/*
+			 * Parallel workers must use the snapshot initialized by the
+			 * parallel leader.
+			 */
+			if (node->worker_snapshot)
+			{
+				snapshot = node->worker_snapshot;
+				extra_flags |= SO_TEMP_SNAPSHOT;
+			}
+
+			scan = node->ss.ss_currentScanDesc = table_beginscan_bm(
+																	node->ss.ss_currentRelation,
+																	snapshot,
+																	0,
+																	NULL,
+																	extra_flags);
+		}
+
 		node->initialized = true;
 	}
 
@@ -604,7 +632,8 @@ ExecReScanBitmapHeapScan(BitmapHeapScanState *node)
 	PlanState  *outerPlan = outerPlanState(node);
 
 	/* rescan to release any page pin */
-	table_rescan(node->ss.ss_currentScanDesc, NULL);
+	if (node->ss.ss_currentScanDesc)
+		table_rescan(node->ss.ss_currentScanDesc, NULL);
 
 	/* release bitmaps and buffers if any */
 	if (node->tbmiterator)
@@ -681,7 +710,9 @@ ExecEndBitmapHeapScan(BitmapHeapScanState *node)
 	/*
 	 * close heap scan
 	 */
-	table_endscan(scanDesc);
+	if (scanDesc)
+		table_endscan(scanDesc);
+
 }
 
 /* ----------------------------------------------------------------
@@ -739,6 +770,7 @@ ExecInitBitmapHeapScan(BitmapHeapScan *node, EState *estate, int eflags)
 	 */
 	scanstate->can_skip_fetch = (node->scan.plan.qual == NIL &&
 								 node->scan.plan.targetlist == NIL);
+	scanstate->worker_snapshot = NULL;
 
 	/*
 	 * Miscellaneous initialization
@@ -786,11 +818,6 @@ ExecInitBitmapHeapScan(BitmapHeapScan *node, EState *estate, int eflags)
 		get_tablespace_io_concurrency(currentRelation->rd_rel->reltablespace);
 
 	scanstate->ss.ss_currentRelation = currentRelation;
-
-	scanstate->ss.ss_currentScanDesc = table_beginscan_bm(currentRelation,
-														  estate->es_snapshot,
-														  0,
-														  NULL);
 
 	/*
 	 * all done.
@@ -930,13 +957,13 @@ ExecBitmapHeapInitializeWorker(BitmapHeapScanState *node,
 							   ParallelWorkerContext *pwcxt)
 {
 	ParallelBitmapHeapState *pstate;
-	Snapshot	snapshot;
 
 	Assert(node->ss.ps.state->es_query_dsa != NULL);
 
 	pstate = shm_toc_lookup(pwcxt->toc, node->ss.ps.plan->plan_node_id, false);
 	node->pstate = pstate;
 
-	snapshot = RestoreSnapshot(pstate->phs_snapshot_data);
-	table_scan_update_snapshot(node->ss.ss_currentScanDesc, snapshot);
+	node->worker_snapshot = RestoreSnapshot(pstate->phs_snapshot_data);
+	Assert(IsMVCCSnapshot(node->worker_snapshot));
+	RegisterSnapshot(node->worker_snapshot);
 }
