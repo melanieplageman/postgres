@@ -2324,7 +2324,6 @@ heapam_scan_bitmap_next_block(TableScanDesc scan,
 
 static bool
 heapam_scan_bitmap_next_tuple(TableScanDesc scan,
-							  TBMIterateResult *tbmres,
 							  TupleTableSlot *slot)
 {
 	HeapScanDesc hscan = (HeapScanDesc) scan;
