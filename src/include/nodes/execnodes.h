@@ -1726,6 +1726,7 @@ typedef struct ParallelBitmapHeapState
  *		shared_tbmiterator	   shared iterator
  *		shared_prefetch_iterator shared iterator for prefetching
  *		pstate			   shared state for parallel bitmap scan
+ *		worker_snapshot	   snapshot for parallel worker
  * ----------------
  */
 typedef struct BitmapHeapScanState
@@ -1750,6 +1751,7 @@ typedef struct BitmapHeapScanState
 	TBMSharedIterator *shared_tbmiterator;
 	TBMSharedIterator *shared_prefetch_iterator;
 	ParallelBitmapHeapState *pstate;
+	Snapshot	worker_snapshot;
 } BitmapHeapScanState;
 
 /* ----------------
