@@ -936,18 +936,27 @@ table_beginscan_strat(Relation rel, Snapshot snapshot,
 }
 
 /*
+ * Update snapshot used by the scan.
+ */
+extern void table_scan_update_snapshot(TableScanDesc scan, Snapshot snapshot);
+
+/*
  * table_beginscan_bm is an alternative entry point for setting up a
  * TableScanDesc for a bitmap heap scan.  Although that scan technology is
  * really quite unlike a standard seqscan, there is just enough commonality to
  * make it worth using the same data structure.
  */
 static inline TableScanDesc
-table_beginscan_bm(Relation rel, Snapshot snapshot,
+table_beginscan_bm(Relation rel, Snapshot snapshot, Snapshot worker_snapshot,
 				   int nkeys, struct ScanKeyData *key)
 {
+	TableScanDesc result;
 	uint32		flags = SO_TYPE_BITMAPSCAN | SO_ALLOW_PAGEMODE;
 
-	return rel->rd_tableam->scan_begin(rel, snapshot, nkeys, key, NULL, flags);
+	result = rel->rd_tableam->scan_begin(rel, snapshot, nkeys, key, NULL, flags);
+	if (worker_snapshot)
+		table_scan_update_snapshot(result, worker_snapshot);
+	return result;
 }
 
 /*
@@ -1036,11 +1045,6 @@ table_rescan_set_params(TableScanDesc scan, struct ScanKeyData *key,
 										 allow_strat, allow_sync,
 										 allow_pagemode);
 }
-
-/*
- * Update snapshot used by the scan.
- */
-extern void table_scan_update_snapshot(TableScanDesc scan, Snapshot snapshot);
 
 /*
  * Return next tuple from `scan`, store in slot.
