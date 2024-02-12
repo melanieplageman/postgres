@@ -818,7 +818,6 @@ typedef struct TableAmRoutine
 	 * scan_bitmap_next_tuple need to exist, or neither.
 	 */
 	bool		(*scan_bitmap_next_tuple) (TableScanDesc scan,
-										   struct TBMIterateResult *tbmres,
 										   TupleTableSlot *slot);
 
 	/*
@@ -1980,7 +1979,6 @@ table_scan_bitmap_next_block(TableScanDesc scan,
  */
 static inline bool
 table_scan_bitmap_next_tuple(TableScanDesc scan,
-							 struct TBMIterateResult *tbmres,
 							 TupleTableSlot *slot)
 {
 	/*
@@ -1992,7 +1990,6 @@ table_scan_bitmap_next_tuple(TableScanDesc scan,
 		elog(ERROR, "unexpected table_scan_bitmap_next_tuple call during logical decoding");
 
 	return scan->rs_rd->rd_tableam->scan_bitmap_next_tuple(scan,
-														   tbmres,
 														   slot);
 }
 
