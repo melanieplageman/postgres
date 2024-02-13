@@ -62,6 +62,13 @@ typedef enum ScanOptions
 
 	/* unregister snapshot at scan end? */
 	SO_TEMP_SNAPSHOT = 1 << 9,
+
+	/*
+	 * At the discretion of the table AM, bitmap table scans may be able to
+	 * skip fetching a block from the table if none of the table data is
+	 * needed.
+	 */
+	SO_CAN_SKIP_FETCH = 1 << 10,
 }			ScanOptions;
 
 /*
