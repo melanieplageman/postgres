@@ -74,8 +74,6 @@ BitmapHeapNext(BitmapHeapScanState *node)
 	ExprContext *econtext;
 	TableScanDesc scan;
 	TIDBitmap  *tbm;
-	TBMIterator *tbmiterator = NULL;
-	TBMSharedIterator *shared_tbmiterator = NULL;
 	TBMIterateResult *tbmres;
 	TupleTableSlot *slot;
 	ParallelBitmapHeapState *pstate = node->pstate;
@@ -88,10 +86,6 @@ BitmapHeapNext(BitmapHeapScanState *node)
 	slot = node->ss.ss_ScanTupleSlot;
 	scan = node->ss.ss_currentScanDesc;
 	tbm = node->tbm;
-	if (pstate == NULL)
-		tbmiterator = node->tbmiterator;
-	else
-		shared_tbmiterator = node->shared_tbmiterator;
 	tbmres = node->tbmres;
 
 	/*
@@ -108,6 +102,9 @@ BitmapHeapNext(BitmapHeapScanState *node)
 	 */
 	if (!node->initialized)
 	{
+		TBMIterator *tbmiterator = NULL;
+		TBMSharedIterator *shared_tbmiterator = NULL;
+
 		if (!pstate)
 		{
 			tbm = (TIDBitmap *) MultiExecProcNode(outerPlanState(node));
@@ -116,7 +113,7 @@ BitmapHeapNext(BitmapHeapScanState *node)
 				elog(ERROR, "unrecognized result from subplan");
 
 			node->tbm = tbm;
-			node->tbmiterator = tbmiterator = tbm_begin_iterate(tbm);
+			tbmiterator = tbm_begin_iterate(tbm);
 			node->tbmres = tbmres = NULL;
 
 #ifdef USE_PREFETCH
@@ -169,8 +166,7 @@ BitmapHeapNext(BitmapHeapScanState *node)
 			}
 
 			/* Allocate a private iterator and attach the shared state to it */
-			node->shared_tbmiterator = shared_tbmiterator =
-				tbm_attach_shared_iterate(dsa, pstate->tbmiterator);
+			shared_tbmiterator = tbm_attach_shared_iterate(dsa, pstate->tbmiterator);
 			node->tbmres = tbmres = NULL;
 
 #ifdef USE_PREFETCH
@@ -220,6 +216,8 @@ BitmapHeapNext(BitmapHeapScanState *node)
 																	extra_flags);
 		}
 
+		node->tbmiterator = tbmiterator;
+		node->shared_tbmiterator = shared_tbmiterator;
 		node->initialized = true;
 	}
 
@@ -235,9 +233,9 @@ BitmapHeapNext(BitmapHeapScanState *node)
 		if (tbmres == NULL)
 		{
 			if (!pstate)
-				node->tbmres = tbmres = tbm_iterate(tbmiterator);
+				node->tbmres = tbmres = tbm_iterate(node->tbmiterator);
 			else
-				node->tbmres = tbmres = tbm_shared_iterate(shared_tbmiterator);
+				node->tbmres = tbmres = tbm_shared_iterate(node->shared_tbmiterator);
 			if (tbmres == NULL)
 			{
 				/* no more entries in the bitmap */
