@@ -63,6 +63,13 @@ typedef enum ScanOptions
 
 	/* unregister snapshot at scan end? */
 	SO_TEMP_SNAPSHOT = 1 << 9,
+
+	/*
+	 * At the discretion of the table AM, bitmap table scans may be able to
+	 * skip fetching a block from the table if none of the table data is
+	 * needed. If table data may be needed, set SO_NEED_TUPLE.
+	 */
+	SO_NEED_TUPLE = 1 << 10,
 }			ScanOptions;
 
 /*
@@ -937,9 +944,9 @@ table_beginscan_strat(Relation rel, Snapshot snapshot,
  */
 static inline TableScanDesc
 table_beginscan_bm(Relation rel, Snapshot snapshot,
-				   int nkeys, struct ScanKeyData *key)
+				   int nkeys, struct ScanKeyData *key, uint32 extra_flags)
 {
-	uint32		flags = SO_TYPE_BITMAPSCAN | SO_ALLOW_PAGEMODE;
+	uint32		flags = SO_TYPE_BITMAPSCAN | SO_ALLOW_PAGEMODE | extra_flags;
 
 	return rel->rd_tableam->scan_begin(rel, snapshot, nkeys, key, NULL, flags);
 }
