@@ -521,7 +521,7 @@ BitmapPrefetch(BitmapHeapScanState *node, TableScanDesc scan,
 				 * but is true in many cases.
 				 */
 				skip_fetch = (can_skip_fetch &&
-							  (node->tbmres ? !node->tbmres->recheck : false) &&
+							  !tbmpre->recheck &&
 							  VM_ALL_VISIBLE(node->ss.ss_currentRelation,
 											 tbmpre->blockno,
 											 &node->pvmbuffer));
@@ -572,7 +572,7 @@ BitmapPrefetch(BitmapHeapScanState *node, TableScanDesc scan,
 
 				/* As above, skip prefetch if we expect not to need page */
 				skip_fetch = (can_skip_fetch &&
-							  (node->tbmres ? !node->tbmres->recheck : false) &&
+							  !tbmpre->recheck &&
 							  VM_ALL_VISIBLE(node->ss.ss_currentRelation,
 											 tbmpre->blockno,
 											 &node->pvmbuffer));
