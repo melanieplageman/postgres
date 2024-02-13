@@ -53,6 +53,8 @@
 #include "utils/spccache.h"
 
 static TupleTableSlot *BitmapHeapNext(BitmapHeapScanState *node);
+static inline void BitmapAccumCounters(BitmapHeapScanState *node,
+									   TableScanDesc scan);
 static inline void BitmapDoneInitializingSharedState(ParallelBitmapHeapState *pstate);
 static inline void BitmapAdjustPrefetchIterator(BitmapHeapScanState *node,
 												BlockNumber blockno);
@@ -234,11 +236,6 @@ BitmapHeapNext(BitmapHeapScanState *node)
 				continue;
 			}
 
-			if (tbmres->ntuples >= 0)
-				node->exact_pages++;
-			else
-				node->lossy_pages++;
-
 			/* Adjust the prefetch target */
 			BitmapAdjustPrefetchTarget(node);
 		}
@@ -315,7 +312,18 @@ BitmapHeapNext(BitmapHeapScanState *node)
 	/*
 	 * if we get here it means we are at the end of the scan..
 	 */
+	BitmapAccumCounters(node, scan);
 	return ExecClearTuple(slot);
+}
+
+static inline void
+BitmapAccumCounters(BitmapHeapScanState *node,
+					TableScanDesc scan)
+{
+	node->exact_pages += scan->exact_pages;
+	scan->exact_pages = 0;
+	node->lossy_pages += scan->lossy_pages;
+	scan->lossy_pages = 0;
 }
 
 /*

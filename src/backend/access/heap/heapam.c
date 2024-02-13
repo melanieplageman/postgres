@@ -957,6 +957,8 @@ heap_beginscan(Relation relation, Snapshot snapshot,
 	scan->rs_strategy = NULL;	/* set in initscan */
 	scan->vmbuffer = InvalidBuffer;
 	scan->empty_tuples = 0;
+	scan->rs_base.lossy_pages = 0;
+	scan->rs_base.exact_pages = 0;
 
 	/*
 	 * Disable page-at-a-time mode if it's not a MVCC-safe snapshot.

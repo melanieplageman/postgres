@@ -2242,6 +2242,15 @@ heapam_scan_bitmap_next_block(TableScanDesc scan,
 	Assert(ntup <= MaxHeapTuplesPerPage);
 	hscan->rs_ntuples = ntup;
 
+	/* Only count exact and lossy pages with visible tuples */
+	if (ntup > 0)
+	{
+		if (tbmres->ntuples >= 0)
+			scan->exact_pages++;
+		else
+			scan->lossy_pages++;
+	}
+
 	return ntup > 0;
 }
 
