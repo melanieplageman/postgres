@@ -959,6 +959,8 @@ heap_beginscan(Relation relation, Snapshot snapshot,
 	scan->empty_tuples = 0;
 	scan->rs_base.lossy_pages = 0;
 	scan->rs_base.exact_pages = 0;
+	scan->rs_base.shared_tbmiterator = NULL;
+	scan->rs_base.tbmiterator = NULL;
 
 	/*
 	 * Disable page-at-a-time mode if it's not a MVCC-safe snapshot.
@@ -1051,6 +1053,18 @@ heap_rescan(TableScanDesc sscan, ScanKey key, bool set_params,
 		ReleaseBuffer(scan->vmbuffer);
 	scan->vmbuffer = InvalidBuffer;
 
+	if (scan->rs_base.rs_flags & SO_TYPE_BITMAPSCAN)
+	{
+		if (scan->rs_base.shared_tbmiterator)
+			tbm_end_shared_iterate(scan->rs_base.shared_tbmiterator);
+
+		if (scan->rs_base.tbmiterator)
+			tbm_end_iterate(scan->rs_base.tbmiterator);
+	}
+
+	scan->rs_base.shared_tbmiterator = NULL;
+	scan->rs_base.tbmiterator = NULL;
+
 	/*
 	 * reinitialize scan descriptor
 	 */
@@ -1073,6 +1087,14 @@ heap_endscan(TableScanDesc sscan)
 	if (BufferIsValid(scan->vmbuffer))
 		ReleaseBuffer(scan->vmbuffer);
 	scan->vmbuffer = InvalidBuffer;
+
+	if (sscan->shared_tbmiterator)
+		tbm_end_shared_iterate(sscan->shared_tbmiterator);
+	sscan->shared_tbmiterator = NULL;
+
+	if (sscan->tbmiterator)
+		tbm_end_iterate(sscan->tbmiterator);
+	sscan->tbmiterator = NULL;
 
 	/*
 	 * decrement relation reference count and free scan descriptor storage

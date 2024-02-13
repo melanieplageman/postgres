@@ -1709,9 +1709,7 @@ typedef struct ParallelBitmapHeapState
  *
  *		bitmapqualorig	   execution state for bitmapqualorig expressions
  *		tbm				   bitmap obtained from child index scan(s)
- *		tbmiterator		   iterator for scanning current pages
- *		tbmres			   current-page data
- *		pvmbuffer		   ditto, for prefetched pages
+ *		pvmbuffer		   buffer for visibility-map lookups of prefetched pages
  *		exact_pages		   total number of exact pages retrieved
  *		lossy_pages		   total number of lossy pages retrieved
  *		prefetch_iterator  iterator for prefetching ahead of current page
@@ -1720,7 +1718,6 @@ typedef struct ParallelBitmapHeapState
  *		prefetch_maximum   maximum value for prefetch_target
  *		pscan_len		   size of the shared memory for parallel bitmap
  *		initialized		   is node is ready to iterate
- *		shared_tbmiterator	   shared iterator
  *		shared_prefetch_iterator shared iterator for prefetching
  *		pstate			   shared state for parallel bitmap scan
  *		worker_snapshot	   snapshot for parallel worker
@@ -1731,8 +1728,6 @@ typedef struct BitmapHeapScanState
 	ScanState	ss;				/* its first field is NodeTag */
 	ExprState  *bitmapqualorig;
 	TIDBitmap  *tbm;
-	TBMIterator *tbmiterator;
-	TBMIterateResult *tbmres;
 	Buffer		pvmbuffer;
 	long		exact_pages;
 	long		lossy_pages;
@@ -1742,10 +1737,11 @@ typedef struct BitmapHeapScanState
 	int			prefetch_maximum;
 	Size		pscan_len;
 	bool		initialized;
-	TBMSharedIterator *shared_tbmiterator;
 	TBMSharedIterator *shared_prefetch_iterator;
 	ParallelBitmapHeapState *pstate;
 	Snapshot	worker_snapshot;
+	bool		recheck;
+	BlockNumber blockno;
 } BitmapHeapScanState;
 
 /* ----------------

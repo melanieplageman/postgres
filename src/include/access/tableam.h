@@ -805,7 +805,7 @@ typedef struct TableAmRoutine
 	 * scan_bitmap_next_tuple need to exist, or neither.
 	 */
 	bool		(*scan_bitmap_next_block) (TableScanDesc scan,
-										   struct TBMIterateResult *tbmres);
+										   bool *recheck, BlockNumber *blockno);
 
 	/*
 	 * Fetch the next tuple of a bitmap table scan into `slot` and return true
@@ -1953,17 +1953,16 @@ table_relation_estimate_size(Relation rel, int32 *attr_widths,
  */
 
 /*
- * Prepare to fetch / check / return tuples from `tbmres->blockno` as part of
- * a bitmap table scan. `scan` needs to have been started via
- * table_beginscan_bm(). Returns false if there are no tuples to be found on
- * the page, true otherwise.
+ * Prepare to fetch / check / return tuples from as part of a bitmap table
+ * scan. `scan` needs to have been started via table_beginscan_bm(). Returns
+ * false if there are no more blocks in the bitmap, true otherwise.
  *
  * Note, this is an optionally implemented function, therefore should only be
  * used after verifying the presence (at plan time or such).
  */
 static inline bool
 table_scan_bitmap_next_block(TableScanDesc scan,
-							 struct TBMIterateResult *tbmres)
+							 bool *recheck, BlockNumber *blockno)
 {
 	/*
 	 * We don't expect direct calls to table_scan_bitmap_next_block with valid
@@ -1973,8 +1972,7 @@ table_scan_bitmap_next_block(TableScanDesc scan,
 	if (unlikely(TransactionIdIsValid(CheckXidAlive) && !bsysscan))
 		elog(ERROR, "unexpected table_scan_bitmap_next_block call during logical decoding");
 
-	return scan->rs_rd->rd_tableam->scan_bitmap_next_block(scan,
-														   tbmres);
+	return scan->rs_rd->rd_tableam->scan_bitmap_next_block(scan, recheck, blockno);
 }
 
 /*
