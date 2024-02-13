@@ -955,6 +955,8 @@ heap_beginscan(Relation relation, Snapshot snapshot,
 	scan->rs_base.rs_flags = flags;
 	scan->rs_base.rs_parallel = parallel_scan;
 	scan->rs_strategy = NULL;	/* set in initscan */
+	scan->vmbuffer = InvalidBuffer;
+	scan->empty_tuples = 0;
 
 	/*
 	 * Disable page-at-a-time mode if it's not a MVCC-safe snapshot.
@@ -1043,6 +1045,10 @@ heap_rescan(TableScanDesc sscan, ScanKey key, bool set_params,
 	if (BufferIsValid(scan->rs_cbuf))
 		ReleaseBuffer(scan->rs_cbuf);
 
+	if (BufferIsValid(scan->vmbuffer))
+		ReleaseBuffer(scan->vmbuffer);
+	scan->vmbuffer = InvalidBuffer;
+
 	/*
 	 * reinitialize scan descriptor
 	 */
@@ -1061,6 +1067,10 @@ heap_endscan(TableScanDesc sscan)
 	 */
 	if (BufferIsValid(scan->rs_cbuf))
 		ReleaseBuffer(scan->rs_cbuf);
+
+	if (BufferIsValid(scan->vmbuffer))
+		ReleaseBuffer(scan->vmbuffer);
+	scan->vmbuffer = InvalidBuffer;
 
 	/*
 	 * decrement relation reference count and free scan descriptor storage

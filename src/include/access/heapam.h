@@ -73,6 +73,8 @@ typedef struct HeapScanDescData
 	ParallelBlockTableScanWorkerData *rs_parallelworkerdata;
 
 	/* these fields only used in page-at-a-time mode and for bitmap scans */
+	Buffer		vmbuffer;		/* for checking if can skip fetch */
+	int			empty_tuples;	/* count of all NULL tuples to be returned */
 	int			rs_cindex;		/* current tuple's index in vistuples */
 	int			rs_ntuples;		/* number of visible tuples on page */
 	OffsetNumber rs_vistuples[MaxHeapTuplesPerPage];	/* their offsets */

@@ -62,6 +62,7 @@ typedef enum ScanOptions
 
 	/* unregister snapshot at scan end? */
 	SO_TEMP_SNAPSHOT = 1 << 9,
+	SO_CAN_SKIP_FETCH = 1 << 10,
 }			ScanOptions;
 
 /*
@@ -948,10 +949,13 @@ extern void table_scan_update_snapshot(TableScanDesc scan, Snapshot snapshot);
  */
 static inline TableScanDesc
 table_beginscan_bm(Relation rel, Snapshot snapshot, Snapshot worker_snapshot,
-				   int nkeys, struct ScanKeyData *key)
+				   int nkeys, struct ScanKeyData *key, bool can_skip_fetch)
 {
 	TableScanDesc result;
 	uint32		flags = SO_TYPE_BITMAPSCAN | SO_ALLOW_PAGEMODE;
+
+	if (can_skip_fetch)
+		flags |= SO_CAN_SKIP_FETCH;
 
 	result = rel->rd_tableam->scan_begin(rel, snapshot, nkeys, key, NULL, flags);
 	if (worker_snapshot)
