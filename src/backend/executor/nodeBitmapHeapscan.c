@@ -75,16 +75,17 @@ bhs_begin_iterate(BitmapHeapIterator *iterator, TIDBitmap *tbm,
 		iterator->serial = tbm_begin_iterate(tbm);
 }
 
-TBMIterateResult *
-bhs_iterate(BitmapHeapIterator *iterator)
+void
+bhs_iterate(BitmapHeapIterator *iterator, TBMIterateResult *result)
 {
 	Assert(iterator);
+	Assert(result);
 	Assert(!iterator->exhausted);
 
 	if (iterator->serial)
-		return tbm_iterate(iterator->serial);
+		tbm_iterate(iterator->serial, result);
 	else
-		return tbm_shared_iterate(iterator->parallel);
+		tbm_shared_iterate(iterator->parallel, result);
 }
 
 void

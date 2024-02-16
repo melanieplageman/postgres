@@ -2196,7 +2196,7 @@ BitmapAdjustPrefetchIterator(HeapScanDesc scan)
 #ifdef USE_PREFETCH
 	BitmapHeapIterator *prefetch_iterator = &scan->rs_bhs.pf_iterator;
 	ParallelBitmapHeapState *pstate = scan->rs_bhs.pstate;
-	TBMIterateResult *tbmpre;
+	TBMIterateResult tbmpre;
 
 	if (pstate == NULL)
 	{
@@ -2208,8 +2208,8 @@ BitmapAdjustPrefetchIterator(HeapScanDesc scan)
 		else if (!prefetch_iterator->exhausted)
 		{
 			/* Do not let the prefetch iterator get behind the main one */
-			tbmpre = bhs_iterate(prefetch_iterator);
-			scan->rs_bhs.pfblockno = tbmpre ? tbmpre->blockno : InvalidBlockNumber;
+			bhs_iterate(prefetch_iterator, &tbmpre);
+			scan->rs_bhs.pfblockno = tbmpre.blockno;
 		}
 		return;
 	}
@@ -2242,8 +2242,8 @@ BitmapAdjustPrefetchIterator(HeapScanDesc scan)
 			 */
 			if (!prefetch_iterator->exhausted)
 			{
-				tbmpre = bhs_iterate(prefetch_iterator);
-				scan->rs_bhs.pfblockno = tbmpre ? tbmpre->blockno : InvalidBlockNumber;
+				bhs_iterate(prefetch_iterator, &tbmpre);
+				scan->rs_bhs.pfblockno = tbmpre.blockno;
 			}
 		}
 	}
@@ -2260,7 +2260,7 @@ heapam_scan_bitmap_next_block(TableScanDesc scan,
 	Buffer		buffer;
 	Snapshot	snapshot;
 	int			ntup;
-	TBMIterateResult *tbmres;
+	TBMIterateResult tbmres;
 
 	hscan->rs_cindex = 0;
 	hscan->rs_ntuples = 0;
@@ -2275,9 +2275,9 @@ heapam_scan_bitmap_next_block(TableScanDesc scan,
 		CHECK_FOR_INTERRUPTS();
 
 		Assert(!hscan->rs_bhs.iterator.exhausted);
-		tbmres = bhs_iterate(&hscan->rs_bhs.iterator);
+		bhs_iterate(&hscan->rs_bhs.iterator, &tbmres);
 
-		if (tbmres == NULL)
+		if (!BlockNumberIsValid(tbmres.blockno))
 		{
 			/* no more entries in the bitmap */
 			Assert(hscan->rs_bhs.empty_tuples_pending == 0);
@@ -2292,11 +2292,11 @@ heapam_scan_bitmap_next_block(TableScanDesc scan,
 		 * isolation though, as we need to examine all invisible tuples
 		 * reachable by the index.
 		 */
-	} while (!IsolationIsSerializable() && tbmres->blockno >= hscan->rs_nblocks);
+	} while (!IsolationIsSerializable() && tbmres.blockno >= hscan->rs_nblocks);
 
 	/* Got a valid block */
-	*blockno = tbmres->blockno;
-	*recheck = tbmres->recheck;
+	*blockno = tbmres.blockno;
+	*recheck = tbmres.recheck;
 
 	/*
 	 * We can skip fetching the heap page if we don't need any fields from the
@@ -2304,19 +2304,19 @@ heapam_scan_bitmap_next_block(TableScanDesc scan,
 	 * page are visible to our transaction.
 	 */
 	if (!(scan->rs_flags & SO_NEED_TUPLE) &&
-		!tbmres->recheck &&
-		VM_ALL_VISIBLE(scan->rs_rd, tbmres->blockno, &hscan->rs_bhs.vmbuffer))
+		!tbmres.recheck &&
+		VM_ALL_VISIBLE(scan->rs_rd, tbmres.blockno, &hscan->rs_bhs.vmbuffer))
 	{
 		/* can't be lossy in the skip_fetch case */
-		Assert(tbmres->ntuples >= 0);
+		Assert(tbmres.ntuples >= 0);
 		Assert(hscan->rs_bhs.empty_tuples_pending >= 0);
 
-		hscan->rs_bhs.empty_tuples_pending += tbmres->ntuples;
+		hscan->rs_bhs.empty_tuples_pending += tbmres.ntuples;
 
 		return true;
 	}
 
-	block = tbmres->blockno;
+	block = tbmres.blockno;
 
 	/*
 	 * Acquire pin on the target heap page, trading in any pin we held before.
@@ -2345,7 +2345,7 @@ heapam_scan_bitmap_next_block(TableScanDesc scan,
 	/*
 	 * We need two separate strategies for lossy and non-lossy cases.
 	 */
-	if (tbmres->ntuples >= 0)
+	if (tbmres.ntuples >= 0)
 	{
 		/*
 		 * Bitmap is non-lossy, so we just look through the offsets listed in
@@ -2354,9 +2354,9 @@ heapam_scan_bitmap_next_block(TableScanDesc scan,
 		 */
 		int			curslot;
 
-		for (curslot = 0; curslot < tbmres->ntuples; curslot++)
+		for (curslot = 0; curslot < tbmres.ntuples; curslot++)
 		{
-			OffsetNumber offnum = tbmres->offsets[curslot];
+			OffsetNumber offnum = tbmres.offsets[curslot];
 			ItemPointerData tid;
 			HeapTupleData heapTuple;
 
@@ -2406,7 +2406,7 @@ heapam_scan_bitmap_next_block(TableScanDesc scan,
 	Assert(ntup <= MaxHeapTuplesPerPage);
 	hscan->rs_ntuples = ntup;
 
-	if (tbmres->ntuples < 0)
+	if (tbmres.ntuples < 0)
 		(*lossy_pages)++;
 	else
 		(*exact_pages)++;
@@ -2495,17 +2495,19 @@ BitmapPrefetch(HeapScanDesc scan)
 		{
 			while (scan->rs_bhs.prefetch_pages < scan->rs_bhs.prefetch_target)
 			{
-				TBMIterateResult *tbmpre = bhs_iterate(prefetch_iterator);
+				TBMIterateResult tbmpre;
 				bool		skip_fetch;
 
-				if (tbmpre == NULL)
+				bhs_iterate(prefetch_iterator, &tbmpre);
+
+				if (!BlockNumberIsValid(tbmpre.blockno))
 				{
 					/* No more pages to prefetch */
 					bhs_end_iterate(prefetch_iterator);
 					break;
 				}
 				scan->rs_bhs.prefetch_pages++;
-				scan->rs_bhs.pfblockno = tbmpre->blockno;
+				scan->rs_bhs.pfblockno = tbmpre.blockno;
 
 				/*
 				 * If we expect not to have to actually read this heap page,
@@ -2514,13 +2516,13 @@ BitmapPrefetch(HeapScanDesc scan)
 				 * prefetch_pages?)
 				 */
 				skip_fetch = (!(scan->rs_base.rs_flags & SO_NEED_TUPLE) &&
-							  !tbmpre->recheck &&
+							  !tbmpre.recheck &&
 							  VM_ALL_VISIBLE(scan->rs_base.rs_rd,
-											 tbmpre->blockno,
+											 tbmpre.blockno,
 											 &scan->rs_bhs.pvmbuffer));
 
 				if (!skip_fetch)
-					PrefetchBuffer(scan->rs_base.rs_rd, MAIN_FORKNUM, tbmpre->blockno);
+					PrefetchBuffer(scan->rs_base.rs_rd, MAIN_FORKNUM, tbmpre.blockno);
 			}
 		}
 
@@ -2533,7 +2535,7 @@ BitmapPrefetch(HeapScanDesc scan)
 		{
 			while (1)
 			{
-				TBMIterateResult *tbmpre;
+				TBMIterateResult tbmpre;
 				bool		do_prefetch = false;
 				bool		skip_fetch;
 
@@ -2553,25 +2555,25 @@ BitmapPrefetch(HeapScanDesc scan)
 					return;
 
 				Assert(!scan->rs_bhs.iterator.exhausted);
-				tbmpre = bhs_iterate(prefetch_iterator);
-				if (tbmpre == NULL)
+				bhs_iterate(prefetch_iterator, &tbmpre);
+				if (!BlockNumberIsValid(tbmpre.blockno))
 				{
 					/* No more pages to prefetch */
 					bhs_end_iterate(prefetch_iterator);
 					break;
 				}
 
-				scan->rs_bhs.pfblockno = tbmpre->blockno;
+				scan->rs_bhs.pfblockno = tbmpre.blockno;
 
 				/* As above, skip prefetch if we expect not to need page */
 				skip_fetch = (!(scan->rs_base.rs_flags & SO_NEED_TUPLE) &&
-							  !tbmpre->recheck &&
+							  !tbmpre.recheck &&
 							  VM_ALL_VISIBLE(scan->rs_base.rs_rd,
-											 tbmpre->blockno,
+											 tbmpre.blockno,
 											 &scan->rs_bhs.pvmbuffer));
 
 				if (!skip_fetch)
-					PrefetchBuffer(scan->rs_base.rs_rd, MAIN_FORKNUM, tbmpre->blockno);
+					PrefetchBuffer(scan->rs_base.rs_rd, MAIN_FORKNUM, tbmpre.blockno);
 			}
 		}
 	}
