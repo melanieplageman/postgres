@@ -1682,11 +1682,8 @@ typedef enum
 /* ----------------
  *	 ParallelBitmapHeapState information
  *		tbmiterator				iterator for scanning current pages
- *		prefetch_iterator		iterator for prefetching ahead of current page
  *		mutex					mutual exclusion for the prefetching variable
  *								and state
- *		prefetch_pages			# pages prefetch iterator is ahead of current
- *		prefetch_target			current target prefetch distance
  *		state					current state of the TIDBitmap
  *		cv						conditional wait variable
  *		phs_snapshot_data		snapshot data shared to workers
@@ -1695,10 +1692,7 @@ typedef enum
 typedef struct ParallelBitmapHeapState
 {
 	dsa_pointer tbmiterator;
-	dsa_pointer prefetch_iterator;
 	slock_t		mutex;
-	int			prefetch_pages;
-	int			prefetch_target;
 	SharedBitmapState state;
 	ConditionVariable cv;
 	char		phs_snapshot_data[FLEXIBLE_ARRAY_MEMBER];
@@ -1709,16 +1703,10 @@ typedef struct ParallelBitmapHeapState
  *
  *		bitmapqualorig	   execution state for bitmapqualorig expressions
  *		tbm				   bitmap obtained from child index scan(s)
- *		pvmbuffer		   buffer for visibility-map lookups of prefetched pages
  *		exact_pages		   total number of exact pages retrieved
  *		lossy_pages		   total number of lossy pages retrieved
- *		prefetch_iterator  iterator for prefetching ahead of current page
- *		prefetch_pages	   # pages prefetch iterator is ahead of current
- *		prefetch_target    current target prefetch distance
- *		prefetch_maximum   maximum value for prefetch_target
  *		pscan_len		   size of the shared memory for parallel bitmap
  *		initialized		   is node is ready to iterate
- *		shared_prefetch_iterator shared iterator for prefetching
  *		pstate			   shared state for parallel bitmap scan
  *		worker_snapshot	   snapshot for parallel worker
  *		recheck			   do current page's tuples need recheck
@@ -1729,20 +1717,13 @@ typedef struct BitmapHeapScanState
 	ScanState	ss;				/* its first field is NodeTag */
 	ExprState  *bitmapqualorig;
 	TIDBitmap  *tbm;
-	Buffer		pvmbuffer;
 	long		exact_pages;
 	long		lossy_pages;
-	TBMIterator *prefetch_iterator;
-	int			prefetch_pages;
-	int			prefetch_target;
-	int			prefetch_maximum;
 	Size		pscan_len;
 	bool		initialized;
-	TBMSharedIterator *shared_prefetch_iterator;
 	ParallelBitmapHeapState *pstate;
 	Snapshot	worker_snapshot;
 	bool		recheck;
-	BlockNumber blockno;
 } BitmapHeapScanState;
 
 /* ----------------

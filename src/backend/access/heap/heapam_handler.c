@@ -2113,79 +2113,65 @@ heapam_estimate_rel_size(Relation rel, int32 *attr_widths,
  */
 
 static bool
-heapam_scan_bitmap_next_block(TableScanDesc scan,
-							  bool *recheck, bool *lossy, BlockNumber *blockno)
+heapam_scan_bitmap_next_block(TableScanDesc scan, bool *recheck, bool *lossy)
 {
 	HeapScanDesc hscan = (HeapScanDesc) scan;
+	void	   *io_private;
 	BlockNumber block;
 	Buffer		buffer;
 	Snapshot	snapshot;
 	int			ntup;
-	TBMIterateResult tbmres;
+	TBMIterateResult *tbmres;
+
+	Assert(hscan->rs_pgsr);
 
 	hscan->rs_cindex = 0;
 	hscan->rs_ntuples = 0;
 
-	*blockno = InvalidBlockNumber;
 	*recheck = true;
 
-	do
+	/* Release buffer containing previous block. */
+	if (BufferIsValid(hscan->rs_cbuf))
 	{
-		CHECK_FOR_INTERRUPTS();
+		ReleaseBuffer(hscan->rs_cbuf);
+		hscan->rs_cbuf = InvalidBuffer;
+	}
 
-		if (scan->shared_tbmiterator)
-			tbm_shared_iterate(scan->shared_tbmiterator, &tbmres);
-		else
-			tbm_iterate(scan->tbmiterator, &tbmres);
+	hscan->rs_cbuf = pg_streaming_read_buffer_get_next(hscan->rs_pgsr, &io_private);
 
-		if (!BlockNumberIsValid(tbmres.blockno))
+	if (BufferIsInvalid(hscan->rs_cbuf))
+	{
+		if (BufferIsValid(hscan->rs_vmbuffer))
 		{
-			/* no more entries in the bitmap */
-			Assert(hscan->rs_empty_tuples_pending == 0);
-			return false;
+			ReleaseBuffer(hscan->rs_vmbuffer);
+			hscan->rs_vmbuffer = InvalidBuffer;
 		}
 
 		/*
-		 * Ignore any claimed entries past what we think is the end of the
-		 * relation. It may have been extended after the start of our scan (we
-		 * only hold an AccessShareLock, and it could be inserts from this
-		 * backend).  We don't take this optimization in SERIALIZABLE
-		 * isolation though, as we need to examine all invisible tuples
-		 * reachable by the index.
+		 * Bitmap is exhausted. Time to emit empty tuples if relevant. We emit
+		 * all empty tuples at the end instead of emitting them per block we
+		 * skip fetching. This is necessary because the streaming read API
+		 * will only return TBMIterateResults for blocks actually fetched.
+		 * When we skip fetching a block, we keep track of how many empty
+		 * tuples to emit at the end of the BitmapHeapScan. We do not recheck
+		 * all NULL tuples.
 		 */
-	} while (!IsolationIsSerializable() && tbmres.blockno >= hscan->rs_nblocks);
-
-	/* Got a valid block */
-	*blockno = tbmres.blockno;
-	*recheck = tbmres.recheck;
-
-	/*
-	 * We can skip fetching the heap page if we don't need any fields from the
-	 * heap, and the bitmap entries don't need rechecking, and all tuples on
-	 * the page are visible to our transaction.
-	 */
-	if (scan->rs_flags & SO_CAN_SKIP_FETCH &&
-		!tbmres.recheck &&
-		VM_ALL_VISIBLE(scan->rs_rd, tbmres.blockno, &hscan->rs_vmbuffer))
-	{
-		/* can't be lossy in the skip_fetch case */
-		Assert(tbmres.ntuples >= 0);
-		Assert(hscan->rs_empty_tuples_pending >= 0);
-
-		hscan->rs_empty_tuples_pending += tbmres.ntuples;
-
-		return true;
+		*recheck = false;
+		return hscan->rs_empty_tuples_pending > 0;
 	}
 
-	block = tbmres.blockno;
+	Assert(io_private);
 
-	/*
-	 * Acquire pin on the target heap page, trading in any pin we held before.
-	 */
-	hscan->rs_cbuf = ReleaseAndReadBuffer(hscan->rs_cbuf,
-										  scan->rs_rd,
-										  block);
-	hscan->rs_cblock = block;
+	tbmres = io_private;
+
+	Assert(BufferGetBlockNumber(hscan->rs_cbuf) == tbmres->blockno);
+
+	*recheck = tbmres->recheck;
+
+	hscan->rs_cblock = tbmres->blockno;
+	hscan->rs_ntuples = tbmres->ntuples;
+
+	block = tbmres->blockno;
 	buffer = hscan->rs_cbuf;
 	snapshot = scan->rs_snapshot;
 
@@ -2206,7 +2192,7 @@ heapam_scan_bitmap_next_block(TableScanDesc scan,
 	/*
 	 * We need two separate strategies for lossy and non-lossy cases.
 	 */
-	if (tbmres.ntuples >= 0)
+	if (tbmres->ntuples >= 0)
 	{
 		/*
 		 * Bitmap is non-lossy, so we just look through the offsets listed in
@@ -2215,9 +2201,9 @@ heapam_scan_bitmap_next_block(TableScanDesc scan,
 		 */
 		int			curslot;
 
-		for (curslot = 0; curslot < tbmres.ntuples; curslot++)
+		for (curslot = 0; curslot < tbmres->ntuples; curslot++)
 		{
-			OffsetNumber offnum = tbmres.offsets[curslot];
+			OffsetNumber offnum = tbmres->offsets[curslot];
 			ItemPointerData tid;
 			HeapTupleData heapTuple;
 
@@ -2267,7 +2253,7 @@ heapam_scan_bitmap_next_block(TableScanDesc scan,
 	Assert(ntup <= MaxHeapTuplesPerPage);
 	hscan->rs_ntuples = ntup;
 
-	*lossy = tbmres.ntuples < 0;
+	*lossy = tbmres->ntuples < 0;
 
 	/*
 	 * Return true to indicate that a valid block was found and the bitmap is

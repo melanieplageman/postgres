@@ -792,23 +792,11 @@ typedef struct TableAmRoutine
 	 * lossy indicates whether or not the block's representation in the bitmap
 	 * is lossy or exact.
 	 *
-	 * XXX: Currently this may only be implemented if the AM uses md.c as its
-	 * storage manager, and uses ItemPointer->ip_blkid in a manner that maps
-	 * blockids directly to the underlying storage. nodeBitmapHeapscan.c
-	 * performs prefetching directly using that interface.  This probably
-	 * needs to be rectified at a later point.
-	 *
-	 * XXX: Currently this may only be implemented if the AM uses the
-	 * visibilitymap, as nodeBitmapHeapscan.c unconditionally accesses it to
-	 * perform prefetching.  This probably needs to be rectified at a later
-	 * point.
-	 *
 	 * Optional callback, but either both scan_bitmap_next_block and
 	 * scan_bitmap_next_tuple need to exist, or neither.
 	 */
-	bool		(*scan_bitmap_next_block) (TableScanDesc scan,
-										   bool *recheck, bool *lossy,
-										   BlockNumber *blockno);
+	bool		(*scan_bitmap_next_block) (TableScanDesc scan, bool *recheck,
+										   bool *lossy);
 
 	/*
 	 * Fetch the next tuple of a bitmap table scan into `slot` and return true
@@ -1984,8 +1972,7 @@ table_relation_estimate_size(Relation rel, int32 *attr_widths,
  * used after verifying the presence (at plan time or such).
  */
 static inline bool
-table_scan_bitmap_next_block(TableScanDesc scan,
-							 bool *recheck, bool *lossy, BlockNumber *blockno)
+table_scan_bitmap_next_block(TableScanDesc scan, bool *recheck, bool *lossy)
 {
 	/*
 	 * We don't expect direct calls to table_scan_bitmap_next_block with valid
@@ -1995,8 +1982,7 @@ table_scan_bitmap_next_block(TableScanDesc scan,
 	if (unlikely(TransactionIdIsValid(CheckXidAlive) && !bsysscan))
 		elog(ERROR, "unexpected table_scan_bitmap_next_block call during logical decoding");
 
-	return scan->rs_rd->rd_tableam->scan_bitmap_next_block(scan, recheck,
-														   lossy, blockno);
+	return scan->rs_rd->rd_tableam->scan_bitmap_next_block(scan, recheck, lossy);
 }
 
 /*

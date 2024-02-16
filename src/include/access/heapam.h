@@ -26,6 +26,7 @@
 #include "storage/dsm.h"
 #include "storage/lockdefs.h"
 #include "storage/shm_toc.h"
+#include "storage/streaming_read.h"
 #include "utils/relcache.h"
 #include "utils/snapshot.h"
 
@@ -71,6 +72,9 @@ typedef struct HeapScanDescData
 	 * performing a parallel scan.
 	 */
 	ParallelBlockTableScanWorkerData *rs_parallelworkerdata;
+
+	/* Streaming read control object for scans supporting it */
+	PgStreamingRead *rs_pgsr;
 
 	/*
 	 * These fields are only used for bitmap scans for the "skip fetch"

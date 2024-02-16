@@ -115,6 +115,8 @@ static XLogRecPtr log_heap_new_cid(Relation relation, HeapTuple tup);
 static HeapTuple ExtractReplicaIdentity(Relation relation, HeapTuple tp, bool key_required,
 										bool *copy);
 
+static BlockNumber bitmapheap_pgsr_next(PgStreamingRead *pgsr, void *pgsr_private,
+										void *per_buffer_data);
 
 /*
  * Each tuple lock mode has a corresponding heavyweight lock, and one or two
@@ -334,6 +336,22 @@ initscan(HeapScanDesc scan, ScanKey key, bool keep_startblock)
 	 */
 	if (key != NULL && scan->rs_base.rs_nkeys > 0)
 		memcpy(scan->rs_base.rs_key, key, scan->rs_base.rs_nkeys * sizeof(ScanKeyData));
+
+	if (scan->rs_base.rs_flags & SO_TYPE_BITMAPSCAN)
+	{
+		if (scan->rs_pgsr)
+			pg_streaming_read_free(scan->rs_pgsr);
+
+		scan->rs_pgsr = pg_streaming_read_buffer_alloc(PGSR_FLAG_DEFAULT,
+													   scan,
+													   sizeof(TBMIterateResult),
+													   scan->rs_strategy,
+													   BMR_REL(scan->rs_base.rs_rd),
+													   MAIN_FORKNUM,
+													   bitmapheap_pgsr_next);
+
+
+	}
 
 	/*
 	 * Currently, we only have a stats counter for sequential heap scans (but
@@ -955,6 +973,7 @@ heap_beginscan(Relation relation, Snapshot snapshot,
 	scan->rs_base.rs_flags = flags;
 	scan->rs_base.rs_parallel = parallel_scan;
 	scan->rs_strategy = NULL;	/* set in initscan */
+	scan->rs_pgsr = NULL;
 	scan->rs_vmbuffer = InvalidBuffer;
 	scan->rs_empty_tuples_pending = 0;
 
@@ -1092,6 +1111,9 @@ heap_endscan(TableScanDesc sscan)
 
 	if (scan->rs_base.rs_flags & SO_TEMP_SNAPSHOT)
 		UnregisterSnapshot(scan->rs_base.rs_snapshot);
+
+	if (scan->rs_base.rs_flags & SO_TYPE_BITMAPSCAN && scan->rs_pgsr)
+		pg_streaming_read_free(scan->rs_pgsr);
 
 	pfree(scan);
 }
@@ -10249,4 +10271,50 @@ HeapCheckForSerializableConflictOut(bool visible, Relation relation,
 		return;
 
 	CheckForSerializableConflictOut(relation, xid, snapshot);
+}
+
+static BlockNumber
+bitmapheap_pgsr_next(PgStreamingRead *pgsr, void *pgsr_private,
+					 void *per_buffer_data)
+{
+	TBMIterateResult *tbmres = per_buffer_data;
+	HeapScanDesc hdesc = (HeapScanDesc) pgsr_private;
+
+	for (;;)
+	{
+		CHECK_FOR_INTERRUPTS();
+
+		if (hdesc->rs_base.shared_tbmiterator)
+			tbm_shared_iterate(hdesc->rs_base.shared_tbmiterator, tbmres);
+		else
+			tbm_iterate(hdesc->rs_base.tbmiterator, tbmres);
+
+		/* no more entries in the bitmap */
+		if (!BlockNumberIsValid(tbmres->blockno))
+			return InvalidBlockNumber;
+
+		/*
+		 * Ignore any claimed entries past what we think is the end of the
+		 * relation. It may have been extended after the start of our scan (we
+		 * only hold an AccessShareLock, and it could be inserts from this
+		 * backend).  We don't take this optimization in SERIALIZABLE
+		 * isolation though, as we need to examine all invisible tuples
+		 * reachable by the index.
+		 */
+		if (!IsolationIsSerializable() && tbmres->blockno >= hdesc->rs_nblocks)
+			continue;
+
+		if (hdesc->rs_base.rs_flags & SO_CAN_SKIP_FETCH &&
+			!tbmres->recheck &&
+			VM_ALL_VISIBLE(hdesc->rs_base.rs_rd, tbmres->blockno, &hdesc->rs_vmbuffer))
+		{
+			hdesc->rs_empty_tuples_pending += tbmres->ntuples;
+			continue;
+		}
+
+		return tbmres->blockno;
+	}
+
+	/* not reachable */
+	Assert(false);
 }
