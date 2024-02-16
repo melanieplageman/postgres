@@ -34,7 +34,7 @@ typedef struct BitmapHeapIterator
 	struct TBMSharedIterator *parallel;
 } BitmapHeapIterator;
 
-extern TBMIterateResult *bhs_iterate(BitmapHeapIterator *iterator);
+extern void bhs_iterate(BitmapHeapIterator *iterator, TBMIterateResult *result);
 
 extern void bhs_end_iterate(BitmapHeapIterator *iterator);
 

@@ -77,15 +77,16 @@ bhs_begin_iterate(TIDBitmap *tbm, dsa_pointer shared_area, dsa_area *personal_ar
 	return result;
 }
 
-TBMIterateResult *
-bhs_iterate(BitmapHeapIterator *iterator)
+void
+bhs_iterate(BitmapHeapIterator *iterator, TBMIterateResult *result)
 {
 	Assert(iterator);
+	Assert(result);
 
 	if (iterator->serial)
-		return tbm_iterate(iterator->serial);
+		tbm_iterate(iterator->serial, result);
 	else
-		return tbm_shared_iterate(iterator->parallel);
+		tbm_shared_iterate(iterator->parallel, result);
 }
 
 void
@@ -348,7 +349,7 @@ BitmapAdjustPrefetchIterator(BitmapHeapScanState *node)
 #ifdef USE_PREFETCH
 	ParallelBitmapHeapState *pstate = node->pstate;
 	BitmapHeapIterator *prefetch_iterator = node->pf_iterator;
-	TBMIterateResult *tbmpre;
+	TBMIterateResult tbmpre;
 
 	if (pstate == NULL)
 	{
@@ -360,8 +361,8 @@ BitmapAdjustPrefetchIterator(BitmapHeapScanState *node)
 		else if (prefetch_iterator)
 		{
 			/* Do not let the prefetch iterator get behind the main one */
-			tbmpre = bhs_iterate(prefetch_iterator);
-			node->pfblockno = tbmpre ? tbmpre->blockno : InvalidBlockNumber;
+			bhs_iterate(prefetch_iterator, &tbmpre);
+			node->pfblockno = tbmpre.blockno;
 		}
 		return;
 	}
@@ -394,8 +395,8 @@ BitmapAdjustPrefetchIterator(BitmapHeapScanState *node)
 			 */
 			if (prefetch_iterator)
 			{
-				tbmpre = bhs_iterate(prefetch_iterator);
-				node->pfblockno = tbmpre ? tbmpre->blockno : InvalidBlockNumber;
+				bhs_iterate(prefetch_iterator, &tbmpre);
+				node->pfblockno = tbmpre.blockno;
 			}
 		}
 	}
@@ -462,10 +463,12 @@ BitmapPrefetch(BitmapHeapScanState *node, TableScanDesc scan)
 		{
 			while (node->prefetch_pages < node->prefetch_target)
 			{
-				TBMIterateResult *tbmpre = bhs_iterate(prefetch_iterator);
+				TBMIterateResult tbmpre;
 				bool		skip_fetch;
 
-				if (tbmpre == NULL)
+				bhs_iterate(prefetch_iterator, &tbmpre);
+
+				if (!BlockNumberIsValid(tbmpre.blockno))
 				{
 					/* No more pages to prefetch */
 					bhs_end_iterate(prefetch_iterator);
@@ -473,7 +476,7 @@ BitmapPrefetch(BitmapHeapScanState *node, TableScanDesc scan)
 					break;
 				}
 				node->prefetch_pages++;
-				node->pfblockno = tbmpre->blockno;
+				node->pfblockno = tbmpre.blockno;
 
 				/*
 				 * If we expect not to have to actually read this heap page,
@@ -482,13 +485,13 @@ BitmapPrefetch(BitmapHeapScanState *node, TableScanDesc scan)
 				 * prefetch_pages?)
 				 */
 				skip_fetch = (!(scan->rs_flags & SO_NEED_TUPLE) &&
-							  !tbmpre->recheck &&
+							  !tbmpre.recheck &&
 							  VM_ALL_VISIBLE(node->ss.ss_currentRelation,
-											 tbmpre->blockno,
+											 tbmpre.blockno,
 											 &node->pvmbuffer));
 
 				if (!skip_fetch)
-					PrefetchBuffer(scan->rs_rd, MAIN_FORKNUM, tbmpre->blockno);
+					PrefetchBuffer(scan->rs_rd, MAIN_FORKNUM, tbmpre.blockno);
 			}
 		}
 
@@ -501,7 +504,7 @@ BitmapPrefetch(BitmapHeapScanState *node, TableScanDesc scan)
 		{
 			while (1)
 			{
-				TBMIterateResult *tbmpre;
+				TBMIterateResult tbmpre;
 				bool		do_prefetch = false;
 				bool		skip_fetch;
 
@@ -520,8 +523,8 @@ BitmapPrefetch(BitmapHeapScanState *node, TableScanDesc scan)
 				if (!do_prefetch)
 					return;
 
-				tbmpre = bhs_iterate(prefetch_iterator);
-				if (tbmpre == NULL)
+				bhs_iterate(prefetch_iterator, &tbmpre);
+				if (!BlockNumberIsValid(tbmpre.blockno))
 				{
 					/* No more pages to prefetch */
 					bhs_end_iterate(prefetch_iterator);
@@ -529,17 +532,17 @@ BitmapPrefetch(BitmapHeapScanState *node, TableScanDesc scan)
 					break;
 				}
 
-				node->pfblockno = tbmpre->blockno;
+				node->pfblockno = tbmpre.blockno;
 
 				/* As above, skip prefetch if we expect not to need page */
 				skip_fetch = (!(scan->rs_flags & SO_NEED_TUPLE) &&
-							  !tbmpre->recheck &&
+							  !tbmpre.recheck &&
 							  VM_ALL_VISIBLE(node->ss.ss_currentRelation,
-											 tbmpre->blockno,
+											 tbmpre.blockno,
 											 &node->pvmbuffer));
 
 				if (!skip_fetch)
-					PrefetchBuffer(scan->rs_rd, MAIN_FORKNUM, tbmpre->blockno);
+					PrefetchBuffer(scan->rs_rd, MAIN_FORKNUM, tbmpre.blockno);
 			}
 		}
 	}
