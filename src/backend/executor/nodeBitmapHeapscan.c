@@ -344,9 +344,10 @@ BitmapAdjustPrefetchIterator(BitmapHeapScanState *node,
 		else if (prefetch_iterator)
 		{
 			/* Do not let the prefetch iterator get behind the main one */
-			TBMIterateResult *tbmpre = tbm_iterate(prefetch_iterator);
+			TBMIterateResult tbmpre;
+			tbm_iterate(prefetch_iterator, &tbmpre);
 
-			if (tbmpre == NULL || tbmpre->blockno != blockno)
+			if (!BlockNumberIsValid(tbmpre.blockno) || tbmpre.blockno != blockno)
 				elog(ERROR, "prefetch and main iterators are out of sync");
 		}
 		return;
@@ -364,6 +365,8 @@ BitmapAdjustPrefetchIterator(BitmapHeapScanState *node,
 		}
 		else
 		{
+			TBMIterateResult tbmpre;
+
 			/* Release the mutex before iterating */
 			SpinLockRelease(&pstate->mutex);
 
@@ -376,7 +379,7 @@ BitmapAdjustPrefetchIterator(BitmapHeapScanState *node,
 			 * case.
 			 */
 			if (prefetch_iterator)
-				tbm_shared_iterate(prefetch_iterator);
+				tbm_shared_iterate(prefetch_iterator, &tbmpre);
 		}
 	}
 #endif							/* USE_PREFETCH */
@@ -443,10 +446,12 @@ BitmapPrefetch(BitmapHeapScanState *node, TableScanDesc scan)
 		{
 			while (node->prefetch_pages < node->prefetch_target)
 			{
-				TBMIterateResult *tbmpre = tbm_iterate(prefetch_iterator);
+				TBMIterateResult tbmpre;
 				bool		skip_fetch;
 
-				if (tbmpre == NULL)
+				tbm_iterate(prefetch_iterator, &tbmpre);
+
+				if (!BlockNumberIsValid(tbmpre.blockno))
 				{
 					/* No more pages to prefetch */
 					tbm_end_iterate(prefetch_iterator);
@@ -462,13 +467,13 @@ BitmapPrefetch(BitmapHeapScanState *node, TableScanDesc scan)
 				 * prefetch_pages?)
 				 */
 				skip_fetch = (scan->rs_flags & SO_CAN_SKIP_FETCH &&
-							  !tbmpre->recheck &&
+							  !tbmpre.recheck &&
 							  VM_ALL_VISIBLE(node->ss.ss_currentRelation,
-											 tbmpre->blockno,
+											 tbmpre.blockno,
 											 &node->pvmbuffer));
 
 				if (!skip_fetch)
-					PrefetchBuffer(scan->rs_rd, MAIN_FORKNUM, tbmpre->blockno);
+					PrefetchBuffer(scan->rs_rd, MAIN_FORKNUM, tbmpre.blockno);
 			}
 		}
 
@@ -483,7 +488,7 @@ BitmapPrefetch(BitmapHeapScanState *node, TableScanDesc scan)
 		{
 			while (1)
 			{
-				TBMIterateResult *tbmpre;
+				TBMIterateResult tbmpre;
 				bool		do_prefetch = false;
 				bool		skip_fetch;
 
@@ -502,8 +507,8 @@ BitmapPrefetch(BitmapHeapScanState *node, TableScanDesc scan)
 				if (!do_prefetch)
 					return;
 
-				tbmpre = tbm_shared_iterate(prefetch_iterator);
-				if (tbmpre == NULL)
+				tbm_shared_iterate(prefetch_iterator, &tbmpre);
+				if (!BlockNumberIsValid(tbmpre.blockno))
 				{
 					/* No more pages to prefetch */
 					tbm_end_shared_iterate(prefetch_iterator);
@@ -513,13 +518,13 @@ BitmapPrefetch(BitmapHeapScanState *node, TableScanDesc scan)
 
 				/* As above, skip prefetch if we expect not to need page */
 				skip_fetch = (scan->rs_flags & SO_CAN_SKIP_FETCH &&
-							  !tbmpre->recheck &&
+							  !tbmpre.recheck &&
 							  VM_ALL_VISIBLE(node->ss.ss_currentRelation,
-											 tbmpre->blockno,
+											 tbmpre.blockno,
 											 &node->pvmbuffer));
 
 				if (!skip_fetch)
-					PrefetchBuffer(scan->rs_rd, MAIN_FORKNUM, tbmpre->blockno);
+					PrefetchBuffer(scan->rs_rd, MAIN_FORKNUM, tbmpre.blockno);
 			}
 		}
 	}

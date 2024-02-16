@@ -2121,7 +2121,7 @@ heapam_scan_bitmap_next_block(TableScanDesc scan,
 	Buffer		buffer;
 	Snapshot	snapshot;
 	int			ntup;
-	TBMIterateResult *tbmres;
+	TBMIterateResult tbmres;
 
 	hscan->rs_cindex = 0;
 	hscan->rs_ntuples = 0;
@@ -2134,11 +2134,11 @@ heapam_scan_bitmap_next_block(TableScanDesc scan,
 		CHECK_FOR_INTERRUPTS();
 
 		if (scan->shared_tbmiterator)
-			tbmres = tbm_shared_iterate(scan->shared_tbmiterator);
+			tbm_shared_iterate(scan->shared_tbmiterator, &tbmres);
 		else
-			tbmres = tbm_iterate(scan->tbmiterator);
+			tbm_iterate(scan->tbmiterator, &tbmres);
 
-		if (tbmres == NULL)
+		if (!BlockNumberIsValid(tbmres.blockno))
 		{
 			/* no more entries in the bitmap */
 			Assert(hscan->rs_empty_tuples_pending == 0);
@@ -2153,11 +2153,11 @@ heapam_scan_bitmap_next_block(TableScanDesc scan,
 		 * isolation though, as we need to examine all invisible tuples
 		 * reachable by the index.
 		 */
-	} while (!IsolationIsSerializable() && tbmres->blockno >= hscan->rs_nblocks);
+	} while (!IsolationIsSerializable() && tbmres.blockno >= hscan->rs_nblocks);
 
 	/* Got a valid block */
-	*blockno = tbmres->blockno;
-	*recheck = tbmres->recheck;
+	*blockno = tbmres.blockno;
+	*recheck = tbmres.recheck;
 
 	/*
 	 * We can skip fetching the heap page if we don't need any fields from the
@@ -2165,19 +2165,19 @@ heapam_scan_bitmap_next_block(TableScanDesc scan,
 	 * the page are visible to our transaction.
 	 */
 	if (scan->rs_flags & SO_CAN_SKIP_FETCH &&
-		!tbmres->recheck &&
-		VM_ALL_VISIBLE(scan->rs_rd, tbmres->blockno, &hscan->rs_vmbuffer))
+		!tbmres.recheck &&
+		VM_ALL_VISIBLE(scan->rs_rd, tbmres.blockno, &hscan->rs_vmbuffer))
 	{
 		/* can't be lossy in the skip_fetch case */
-		Assert(tbmres->ntuples >= 0);
+		Assert(tbmres.ntuples >= 0);
 		Assert(hscan->rs_empty_tuples_pending >= 0);
 
-		hscan->rs_empty_tuples_pending += tbmres->ntuples;
+		hscan->rs_empty_tuples_pending += tbmres.ntuples;
 
 		return true;
 	}
 
-	block = tbmres->blockno;
+	block = tbmres.blockno;
 
 	/*
 	 * Acquire pin on the target heap page, trading in any pin we held before.
@@ -2206,7 +2206,7 @@ heapam_scan_bitmap_next_block(TableScanDesc scan,
 	/*
 	 * We need two separate strategies for lossy and non-lossy cases.
 	 */
-	if (tbmres->ntuples >= 0)
+	if (tbmres.ntuples >= 0)
 	{
 		/*
 		 * Bitmap is non-lossy, so we just look through the offsets listed in
@@ -2215,9 +2215,9 @@ heapam_scan_bitmap_next_block(TableScanDesc scan,
 		 */
 		int			curslot;
 
-		for (curslot = 0; curslot < tbmres->ntuples; curslot++)
+		for (curslot = 0; curslot < tbmres.ntuples; curslot++)
 		{
-			OffsetNumber offnum = tbmres->offsets[curslot];
+			OffsetNumber offnum = tbmres.offsets[curslot];
 			ItemPointerData tid;
 			HeapTupleData heapTuple;
 
@@ -2267,7 +2267,7 @@ heapam_scan_bitmap_next_block(TableScanDesc scan,
 	Assert(ntup <= MaxHeapTuplesPerPage);
 	hscan->rs_ntuples = ntup;
 
-	*lossy = tbmres->ntuples < 0;
+	*lossy = tbmres.ntuples < 0;
 
 	/*
 	 * Return true to indicate that a valid block was found and the bitmap is
