@@ -19,6 +19,7 @@
 
 #include "access/xlog.h"
 #include "executor/instrument.h"
+#include "funcapi.h"
 #include "utils/builtins.h"
 #include "utils/pgstat_internal.h"
 #include "utils/pg_lsn.h"
@@ -422,4 +423,58 @@ pgstat_wal_update_lsntimeline(TimestampTz time, XLogRecPtr lsn)
 	LWLockAcquire(&stats_shmem->lock, LW_EXCLUSIVE);
 	lsntime_insert(&stats_shmem->stats.timeline, time, lsn);
 	LWLockRelease(&stats_shmem->lock);
+}
+
+PG_FUNCTION_INFO_V1(pg_estimate_lsn_at_time);
+PG_FUNCTION_INFO_V1(pg_estimate_time_at_lsn);
+PG_FUNCTION_INFO_V1(pg_lsntimeline);
+
+Datum
+pg_estimate_time_at_lsn(PG_FUNCTION_ARGS)
+{
+	XLogRecPtr	lsn = PG_GETARG_LSN(0);
+	PgStatShared_Wal *stats_shmem = &pgStatLocal.shmem->wal;
+	TimestampTz result;
+
+	LWLockAcquire(&stats_shmem->lock, LW_SHARED);
+	result = estimate_time_at_lsn(&stats_shmem->stats.timeline, lsn);
+	LWLockRelease(&stats_shmem->lock);
+
+	PG_RETURN_TIMESTAMPTZ(result);
+}
+
+Datum
+pg_estimate_lsn_at_time(PG_FUNCTION_ARGS)
+{
+	PgStatShared_Wal *stats_shmem = &pgStatLocal.shmem->wal;
+	TimestampTz time = PG_GETARG_TIMESTAMPTZ(0);
+	XLogRecPtr	result;
+
+	LWLockAcquire(&stats_shmem->lock, LW_SHARED);
+	result = estimate_lsn_at_time(&stats_shmem->stats.timeline, time);
+	LWLockRelease(&stats_shmem->lock);
+
+	PG_RETURN_LSN(result);
+}
+
+Datum
+pg_lsntimeline(PG_FUNCTION_ARGS)
+{
+	ReturnSetInfo *rsinfo;
+	PgStat_WalStats *stats = pgstat_fetch_stat_wal();
+	LSNTimeline *timeline = &stats->timeline;
+
+	InitMaterializedSRF(fcinfo, 0);
+	rsinfo = (ReturnSetInfo *) fcinfo->resultinfo;
+	for (int i = LSNTIMELINE_VOLUME - timeline->length; i < LSNTIMELINE_VOLUME; i++)
+	{
+		Datum		values[2] = {0};
+		bool		nulls[2] = {0};
+
+		values[0] = timeline->data[i].time;
+		values[1] = timeline->data[i].lsn;
+		tuplestore_putvalues(rsinfo->setResult, rsinfo->setDesc,
+							 values, nulls);
+	}
+	return (Datum) 0;
 }
