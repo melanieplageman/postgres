@@ -2973,6 +2973,7 @@ VacOptValue
 VacuumParams
 VacuumRelation
 VacuumStmt
+VacReapBlkState
 ValidIOData
 ValidateIndexState
 ValuesScan
