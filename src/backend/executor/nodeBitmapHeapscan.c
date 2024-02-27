@@ -211,7 +211,7 @@ BitmapHeapNext(BitmapHeapScanState *node)
 
 	for (;;)
 	{
-		bool		valid;
+		bool		valid, lossy;
 
 		CHECK_FOR_INTERRUPTS();
 
@@ -232,12 +232,12 @@ BitmapHeapNext(BitmapHeapScanState *node)
 
 			BitmapAdjustPrefetchIterator(node, tbmres->blockno);
 
-			valid = table_scan_bitmap_next_block(scan, tbmres);
+			valid = table_scan_bitmap_next_block(scan, tbmres, &lossy);
 
-			if (tbmres->ntuples >= 0)
-				node->exact_pages++;
-			else
+			if (lossy)
 				node->lossy_pages++;
+			else
+				node->exact_pages++;
 
 			if (!valid)
 			{
