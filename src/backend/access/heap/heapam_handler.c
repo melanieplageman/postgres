@@ -2112,7 +2112,8 @@ heapam_estimate_rel_size(Relation rel, int32 *attr_widths,
 
 static bool
 heapam_scan_bitmap_next_block(TableScanDesc scan,
-							  TBMIterateResult *tbmres)
+							  TBMIterateResult *tbmres,
+							  bool *lossy)
 {
 	HeapScanDesc hscan = (HeapScanDesc) scan;
 	BlockNumber block = tbmres->blockno;
@@ -2239,6 +2240,8 @@ heapam_scan_bitmap_next_block(TableScanDesc scan,
 
 	Assert(ntup <= MaxHeapTuplesPerPage);
 	hscan->rs_ntuples = ntup;
+
+	*lossy = tbmres->ntuples < 0;
 
 	return ntup > 0;
 }
