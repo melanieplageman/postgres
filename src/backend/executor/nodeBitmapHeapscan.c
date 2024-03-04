@@ -242,7 +242,6 @@ BitmapHeapNext(BitmapHeapScanState *node)
 				break;
 			}
 
-			BitmapAdjustPrefetchIterator(node, tbmres->blockno);
 
 			valid = table_scan_bitmap_next_block(scan, tbmres, &lossy);
 
@@ -257,6 +256,7 @@ BitmapHeapNext(BitmapHeapScanState *node)
 				continue;
 			}
 
+			BitmapAdjustPrefetchIterator(node, tbmres->blockno);
 
 			/* Adjust the prefetch target */
 			BitmapAdjustPrefetchTarget(node);
