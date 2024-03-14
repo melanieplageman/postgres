@@ -24,6 +24,9 @@
 
 struct ParallelTableScanDescData;
 
+struct TBMIterator;
+struct TBMSharedIterator;
+
 /*
  * Generic descriptor for table scans. This is the base-class for table scans,
  * which needs to be embedded in the scans of individual AMs.
@@ -39,6 +42,10 @@ typedef struct TableScanDescData
 	/* Range of ItemPointers for table_scan_getnextslot_tidrange() to scan. */
 	ItemPointerData rs_mintid;
 	ItemPointerData rs_maxtid;
+
+	/* Only used for Bitmap table scans */
+	struct TBMIterator *tbmiterator;
+	struct TBMSharedIterator *shared_tbmiterator;
 
 	/*
 	 * Information about type and behaviour of the scan, a bitmask of members
