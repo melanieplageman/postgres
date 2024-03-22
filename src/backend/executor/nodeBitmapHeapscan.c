@@ -119,7 +119,6 @@ BitmapHeapNext(BitmapHeapScanState *node)
 {
 	ExprContext *econtext;
 	TableScanDesc scan;
-	bool		lossy;
 	TIDBitmap  *tbm;
 	TupleTableSlot *slot;
 	ParallelBitmapHeapState *pstate = node->pstate;
@@ -298,13 +297,9 @@ new_page:
 
 		BitmapAdjustPrefetchIterator(node);
 
-		if (!table_scan_bitmap_next_block(scan, &node->recheck, &lossy, &node->blockno))
+		if (!table_scan_bitmap_next_block(scan, &node->recheck, &node->blockno,
+										  &node->lossy_pages, &node->exact_pages))
 			break;
-
-		if (lossy)
-			node->lossy_pages++;
-		else
-			node->exact_pages++;
 
 		/*
 		 * If serial, we can error out if the the prefetch block doesn't stay

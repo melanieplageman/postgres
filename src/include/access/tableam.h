@@ -782,8 +782,8 @@ typedef struct TableAmRoutine
 	 * work to allow scan_bitmap_next_tuple() to return tuples (e.g. it might
 	 * make sense to perform tuple visibility checks at this time).
 	 *
-	 * lossy indicates whether or not the block's representation in the bitmap
-	 * is lossy or exact.
+	 * lossy_pages is incremented if the block's representation in the bitmap
+	 * is lossy, otherwise, exact_pages is incremented.
 	 *
 	 * XXX: Currently this may only be implemented if the AM uses md.c as its
 	 * storage manager, and uses ItemPointer->ip_blkid in a manner that maps
@@ -800,8 +800,10 @@ typedef struct TableAmRoutine
 	 * scan_bitmap_next_tuple need to exist, or neither.
 	 */
 	bool		(*scan_bitmap_next_block) (TableScanDesc scan,
-										   bool *recheck, bool *lossy,
-										   BlockNumber *blockno);
+										   bool *recheck,
+										   BlockNumber *blockno,
+										   long *lossy_pages,
+										   long *exact_pages);
 
 	/*
 	 * Fetch the next tuple of a bitmap table scan into `slot` and return true
@@ -1977,15 +1979,17 @@ table_relation_estimate_size(Relation rel, int32 *attr_widths,
 /*
  * Prepare to fetch / check / return tuples as part of a bitmap table scan.
  * `scan` needs to have been started via table_beginscan_bm(). Returns false if
- * there are no more blocks in the bitmap, true otherwise. lossy is set to true
- * if bitmap is lossy for the selected block and false otherwise.
+ * there are no more blocks in the bitmap, true otherwise. lossy_pages is
+ * incremented if bitmap is lossy for the selected block and exact_pages is
+ * incremented otherwise.
  *
  * Note, this is an optionally implemented function, therefore should only be
  * used after verifying the presence (at plan time or such).
  */
 static inline bool
 table_scan_bitmap_next_block(TableScanDesc scan,
-							 bool *recheck, bool *lossy, BlockNumber *blockno)
+							 bool *recheck, BlockNumber *blockno,
+							 long *lossy_pages, long *exact_pages)
 {
 	/*
 	 * We don't expect direct calls to table_scan_bitmap_next_block with valid
@@ -1996,7 +2000,8 @@ table_scan_bitmap_next_block(TableScanDesc scan,
 		elog(ERROR, "unexpected table_scan_bitmap_next_block call during logical decoding");
 
 	return scan->rs_rd->rd_tableam->scan_bitmap_next_block(scan, recheck,
-														   lossy, blockno);
+														   blockno, lossy_pages,
+														   exact_pages);
 }
 
 /*
