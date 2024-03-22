@@ -948,8 +948,16 @@ heap_beginscan(Relation relation, Snapshot snapshot,
 	scan->rs_base.rs_flags = flags;
 	scan->rs_base.rs_parallel = parallel_scan;
 	scan->rs_strategy = NULL;	/* set in initscan */
+
+	scan->rs_base.blockno = InvalidBlockNumber;
+
 	scan->rs_vmbuffer = InvalidBuffer;
 	scan->rs_empty_tuples_pending = 0;
+	scan->pvmbuffer = InvalidBuffer;
+
+	scan->pfblockno = InvalidBlockNumber;
+	scan->prefetch_target = -1;
+	scan->prefetch_pages = 0;
 
 	/*
 	 * Disable page-at-a-time mode if it's not a MVCC-safe snapshot.
@@ -1032,6 +1040,12 @@ heap_rescan(TableScanDesc sscan, ScanKey key, bool set_params,
 			scan->rs_base.rs_flags &= ~SO_ALLOW_PAGEMODE;
 	}
 
+	scan->rs_base.blockno = InvalidBlockNumber;
+
+	scan->pfblockno = InvalidBlockNumber;
+	scan->prefetch_target = -1;
+	scan->prefetch_pages = 0;
+
 	/*
 	 * unpin scan buffers
 	 */
@@ -1042,6 +1056,12 @@ heap_rescan(TableScanDesc sscan, ScanKey key, bool set_params,
 	{
 		ReleaseBuffer(scan->rs_vmbuffer);
 		scan->rs_vmbuffer = InvalidBuffer;
+	}
+
+	if (BufferIsValid(scan->pvmbuffer))
+	{
+		ReleaseBuffer(scan->pvmbuffer);
+		scan->pvmbuffer = InvalidBuffer;
 	}
 
 	/*
@@ -1067,6 +1087,12 @@ heap_endscan(TableScanDesc sscan)
 	{
 		ReleaseBuffer(scan->rs_vmbuffer);
 		scan->rs_vmbuffer = InvalidBuffer;
+	}
+
+	if (BufferIsValid(scan->pvmbuffer))
+	{
+		ReleaseBuffer(scan->pvmbuffer);
+		scan->pvmbuffer = InvalidBuffer;
 	}
 
 	/*
