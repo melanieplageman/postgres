@@ -2183,12 +2183,6 @@ heapam_estimate_rel_size(Relation rel, int32 *attr_widths,
 									   HEAP_USABLE_BYTES_PER_PAGE);
 }
 
-
-/* ------------------------------------------------------------------------
- * Executor related callbacks for the heap AM
- * ------------------------------------------------------------------------
- */
-
 /*
  *	BitmapAdjustPrefetchIterator - Adjust the prefetch iterator
  *
@@ -2222,8 +2216,8 @@ BitmapAdjustPrefetchIterator(HeapScanDesc scan)
 
 	/*
 	 * Adjusting the prefetch iterator before invoking
-	 * table_scan_bitmap_next_block() keeps prefetch distance higher across
-	 * the parallel workers.
+	 * heapam_bitmap_next_block() keeps prefetch distance higher across the
+	 * parallel workers.
 	 */
 	if (scan->rs_base.prefetch_maximum > 0)
 	{
@@ -2586,30 +2580,43 @@ BitmapPrefetch(HeapScanDesc scan)
 #endif							/* USE_PREFETCH */
 }
 
+/* ------------------------------------------------------------------------
+ * Executor related callbacks for the heap AM
+ * ------------------------------------------------------------------------
+ */
+
 static bool
 heapam_scan_bitmap_next_tuple(TableScanDesc scan,
-							  TupleTableSlot *slot)
+							  TupleTableSlot *slot, bool *recheck,
+							  long *lossy_pages, long *exact_pages)
 {
 	HeapScanDesc hscan = (HeapScanDesc) scan;
 	OffsetNumber targoffset;
 	Page		page;
 	ItemId		lp;
 
-	if (hscan->rs_empty_tuples_pending > 0)
-	{
-		/*
-		 * If we don't have to fetch the tuple, just return nulls.
-		 */
-		ExecStoreAllNullTuple(slot);
-		hscan->rs_empty_tuples_pending--;
-		return true;
-	}
-
 	/*
 	 * Out of range?  If so, nothing more to look at on this page
 	 */
-	if (hscan->rs_cindex < 0 || hscan->rs_cindex >= hscan->rs_ntuples)
-		return false;
+	while (hscan->rs_cindex < 0 || hscan->rs_cindex >= hscan->rs_ntuples)
+	{
+		/*
+		 * Emit empty tuples before advancing to the next block
+		 */
+		if (hscan->rs_empty_tuples_pending > 0)
+		{
+			/*
+			 * If we don't have to fetch the tuple, just return nulls.
+			 */
+			ExecStoreAllNullTuple(slot);
+			hscan->rs_empty_tuples_pending--;
+			return true;
+		}
+
+		if (!heapam_scan_bitmap_next_block(scan, recheck, &scan->blockno,
+										   lossy_pages, exact_pages))
+			return false;
+	}
 
 #ifdef USE_PREFETCH
 
@@ -2990,7 +2997,6 @@ static const TableAmRoutine heapam_methods = {
 
 	.relation_estimate_size = heapam_estimate_rel_size,
 
-	.scan_bitmap_next_block = heapam_scan_bitmap_next_block,
 	.scan_bitmap_next_tuple = heapam_scan_bitmap_next_tuple,
 	.scan_sample_next_block = heapam_scan_sample_next_block,
 	.scan_sample_next_tuple = heapam_scan_sample_next_tuple
