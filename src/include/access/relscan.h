@@ -26,6 +26,7 @@
 struct ParallelTableScanDescData;
 
 struct BitmapHeapIterator;
+struct ParallelBitmapHeapState;
 
 /*
  * Generic descriptor for table scans. This is the base-class for table scans,
@@ -45,6 +46,13 @@ typedef struct TableScanDescData
 
 	/* Only used for Bitmap table scans */
 	struct BitmapHeapIterator *rs_bhs_iterator;
+	struct BitmapHeapIterator *rs_pf_bhs_iterator;
+
+	/* maximum value for prefetch_target */
+	int			prefetch_maximum;
+	struct ParallelBitmapHeapState *bm_parallel;
+	/* used to validate BHS prefetch and current block stay in sync */
+	BlockNumber blockno;
 
 	/*
 	 * Information about type and behaviour of the scan, a bitmask of members
