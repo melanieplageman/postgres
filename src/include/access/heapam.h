@@ -86,6 +86,23 @@ typedef struct HeapScanDescData
 	Buffer		rs_vmbuffer;
 	int			rs_empty_tuples_pending;
 
+	/*
+	 * These fields only used for prefetching in bitmap table scans
+	 */
+
+	/* buffer for visibility-map lookups of prefetched pages */
+	Buffer		pvmbuffer;
+
+	/*
+	 * These fields only used in serial BHS
+	 */
+	/* Current target for prefetch distance */
+	int			prefetch_target;
+	/* # pages prefetch iterator is ahead of current */
+	int			prefetch_pages;
+	/* used to validate prefetch block stays ahead of current block  */
+	BlockNumber pfblockno;
+
 	/* these fields only used in page-at-a-time mode and for bitmap scans */
 	int			rs_cindex;		/* current tuple's index in vistuples */
 	int			rs_ntuples;		/* number of visible tuples on page */
