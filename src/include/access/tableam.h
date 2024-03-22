@@ -918,8 +918,6 @@ table_beginscan_bm(Relation rel, Snapshot snapshot,
 
 	result = rel->rd_tableam->scan_begin(rel, snapshot, nkeys, key, NULL, flags);
 	result->rs_bhs_iterator = NULL;
-	result->rs_pf_bhs_iterator = NULL;
-	result->prefetch_maximum = 0;
 	result->bm_parallel = NULL;
 	return result;
 }
@@ -972,12 +970,6 @@ table_endscan(TableScanDesc scan)
 	{
 		bhs_end_iterate(scan->rs_bhs_iterator);
 		scan->rs_bhs_iterator = NULL;
-
-		if (scan->rs_pf_bhs_iterator)
-		{
-			bhs_end_iterate(scan->rs_pf_bhs_iterator);
-			scan->rs_pf_bhs_iterator = NULL;
-		}
 	}
 
 	scan->rs_rd->rd_tableam->scan_end(scan);
@@ -994,12 +986,6 @@ table_rescan(TableScanDesc scan,
 	{
 		bhs_end_iterate(scan->rs_bhs_iterator);
 		scan->rs_bhs_iterator = NULL;
-
-		if (scan->rs_pf_bhs_iterator)
-		{
-			bhs_end_iterate(scan->rs_pf_bhs_iterator);
-			scan->rs_pf_bhs_iterator = NULL;
-		}
 	}
 
 	scan->rs_rd->rd_tableam->scan_rescan(scan, key, false, false, false, false);

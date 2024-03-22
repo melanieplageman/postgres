@@ -108,6 +108,8 @@ static XLogRecPtr log_heap_new_cid(Relation relation, HeapTuple tup);
 static HeapTuple ExtractReplicaIdentity(Relation relation, HeapTuple tp, bool key_required,
 										bool *copy);
 
+static BlockNumber bitmapheap_stream_read_next(ReadStream *pgsr, void *pgsr_private,
+											   void *per_buffer_data);
 
 /*
  * Each tuple lock mode has a corresponding heavyweight lock, and one or two
@@ -323,6 +325,23 @@ initscan(HeapScanDesc scan, ScanKey key, bool keep_startblock)
 	scan->rs_ntuples = 0;
 
 	/* page-at-a-time fields are always invalid when not rs_inited */
+
+	/*
+	 * Make the read stream object for BitmapHeapScan. If this is a rescan, we
+	 * expect that the previous read stream was ended in heap_rescan() before
+	 * invoking initscan(). Do not create the read stream until after creating
+	 * the BufferAccessStrategy object.
+	 */
+	if (scan->rs_base.rs_flags & SO_TYPE_BITMAPSCAN)
+	{
+		scan->rs_read_stream = read_stream_begin_relation(READ_STREAM_DEFAULT,
+														  scan->rs_strategy,
+														  scan->rs_base.rs_rd,
+														  MAIN_FORKNUM,
+														  bitmapheap_stream_read_next,
+														  scan,
+														  sizeof(TBMIterateResult));
+	}
 
 	/*
 	 * copy the scan key, if appropriate
@@ -950,16 +969,9 @@ heap_beginscan(Relation relation, Snapshot snapshot,
 	scan->rs_base.rs_flags = flags;
 	scan->rs_base.rs_parallel = parallel_scan;
 	scan->rs_strategy = NULL;	/* set in initscan */
-
-	scan->rs_base.blockno = InvalidBlockNumber;
-
+	scan->rs_read_stream = NULL;
 	scan->rs_vmbuffer = InvalidBuffer;
 	scan->rs_empty_tuples_pending = 0;
-	scan->pvmbuffer = InvalidBuffer;
-
-	scan->pfblockno = InvalidBlockNumber;
-	scan->prefetch_target = -1;
-	scan->prefetch_pages = 0;
 
 	/*
 	 * Disable page-at-a-time mode if it's not a MVCC-safe snapshot.
@@ -1042,12 +1054,6 @@ heap_rescan(TableScanDesc sscan, ScanKey key, bool set_params,
 			scan->rs_base.rs_flags &= ~SO_ALLOW_PAGEMODE;
 	}
 
-	scan->rs_base.blockno = InvalidBlockNumber;
-
-	scan->pfblockno = InvalidBlockNumber;
-	scan->prefetch_target = -1;
-	scan->prefetch_pages = 0;
-
 	/*
 	 * unpin scan buffers
 	 */
@@ -1060,10 +1066,13 @@ heap_rescan(TableScanDesc sscan, ScanKey key, bool set_params,
 		scan->rs_vmbuffer = InvalidBuffer;
 	}
 
-	if (BufferIsValid(scan->pvmbuffer))
+	/* Free the old read stream before reinitializing the scan descriptor */
+	if (scan->rs_base.rs_flags & SO_TYPE_BITMAPSCAN)
 	{
-		ReleaseBuffer(scan->pvmbuffer);
-		scan->pvmbuffer = InvalidBuffer;
+		if (scan->rs_read_stream)
+			read_stream_end(scan->rs_read_stream);
+
+		scan->rs_read_stream = NULL;
 	}
 
 	/*
@@ -1091,11 +1100,9 @@ heap_endscan(TableScanDesc sscan)
 		scan->rs_vmbuffer = InvalidBuffer;
 	}
 
-	if (BufferIsValid(scan->pvmbuffer))
-	{
-		ReleaseBuffer(scan->pvmbuffer);
-		scan->pvmbuffer = InvalidBuffer;
-	}
+	/* We must free the read stream before the BufferAccessStrategy object */
+	if (scan->rs_base.rs_flags & SO_TYPE_BITMAPSCAN && scan->rs_read_stream)
+		read_stream_end(scan->rs_read_stream);
 
 	/*
 	 * decrement relation reference count and free scan descriptor storage
@@ -10110,4 +10117,52 @@ HeapCheckForSerializableConflictOut(bool visible, Relation relation,
 		return;
 
 	CheckForSerializableConflictOut(relation, xid, snapshot);
+}
+
+static BlockNumber
+bitmapheap_stream_read_next(ReadStream *pgsr, void *private_data,
+							void *per_buffer_data)
+{
+	TBMIterateResult *tbmres = per_buffer_data;
+	HeapScanDesc hdesc = (HeapScanDesc) private_data;
+
+	for (;;)
+	{
+		CHECK_FOR_INTERRUPTS();
+
+		bhs_iterate(hdesc->rs_base.rs_bhs_iterator, tbmres);
+
+		/* no more entries in the bitmap */
+		if (!BlockNumberIsValid(tbmres->blockno))
+			return InvalidBlockNumber;
+
+		/*
+		 * Ignore any claimed entries past what we think is the end of the
+		 * relation. It may have been extended after the start of our scan (we
+		 * only hold an AccessShareLock, and it could be inserts from this
+		 * backend).  We don't take this optimization in SERIALIZABLE
+		 * isolation though, as we need to examine all invisible tuples
+		 * reachable by the index.
+		 */
+		if (!IsolationIsSerializable() && tbmres->blockno >= hdesc->rs_nblocks)
+			continue;
+
+		/*
+		 * We can skip fetching the heap page if we don't need any fields from
+		 * the heap, the bitmap entries don't need rechecking, and all tuples
+		 * on the page are visible to our transaction.
+		 */
+		if (!(hdesc->rs_base.rs_flags & SO_NEED_TUPLE) &&
+			!tbmres->recheck &&
+			VM_ALL_VISIBLE(hdesc->rs_base.rs_rd, tbmres->blockno, &hdesc->rs_vmbuffer))
+		{
+			hdesc->rs_empty_tuples_pending += tbmres->ntuples;
+			continue;
+		}
+
+		return tbmres->blockno;
+	}
+
+	/* not reachable */
+	Assert(false);
 }

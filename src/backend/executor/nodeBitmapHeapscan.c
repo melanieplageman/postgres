@@ -131,14 +131,6 @@ BitmapHeapNext(BitmapHeapScanState *node)
 	/*
 	 * If we haven't yet performed the underlying index scan, do it, and begin
 	 * the iteration over the bitmap.
-	 *
-	 * For prefetching, we use *two* iterators, one for the pages we are
-	 * actually scanning and another that runs ahead of the first for
-	 * prefetching.  node->prefetch_pages tracks exactly how many pages ahead
-	 * the prefetch iterator is.  Also, node->prefetch_target tracks the
-	 * desired prefetch distance, which starts small and increases up to the
-	 * scan->prefetch_maximum.  This is to avoid doing a lot of prefetching in
-	 * a scan that stops after a few tuples because of a LIMIT.
 	 */
 	if (!node->initialized)
 	{
@@ -148,15 +140,6 @@ BitmapHeapNext(BitmapHeapScanState *node)
 		 */
 		bool		init_shared_state = node->pstate ?
 			BitmapShouldInitializeSharedState(node->pstate) : false;
-
-		/*
-		 * Maximum number of prefetches for the tablespace if configured,
-		 * otherwise the current value of the effective_io_concurrency GUC.
-		 */
-		int			pf_maximum = 0;
-#ifdef USE_PREFETCH
-		pf_maximum = get_tablespace_io_concurrency(node->ss.ss_currentRelation->rd_rel->reltablespace);
-#endif
 
 		if (!node->pstate || init_shared_state)
 		{
@@ -174,13 +157,7 @@ BitmapHeapNext(BitmapHeapScanState *node)
 				 * multiple processes to iterate jointly.
 				 */
 				node->pstate->tbmiterator = tbm_prepare_shared_iterate(tbm);
-#ifdef USE_PREFETCH
-				if (pf_maximum > 0)
-				{
-					node->pstate->prefetch_iterator =
-						tbm_prepare_shared_iterate(tbm);
-				}
-#endif
+
 				/* We have initialized the shared state so wake up others. */
 				BitmapDoneInitializingSharedState(node->pstate);
 			}
@@ -213,21 +190,11 @@ BitmapHeapNext(BitmapHeapScanState *node)
 																	extra_flags);
 		}
 
-		scan->prefetch_maximum = pf_maximum;
 		scan->bm_parallel = node->pstate;
 
 		scan->rs_bhs_iterator = bhs_begin_iterate(tbm,
 												  scan->bm_parallel ? scan->bm_parallel->tbmiterator : InvalidDsaPointer,
 												  dsa);
-
-#ifdef USE_PREFETCH
-		if (scan->prefetch_maximum > 0)
-		{
-			scan->rs_pf_bhs_iterator = bhs_begin_iterate(tbm,
-														 scan->bm_parallel ? scan->bm_parallel->prefetch_iterator : InvalidDsaPointer,
-														 dsa);
-		}
-#endif							/* USE_PREFETCH */
 
 		node->initialized = true;
 	}
@@ -525,14 +492,10 @@ ExecBitmapHeapInitializeDSM(BitmapHeapScanState *node,
 		return;
 
 	pstate = shm_toc_allocate(pcxt->toc, sizeof(ParallelBitmapHeapState));
-
 	pstate->tbmiterator = 0;
-	pstate->prefetch_iterator = 0;
 
 	/* Initialize the mutex */
 	SpinLockInit(&pstate->mutex);
-	pstate->prefetch_pages = 0;
-	pstate->prefetch_target = -1;
 	pstate->state = BM_INITIAL;
 
 	ConditionVariableInit(&pstate->cv);
@@ -563,11 +526,7 @@ ExecBitmapHeapReInitializeDSM(BitmapHeapScanState *node,
 	if (DsaPointerIsValid(pstate->tbmiterator))
 		tbm_free_shared_area(dsa, pstate->tbmiterator);
 
-	if (DsaPointerIsValid(pstate->prefetch_iterator))
-		tbm_free_shared_area(dsa, pstate->prefetch_iterator);
-
 	pstate->tbmiterator = InvalidDsaPointer;
-	pstate->prefetch_iterator = InvalidDsaPointer;
 }
 
 /* ----------------------------------------------------------------

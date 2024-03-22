@@ -26,6 +26,7 @@
 #include "storage/dsm.h"
 #include "storage/lockdefs.h"
 #include "storage/shm_toc.h"
+#include "storage/read_stream.h"
 #include "utils/relcache.h"
 #include "utils/snapshot.h"
 
@@ -76,6 +77,9 @@ typedef struct HeapScanDescData
 	 */
 	ParallelBlockTableScanWorkerData *rs_parallelworkerdata;
 
+	/* Streaming read control object for scans supporting it */
+	ReadStream *rs_read_stream;
+
 	/*
 	 * These fields are only used for bitmap scans for the "skip fetch"
 	 * optimization. Bitmap scans needing no fields from the heap may skip
@@ -85,23 +89,6 @@ typedef struct HeapScanDescData
 	 */
 	Buffer		rs_vmbuffer;
 	int			rs_empty_tuples_pending;
-
-	/*
-	 * These fields only used for prefetching in bitmap table scans
-	 */
-
-	/* buffer for visibility-map lookups of prefetched pages */
-	Buffer		pvmbuffer;
-
-	/*
-	 * These fields only used in serial BHS
-	 */
-	/* Current target for prefetch distance */
-	int			prefetch_target;
-	/* # pages prefetch iterator is ahead of current */
-	int			prefetch_pages;
-	/* used to validate prefetch block stays ahead of current block  */
-	BlockNumber pfblockno;
 
 	/* these fields only used in page-at-a-time mode and for bitmap scans */
 	int			rs_cindex;		/* current tuple's index in vistuples */
