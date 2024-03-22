@@ -229,43 +229,34 @@ BitmapHeapNext(BitmapHeapScanState *node)
 #endif							/* USE_PREFETCH */
 
 		node->initialized = true;
-
-		goto new_page;
 	}
 
-	for (;;)
+	while (table_scan_bitmap_next_tuple(scan, slot, &node->recheck,
+										&node->lossy_pages, &node->exact_pages))
 	{
-		while (table_scan_bitmap_next_tuple(scan, slot))
+		CHECK_FOR_INTERRUPTS();
+
+
+		/*
+		 * If we are using lossy info, we have to recheck the qual conditions
+		 * at every tuple.
+		 */
+		if (node->recheck)
 		{
-			CHECK_FOR_INTERRUPTS();
-
-
-			/*
-			 * If we are using lossy info, we have to recheck the qual
-			 * conditions at every tuple.
-			 */
-			if (node->recheck)
+			econtext->ecxt_scantuple = slot;
+			if (!ExecQualAndReset(node->bitmapqualorig, econtext))
 			{
-				econtext->ecxt_scantuple = slot;
-				if (!ExecQualAndReset(node->bitmapqualorig, econtext))
-				{
-					/* Fails recheck, so drop it and loop back for another */
-					InstrCountFiltered2(node, 1);
-					ExecClearTuple(slot);
-					continue;
-				}
+				/* Fails recheck, so drop it and loop back for another */
+				InstrCountFiltered2(node, 1);
+				ExecClearTuple(slot);
+				continue;
 			}
-
-			/* OK to return this tuple */
-			return slot;
 		}
 
-new_page:
-
-		if (!table_scan_bitmap_next_block(scan, &scan->blockno, &node->recheck,
-										  &node->lossy_pages, &node->exact_pages))
-			break;
+		/* OK to return this tuple */
+		return slot;
 	}
+
 
 	/*
 	 * if we get here it means we are at the end of the scan..

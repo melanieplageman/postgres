@@ -324,6 +324,8 @@ initscan(HeapScanDesc scan, ScanKey key, bool keep_startblock)
 	ItemPointerSetInvalid(&scan->rs_ctup.t_self);
 	scan->rs_cbuf = InvalidBuffer;
 	scan->rs_cblock = InvalidBlockNumber;
+	scan->rs_cindex = 0;
+	scan->rs_ntuples = 0;
 
 	/* page-at-a-time fields are always invalid when not rs_inited */
 
