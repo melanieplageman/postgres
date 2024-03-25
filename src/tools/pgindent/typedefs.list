@@ -259,6 +259,7 @@ BitString
 BitmapAnd
 BitmapAndPath
 BitmapAndState
+BitmapHeapIterator
 BitmapHeapPath
 BitmapHeapScan
 BitmapHeapScanState
