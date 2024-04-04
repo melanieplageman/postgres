@@ -2194,22 +2194,22 @@ static inline void
 BitmapAdjustPrefetchIterator(HeapScanDesc scan)
 {
 #ifdef USE_PREFETCH
-	BitmapHeapIterator *prefetch_iterator = scan->rs_base.rs_pf_bhs_iterator;
-	ParallelBitmapHeapState *pstate = scan->rs_base.bm_parallel;
+	BitmapHeapIterator *prefetch_iterator = &scan->rs_bhs.pf_iterator;
+	ParallelBitmapHeapState *pstate = scan->rs_bhs.pstate;
 	TBMIterateResult *tbmpre;
 
 	if (pstate == NULL)
 	{
-		if (scan->prefetch_pages > 0)
+		if (scan->rs_bhs.prefetch_pages > 0)
 		{
 			/* The main iterator has closed the distance by one page */
-			scan->prefetch_pages--;
+			scan->rs_bhs.prefetch_pages--;
 		}
-		else if (prefetch_iterator)
+		else if (!prefetch_iterator->exhausted)
 		{
 			/* Do not let the prefetch iterator get behind the main one */
 			tbmpre = bhs_iterate(prefetch_iterator);
-			scan->pfblockno = tbmpre ? tbmpre->blockno : InvalidBlockNumber;
+			scan->rs_bhs.pfblockno = tbmpre ? tbmpre->blockno : InvalidBlockNumber;
 		}
 		return;
 	}
@@ -2219,7 +2219,7 @@ BitmapAdjustPrefetchIterator(HeapScanDesc scan)
 	 * heapam_bitmap_next_block() keeps prefetch distance higher across the
 	 * parallel workers.
 	 */
-	if (scan->rs_base.prefetch_maximum > 0)
+	if (scan->rs_bhs.prefetch_maximum > 0)
 	{
 		SpinLockAcquire(&pstate->mutex);
 		if (pstate->prefetch_pages > 0)
@@ -2240,10 +2240,10 @@ BitmapAdjustPrefetchIterator(HeapScanDesc scan)
 			 * we don't validate the blockno here as we do in non-parallel
 			 * case.
 			 */
-			if (prefetch_iterator)
+			if (!prefetch_iterator->exhausted)
 			{
 				tbmpre = bhs_iterate(prefetch_iterator);
-				scan->pfblockno = tbmpre ? tbmpre->blockno : InvalidBlockNumber;
+				scan->rs_bhs.pfblockno = tbmpre ? tbmpre->blockno : InvalidBlockNumber;
 			}
 		}
 	}
@@ -2274,12 +2274,13 @@ heapam_scan_bitmap_next_block(TableScanDesc scan,
 	{
 		CHECK_FOR_INTERRUPTS();
 
-		tbmres = bhs_iterate(scan->rs_bhs_iterator);
+		Assert(!hscan->rs_bhs.iterator.exhausted);
+		tbmres = bhs_iterate(&hscan->rs_bhs.iterator);
 
 		if (tbmres == NULL)
 		{
 			/* no more entries in the bitmap */
-			Assert(hscan->rs_empty_tuples_pending == 0);
+			Assert(hscan->rs_bhs.empty_tuples_pending == 0);
 			return false;
 		}
 
@@ -2304,13 +2305,13 @@ heapam_scan_bitmap_next_block(TableScanDesc scan,
 	 */
 	if (!(scan->rs_flags & SO_NEED_TUPLE) &&
 		!tbmres->recheck &&
-		VM_ALL_VISIBLE(scan->rs_rd, tbmres->blockno, &hscan->rs_vmbuffer))
+		VM_ALL_VISIBLE(scan->rs_rd, tbmres->blockno, &hscan->rs_bhs.vmbuffer))
 	{
 		/* can't be lossy in the skip_fetch case */
 		Assert(tbmres->ntuples >= 0);
-		Assert(hscan->rs_empty_tuples_pending >= 0);
+		Assert(hscan->rs_bhs.empty_tuples_pending >= 0);
 
-		hscan->rs_empty_tuples_pending += tbmres->ntuples;
+		hscan->rs_bhs.empty_tuples_pending += tbmres->ntuples;
 
 		return true;
 	}
@@ -2414,9 +2415,9 @@ heapam_scan_bitmap_next_block(TableScanDesc scan,
 	 * If serial, we can error out if the the prefetch block doesn't stay
 	 * ahead of the current block.
 	 */
-	if (scan->bm_parallel == NULL &&
-		scan->rs_pf_bhs_iterator &&
-		hscan->pfblockno < hscan->rs_base.blockno)
+	if (hscan->rs_bhs.pstate == NULL &&
+		!hscan->rs_bhs.pf_iterator.exhausted &&
+		hscan->rs_bhs.pfblockno < hscan->rs_bhs.blockno)
 		elog(ERROR, "prefetch and main iterators are out of sync");
 
 	/* Adjust the prefetch target */
@@ -2444,19 +2445,19 @@ static inline void
 BitmapAdjustPrefetchTarget(HeapScanDesc scan)
 {
 #ifdef USE_PREFETCH
-	ParallelBitmapHeapState *pstate = scan->rs_base.bm_parallel;
-	int			prefetch_maximum = scan->rs_base.prefetch_maximum;
+	ParallelBitmapHeapState *pstate = scan->rs_bhs.pstate;
+	int			prefetch_maximum = scan->rs_bhs.prefetch_maximum;
 
 	if (pstate == NULL)
 	{
-		if (scan->prefetch_target >= prefetch_maximum)
+		if (scan->rs_bhs.prefetch_target >= prefetch_maximum)
 			 /* don't increase any further */ ;
-		else if (scan->prefetch_target >= prefetch_maximum / 2)
-			scan->prefetch_target = prefetch_maximum;
-		else if (scan->prefetch_target > 0)
-			scan->prefetch_target *= 2;
+		else if (scan->rs_bhs.prefetch_target >= prefetch_maximum / 2)
+			scan->rs_bhs.prefetch_target = prefetch_maximum;
+		else if (scan->rs_bhs.prefetch_target > 0)
+			scan->rs_bhs.prefetch_target *= 2;
 		else
-			scan->prefetch_target++;
+			scan->rs_bhs.prefetch_target++;
 		return;
 	}
 
@@ -2485,14 +2486,14 @@ static inline void
 BitmapPrefetch(HeapScanDesc scan)
 {
 #ifdef USE_PREFETCH
-	ParallelBitmapHeapState *pstate = scan->rs_base.bm_parallel;
-	BitmapHeapIterator *prefetch_iterator = scan->rs_base.rs_pf_bhs_iterator;
+	ParallelBitmapHeapState *pstate = scan->rs_bhs.pstate;
+	BitmapHeapIterator *prefetch_iterator = &scan->rs_bhs.pf_iterator;
 
 	if (pstate == NULL)
 	{
-		if (prefetch_iterator)
+		if (!prefetch_iterator->exhausted)
 		{
-			while (scan->prefetch_pages < scan->prefetch_target)
+			while (scan->rs_bhs.prefetch_pages < scan->rs_bhs.prefetch_target)
 			{
 				TBMIterateResult *tbmpre = bhs_iterate(prefetch_iterator);
 				bool		skip_fetch;
@@ -2501,11 +2502,10 @@ BitmapPrefetch(HeapScanDesc scan)
 				{
 					/* No more pages to prefetch */
 					bhs_end_iterate(prefetch_iterator);
-					scan->rs_base.rs_pf_bhs_iterator = NULL;
 					break;
 				}
-				scan->prefetch_pages++;
-				scan->pfblockno = tbmpre->blockno;
+				scan->rs_bhs.prefetch_pages++;
+				scan->rs_bhs.pfblockno = tbmpre->blockno;
 
 				/*
 				 * If we expect not to have to actually read this heap page,
@@ -2517,7 +2517,7 @@ BitmapPrefetch(HeapScanDesc scan)
 							  !tbmpre->recheck &&
 							  VM_ALL_VISIBLE(scan->rs_base.rs_rd,
 											 tbmpre->blockno,
-											 &scan->pvmbuffer));
+											 &scan->rs_bhs.pvmbuffer));
 
 				if (!skip_fetch)
 					PrefetchBuffer(scan->rs_base.rs_rd, MAIN_FORKNUM, tbmpre->blockno);
@@ -2529,7 +2529,7 @@ BitmapPrefetch(HeapScanDesc scan)
 
 	if (pstate->prefetch_pages < pstate->prefetch_target)
 	{
-		if (prefetch_iterator)
+		if (!prefetch_iterator->exhausted)
 		{
 			while (1)
 			{
@@ -2552,23 +2552,23 @@ BitmapPrefetch(HeapScanDesc scan)
 				if (!do_prefetch)
 					return;
 
+				Assert(!scan->rs_bhs.iterator.exhausted);
 				tbmpre = bhs_iterate(prefetch_iterator);
 				if (tbmpre == NULL)
 				{
 					/* No more pages to prefetch */
 					bhs_end_iterate(prefetch_iterator);
-					scan->rs_base.rs_pf_bhs_iterator = NULL;
 					break;
 				}
 
-				scan->pfblockno = tbmpre->blockno;
+				scan->rs_bhs.pfblockno = tbmpre->blockno;
 
 				/* As above, skip prefetch if we expect not to need page */
 				skip_fetch = (!(scan->rs_base.rs_flags & SO_NEED_TUPLE) &&
 							  !tbmpre->recheck &&
 							  VM_ALL_VISIBLE(scan->rs_base.rs_rd,
 											 tbmpre->blockno,
-											 &scan->pvmbuffer));
+											 &scan->rs_bhs.pvmbuffer));
 
 				if (!skip_fetch)
 					PrefetchBuffer(scan->rs_base.rs_rd, MAIN_FORKNUM, tbmpre->blockno);
@@ -2601,17 +2601,17 @@ heapam_scan_bitmap_next_tuple(TableScanDesc scan,
 		/*
 		 * Emit empty tuples before advancing to the next block
 		 */
-		if (hscan->rs_empty_tuples_pending > 0)
+		if (hscan->rs_bhs.empty_tuples_pending > 0)
 		{
 			/*
 			 * If we don't have to fetch the tuple, just return nulls.
 			 */
 			ExecStoreAllNullTuple(slot);
-			hscan->rs_empty_tuples_pending--;
+			hscan->rs_bhs.empty_tuples_pending--;
 			return true;
 		}
 
-		if (!heapam_scan_bitmap_next_block(scan, recheck, &scan->blockno,
+		if (!heapam_scan_bitmap_next_block(scan, recheck, &hscan->rs_bhs.blockno,
 										   lossy_pages, exact_pages))
 			return false;
 	}
@@ -2622,18 +2622,18 @@ heapam_scan_bitmap_next_tuple(TableScanDesc scan,
 	 * Try to prefetch at least a few pages even before we get to the second
 	 * page if we don't stop reading after the first tuple.
 	 */
-	if (!scan->bm_parallel)
+	if (!hscan->rs_bhs.pstate)
 	{
-		if (hscan->prefetch_target < scan->prefetch_maximum)
-			hscan->prefetch_target++;
+		if (hscan->rs_bhs.prefetch_target < hscan->rs_bhs.prefetch_maximum)
+			hscan->rs_bhs.prefetch_target++;
 	}
-	else if (scan->bm_parallel->prefetch_target < scan->prefetch_maximum)
+	else if (hscan->rs_bhs.pstate->prefetch_target < hscan->rs_bhs.prefetch_maximum)
 	{
 		/* take spinlock while updating shared state */
-		SpinLockAcquire(&scan->bm_parallel->mutex);
-		if (scan->bm_parallel->prefetch_target < scan->prefetch_maximum)
-			scan->bm_parallel->prefetch_target++;
-		SpinLockRelease(&scan->bm_parallel->mutex);
+		SpinLockAcquire(&hscan->rs_bhs.pstate->mutex);
+		if (hscan->rs_bhs.pstate->prefetch_target < hscan->rs_bhs.prefetch_maximum)
+			hscan->rs_bhs.pstate->prefetch_target++;
+		SpinLockRelease(&hscan->rs_bhs.pstate->mutex);
 	}
 
 	/*
@@ -2970,6 +2970,8 @@ static const TableAmRoutine heapam_methods = {
 
 	.scan_set_tidrange = heap_set_tidrange,
 	.scan_getnextslot_tidrange = heap_getnextslot_tidrange,
+
+	.scan_rescan_bm = heap_rescan_bm,
 
 	.parallelscan_estimate = table_block_parallelscan_estimate,
 	.parallelscan_initialize = table_block_parallelscan_initialize,

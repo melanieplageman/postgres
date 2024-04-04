@@ -52,6 +52,7 @@
 #include "access/xlogutils.h"
 #include "catalog/catalog.h"
 #include "commands/vacuum.h"
+#include "executor/nodeBitmapHeapscan.h"
 #include "miscadmin.h"
 #include "pgstat.h"
 #include "port/atomics.h"
@@ -222,6 +223,7 @@ static const int MultiXactStatusLock[MaxMultiXactStatus + 1] =
  *						 heap support routines
  * ----------------------------------------------------------------
  */
+
 
 /* ----------------
  *		initscan - scan code common to heap_beginscan and heap_rescan
@@ -970,16 +972,6 @@ heap_beginscan(Relation relation, Snapshot snapshot,
 	scan->rs_base.rs_parallel = parallel_scan;
 	scan->rs_strategy = NULL;	/* set in initscan */
 
-	scan->rs_base.blockno = InvalidBlockNumber;
-
-	scan->rs_vmbuffer = InvalidBuffer;
-	scan->rs_empty_tuples_pending = 0;
-	scan->pvmbuffer = InvalidBuffer;
-
-	scan->pfblockno = InvalidBlockNumber;
-	scan->prefetch_target = -1;
-	scan->prefetch_pages = 0;
-
 	/*
 	 * Disable page-at-a-time mode if it's not a MVCC-safe snapshot.
 	 */
@@ -1036,6 +1028,23 @@ heap_beginscan(Relation relation, Snapshot snapshot,
 	return (TableScanDesc) scan;
 }
 
+/*
+ * Helper to cleanup BitmapHeapScan state
+ */
+static void
+heap_endscan_bm(HeapScanDesc scan)
+{
+	if (BufferIsValid(scan->rs_bhs.vmbuffer))
+		ReleaseBuffer(scan->rs_bhs.vmbuffer);
+
+	if (BufferIsValid(scan->rs_bhs.pvmbuffer))
+		ReleaseBuffer(scan->rs_bhs.pvmbuffer);
+
+	bhs_end_iterate(&scan->rs_bhs.pf_iterator);
+	bhs_end_iterate(&scan->rs_bhs.iterator);
+}
+
+
 void
 heap_rescan(TableScanDesc sscan, ScanKey key, bool set_params,
 			bool allow_strat, bool allow_sync, bool allow_pagemode)
@@ -1061,29 +1070,14 @@ heap_rescan(TableScanDesc sscan, ScanKey key, bool set_params,
 			scan->rs_base.rs_flags &= ~SO_ALLOW_PAGEMODE;
 	}
 
-	scan->rs_base.blockno = InvalidBlockNumber;
-
-	scan->pfblockno = InvalidBlockNumber;
-	scan->prefetch_target = -1;
-	scan->prefetch_pages = 0;
-
 	/*
 	 * unpin scan buffers
 	 */
 	if (BufferIsValid(scan->rs_cbuf))
 		ReleaseBuffer(scan->rs_cbuf);
 
-	if (BufferIsValid(scan->rs_vmbuffer))
-	{
-		ReleaseBuffer(scan->rs_vmbuffer);
-		scan->rs_vmbuffer = InvalidBuffer;
-	}
-
-	if (BufferIsValid(scan->pvmbuffer))
-	{
-		ReleaseBuffer(scan->pvmbuffer);
-		scan->pvmbuffer = InvalidBuffer;
-	}
+	if (scan->rs_base.rs_flags & SO_TYPE_BITMAPSCAN)
+		heap_endscan_bm(scan);
 
 	/*
 	 * reinitialize scan descriptor
@@ -1104,17 +1098,8 @@ heap_endscan(TableScanDesc sscan)
 	if (BufferIsValid(scan->rs_cbuf))
 		ReleaseBuffer(scan->rs_cbuf);
 
-	if (BufferIsValid(scan->rs_vmbuffer))
-	{
-		ReleaseBuffer(scan->rs_vmbuffer);
-		scan->rs_vmbuffer = InvalidBuffer;
-	}
-
-	if (BufferIsValid(scan->pvmbuffer))
-	{
-		ReleaseBuffer(scan->pvmbuffer);
-		scan->pvmbuffer = InvalidBuffer;
-	}
+	if (scan->rs_base.rs_flags & SO_TYPE_BITMAPSCAN)
+		heap_endscan_bm(scan);
 
 	/*
 	 * decrement relation reference count and free scan descriptor storage
@@ -1361,6 +1346,52 @@ heap_getnextslot_tidrange(TableScanDesc sscan, ScanDirection direction,
 	ExecStoreBufferHeapTuple(&scan->rs_ctup, slot, scan->rs_cbuf);
 	return true;
 }
+
+void
+heap_rescan_bm(TableScanDesc sscan, TIDBitmap *tbm,
+			   ParallelBitmapHeapState *pstate, dsa_area *dsa, int pf_maximum)
+{
+	HeapScanDesc scan = (HeapScanDesc) sscan;
+
+	/*
+	 * If this is a rescan, heap_rescan() must have already cleaned up the
+	 * iterators.
+	 */
+	scan->rs_bhs.iterator.serial = NULL;
+	scan->rs_bhs.iterator.parallel = NULL;
+	scan->rs_bhs.iterator.exhausted = false;
+	scan->rs_bhs.pf_iterator.serial = NULL;
+	scan->rs_bhs.pf_iterator.parallel = NULL;
+	scan->rs_bhs.pf_iterator.exhausted = false;
+	scan->rs_bhs.prefetch_maximum = 0;
+	scan->rs_bhs.vmbuffer = InvalidBuffer;
+	scan->rs_bhs.pvmbuffer = InvalidBuffer;
+	scan->rs_bhs.empty_tuples_pending = 0;
+	scan->rs_bhs.pstate = NULL;
+	scan->rs_bhs.prefetch_target = -1;
+	scan->rs_bhs.prefetch_pages = 0;
+	scan->rs_bhs.pfblockno = InvalidBlockNumber;
+	scan->rs_bhs.blockno = InvalidBlockNumber;
+
+	bhs_begin_iterate(&scan->rs_bhs.iterator,
+					  tbm, dsa,
+					  pstate ?
+					  pstate->tbmiterator :
+					  InvalidDsaPointer);
+#ifdef USE_PREFETCH
+	if (pf_maximum > 0)
+	{
+		bhs_begin_iterate(&scan->rs_bhs.pf_iterator, tbm, dsa,
+						  pstate ?
+						  pstate->prefetch_iterator :
+						  InvalidDsaPointer);
+	}
+#endif							/* USE_PREFETCH */
+
+	scan->rs_bhs.pstate = pstate;
+	scan->rs_bhs.prefetch_maximum = pf_maximum;
+}
+
 
 /*
  *	heap_fetch		- retrieve tuple with given tid

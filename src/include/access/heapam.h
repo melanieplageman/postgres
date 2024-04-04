@@ -46,6 +46,50 @@ struct VacuumCutoffs;
 
 #define MaxLockTupleMode	LockTupleExclusive
 
+typedef struct BitmapHeapTableState
+{
+	/*
+	 * Members common to Parallel and Serial BitmapHeapScan
+	 */
+	struct BitmapHeapIterator iterator;
+	struct BitmapHeapIterator pf_iterator;
+
+	/* maximum value for prefetch_target */
+	int			prefetch_maximum;
+
+	/*
+	 * These fields are only used for bitmap scans for the "skip fetch"
+	 * optimization. Bitmap scans needing no fields from the heap may skip
+	 * fetching an all visible block, instead using the number of tuples per
+	 * block reported by the bitmap to determine how many NULL-filled tuples
+	 * to return. They are common to parallel and serial BitmapHeapScans
+	 */
+	Buffer		vmbuffer;
+	/* buffer for visibility-map lookups of prefetched pages */
+	Buffer		pvmbuffer;
+	int			empty_tuples_pending;
+
+	/*
+	 * Parallel-only members
+	 */
+
+	struct ParallelBitmapHeapState *pstate;
+
+	/*
+	 * Serial-only members
+	 */
+
+	/* Current target for prefetch distance */
+	int			prefetch_target;
+	/* # pages prefetch iterator is ahead of current */
+	int			prefetch_pages;
+	/* used to validate prefetch block stays ahead of current block  */
+	BlockNumber pfblockno;
+	/* used to validate BHS prefetch and current block stay in sync */
+	BlockNumber blockno;
+} BitmapHeapTableState;
+
+
 /*
  * Descriptor for heap table scans.
  */
@@ -76,37 +120,14 @@ typedef struct HeapScanDescData
 	 */
 	ParallelBlockTableScanWorkerData *rs_parallelworkerdata;
 
-	/*
-	 * These fields are only used for bitmap scans for the "skip fetch"
-	 * optimization. Bitmap scans needing no fields from the heap may skip
-	 * fetching an all visible block, instead using the number of tuples per
-	 * block reported by the bitmap to determine how many NULL-filled tuples
-	 * to return.
-	 */
-	Buffer		rs_vmbuffer;
-	int			rs_empty_tuples_pending;
-
-	/*
-	 * These fields only used for prefetching in bitmap table scans
-	 */
-
-	/* buffer for visibility-map lookups of prefetched pages */
-	Buffer		pvmbuffer;
-
-	/*
-	 * These fields only used in serial BHS
-	 */
-	/* Current target for prefetch distance */
-	int			prefetch_target;
-	/* # pages prefetch iterator is ahead of current */
-	int			prefetch_pages;
-	/* used to validate prefetch block stays ahead of current block  */
-	BlockNumber pfblockno;
-
 	/* these fields only used in page-at-a-time mode and for bitmap scans */
 	int			rs_cindex;		/* current tuple's index in vistuples */
 	int			rs_ntuples;		/* number of visible tuples on page */
 	OffsetNumber rs_vistuples[MaxHeapTuplesPerPage];	/* their offsets */
+
+	/* Only used for Bitmap table scans */
+	/* TODO: find a way to only have it be here optionally */
+	BitmapHeapTableState rs_bhs;
 }			HeapScanDescData;
 typedef struct HeapScanDescData *HeapScanDesc;
 
@@ -306,6 +327,8 @@ extern void heap_set_tidrange(TableScanDesc sscan, ItemPointer mintid,
 extern bool heap_getnextslot_tidrange(TableScanDesc sscan,
 									  ScanDirection direction,
 									  TupleTableSlot *slot);
+extern void heap_rescan_bm(TableScanDesc sscan, TIDBitmap *tbm,
+						   ParallelBitmapHeapState *pstate, dsa_area *dsa, int pf_maximum);
 extern bool heap_fetch(Relation relation, Snapshot snapshot,
 					   HeapTuple tuple, Buffer *userbuf, bool keep_buf);
 extern bool heap_hot_search_buffer(ItemPointer tid, Relation relation,

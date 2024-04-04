@@ -391,6 +391,13 @@ typedef struct TableAmRoutine
 											  ScanDirection direction,
 											  TupleTableSlot *slot);
 
+	/*
+	 * TODO: add comment
+	 */
+	void		(*scan_rescan_bm) (TableScanDesc scan, TIDBitmap *tbm,
+								   ParallelBitmapHeapState *pstate, dsa_area *dsa,
+								   int pf_maximum);
+
 	/* ------------------------------------------------------------------------
 	 * Parallel table scan related functions.
 	 * ------------------------------------------------------------------------
@@ -910,18 +917,23 @@ table_beginscan_strat(Relation rel, Snapshot snapshot,
  * make it worth using the same data structure.
  */
 static inline TableScanDesc
-table_beginscan_bm(Relation rel, Snapshot snapshot,
-				   int nkeys, struct ScanKeyData *key, uint32 extra_flags)
+table_beginscan_bm(TableScanDesc scan, Relation rel, Snapshot snapshot,
+				   int nkeys, struct ScanKeyData *key, uint32 extra_flags,
+				   int pf_maximum, TIDBitmap *tbm,
+				   ParallelBitmapHeapState *pstate, dsa_area *dsa)
 {
-	TableScanDesc result;
 	uint32		flags = SO_TYPE_BITMAPSCAN | SO_ALLOW_PAGEMODE | extra_flags;
 
-	result = rel->rd_tableam->scan_begin(rel, snapshot, nkeys, key, NULL, flags);
-	result->rs_bhs_iterator = NULL;
-	result->rs_pf_bhs_iterator = NULL;
-	result->prefetch_maximum = 0;
-	result->bm_parallel = NULL;
-	return result;
+	/*
+	 * If this is the first scan of the underlying table, create the table
+	 * scan descriptor and begin the scan.
+	 */
+	if (!scan)
+		scan = rel->rd_tableam->scan_begin(rel, snapshot, nkeys, key, NULL, flags);
+
+	scan->rs_rd->rd_tableam->scan_rescan_bm(scan, tbm, pstate, dsa, pf_maximum);
+
+	return scan;
 }
 
 /*
@@ -968,18 +980,6 @@ table_beginscan_tid(Relation rel, Snapshot snapshot)
 static inline void
 table_endscan(TableScanDesc scan)
 {
-	if (scan->rs_flags & SO_TYPE_BITMAPSCAN)
-	{
-		bhs_end_iterate(scan->rs_bhs_iterator);
-		scan->rs_bhs_iterator = NULL;
-
-		if (scan->rs_pf_bhs_iterator)
-		{
-			bhs_end_iterate(scan->rs_pf_bhs_iterator);
-			scan->rs_pf_bhs_iterator = NULL;
-		}
-	}
-
 	scan->rs_rd->rd_tableam->scan_end(scan);
 }
 
@@ -990,18 +990,6 @@ static inline void
 table_rescan(TableScanDesc scan,
 			 struct ScanKeyData *key)
 {
-	if (scan->rs_flags & SO_TYPE_BITMAPSCAN)
-	{
-		bhs_end_iterate(scan->rs_bhs_iterator);
-		scan->rs_bhs_iterator = NULL;
-
-		if (scan->rs_pf_bhs_iterator)
-		{
-			bhs_end_iterate(scan->rs_pf_bhs_iterator);
-			scan->rs_pf_bhs_iterator = NULL;
-		}
-	}
-
 	scan->rs_rd->rd_tableam->scan_rescan(scan, key, false, false, false, false);
 }
 
