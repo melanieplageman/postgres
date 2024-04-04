@@ -32,9 +32,12 @@ typedef struct BitmapHeapIterator
 {
 	struct TBMIterator *serial;
 	struct TBMSharedIterator *parallel;
+	bool		exhausted;
 } BitmapHeapIterator;
 
 extern TBMIterateResult *bhs_iterate(BitmapHeapIterator *iterator);
+extern void bhs_begin_iterate(BitmapHeapIterator *iterator, TIDBitmap *tbm,
+							  dsa_area *dsa, dsa_pointer dsp);
 
 extern void bhs_end_iterate(BitmapHeapIterator *iterator);
 

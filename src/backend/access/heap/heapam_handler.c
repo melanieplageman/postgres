@@ -60,9 +60,9 @@ static bool SampleHeapTupleVisible(TableScanDesc scan, Buffer buffer,
 								   OffsetNumber tupoffset);
 
 static BlockNumber heapam_scan_get_blocks_done(HeapScanDesc hscan);
-static inline void BitmapAdjustPrefetchIterator(HeapScanDesc scan);
-static inline void BitmapAdjustPrefetchTarget(HeapScanDesc scan);
-static inline void BitmapPrefetch(HeapScanDesc scan);
+static inline void BitmapAdjustPrefetchIterator(BitmapHeapScanDesc scan);
+static inline void BitmapAdjustPrefetchTarget(BitmapHeapScanDesc scan);
+static inline void BitmapPrefetch(BitmapHeapScanDesc scan);
 
 static const TableAmRoutine heapam_methods;
 
@@ -2191,11 +2191,11 @@ heapam_estimate_rel_size(Relation rel, int32 *attr_widths,
  *	decrement prefetch_pages.
  */
 static inline void
-BitmapAdjustPrefetchIterator(HeapScanDesc scan)
+BitmapAdjustPrefetchIterator(BitmapHeapScanDesc scan)
 {
 #ifdef USE_PREFETCH
-	BitmapHeapIterator *prefetch_iterator = scan->rs_base.rs_pf_bhs_iterator;
-	ParallelBitmapHeapState *pstate = scan->rs_base.bm_parallel;
+	BitmapHeapIterator *prefetch_iterator = &scan->pf_iterator;
+	ParallelBitmapHeapState *pstate = scan->pstate;
 	TBMIterateResult *tbmpre;
 
 	if (pstate == NULL)
@@ -2205,7 +2205,7 @@ BitmapAdjustPrefetchIterator(HeapScanDesc scan)
 			/* The main iterator has closed the distance by one page */
 			scan->prefetch_pages--;
 		}
-		else if (prefetch_iterator)
+		else if (!prefetch_iterator->exhausted)
 		{
 			/* Do not let the prefetch iterator get behind the main one */
 			tbmpre = bhs_iterate(prefetch_iterator);
@@ -2219,7 +2219,7 @@ BitmapAdjustPrefetchIterator(HeapScanDesc scan)
 	 * heapam_bitmap_next_block() keeps prefetch distance higher across the
 	 * parallel workers.
 	 */
-	if (scan->rs_base.prefetch_maximum > 0)
+	if (scan->prefetch_maximum > 0)
 	{
 		SpinLockAcquire(&pstate->mutex);
 		if (pstate->prefetch_pages > 0)
@@ -2240,7 +2240,7 @@ BitmapAdjustPrefetchIterator(HeapScanDesc scan)
 			 * we don't validate the blockno here as we do in non-parallel
 			 * case.
 			 */
-			if (prefetch_iterator)
+			if (!prefetch_iterator->exhausted)
 			{
 				tbmpre = bhs_iterate(prefetch_iterator);
 				scan->pfblockno = tbmpre ? tbmpre->blockno : InvalidBlockNumber;
@@ -2251,11 +2251,11 @@ BitmapAdjustPrefetchIterator(HeapScanDesc scan)
 }
 
 static bool
-heapam_scan_bitmap_next_block(TableScanDesc scan,
+heapam_scan_bitmap_next_block(BitmapHeapScanDesc scan,
 							  BlockNumber *blockno, bool *recheck,
 							  long *lossy_pages, long *exact_pages)
 {
-	HeapScanDesc hscan = (HeapScanDesc) scan;
+	HeapScanDesc hscan = &scan->heap_common;
 	BlockNumber block;
 	Buffer		buffer;
 	Snapshot	snapshot;
@@ -2268,18 +2268,19 @@ heapam_scan_bitmap_next_block(TableScanDesc scan,
 	*blockno = InvalidBlockNumber;
 	*recheck = true;
 
-	BitmapAdjustPrefetchIterator(hscan);
+	BitmapAdjustPrefetchIterator(scan);
 
 	do
 	{
 		CHECK_FOR_INTERRUPTS();
 
-		tbmres = bhs_iterate(scan->rs_bhs_iterator);
+		Assert(!scan->iterator.exhausted);
+		tbmres = bhs_iterate(&scan->iterator);
 
 		if (tbmres == NULL)
 		{
 			/* no more entries in the bitmap */
-			Assert(hscan->rs_empty_tuples_pending == 0);
+			Assert(scan->empty_tuples_pending == 0);
 			return false;
 		}
 
@@ -2302,15 +2303,15 @@ heapam_scan_bitmap_next_block(TableScanDesc scan,
 	 * heap, the bitmap entries don't need rechecking, and all tuples on the
 	 * page are visible to our transaction.
 	 */
-	if (!(scan->rs_flags & SO_NEED_TUPLE) &&
+	if (!(hscan->rs_base.rs_flags & SO_NEED_TUPLE) &&
 		!tbmres->recheck &&
-		VM_ALL_VISIBLE(scan->rs_rd, tbmres->blockno, &hscan->rs_vmbuffer))
+		VM_ALL_VISIBLE(hscan->rs_base.rs_rd, tbmres->blockno, &scan->vmbuffer))
 	{
 		/* can't be lossy in the skip_fetch case */
 		Assert(tbmres->ntuples >= 0);
-		Assert(hscan->rs_empty_tuples_pending >= 0);
+		Assert(scan->empty_tuples_pending >= 0);
 
-		hscan->rs_empty_tuples_pending += tbmres->ntuples;
+		scan->empty_tuples_pending += tbmres->ntuples;
 
 		return true;
 	}
@@ -2321,18 +2322,18 @@ heapam_scan_bitmap_next_block(TableScanDesc scan,
 	 * Acquire pin on the target heap page, trading in any pin we held before.
 	 */
 	hscan->rs_cbuf = ReleaseAndReadBuffer(hscan->rs_cbuf,
-										  scan->rs_rd,
+										  hscan->rs_base.rs_rd,
 										  block);
 	hscan->rs_cblock = block;
 	buffer = hscan->rs_cbuf;
-	snapshot = scan->rs_snapshot;
+	snapshot = hscan->rs_base.rs_snapshot;
 
 	ntup = 0;
 
 	/*
 	 * Prune and repair fragmentation for the whole page, if possible.
 	 */
-	heap_page_prune_opt(scan->rs_rd, buffer);
+	heap_page_prune_opt(hscan->rs_base.rs_rd, buffer);
 
 	/*
 	 * We must hold share lock on the buffer content while examining tuple
@@ -2360,7 +2361,7 @@ heapam_scan_bitmap_next_block(TableScanDesc scan,
 			HeapTupleData heapTuple;
 
 			ItemPointerSet(&tid, block, offnum);
-			if (heap_hot_search_buffer(&tid, scan->rs_rd, buffer, snapshot,
+			if (heap_hot_search_buffer(&tid, hscan->rs_base.rs_rd, buffer, snapshot,
 									   &heapTuple, NULL, true))
 				hscan->rs_vistuples[ntup++] = ItemPointerGetOffsetNumber(&tid);
 		}
@@ -2386,16 +2387,16 @@ heapam_scan_bitmap_next_block(TableScanDesc scan,
 				continue;
 			loctup.t_data = (HeapTupleHeader) PageGetItem(page, lp);
 			loctup.t_len = ItemIdGetLength(lp);
-			loctup.t_tableOid = scan->rs_rd->rd_id;
+			loctup.t_tableOid = hscan->rs_base.rs_rd->rd_id;
 			ItemPointerSet(&loctup.t_self, block, offnum);
 			valid = HeapTupleSatisfiesVisibility(&loctup, snapshot, buffer);
 			if (valid)
 			{
 				hscan->rs_vistuples[ntup++] = offnum;
-				PredicateLockTID(scan->rs_rd, &loctup.t_self, snapshot,
+				PredicateLockTID(hscan->rs_base.rs_rd, &loctup.t_self, snapshot,
 								 HeapTupleHeaderGetXmin(loctup.t_data));
 			}
-			HeapCheckForSerializableConflictOut(valid, scan->rs_rd, &loctup,
+			HeapCheckForSerializableConflictOut(valid, hscan->rs_base.rs_rd, &loctup,
 												buffer, snapshot);
 		}
 	}
@@ -2414,13 +2415,13 @@ heapam_scan_bitmap_next_block(TableScanDesc scan,
 	 * If serial, we can error out if the the prefetch block doesn't stay
 	 * ahead of the current block.
 	 */
-	if (scan->bm_parallel == NULL &&
-		scan->rs_pf_bhs_iterator &&
-		hscan->pfblockno < hscan->rs_base.blockno)
+	if (scan->pstate == NULL &&
+		!scan->pf_iterator.exhausted &&
+		scan->pfblockno < scan->blockno)
 		elog(ERROR, "prefetch and main iterators are out of sync");
 
 	/* Adjust the prefetch target */
-	BitmapAdjustPrefetchTarget(hscan);
+	BitmapAdjustPrefetchTarget(scan);
 
 	/*
 	 * Return true to indicate that a valid block was found and the bitmap is
@@ -2441,11 +2442,11 @@ heapam_scan_bitmap_next_block(TableScanDesc scan,
  * it doubles as later pages are fetched.
  */
 static inline void
-BitmapAdjustPrefetchTarget(HeapScanDesc scan)
+BitmapAdjustPrefetchTarget(BitmapHeapScanDesc scan)
 {
 #ifdef USE_PREFETCH
-	ParallelBitmapHeapState *pstate = scan->rs_base.bm_parallel;
-	int			prefetch_maximum = scan->rs_base.prefetch_maximum;
+	ParallelBitmapHeapState *pstate = scan->pstate;
+	int			prefetch_maximum = scan->prefetch_maximum;
 
 	if (pstate == NULL)
 	{
@@ -2482,15 +2483,16 @@ BitmapAdjustPrefetchTarget(HeapScanDesc scan)
  * BitmapPrefetch - Prefetch, if prefetch_pages are behind prefetch_target
  */
 static inline void
-BitmapPrefetch(HeapScanDesc scan)
+BitmapPrefetch(BitmapHeapScanDesc scan)
 {
 #ifdef USE_PREFETCH
-	ParallelBitmapHeapState *pstate = scan->rs_base.bm_parallel;
-	BitmapHeapIterator *prefetch_iterator = scan->rs_base.rs_pf_bhs_iterator;
+	ParallelBitmapHeapState *pstate = scan->pstate;
+	BitmapHeapIterator *prefetch_iterator = &scan->pf_iterator;
+	Relation	rel = scan->heap_common.rs_base.rs_rd;
 
 	if (pstate == NULL)
 	{
-		if (prefetch_iterator)
+		if (!prefetch_iterator->exhausted)
 		{
 			while (scan->prefetch_pages < scan->prefetch_target)
 			{
@@ -2501,7 +2503,6 @@ BitmapPrefetch(HeapScanDesc scan)
 				{
 					/* No more pages to prefetch */
 					bhs_end_iterate(prefetch_iterator);
-					scan->rs_base.rs_pf_bhs_iterator = NULL;
 					break;
 				}
 				scan->prefetch_pages++;
@@ -2513,14 +2514,14 @@ BitmapPrefetch(HeapScanDesc scan)
 				 * logic normally.  (Would it be better not to increment
 				 * prefetch_pages?)
 				 */
-				skip_fetch = (!(scan->rs_base.rs_flags & SO_NEED_TUPLE) &&
+				skip_fetch = (!(scan->heap_common.rs_base.rs_flags & SO_NEED_TUPLE) &&
 							  !tbmpre->recheck &&
-							  VM_ALL_VISIBLE(scan->rs_base.rs_rd,
+							  VM_ALL_VISIBLE(rel,
 											 tbmpre->blockno,
 											 &scan->pvmbuffer));
 
 				if (!skip_fetch)
-					PrefetchBuffer(scan->rs_base.rs_rd, MAIN_FORKNUM, tbmpre->blockno);
+					PrefetchBuffer(rel, MAIN_FORKNUM, tbmpre->blockno);
 			}
 		}
 
@@ -2529,7 +2530,7 @@ BitmapPrefetch(HeapScanDesc scan)
 
 	if (pstate->prefetch_pages < pstate->prefetch_target)
 	{
-		if (prefetch_iterator)
+		if (!prefetch_iterator->exhausted)
 		{
 			while (1)
 			{
@@ -2552,26 +2553,26 @@ BitmapPrefetch(HeapScanDesc scan)
 				if (!do_prefetch)
 					return;
 
+				Assert(!scan->iterator.exhausted);
 				tbmpre = bhs_iterate(prefetch_iterator);
 				if (tbmpre == NULL)
 				{
 					/* No more pages to prefetch */
 					bhs_end_iterate(prefetch_iterator);
-					scan->rs_base.rs_pf_bhs_iterator = NULL;
 					break;
 				}
 
 				scan->pfblockno = tbmpre->blockno;
 
 				/* As above, skip prefetch if we expect not to need page */
-				skip_fetch = (!(scan->rs_base.rs_flags & SO_NEED_TUPLE) &&
+				skip_fetch = (!(scan->heap_common.rs_base.rs_flags & SO_NEED_TUPLE) &&
 							  !tbmpre->recheck &&
-							  VM_ALL_VISIBLE(scan->rs_base.rs_rd,
+							  VM_ALL_VISIBLE(rel,
 											 tbmpre->blockno,
 											 &scan->pvmbuffer));
 
 				if (!skip_fetch)
-					PrefetchBuffer(scan->rs_base.rs_rd, MAIN_FORKNUM, tbmpre->blockno);
+					PrefetchBuffer(rel, MAIN_FORKNUM, tbmpre->blockno);
 			}
 		}
 	}
@@ -2588,7 +2589,8 @@ heapam_scan_bitmap_next_tuple(TableScanDesc scan,
 							  TupleTableSlot *slot, bool *recheck,
 							  long *lossy_pages, long *exact_pages)
 {
-	HeapScanDesc hscan = (HeapScanDesc) scan;
+	BitmapHeapScanDesc bscan = (BitmapHeapScanDesc) scan;
+	HeapScanDesc hscan = &bscan->heap_common;
 	OffsetNumber targoffset;
 	Page		page;
 	ItemId		lp;
@@ -2601,17 +2603,17 @@ heapam_scan_bitmap_next_tuple(TableScanDesc scan,
 		/*
 		 * Emit empty tuples before advancing to the next block
 		 */
-		if (hscan->rs_empty_tuples_pending > 0)
+		if (bscan->empty_tuples_pending > 0)
 		{
 			/*
 			 * If we don't have to fetch the tuple, just return nulls.
 			 */
 			ExecStoreAllNullTuple(slot);
-			hscan->rs_empty_tuples_pending--;
+			bscan->empty_tuples_pending--;
 			return true;
 		}
 
-		if (!heapam_scan_bitmap_next_block(scan, &scan->blockno, recheck,
+		if (!heapam_scan_bitmap_next_block(bscan, &bscan->blockno, recheck,
 										   lossy_pages, exact_pages))
 			return false;
 	}
@@ -2622,18 +2624,18 @@ heapam_scan_bitmap_next_tuple(TableScanDesc scan,
 	 * Try to prefetch at least a few pages even before we get to the second
 	 * page if we don't stop reading after the first tuple.
 	 */
-	if (!scan->bm_parallel)
+	if (!bscan->pstate)
 	{
-		if (hscan->prefetch_target < scan->prefetch_maximum)
-			hscan->prefetch_target++;
+		if (bscan->prefetch_target < bscan->prefetch_maximum)
+			bscan->prefetch_target++;
 	}
-	else if (scan->bm_parallel->prefetch_target < scan->prefetch_maximum)
+	else if (bscan->pstate->prefetch_target < bscan->prefetch_maximum)
 	{
 		/* take spinlock while updating shared state */
-		SpinLockAcquire(&scan->bm_parallel->mutex);
-		if (scan->bm_parallel->prefetch_target < scan->prefetch_maximum)
-			scan->bm_parallel->prefetch_target++;
-		SpinLockRelease(&scan->bm_parallel->mutex);
+		SpinLockAcquire(&bscan->pstate->mutex);
+		if (bscan->pstate->prefetch_target < bscan->prefetch_maximum)
+			bscan->pstate->prefetch_target++;
+		SpinLockRelease(&bscan->pstate->mutex);
 	}
 
 	/*
@@ -2643,7 +2645,7 @@ heapam_scan_bitmap_next_tuple(TableScanDesc scan,
 	 * the current page, else we may uselessly prefetch the same page we are
 	 * just about to request for real.
 	 */
-	BitmapPrefetch(hscan);
+	BitmapPrefetch(bscan);
 #endif							/* USE_PREFETCH */
 
 	targoffset = hscan->rs_vistuples[hscan->rs_cindex];
@@ -2970,6 +2972,10 @@ static const TableAmRoutine heapam_methods = {
 
 	.scan_set_tidrange = heap_set_tidrange,
 	.scan_getnextslot_tidrange = heap_getnextslot_tidrange,
+
+	.scan_rescan_bm = heap_rescan_bm,
+	.scan_begin_bm = heap_beginscan_bm,
+	.scan_end_bm = heap_endscan_bm,
 
 	.parallelscan_estimate = table_block_parallelscan_estimate,
 	.parallelscan_initialize = table_block_parallelscan_initialize,
