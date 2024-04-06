@@ -20,12 +20,10 @@
 #include "storage/buf.h"
 #include "storage/spin.h"
 #include "utils/relcache.h"
+#include "nodes/tidbitmap.h"
 
 
 struct ParallelTableScanDescData;
-
-struct TBMIterator;
-struct TBMSharedIterator;
 
 /*
  * Generic descriptor for table scans. This is the base-class for table scans,
@@ -44,8 +42,7 @@ typedef struct TableScanDescData
 	ItemPointerData rs_maxtid;
 
 	/* Only used for Bitmap table scans */
-	struct TBMIterator *tbmiterator;
-	struct TBMSharedIterator *shared_tbmiterator;
+	UnifiedTBMIterator rs_bhs_iterator;
 
 	/*
 	 * Information about type and behaviour of the scan, a bitmask of members
