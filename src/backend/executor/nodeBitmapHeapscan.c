@@ -162,63 +162,48 @@ static TupleTableSlot *
 BitmapHeapNext(BitmapHeapScanState *node)
 {
 	ExprContext *econtext;
-	TableScanDesc scan;
 	TupleTableSlot *slot;
-
-	/*
-	 * extract necessary information from index scan node
-	 */
-	econtext = node->ss.ps.ps_ExprContext;
-	slot = node->ss.ss_ScanTupleSlot;
-	scan = node->ss.ss_currentScanDesc;
+	TableScanDesc scan;
 
 	/*
 	 * If we haven't yet performed the underlying index scan, do it, and begin
 	 * the iteration over the bitmap. This happens on rescan as well.
 	 */
 	if (!node->initialized)
-	{
 		BitmapHeapInitialize(node);
-		/* We may have a new scan descriptor */
-		scan = node->ss.ss_currentScanDesc;
-		goto new_page;
-	}
 
-	for (;;)
+	/*
+	 * BitmapHeapInitialize() may make the scan descriptor so don't get it
+	 * from the node until after calling it.
+	 */
+	econtext = node->ss.ps.ps_ExprContext;
+	slot = node->ss.ss_ScanTupleSlot;
+	scan = node->ss.ss_currentScanDesc;
+
+	while (table_scan_bitmap_next_tuple(scan, slot, &node->recheck,
+										&node->lossy_pages, &node->exact_pages))
 	{
-		while (table_scan_bitmap_next_tuple(scan, slot))
+		CHECK_FOR_INTERRUPTS();
+
+
+		/*
+		 * If we are using lossy info, we have to recheck the qual conditions
+		 * at every tuple.
+		 */
+		if (node->recheck)
 		{
-			/*
-			 * Continuing in previously obtained page.
-			 */
-
-			CHECK_FOR_INTERRUPTS();
-
-			/*
-			 * If we are using lossy info, we have to recheck the qual
-			 * conditions at every tuple.
-			 */
-			if (node->recheck)
+			econtext->ecxt_scantuple = slot;
+			if (!ExecQualAndReset(node->bitmapqualorig, econtext))
 			{
-				econtext->ecxt_scantuple = slot;
-				if (!ExecQualAndReset(node->bitmapqualorig, econtext))
-				{
-					/* Fails recheck, so drop it and loop back for another */
-					InstrCountFiltered2(node, 1);
-					ExecClearTuple(slot);
-					continue;
-				}
+				/* Fails recheck, so drop it and loop back for another */
+				InstrCountFiltered2(node, 1);
+				ExecClearTuple(slot);
+				continue;
 			}
-
-			/* OK to return this tuple */
-			return slot;
 		}
 
-new_page:
-
-		if (!table_scan_bitmap_next_block(scan, &node->blockno, &node->recheck,
-										  &node->lossy_pages, &node->exact_pages))
-			break;
+		/* OK to return this tuple */
+		return slot;
 	}
 
 	/*
@@ -289,7 +274,6 @@ ExecReScanBitmapHeapScan(BitmapHeapScanState *node)
 	node->tbm = NULL;
 	node->initialized = false;
 	node->recheck = true;
-	node->blockno = InvalidBlockNumber;
 
 	ExecScanReScan(&node->ss);
 
@@ -369,7 +353,6 @@ ExecInitBitmapHeapScan(BitmapHeapScan *node, EState *estate, int eflags)
 	scanstate->initialized = false;
 	scanstate->pstate = NULL;
 	scanstate->recheck = true;
-	scanstate->blockno = InvalidBlockNumber;
 
 	/*
 	 * Miscellaneous initialization
