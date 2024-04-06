@@ -164,6 +164,8 @@ BitmapHeapNext(BitmapHeapScanState *node)
 			node->ss.ss_currentScanDesc = scan;
 		}
 
+		/* rescan to release any page pin */
+		table_rescan(scan, NULL);
 		unified_tbm_begin_iterate(&scan->rs_bhs_iterator, tbm, dsa,
 								  pstate ?
 								  pstate->tbmiterator :
@@ -540,10 +542,6 @@ void
 ExecReScanBitmapHeapScan(BitmapHeapScanState *node)
 {
 	PlanState  *outerPlan = outerPlanState(node);
-
-	/* rescan to release any page pin */
-	if (node->ss.ss_currentScanDesc)
-		table_rescan(node->ss.ss_currentScanDesc, NULL);
 
 	/* release bitmaps and buffers if any */
 	if (node->prefetch_iterator.exhausted)
