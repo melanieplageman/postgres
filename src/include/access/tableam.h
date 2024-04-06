@@ -1033,7 +1033,7 @@ table_endscan(TableScanDesc scan)
 
 		if (scan->tbmiterator)
 		{
-			tbm_end_iterate(scan->tbmiterator);
+			tbm_end_serial_iterate(scan->tbmiterator);
 			scan->tbmiterator = NULL;
 		}
 	}
@@ -1058,7 +1058,7 @@ table_rescan(TableScanDesc scan,
 
 		if (scan->tbmiterator)
 		{
-			tbm_end_iterate(scan->tbmiterator);
+			tbm_end_serial_iterate(scan->tbmiterator);
 			scan->tbmiterator = NULL;
 		}
 	}

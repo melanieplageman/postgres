@@ -2795,6 +2795,7 @@ TAR_MEMBER
 TBMIterateResult
 TBMIteratingState
 TBMIterator
+TBMSerialIterator
 TBMSharedIterator
 TBMSharedIteratorState
 TBMStatus

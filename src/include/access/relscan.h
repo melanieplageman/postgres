@@ -24,7 +24,7 @@
 
 struct ParallelTableScanDescData;
 
-struct TBMIterator;
+struct TBMSerialIterator;
 struct TBMSharedIterator;
 
 /*
@@ -40,7 +40,7 @@ typedef struct TableScanDescData
 	struct ScanKeyData *rs_key; /* array of scan key descriptors */
 
 	/* Iterators for Bitmap Table Scans */
-	struct TBMIterator *tbmiterator;
+	struct TBMSerialIterator *tbmiterator;
 	struct TBMSharedIterator *shared_tbmiterator;
 
 	/* Range of ItemPointers for table_scan_getnextslot_tidrange() to scan. */
