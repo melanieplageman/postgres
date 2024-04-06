@@ -96,6 +96,8 @@ BitmapHeapNext(BitmapHeapScanState *node)
 	 */
 	if (!node->initialized)
 	{
+		bool		need_tuples = false;
+
 		/*
 		 * The leader will immediately come out of the function, but others
 		 * will be blocked until leader populates the TBM and wakes them up.
@@ -136,36 +138,28 @@ BitmapHeapNext(BitmapHeapScanState *node)
 			}
 		}
 
+
+		/*
+		 * We can potentially skip fetching heap pages if we do not need any
+		 * columns of the table, either for checking non-indexable quals or
+		 * for returning data.  This test is a bit simplistic, as it checks
+		 * the stronger condition that there's no qual or return tlist at all.
+		 * But in most cases it's probably not worth working harder than that.
+		 */
+		need_tuples = (node->ss.ps.plan->qual != NIL ||
+					   node->ss.ps.plan->targetlist != NIL);
+
 		/*
 		 * If this is the first scan of the underlying table, create the table
 		 * scan descriptor and begin the scan.
 		 */
-		if (!scan)
-		{
-			bool		need_tuples = false;
+		scan = table_beginscan_bm(node->ss.ss_currentScanDesc,
+								  node->ss.ss_currentRelation,
+								  node->ss.ps.state->es_snapshot,
+								  need_tuples);
 
-			/*
-			 * We can potentially skip fetching heap pages if we do not need
-			 * any columns of the table, either for checking non-indexable
-			 * quals or for returning data.  This test is a bit simplistic, as
-			 * it checks the stronger condition that there's no qual or return
-			 * tlist at all. But in most cases it's probably not worth working
-			 * harder than that.
-			 */
-			need_tuples = (node->ss.ps.plan->qual != NIL ||
-						   node->ss.ps.plan->targetlist != NIL);
+		node->ss.ss_currentScanDesc = scan;
 
-			scan = table_beginscan_bm(node->ss.ss_currentRelation,
-									  node->ss.ps.state->es_snapshot,
-									  0,
-									  NULL,
-									  need_tuples);
-
-			node->ss.ss_currentScanDesc = scan;
-		}
-
-		/* rescan to release any page pin */
-		table_rescan(scan, NULL);
 		unified_tbm_begin_iterate(&scan->rs_bhs_iterator, tbm, dsa,
 								  pstate ?
 								  pstate->tbmiterator :
@@ -591,10 +585,10 @@ ExecEndBitmapHeapScan(BitmapHeapScanState *node)
 
 
 	/*
-	 * close heap scan
+	 * close bitmap heap scan
 	 */
 	if (scanDesc)
-		table_endscan(scanDesc);
+		table_endscan_bm(scanDesc);
 
 	/*
 	 * release bitmaps and buffers if any

@@ -13,8 +13,11 @@
  *
  * INTERFACE ROUTINES
  *		heap_beginscan	- begin relation scan
+ *		heap_beginscan_bm - begin bitmap heap scan
  *		heap_rescan		- restart a relation scan
+ *		heap_rescan_bm  - restart a bitmap heap scan
  *		heap_endscan	- end relation scan
+ *		heap_endscan_bm - end a bitmap heap scan
  *		heap_getnext	- retrieve next tuple in scan
  *		heap_fetch		- retrieve tuple with given tid
  *		heap_insert		- insert tuple into a relation
@@ -967,8 +970,6 @@ heap_beginscan(Relation relation, Snapshot snapshot,
 	scan->rs_base.rs_flags = flags;
 	scan->rs_base.rs_parallel = parallel_scan;
 	scan->rs_strategy = NULL;	/* set in initscan */
-	scan->rs_vmbuffer = InvalidBuffer;
-	scan->rs_empty_tuples_pending = 0;
 
 	/*
 	 * Disable page-at-a-time mode if it's not a MVCC-safe snapshot.
@@ -1026,6 +1027,45 @@ heap_beginscan(Relation relation, Snapshot snapshot,
 	return (TableScanDesc) scan;
 }
 
+TableScanDesc
+heap_beginscan_bm(Relation relation, Snapshot snapshot, uint32 flags)
+{
+	BitmapHeapScanDesc scan;
+
+	/*
+	 * increment relation ref count while scanning relation
+	 *
+	 * This is just to make really sure the relcache entry won't go away while
+	 * the scan has a pointer to it.  Caller should be holding the rel open
+	 * anyway, so this is redundant in all normal scenarios...
+	 */
+	RelationIncrementReferenceCount(relation);
+	scan = (BitmapHeapScanDesc) palloc(sizeof(BitmapHeapScanDescData));
+
+	scan->heap_common.rs_base.rs_rd = relation;
+	scan->heap_common.rs_base.rs_snapshot = snapshot;
+	scan->heap_common.rs_base.rs_nkeys = 0;
+	scan->heap_common.rs_base.rs_flags = flags;
+	scan->heap_common.rs_base.rs_parallel = NULL;
+	scan->heap_common.rs_strategy = NULL;
+
+	Assert(snapshot && IsMVCCSnapshot(snapshot));
+
+	/* we only need to set this up once */
+	scan->heap_common.rs_ctup.t_tableOid = RelationGetRelid(relation);
+
+	scan->heap_common.rs_parallelworkerdata = NULL;
+	scan->heap_common.rs_base.rs_key = NULL;
+
+	initscan(&scan->heap_common, NULL, false);
+
+	scan->vmbuffer = InvalidBuffer;
+	scan->empty_tuples_pending = 0;
+
+	return (TableScanDesc) scan;
+}
+
+
 void
 heap_rescan(TableScanDesc sscan, ScanKey key, bool set_params,
 			bool allow_strat, bool allow_sync, bool allow_pagemode)
@@ -1057,19 +1097,32 @@ heap_rescan(TableScanDesc sscan, ScanKey key, bool set_params,
 	if (BufferIsValid(scan->rs_cbuf))
 		ReleaseBuffer(scan->rs_cbuf);
 
-	if (BufferIsValid(scan->rs_vmbuffer))
-	{
-		ReleaseBuffer(scan->rs_vmbuffer);
-		scan->rs_vmbuffer = InvalidBuffer;
-	}
-
-	scan->rs_empty_tuples_pending = 0;
-
 	/*
 	 * reinitialize scan descriptor
 	 */
 	initscan(scan, key, true);
 }
+
+void
+heap_rescan_bm(TableScanDesc sscan)
+{
+	BitmapHeapScanDesc scan = (BitmapHeapScanDesc) sscan;
+
+	if (BufferIsValid(scan->heap_common.rs_cbuf))
+		ReleaseBuffer(scan->heap_common.rs_cbuf);
+
+	if (BufferIsValid(scan->vmbuffer))
+		ReleaseBuffer(scan->vmbuffer);
+	scan->vmbuffer = InvalidBuffer;
+
+	scan->empty_tuples_pending = 0;
+
+	/*
+	 * reinitialize heap scan descriptor
+	 */
+	initscan(&scan->heap_common, NULL, true);
+}
+
 
 void
 heap_endscan(TableScanDesc sscan)
@@ -1083,11 +1136,6 @@ heap_endscan(TableScanDesc sscan)
 	 */
 	if (BufferIsValid(scan->rs_cbuf))
 		ReleaseBuffer(scan->rs_cbuf);
-
-	if (BufferIsValid(scan->rs_vmbuffer))
-		ReleaseBuffer(scan->rs_vmbuffer);
-
-	scan->rs_empty_tuples_pending = 0;
 
 	/*
 	 * decrement relation reference count and free scan descriptor storage
@@ -1108,6 +1156,29 @@ heap_endscan(TableScanDesc sscan)
 
 	pfree(scan);
 }
+
+/*
+ * Cleanup BitmapHeapScan table state
+ */
+void
+heap_endscan_bm(TableScanDesc sscan)
+{
+	BitmapHeapScanDesc scan = (BitmapHeapScanDesc) sscan;
+
+	if (BufferIsValid(scan->heap_common.rs_cbuf))
+		ReleaseBuffer(scan->heap_common.rs_cbuf);
+
+	if (BufferIsValid(scan->vmbuffer))
+		ReleaseBuffer(scan->vmbuffer);
+
+	/*
+	 * decrement relation reference count and free scan descriptor storage
+	 */
+	RelationDecrementReferenceCount(scan->heap_common.rs_base.rs_rd);
+
+	pfree(scan);
+}
+
 
 HeapTuple
 heap_getnext(TableScanDesc sscan, ScanDirection direction)
