@@ -105,14 +105,10 @@ BitmapHeapNext(BitmapHeapScanState *node)
 
 #ifdef USE_PREFETCH
 			if (node->prefetch_maximum > 0)
-			{
 				node->prefetch_iterator = tbm_begin_iterate(node->tbm, dsa,
 															pstate ?
 															pstate->prefetch_iterator :
 															InvalidDsaPointer);
-				node->prefetch_pages = 0;
-				node->prefetch_target = -1;
-			}
 #endif							/* USE_PREFETCH */
 		}
 		else if (BitmapShouldInitializeSharedState(pstate))
@@ -592,6 +588,9 @@ ExecReScanBitmapHeapScan(BitmapHeapScanState *node)
 	node->recheck = true;
 	node->blockno = InvalidBlockNumber;
 	node->pfblockno = InvalidBlockNumber;
+	/* Only used for serial BHS */
+	node->prefetch_pages = 0;
+	node->prefetch_target = -1;
 
 	ExecScanReScan(&node->ss);
 
@@ -707,7 +706,7 @@ ExecInitBitmapHeapScan(BitmapHeapScan *node, EState *estate, int eflags)
 	memset(&scanstate->stats, 0, sizeof(BitmapHeapScanInstrumentation));
 
 	scanstate->prefetch_pages = 0;
-	scanstate->prefetch_target = 0;
+	scanstate->prefetch_target = -1;
 	scanstate->initialized = false;
 	scanstate->pstate = NULL;
 	scanstate->recheck = true;
@@ -867,7 +866,7 @@ ExecBitmapHeapInitializeDSM(BitmapHeapScanState *node,
 	/* Initialize the mutex */
 	SpinLockInit(&pstate->mutex);
 	pstate->prefetch_pages = 0;
-	pstate->prefetch_target = 0;
+	pstate->prefetch_target = -1;
 	pstate->state = BM_INITIAL;
 
 	ConditionVariableInit(&pstate->cv);
@@ -904,6 +903,8 @@ ExecBitmapHeapReInitializeDSM(BitmapHeapScanState *node,
 		return;
 
 	pstate->state = BM_INITIAL;
+	pstate->prefetch_pages = 0;
+	pstate->prefetch_target = -1;
 
 	if (DsaPointerIsValid(pstate->tbmiterator))
 		tbm_free_shared_area(dsa, pstate->tbmiterator);
