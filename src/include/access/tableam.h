@@ -368,7 +368,8 @@ typedef struct TableAmRoutine
 									uint32 flags);
 
 	void		(*scan_rescan_bm) (TableScanDesc scan, TIDBitmap *tbm,
-								   ParallelBitmapHeapState *pstate, dsa_area *dsa);
+								   ParallelBitmapHeapState *pstate, dsa_area *dsa,
+								   int prefetch_maximum);
 
 	/*
 	 * Release resources and deallocate scan.
@@ -805,17 +806,6 @@ typedef struct TableAmRoutine
 	 * lossy_pages is incremented if the bitmap is lossy for the selected
 	 * block; otherwise, exact_pages is incremented.
 	 *
-	 * XXX: Currently this may only be implemented if the AM uses md.c as its
-	 * storage manager, and uses ItemPointer->ip_blkid in a manner that maps
-	 * blockids directly to the underlying storage. nodeBitmapHeapscan.c
-	 * performs prefetching directly using that interface.  This probably
-	 * needs to be rectified at a later point.
-	 *
-	 * XXX: Currently this may only be implemented if the AM uses the
-	 * visibilitymap, as nodeBitmapHeapscan.c unconditionally accesses it to
-	 * perform prefetching.  This probably needs to be rectified at a later
-	 * point.
-	 *
 	 * Optional callback, but either both scan_bitmap_next_block and
 	 * scan_bitmap_next_tuple need to exist, or neither.
 	 */
@@ -954,7 +944,7 @@ table_beginscan_strat(Relation rel, Snapshot snapshot,
  */
 static inline TableScanDesc
 table_beginscan_bm(TableScanDesc scan, Relation rel, Snapshot snapshot,
-				   bool need_tuple, TIDBitmap *tbm,
+				   bool need_tuple, int prefetch_maximum, TIDBitmap *tbm,
 				   ParallelBitmapHeapState *pstate, dsa_area *dsa)
 {
 	uint32		flags = SO_TYPE_BITMAPSCAN | SO_ALLOW_PAGEMODE;
@@ -969,7 +959,7 @@ table_beginscan_bm(TableScanDesc scan, Relation rel, Snapshot snapshot,
 	if (!scan)
 		scan = rel->rd_tableam->scan_begin_bm(rel, snapshot, flags);
 
-	scan->rs_rd->rd_tableam->scan_rescan_bm(scan, tbm, pstate, dsa);
+	scan->rs_rd->rd_tableam->scan_rescan_bm(scan, tbm, pstate, dsa, prefetch_maximum);
 
 	return scan;
 }

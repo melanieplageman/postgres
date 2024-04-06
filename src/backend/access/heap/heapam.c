@@ -1065,6 +1065,14 @@ heap_beginscan_bm(Relation relation, Snapshot snapshot, uint32 flags)
 	scan->vmbuffer = InvalidBuffer;
 	scan->empty_tuples_pending = 0;
 
+	/*
+	 * The rest of the BitmapHeapScanDesc members related to prefetching will
+	 * be initialized in heap_rescan_bm().
+	 */
+	scan->pvmbuffer = InvalidBuffer;
+	scan->prefetch_iterator.serial = NULL;
+	scan->prefetch_iterator.parallel = NULL;
+
 	return (TableScanDesc) scan;
 }
 
@@ -1108,7 +1116,8 @@ heap_rescan(TableScanDesc sscan, ScanKey key, bool set_params,
 
 void
 heap_rescan_bm(TableScanDesc sscan, TIDBitmap *tbm,
-			   ParallelBitmapHeapState *pstate, dsa_area *dsa)
+			   ParallelBitmapHeapState *pstate, dsa_area *dsa,
+			   int prefetch_maximum)
 {
 	BitmapHeapScanDesc scan = (BitmapHeapScanDesc) sscan;
 
@@ -1122,6 +1131,17 @@ heap_rescan_bm(TableScanDesc sscan, TIDBitmap *tbm,
 	scan->empty_tuples_pending = 0;
 	unified_tbm_end_iterate(&scan->iterator);
 
+	if (BufferIsValid(scan->pvmbuffer))
+		ReleaseBuffer(scan->pvmbuffer);
+
+	unified_tbm_end_iterate(&scan->prefetch_iterator);
+
+	scan->prefetch_maximum = prefetch_maximum;
+	scan->pstate = pstate;
+	scan->prefetch_target = -1;
+	scan->prefetch_pages = 0;
+	scan->pfblockno = InvalidBlockNumber;
+
 	/*
 	 * reinitialize heap scan descriptor
 	 */
@@ -1131,6 +1151,17 @@ heap_rescan_bm(TableScanDesc sscan, TIDBitmap *tbm,
 							  pstate ?
 							  pstate->tbmiterator :
 							  InvalidDsaPointer);
+
+#ifdef USE_PREFETCH
+	if (prefetch_maximum > 0)
+	{
+		unified_tbm_begin_iterate(&scan->prefetch_iterator, tbm, dsa,
+								  pstate ?
+								  pstate->prefetch_iterator :
+								  InvalidDsaPointer);
+	}
+#endif							/* USE_PREFETCH */
+
 }
 
 
@@ -1182,6 +1213,11 @@ heap_endscan_bm(TableScanDesc sscan)
 		ReleaseBuffer(scan->vmbuffer);
 
 	unified_tbm_end_iterate(&scan->iterator);
+
+	if (BufferIsValid(scan->pvmbuffer))
+		ReleaseBuffer(scan->pvmbuffer);
+
+	unified_tbm_end_iterate(&scan->prefetch_iterator);
 
 	/*
 	 * decrement relation reference count and free scan descriptor storage

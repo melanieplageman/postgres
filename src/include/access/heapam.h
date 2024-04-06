@@ -92,6 +92,10 @@ typedef struct BitmapHeapScanDescData
 	 * Members common to Parallel and Serial BitmapHeapScan
 	 */
 	UnifiedTBMIterator iterator;
+	UnifiedTBMIterator prefetch_iterator;
+
+	/* maximum value for prefetch_target */
+	int			prefetch_maximum;
 
 	/*
 	 * These fields are only used for bitmap scans for the "skip fetch"
@@ -101,7 +105,26 @@ typedef struct BitmapHeapScanDescData
 	 * to return. They are common to parallel and serial BitmapHeapScans
 	 */
 	Buffer		vmbuffer;
+	/* buffer for visibility-map lookups of prefetched pages */
+	Buffer		pvmbuffer;
 	int			empty_tuples_pending;
+
+	/*
+	 * Parallel-only members
+	 */
+
+	struct ParallelBitmapHeapState *pstate;
+
+	/*
+	 * Serial-only members
+	 */
+
+	/* Current target for prefetch distance */
+	int			prefetch_target;
+	/* # pages prefetch iterator is ahead of current */
+	int			prefetch_pages;
+	/* used to validate prefetch block stays ahead of current block  */
+	BlockNumber pfblockno;
 }			BitmapHeapScanDescData;
 typedef struct BitmapHeapScanDescData *BitmapHeapScanDesc;
 
@@ -305,7 +328,8 @@ extern bool heap_getnextslot_tidrange(TableScanDesc sscan,
 extern TableScanDesc heap_beginscan_bm(Relation relation, Snapshot snapshot, uint32 flags);
 extern void heap_endscan_bm(TableScanDesc scan);
 extern void heap_rescan_bm(TableScanDesc sscan, TIDBitmap *tbm,
-						   ParallelBitmapHeapState *pstate, dsa_area *dsa);
+						   ParallelBitmapHeapState *pstate, dsa_area *dsa,
+						   int prefetch_maximum);
 extern bool heap_fetch(Relation relation, Snapshot snapshot,
 					   HeapTuple tuple, Buffer *userbuf, bool keep_buf);
 extern bool heap_hot_search_buffer(ItemPointer tid, Relation relation,
@@ -422,9 +446,6 @@ extern bool heapam_scan_analyze_next_tuple(TableScanDesc scan,
 										   TransactionId OldestXmin,
 										   double *liverows, double *deadrows,
 										   TupleTableSlot *slot);
-extern void BitmapAdjustPrefetchIterator(BitmapHeapScanState *node);
-extern void BitmapAdjustPrefetchTarget(BitmapHeapScanState *node);
-extern void BitmapPrefetch(BitmapHeapScanState *node, TableScanDesc scan);
 
 /*
  * To avoid leaking too much knowledge about reorderbuffer implementation

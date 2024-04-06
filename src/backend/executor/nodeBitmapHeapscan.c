@@ -69,7 +69,6 @@ BitmapHeapNext(BitmapHeapScanState *node)
 	TIDBitmap  *tbm;
 	TupleTableSlot *slot;
 	ParallelBitmapHeapState *pstate = node->pstate;
-	dsa_area   *dsa = node->ss.ps.state->es_query_dsa;
 
 	/*
 	 * extract necessary information from index scan node
@@ -93,7 +92,9 @@ BitmapHeapNext(BitmapHeapScanState *node)
 	 */
 	if (!node->initialized)
 	{
+		Relation	rel = node->ss.ss_currentRelation;
 		bool		need_tuples = false;
+		int			prefetch_maximum = 0;
 
 		/*
 		 * The leader will immediately come out of the function, but others
@@ -102,6 +103,14 @@ BitmapHeapNext(BitmapHeapScanState *node)
 		 */
 		bool		init_shared_state = node->pstate ?
 			BitmapShouldInitializeSharedState(node->pstate) : false;
+
+		/*
+		 * Maximum number of prefetches for the tablespace if configured,
+		 * otherwise the current value of the effective_io_concurrency GUC.
+		 */
+#ifdef USE_PREFETCH
+		prefetch_maximum = get_tablespace_io_concurrency(rel->rd_rel->reltablespace);
+#endif
 
 		/*
 		 * Only serial bitmap table scans and the parallel leader in a
@@ -124,7 +133,7 @@ BitmapHeapNext(BitmapHeapScanState *node)
 				 */
 				pstate->tbmiterator = tbm_prepare_shared_iterate(tbm);
 #ifdef USE_PREFETCH
-				if (node->prefetch_maximum > 0)
+				if (prefetch_maximum > 0)
 				{
 					pstate->prefetch_iterator =
 						tbm_prepare_shared_iterate(tbm);
@@ -154,21 +163,12 @@ BitmapHeapNext(BitmapHeapScanState *node)
 								  node->ss.ss_currentRelation,
 								  node->ss.ps.state->es_snapshot,
 								  need_tuples,
+								  prefetch_maximum,
 								  node->tbm,
 								  node->pstate,
 								  node->ss.ps.state->es_query_dsa);
 
 		node->ss.ss_currentScanDesc = scan;
-
-#ifdef USE_PREFETCH
-		if (node->prefetch_maximum > 0)
-		{
-			unified_tbm_begin_iterate(&node->prefetch_iterator, tbm, dsa,
-									  pstate ?
-									  pstate->prefetch_iterator :
-									  InvalidDsaPointer);
-		}
-#endif							/* USE_PREFETCH */
 
 		node->initialized = true;
 
@@ -184,37 +184,6 @@ BitmapHeapNext(BitmapHeapScanState *node)
 			 */
 
 			CHECK_FOR_INTERRUPTS();
-
-#ifdef USE_PREFETCH
-
-			/*
-			 * Try to prefetch at least a few pages even before we get to the
-			 * second page if we don't stop reading after the first tuple.
-			 */
-			if (!pstate)
-			{
-				if (node->prefetch_target < node->prefetch_maximum)
-					node->prefetch_target++;
-			}
-			else if (pstate->prefetch_target < node->prefetch_maximum)
-			{
-				/* take spinlock while updating shared state */
-				SpinLockAcquire(&pstate->mutex);
-				if (pstate->prefetch_target < node->prefetch_maximum)
-					pstate->prefetch_target++;
-				SpinLockRelease(&pstate->mutex);
-			}
-#endif							/* USE_PREFETCH */
-
-			/*
-			 * We issue prefetch requests *after* fetching the current page to
-			 * try to avoid having prefetching interfere with the main I/O.
-			 * Also, this should happen only when we have determined there is
-			 * still something to do on the current page, else we may
-			 * uselessly prefetch the same page we are just about to request
-			 * for real.
-			 */
-			BitmapPrefetch(node, scan);
 
 			/*
 			 * If we are using lossy info, we have to recheck the qual
@@ -238,23 +207,9 @@ BitmapHeapNext(BitmapHeapScanState *node)
 
 new_page:
 
-		BitmapAdjustPrefetchIterator(node);
-
 		if (!table_scan_bitmap_next_block(scan, &node->blockno, &node->recheck,
 										  &node->lossy_pages, &node->exact_pages))
 			break;
-
-		/*
-		 * If serial, we can error out if the the prefetch block doesn't stay
-		 * ahead of the current block.
-		 */
-		if (node->pstate == NULL &&
-			!node->prefetch_iterator.exhausted &&
-			node->pfblockno < node->blockno)
-			elog(ERROR, "prefetch and main iterators are out of sync");
-
-		/* Adjust the prefetch target */
-		BitmapAdjustPrefetchTarget(node);
 	}
 
 	/*
@@ -319,22 +274,13 @@ ExecReScanBitmapHeapScan(BitmapHeapScanState *node)
 {
 	PlanState  *outerPlan = outerPlanState(node);
 
-	/* release bitmaps and buffers if any */
-	if (node->prefetch_iterator.exhausted)
-		unified_tbm_end_iterate(&node->prefetch_iterator);
+	/* release bitmaps if any */
 	if (node->tbm)
 		tbm_free(node->tbm);
-	if (node->pvmbuffer != InvalidBuffer)
-		ReleaseBuffer(node->pvmbuffer);
 	node->tbm = NULL;
 	node->initialized = false;
-	node->pvmbuffer = InvalidBuffer;
 	node->recheck = true;
 	node->blockno = InvalidBlockNumber;
-	node->pfblockno = InvalidBlockNumber;
-	/* Only used for serial BHS */
-	node->prefetch_pages = 0;
-	node->prefetch_target = -1;
 
 	ExecScanReScan(&node->ss);
 
@@ -373,14 +319,10 @@ ExecEndBitmapHeapScan(BitmapHeapScanState *node)
 		table_endscan_bm(scanDesc);
 
 	/*
-	 * release bitmaps and buffers if any
+	 * release bitmaps if any
 	 */
-	if (!node->prefetch_iterator.exhausted)
-		unified_tbm_end_iterate(&node->prefetch_iterator);
 	if (node->tbm)
 		tbm_free(node->tbm);
-	if (node->pvmbuffer != InvalidBuffer)
-		ReleaseBuffer(node->pvmbuffer);
 }
 
 /* ----------------------------------------------------------------
@@ -413,16 +355,12 @@ ExecInitBitmapHeapScan(BitmapHeapScan *node, EState *estate, int eflags)
 	scanstate->ss.ps.ExecProcNode = ExecBitmapHeapScan;
 
 	scanstate->tbm = NULL;
-	scanstate->pvmbuffer = InvalidBuffer;
 	scanstate->exact_pages = 0;
 	scanstate->lossy_pages = 0;
-	scanstate->prefetch_pages = 0;
-	scanstate->prefetch_target = -1;
 	scanstate->initialized = false;
 	scanstate->pstate = NULL;
 	scanstate->recheck = true;
 	scanstate->blockno = InvalidBlockNumber;
-	scanstate->pfblockno = InvalidBlockNumber;
 
 	/*
 	 * Miscellaneous initialization
@@ -461,13 +399,6 @@ ExecInitBitmapHeapScan(BitmapHeapScan *node, EState *estate, int eflags)
 		ExecInitQual(node->scan.plan.qual, (PlanState *) scanstate);
 	scanstate->bitmapqualorig =
 		ExecInitQual(node->bitmapqualorig, (PlanState *) scanstate);
-
-	/*
-	 * Maximum number of prefetches for the tablespace if configured,
-	 * otherwise the current value of the effective_io_concurrency GUC.
-	 */
-	scanstate->prefetch_maximum =
-		get_tablespace_io_concurrency(currentRelation->rd_rel->reltablespace);
 
 	scanstate->ss.ss_currentRelation = currentRelation;
 

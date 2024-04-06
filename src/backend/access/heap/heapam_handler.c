@@ -60,6 +60,9 @@ static bool SampleHeapTupleVisible(TableScanDesc scan, Buffer buffer,
 								   OffsetNumber tupoffset);
 
 static BlockNumber heapam_scan_get_blocks_done(HeapScanDesc hscan);
+static inline void BitmapAdjustPrefetchIterator(BitmapHeapScanDesc scan);
+static inline void BitmapAdjustPrefetchTarget(BitmapHeapScanDesc scan);
+static inline void BitmapPrefetch(BitmapHeapScanDesc scan);
 
 static const TableAmRoutine heapam_methods;
 
@@ -2187,26 +2190,26 @@ heapam_estimate_rel_size(Relation rel, int32 *attr_widths,
  *	iterator in prefetch_pages. For each block the main iterator returns, we
  *	decrement prefetch_pages.
  */
-void
-BitmapAdjustPrefetchIterator(BitmapHeapScanState *node)
+static inline void
+BitmapAdjustPrefetchIterator(BitmapHeapScanDesc scan)
 {
 #ifdef USE_PREFETCH
-	ParallelBitmapHeapState *pstate = node->pstate;
-	UnifiedTBMIterator *prefetch_iterator = &node->prefetch_iterator;
+	ParallelBitmapHeapState *pstate = scan->pstate;
+	UnifiedTBMIterator *prefetch_iterator = &scan->prefetch_iterator;
 	TBMIterateResult *tbmpre;
 
 	if (pstate == NULL)
 	{
-		if (node->prefetch_pages > 0)
+		if (scan->prefetch_pages > 0)
 		{
 			/* The main iterator has closed the distance by one page */
-			node->prefetch_pages--;
+			scan->prefetch_pages--;
 		}
 		else if (!prefetch_iterator->exhausted)
 		{
 			/* Do not let the prefetch iterator get behind the main one */
 			tbmpre = unified_tbm_iterate(prefetch_iterator);
-			node->pfblockno = tbmpre ? tbmpre->blockno : InvalidBlockNumber;
+			scan->pfblockno = tbmpre ? tbmpre->blockno : InvalidBlockNumber;
 		}
 		return;
 	}
@@ -2220,7 +2223,7 @@ BitmapAdjustPrefetchIterator(BitmapHeapScanState *node)
 	 * Note that moving the call site of BitmapAdjustPrefetchIterator()
 	 * exacerbates the effects of this bug.
 	 */
-	if (node->prefetch_maximum > 0)
+	if (scan->prefetch_maximum > 0)
 	{
 		SpinLockAcquire(&pstate->mutex);
 		if (pstate->prefetch_pages > 0)
@@ -2244,7 +2247,7 @@ BitmapAdjustPrefetchIterator(BitmapHeapScanState *node)
 			if (!prefetch_iterator->exhausted)
 			{
 				tbmpre = unified_tbm_iterate(prefetch_iterator);
-				node->pfblockno = tbmpre ? tbmpre->blockno : InvalidBlockNumber;
+				scan->pfblockno = tbmpre ? tbmpre->blockno : InvalidBlockNumber;
 			}
 		}
 	}
@@ -2259,33 +2262,33 @@ BitmapAdjustPrefetchIterator(BitmapHeapScanState *node)
  * page/tuple, then to one after the second tuple is fetched, then
  * it doubles as later pages are fetched.
  */
-void
-BitmapAdjustPrefetchTarget(BitmapHeapScanState *node)
+static inline void
+BitmapAdjustPrefetchTarget(BitmapHeapScanDesc scan)
 {
 #ifdef USE_PREFETCH
-	ParallelBitmapHeapState *pstate = node->pstate;
+	ParallelBitmapHeapState *pstate = scan->pstate;
 
 	if (pstate == NULL)
 	{
-		if (node->prefetch_target >= node->prefetch_maximum)
+		if (scan->prefetch_target >= scan->prefetch_maximum)
 			 /* don't increase any further */ ;
-		else if (node->prefetch_target >= node->prefetch_maximum / 2)
-			node->prefetch_target = node->prefetch_maximum;
-		else if (node->prefetch_target > 0)
-			node->prefetch_target *= 2;
+		else if (scan->prefetch_target >= scan->prefetch_maximum / 2)
+			scan->prefetch_target = scan->prefetch_maximum;
+		else if (scan->prefetch_target > 0)
+			scan->prefetch_target *= 2;
 		else
-			node->prefetch_target++;
+			scan->prefetch_target++;
 		return;
 	}
 
 	/* Do an unlocked check first to save spinlock acquisitions. */
-	if (pstate->prefetch_target < node->prefetch_maximum)
+	if (pstate->prefetch_target < scan->prefetch_maximum)
 	{
 		SpinLockAcquire(&pstate->mutex);
-		if (pstate->prefetch_target >= node->prefetch_maximum)
+		if (pstate->prefetch_target >= scan->prefetch_maximum)
 			 /* don't increase any further */ ;
-		else if (pstate->prefetch_target >= node->prefetch_maximum / 2)
-			pstate->prefetch_target = node->prefetch_maximum;
+		else if (pstate->prefetch_target >= scan->prefetch_maximum / 2)
+			pstate->prefetch_target = scan->prefetch_maximum;
 		else if (pstate->prefetch_target > 0)
 			pstate->prefetch_target *= 2;
 		else
@@ -2298,18 +2301,19 @@ BitmapAdjustPrefetchTarget(BitmapHeapScanState *node)
 /*
  * BitmapPrefetch - Prefetch, if prefetch_pages are behind prefetch_target
  */
-void
-BitmapPrefetch(BitmapHeapScanState *node, TableScanDesc scan)
+static inline void
+BitmapPrefetch(BitmapHeapScanDesc scan)
 {
 #ifdef USE_PREFETCH
-	ParallelBitmapHeapState *pstate = node->pstate;
-	UnifiedTBMIterator *prefetch_iterator = &node->prefetch_iterator;
+	ParallelBitmapHeapState *pstate = scan->pstate;
+	Relation	rel = scan->heap_common.rs_base.rs_rd;
+	UnifiedTBMIterator *prefetch_iterator = &scan->prefetch_iterator;
 
 	if (pstate == NULL)
 	{
 		if (!prefetch_iterator->exhausted)
 		{
-			while (node->prefetch_pages < node->prefetch_target)
+			while (scan->prefetch_pages < scan->prefetch_target)
 			{
 				TBMIterateResult *tbmpre = unified_tbm_iterate(prefetch_iterator);
 				bool		skip_fetch;
@@ -2320,8 +2324,8 @@ BitmapPrefetch(BitmapHeapScanState *node, TableScanDesc scan)
 					unified_tbm_end_iterate(prefetch_iterator);
 					break;
 				}
-				node->prefetch_pages++;
-				node->pfblockno = tbmpre->blockno;
+				scan->prefetch_pages++;
+				scan->pfblockno = tbmpre->blockno;
 
 				/*
 				 * If we expect not to have to actually read this heap page,
@@ -2329,14 +2333,14 @@ BitmapPrefetch(BitmapHeapScanState *node, TableScanDesc scan)
 				 * logic normally.  (Would it be better not to increment
 				 * prefetch_pages?)
 				 */
-				skip_fetch = (!(scan->rs_flags & SO_NEED_TUPLES) &&
+				skip_fetch = (!(scan->heap_common.rs_base.rs_flags & SO_NEED_TUPLES) &&
 							  !tbmpre->recheck &&
-							  VM_ALL_VISIBLE(node->ss.ss_currentRelation,
+							  VM_ALL_VISIBLE(rel,
 											 tbmpre->blockno,
-											 &node->pvmbuffer));
+											 &scan->pvmbuffer));
 
 				if (!skip_fetch)
-					PrefetchBuffer(scan->rs_rd, MAIN_FORKNUM, tbmpre->blockno);
+					PrefetchBuffer(rel, MAIN_FORKNUM, tbmpre->blockno);
 			}
 		}
 
@@ -2376,17 +2380,17 @@ BitmapPrefetch(BitmapHeapScanState *node, TableScanDesc scan)
 					break;
 				}
 
-				node->pfblockno = tbmpre->blockno;
+				scan->pfblockno = tbmpre->blockno;
 
 				/* As above, skip prefetch if we expect not to need page */
-				skip_fetch = (!(scan->rs_flags & SO_NEED_TUPLES) &&
+				skip_fetch = (!(scan->heap_common.rs_base.rs_flags & SO_NEED_TUPLES) &&
 							  !tbmpre->recheck &&
-							  VM_ALL_VISIBLE(node->ss.ss_currentRelation,
+							  VM_ALL_VISIBLE(rel,
 											 tbmpre->blockno,
-											 &node->pvmbuffer));
+											 &scan->pvmbuffer));
 
 				if (!skip_fetch)
-					PrefetchBuffer(scan->rs_rd, MAIN_FORKNUM, tbmpre->blockno);
+					PrefetchBuffer(rel, MAIN_FORKNUM, tbmpre->blockno);
 			}
 		}
 	}
@@ -2418,6 +2422,8 @@ heapam_scan_bitmap_next_block(TableScanDesc sscan,
 
 	*blockno = InvalidBlockNumber;
 	*recheck = true;
+
+	BitmapAdjustPrefetchIterator(scan);
 
 	do
 	{
@@ -2559,6 +2565,19 @@ heapam_scan_bitmap_next_block(TableScanDesc sscan,
 	else
 		(*exact_pages)++;
 
+
+	/*
+	 * If serial, we can error out if the the prefetch block doesn't stay
+	 * ahead of the current block.
+	 */
+	if (scan->pstate == NULL &&
+		!scan->prefetch_iterator.exhausted &&
+		scan->pfblockno < block)
+		elog(ERROR, "prefetch and main iterators are out of sync");
+
+	/* Adjust the prefetch target */
+	BitmapAdjustPrefetchTarget(scan);
+
 	/*
 	 * Return true to indicate that a valid block was found and the bitmap is
 	 * not exhausted. If there are no visible tuples on this page,
@@ -2594,6 +2613,36 @@ heapam_scan_bitmap_next_tuple(TableScanDesc sscan,
 	 */
 	if (hscan->rs_cindex < 0 || hscan->rs_cindex >= hscan->rs_ntuples)
 		return false;
+
+#ifdef USE_PREFETCH
+
+	/*
+	 * Try to prefetch at least a few pages even before we get to the second
+	 * page if we don't stop reading after the first tuple.
+	 */
+	if (!scan->pstate)
+	{
+		if (scan->prefetch_target < scan->prefetch_maximum)
+			scan->prefetch_target++;
+	}
+	else if (scan->pstate->prefetch_target < scan->prefetch_maximum)
+	{
+		/* take spinlock while updating shared state */
+		SpinLockAcquire(&scan->pstate->mutex);
+		if (scan->pstate->prefetch_target < scan->prefetch_maximum)
+			scan->pstate->prefetch_target++;
+		SpinLockRelease(&scan->pstate->mutex);
+	}
+
+	/*
+	 * We issue prefetch requests *after* fetching the current page to try to
+	 * avoid having prefetching interfere with the main I/O. Also, this should
+	 * happen only when we have determined there is still something to do on
+	 * the current page, else we may uselessly prefetch the same page we are
+	 * just about to request for real.
+	 */
+	BitmapPrefetch(scan);
+#endif							/* USE_PREFETCH */
 
 	targoffset = hscan->rs_vistuples[hscan->rs_cindex];
 	page = BufferGetPage(hscan->rs_cbuf);
