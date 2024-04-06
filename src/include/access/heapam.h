@@ -91,6 +91,7 @@ typedef struct BitmapHeapScanDescData
 	/*
 	 * Members common to Parallel and Serial BitmapHeapScan
 	 */
+	UnifiedTBMIterator iterator;
 
 	/*
 	 * These fields are only used for bitmap scans for the "skip fetch"

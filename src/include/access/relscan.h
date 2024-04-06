@@ -41,9 +41,6 @@ typedef struct TableScanDescData
 	ItemPointerData rs_mintid;
 	ItemPointerData rs_maxtid;
 
-	/* Only used for Bitmap table scans */
-	UnifiedTBMIterator rs_bhs_iterator;
-
 	/*
 	 * Information about type and behaviour of the scan, a bitmask of members
 	 * of the ScanOptions enum (see tableam.h).

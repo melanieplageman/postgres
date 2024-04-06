@@ -2209,7 +2209,7 @@ heapam_scan_bitmap_next_block(TableScanDesc sscan,
 	{
 		CHECK_FOR_INTERRUPTS();
 
-		tbmres = unified_tbm_iterate(&sscan->rs_bhs_iterator);
+		tbmres = unified_tbm_iterate(&scan->iterator);
 
 		if (tbmres == NULL)
 		{

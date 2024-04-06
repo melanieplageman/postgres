@@ -967,11 +967,7 @@ table_beginscan_bm(TableScanDesc scan, Relation rel, Snapshot snapshot,
 	 * scan descriptor and begin the scan.
 	 */
 	if (!scan)
-	{
 		scan = rel->rd_tableam->scan_begin_bm(rel, snapshot, flags);
-		scan->rs_bhs_iterator.serial = NULL;
-		scan->rs_bhs_iterator.parallel = NULL;
-	}
 
 	scan->rs_rd->rd_tableam->scan_rescan_bm(scan, tbm, pstate, dsa);
 
