@@ -356,6 +356,24 @@ typedef struct TableAmRoutine
 								bool allow_sync, bool allow_pagemode);
 
 	/*
+	 * Functions to begin, restart, and end a scan of the underlying table of
+	 * a bitmap table scan.
+	 *
+	 * `rel`, `flags`, and `snapshot` serve the same purposes as in the
+	 * standard relation scan_[begin|rescan|end] functions documented above.
+	 */
+	TableScanDesc (*scan_begin_bm) (Relation rel,
+									Snapshot snapshot,
+									uint32 flags);
+
+	void		(*scan_rescan_bm) (TableScanDesc scan);
+
+	/*
+	 * Release resources and deallocate scan.
+	 */
+	void		(*scan_end_bm) (TableScanDesc scan);
+
+	/*
 	 * Return next tuple from `scan`, store in slot.
 	 */
 	bool		(*scan_getnextslot) (TableScanDesc scan,
