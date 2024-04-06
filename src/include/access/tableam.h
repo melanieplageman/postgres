@@ -938,16 +938,12 @@ static inline TableScanDesc
 table_beginscan_bm(Relation rel, Snapshot snapshot,
 				   int nkeys, struct ScanKeyData *key, bool need_tuple)
 {
-	TableScanDesc result;
 	uint32		flags = SO_TYPE_BITMAPSCAN | SO_ALLOW_PAGEMODE;
 
 	if (need_tuple)
 		flags |= SO_NEED_TUPLES;
 
-	result = rel->rd_tableam->scan_begin(rel, snapshot, nkeys, key, NULL, flags);
-	result->shared_tbmiterator = NULL;
-	result->tbmiterator = NULL;
-	return result;
+	return rel->rd_tableam->scan_begin(rel, snapshot, nkeys, key, NULL, flags);
 }
 
 /*
@@ -994,20 +990,9 @@ table_beginscan_tid(Relation rel, Snapshot snapshot)
 static inline void
 table_endscan(TableScanDesc scan)
 {
-	if (scan->rs_flags & SO_TYPE_BITMAPSCAN)
-	{
-		if (scan->shared_tbmiterator)
-		{
-			tbm_end_shared_iterate(scan->shared_tbmiterator);
-			scan->shared_tbmiterator = NULL;
-		}
-
-		if (scan->tbmiterator)
-		{
-			tbm_end_iterate(scan->tbmiterator);
-			scan->tbmiterator = NULL;
-		}
-	}
+	if (scan->rs_flags & SO_TYPE_BITMAPSCAN &&
+		!scan->rs_bhs_iterator.exhausted)
+		unified_tbm_end_iterate(&scan->rs_bhs_iterator);
 
 	scan->rs_rd->rd_tableam->scan_end(scan);
 }
@@ -1019,20 +1004,9 @@ static inline void
 table_rescan(TableScanDesc scan,
 			 struct ScanKeyData *key)
 {
-	if (scan->rs_flags & SO_TYPE_BITMAPSCAN)
-	{
-		if (scan->shared_tbmiterator)
-		{
-			tbm_end_shared_iterate(scan->shared_tbmiterator);
-			scan->shared_tbmiterator = NULL;
-		}
-
-		if (scan->tbmiterator)
-		{
-			tbm_end_iterate(scan->tbmiterator);
-			scan->tbmiterator = NULL;
-		}
-	}
+	if (scan->rs_flags & SO_TYPE_BITMAPSCAN &&
+		!scan->rs_bhs_iterator.exhausted)
+		unified_tbm_end_iterate(&scan->rs_bhs_iterator);
 
 	scan->rs_rd->rd_tableam->scan_rescan(scan, key, false, false, false, false);
 }
