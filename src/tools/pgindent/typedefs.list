@@ -263,6 +263,7 @@ BitmapAndPath
 BitmapAndState
 BitmapHeapPath
 BitmapHeapScan
+BitmapHeapScanDesc
 BitmapHeapScanState
 BitmapIndexScan
 BitmapIndexScanState
