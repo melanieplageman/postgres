@@ -1556,3 +1556,58 @@ tbm_calculate_entries(double maxbytes)
 
 	return nbuckets;
 }
+
+/*
+ * Start iteration on a shared or non-shared bitmap iterator. Note that tbm
+ * will only be provided by serial BitmapHeapScan callers. dsa and dsp will
+ * only be provided by parallel BitmapHeapScan callers.
+ */
+void
+unified_tbm_begin_iterate(UnifiedTBMIterator *iterator, TIDBitmap *tbm,
+						  dsa_area *dsa, dsa_pointer dsp)
+{
+	Assert(iterator);
+
+	iterator->serial = NULL;
+	iterator->parallel = NULL;
+	iterator->exhausted = false;
+
+	/* Allocate a private iterator and attach the shared state to it */
+	if (DsaPointerIsValid(dsp))
+		iterator->parallel = tbm_attach_shared_iterate(dsa, dsp);
+	else
+		iterator->serial = tbm_begin_iterate(tbm);
+}
+
+/*
+ * Clean up shared or non-shared bitmap iterator.
+ */
+void
+unified_tbm_end_iterate(UnifiedTBMIterator *iterator)
+{
+	Assert(iterator);
+
+	if (iterator->serial)
+		tbm_end_iterate(iterator->serial);
+	else if (iterator->parallel)
+		tbm_end_shared_iterate(iterator->parallel);
+
+	iterator->serial = NULL;
+	iterator->parallel = NULL;
+	iterator->exhausted = true;
+}
+
+/*
+ * Get the next TBMIterateResult from the shared or non-shared bitmap iterator.
+ */
+TBMIterateResult *
+unified_tbm_iterate(UnifiedTBMIterator *iterator)
+{
+	Assert(iterator);
+	Assert(!iterator->exhausted);
+
+	if (iterator->serial)
+		return tbm_iterate(iterator->serial);
+	else
+		return tbm_shared_iterate(iterator->parallel);
+}
