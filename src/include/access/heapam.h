@@ -422,6 +422,9 @@ extern bool heapam_scan_analyze_next_tuple(TableScanDesc scan,
 										   TransactionId OldestXmin,
 										   double *liverows, double *deadrows,
 										   TupleTableSlot *slot);
+extern void BitmapAdjustPrefetchIterator(BitmapHeapScanState *node);
+extern void BitmapAdjustPrefetchTarget(BitmapHeapScanState *node);
+extern void BitmapPrefetch(BitmapHeapScanState *node, TableScanDesc scan);
 
 /*
  * To avoid leaking too much knowledge about reorderbuffer implementation
