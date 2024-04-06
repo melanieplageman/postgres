@@ -1049,6 +1049,9 @@ heap_beginscan_bm(Relation relation, Snapshot snapshot, uint32 flags)
 	scan->heap_common.rs_base.rs_parallel = NULL;
 	scan->heap_common.rs_strategy = NULL;
 
+	scan->heap_common.rs_base.rs_bhs_iterator.serial = NULL;
+	scan->heap_common.rs_base.rs_bhs_iterator.parallel = NULL;
+
 	Assert(snapshot && IsMVCCSnapshot(snapshot));
 
 	/* we only need to set this up once */
@@ -1104,7 +1107,8 @@ heap_rescan(TableScanDesc sscan, ScanKey key, bool set_params,
 }
 
 void
-heap_rescan_bm(TableScanDesc sscan)
+heap_rescan_bm(TableScanDesc sscan, TIDBitmap *tbm,
+			   ParallelBitmapHeapState *pstate, dsa_area *dsa)
 {
 	BitmapHeapScanDesc scan = (BitmapHeapScanDesc) sscan;
 
@@ -1117,10 +1121,17 @@ heap_rescan_bm(TableScanDesc sscan)
 
 	scan->empty_tuples_pending = 0;
 
+	unified_tbm_end_iterate(&scan->heap_common.rs_base.rs_bhs_iterator);
+
 	/*
 	 * reinitialize heap scan descriptor
 	 */
 	initscan(&scan->heap_common, NULL, true);
+
+	unified_tbm_begin_iterate(&scan->heap_common.rs_base.rs_bhs_iterator, tbm, dsa,
+							  pstate ?
+							  pstate->tbmiterator :
+							  InvalidDsaPointer);
 }
 
 
@@ -1170,6 +1181,8 @@ heap_endscan_bm(TableScanDesc sscan)
 
 	if (BufferIsValid(scan->vmbuffer))
 		ReleaseBuffer(scan->vmbuffer);
+
+	unified_tbm_end_iterate(&scan->heap_common.rs_base.rs_bhs_iterator);
 
 	/*
 	 * decrement relation reference count and free scan descriptor storage

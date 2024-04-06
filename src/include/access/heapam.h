@@ -303,7 +303,8 @@ extern bool heap_getnextslot_tidrange(TableScanDesc sscan,
 									  TupleTableSlot *slot);
 extern TableScanDesc heap_beginscan_bm(Relation relation, Snapshot snapshot, uint32 flags);
 extern void heap_endscan_bm(TableScanDesc scan);
-extern void heap_rescan_bm(TableScanDesc sscan);
+extern void heap_rescan_bm(TableScanDesc sscan, TIDBitmap *tbm,
+						   ParallelBitmapHeapState *pstate, dsa_area *dsa);
 extern bool heap_fetch(Relation relation, Snapshot snapshot,
 					   HeapTuple tuple, Buffer *userbuf, bool keep_buf);
 extern bool heap_hot_search_buffer(ItemPointer tid, Relation relation,

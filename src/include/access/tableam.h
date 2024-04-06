@@ -22,6 +22,7 @@
 #include "access/xact.h"
 #include "commands/vacuum.h"
 #include "executor/tuptable.h"
+#include "nodes/execnodes.h"
 #include "nodes/tidbitmap.h"
 #include "utils/rel.h"
 #include "utils/snapshot.h"
@@ -366,7 +367,8 @@ typedef struct TableAmRoutine
 									Snapshot snapshot,
 									uint32 flags);
 
-	void		(*scan_rescan_bm) (TableScanDesc scan);
+	void		(*scan_rescan_bm) (TableScanDesc scan, TIDBitmap *tbm,
+								   ParallelBitmapHeapState *pstate, dsa_area *dsa);
 
 	/*
 	 * Release resources and deallocate scan.
@@ -952,7 +954,8 @@ table_beginscan_strat(Relation rel, Snapshot snapshot,
  */
 static inline TableScanDesc
 table_beginscan_bm(TableScanDesc scan, Relation rel, Snapshot snapshot,
-				   bool need_tuple)
+				   bool need_tuple, TIDBitmap *tbm,
+				   ParallelBitmapHeapState *pstate, dsa_area *dsa)
 {
 	uint32		flags = SO_TYPE_BITMAPSCAN | SO_ALLOW_PAGEMODE;
 
@@ -964,9 +967,13 @@ table_beginscan_bm(TableScanDesc scan, Relation rel, Snapshot snapshot,
 	 * scan descriptor and begin the scan.
 	 */
 	if (!scan)
+	{
 		scan = rel->rd_tableam->scan_begin_bm(rel, snapshot, flags);
+		scan->rs_bhs_iterator.serial = NULL;
+		scan->rs_bhs_iterator.parallel = NULL;
+	}
 
-	scan->rs_rd->rd_tableam->scan_rescan_bm(scan);
+	scan->rs_rd->rd_tableam->scan_rescan_bm(scan, tbm, pstate, dsa);
 
 	return scan;
 }
@@ -1015,10 +1022,6 @@ table_beginscan_tid(Relation rel, Snapshot snapshot)
 static inline void
 table_endscan(TableScanDesc scan)
 {
-	if (scan->rs_flags & SO_TYPE_BITMAPSCAN &&
-		!scan->rs_bhs_iterator.exhausted)
-		unified_tbm_end_iterate(&scan->rs_bhs_iterator);
-
 	scan->rs_rd->rd_tableam->scan_end(scan);
 }
 
@@ -1038,10 +1041,6 @@ static inline void
 table_rescan(TableScanDesc scan,
 			 struct ScanKeyData *key)
 {
-	if (scan->rs_flags & SO_TYPE_BITMAPSCAN &&
-		!scan->rs_bhs_iterator.exhausted)
-		unified_tbm_end_iterate(&scan->rs_bhs_iterator);
-
 	scan->rs_rd->rd_tableam->scan_rescan(scan, key, false, false, false, false);
 }
 

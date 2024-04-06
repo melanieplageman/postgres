@@ -156,14 +156,12 @@ BitmapHeapNext(BitmapHeapScanState *node)
 		scan = table_beginscan_bm(node->ss.ss_currentScanDesc,
 								  node->ss.ss_currentRelation,
 								  node->ss.ps.state->es_snapshot,
-								  need_tuples);
+								  need_tuples,
+								  node->tbm,
+								  node->pstate,
+								  node->ss.ps.state->es_query_dsa);
 
 		node->ss.ss_currentScanDesc = scan;
-
-		unified_tbm_begin_iterate(&scan->rs_bhs_iterator, tbm, dsa,
-								  pstate ?
-								  pstate->tbmiterator :
-								  InvalidDsaPointer);
 
 #ifdef USE_PREFETCH
 		if (node->prefetch_maximum > 0)
