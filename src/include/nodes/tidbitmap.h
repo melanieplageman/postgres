@@ -46,6 +46,17 @@ typedef struct TBMIterateResult
 	OffsetNumber offsets[FLEXIBLE_ARRAY_MEMBER];
 } TBMIterateResult;
 
+/*
+ * Callers with both serial and parallel implementations can use this unified
+ * API.
+ */
+typedef struct UnifiedTBMIterator
+{
+	TBMIterator *serial;
+	TBMSharedIterator *parallel;
+	bool		exhausted;
+} UnifiedTBMIterator;
+
 /* function prototypes in nodes/tidbitmap.c */
 
 extern TIDBitmap *tbm_create(long maxbytes, dsa_area *dsa);
@@ -71,5 +82,11 @@ extern void tbm_end_shared_iterate(TBMSharedIterator *iterator);
 extern TBMSharedIterator *tbm_attach_shared_iterate(dsa_area *dsa,
 													dsa_pointer dp);
 extern long tbm_calculate_entries(double maxbytes);
+
+extern void unified_tbm_begin_iterate(UnifiedTBMIterator *iterator, TIDBitmap *tbm,
+									  dsa_area *dsa, dsa_pointer dsp);
+extern void unified_tbm_end_iterate(UnifiedTBMIterator *iterator);
+extern TBMIterateResult *unified_tbm_iterate(UnifiedTBMIterator *iterator);
+
 
 #endif							/* TIDBITMAP_H */

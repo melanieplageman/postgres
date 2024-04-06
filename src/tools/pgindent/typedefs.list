@@ -2996,6 +2996,7 @@ UV
 UVersionInfo
 UnicodeNormalizationForm
 UnicodeNormalizationQC
+UnifiedTBMIterator
 Unique
 UniquePath
 UniquePathMethod
