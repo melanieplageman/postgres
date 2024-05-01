@@ -1244,24 +1244,24 @@ heap_beginscan_bm(Relation relation, Snapshot snapshot, uint32 flags)
 	RelationIncrementReferenceCount(relation);
 	scan = (BitmapHeapScanDesc) palloc(sizeof(BitmapHeapScanDescData));
 
-	scan->rs_base.rs_rd = relation;
-	scan->rs_base.rs_snapshot = snapshot;
-	scan->rs_base.rs_flags = flags;
+	scan->base.rel = relation;
+	scan->base.snapshot = snapshot;
+	scan->base.flags = flags;
 
 	Assert(snapshot && IsMVCCSnapshot(snapshot));
 
 	/* we only need to set this up once */
 	scan->rs_ctup.t_tableOid = RelationGetRelid(relation);
 
-	scan->rs_nblocks = RelationGetNumberOfBlocks(scan->rs_base.rs_rd);
+	scan->nblocks = RelationGetNumberOfBlocks(scan->base.rel);
 
 	scan->rs_ctup.t_data = NULL;
 	ItemPointerSetInvalid(&scan->rs_ctup.t_self);
-	scan->rs_cbuf = InvalidBuffer;
-	scan->rs_cblock = InvalidBlockNumber;
+	scan->cbuf = InvalidBuffer;
+	scan->cblock = InvalidBlockNumber;
 
-	scan->rs_cindex = 0;
-	scan->rs_ntuples = 0;
+	scan->vis_idx = 0;
+	scan->vis_ntuples = 0;
 
 	scan->vmbuffer = InvalidBuffer;
 	scan->empty_tuples_pending = 0;
@@ -1279,8 +1279,8 @@ heap_rescan_bm(BitmapTableScanDesc sscan)
 {
 	BitmapHeapScanDesc scan = (BitmapHeapScanDesc) sscan;
 
-	if (BufferIsValid(scan->rs_cbuf))
-		ReleaseBuffer(scan->rs_cbuf);
+	if (BufferIsValid(scan->cbuf))
+		ReleaseBuffer(scan->cbuf);
 
 	if (BufferIsValid(scan->vmbuffer))
 	{
@@ -1290,12 +1290,12 @@ heap_rescan_bm(BitmapTableScanDesc sscan)
 
 	scan->empty_tuples_pending = 0;
 
-	scan->rs_nblocks = RelationGetNumberOfBlocks(scan->rs_base.rs_rd);
+	scan->nblocks = RelationGetNumberOfBlocks(scan->base.rel);
 
 	scan->rs_ctup.t_data = NULL;
 	ItemPointerSetInvalid(&scan->rs_ctup.t_self);
-	scan->rs_cbuf = InvalidBuffer;
-	scan->rs_cblock = InvalidBlockNumber;
+	scan->cbuf = InvalidBuffer;
+	scan->cblock = InvalidBlockNumber;
 }
 
 void
@@ -1303,8 +1303,8 @@ heap_endscan_bm(BitmapTableScanDesc sscan)
 {
 	BitmapHeapScanDesc scan = (BitmapHeapScanDesc) sscan;
 
-	if (BufferIsValid(scan->rs_cbuf))
-		ReleaseBuffer(scan->rs_cbuf);
+	if (BufferIsValid(scan->cbuf))
+		ReleaseBuffer(scan->cbuf);
 
 	if (BufferIsValid(scan->vmbuffer))
 		ReleaseBuffer(scan->vmbuffer);
@@ -1312,7 +1312,7 @@ heap_endscan_bm(BitmapTableScanDesc sscan)
 	/*
 	 * decrement relation reference count and free scan descriptor storage
 	 */
-	RelationDecrementReferenceCount(scan->rs_base.rs_rd);
+	RelationDecrementReferenceCount(scan->base.rel);
 
 	pfree(scan);
 }

@@ -1006,7 +1006,7 @@ table_rescan_bm(BitmapTableScanDesc scan)
 	scan->prefetch_target = -1;
 	scan->prefetch_pages = 0;
 
-	scan->rs_rd->rd_tableam->scan_rescan_bm(scan);
+	scan->rel->rd_tableam->scan_rescan_bm(scan);
 
 	// TODO: should begin the next iteration here?
 }
@@ -1026,7 +1026,7 @@ table_endscan_bm(BitmapTableScanDesc scan)
 		scan->iterator = NULL;
 	}
 
-	scan->rs_rd->rd_tableam->scan_end_bm(scan);
+	scan->rel->rd_tableam->scan_end_bm(scan);
 }
 
 
@@ -2041,7 +2041,7 @@ table_scan_bitmap_next_block(BitmapTableScanDesc scan,
 	if (unlikely(TransactionIdIsValid(CheckXidAlive) && !bsysscan))
 		elog(ERROR, "unexpected table_scan_bitmap_next_block call during logical decoding");
 
-	return scan->rs_rd->rd_tableam->scan_bitmap_next_block(scan,
+	return scan->rel->rd_tableam->scan_bitmap_next_block(scan,
 														   blockno, recheck,
 														   lossy_pages, exact_pages);
 }
@@ -2066,7 +2066,7 @@ table_scan_bitmap_next_tuple(BitmapTableScanDesc scan,
 	if (unlikely(TransactionIdIsValid(CheckXidAlive) && !bsysscan))
 		elog(ERROR, "unexpected table_scan_bitmap_next_tuple call during logical decoding");
 
-	return scan->rs_rd->rd_tableam->scan_bitmap_next_tuple(scan,
+	return scan->rel->rd_tableam->scan_bitmap_next_tuple(scan,
 														   slot);
 }
 

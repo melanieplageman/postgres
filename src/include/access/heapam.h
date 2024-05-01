@@ -100,19 +100,19 @@ typedef struct HeapScanDescData *HeapScanDesc;
 
 typedef struct BitmapHeapScanDescData
 {
-	BitmapTableScanDescData rs_base;
+	BitmapTableScanDescData base;
 
-	BlockNumber rs_nblocks;		/* total number of blocks in rel */
+	BlockNumber nblocks;		/* total number of blocks in rel */
 
-	int			rs_cindex;		/* current tuple's index in vistuples */
-	int			rs_ntuples;		/* number of visible tuples on page */
-	OffsetNumber rs_vistuples[MaxHeapTuplesPerPage];	/* their offsets */
+	int			vis_idx;		/* current tuple's index in vistuples */
+	int			vis_ntuples;		/* number of visible tuples on page */
+	OffsetNumber vis_tuples[MaxHeapTuplesPerPage];	/* their offsets */
 
-	Buffer		rs_cbuf;		/* current buffer in scan, if any */
+	Buffer		cbuf;		/* current buffer in scan, if any */
 	/* NB: if rs_cbuf is not InvalidBuffer, we hold a pin on that buffer */
 	HeapTupleData rs_ctup;		/* current tuple in scan, if any */
 
-	BlockNumber rs_cblock;		/* current block # in scan, if any */
+	BlockNumber cblock;		/* current block # in scan, if any */
 
 	/*
 	 * These fields are only used for bitmap scans for the "skip fetch"

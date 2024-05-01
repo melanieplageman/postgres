@@ -460,14 +460,14 @@ BitmapPrefetch(BitmapHeapScanState *node, BitmapTableScanDesc scan)
 				 * logic normally.  (Would it be better not to increment
 				 * prefetch_pages?)
 				 */
-				skip_fetch = (!(scan->rs_flags & SO_NEED_TUPLES) &&
+				skip_fetch = (!(scan->flags & SO_NEED_TUPLES) &&
 							  !tbmpre->recheck &&
 							  VM_ALL_VISIBLE(node->ss.ss_currentRelation,
 											 tbmpre->blockno,
 											 &node->pvmbuffer));
 
 				if (!skip_fetch)
-					PrefetchBuffer(scan->rs_rd, MAIN_FORKNUM, tbmpre->blockno);
+					PrefetchBuffer(scan->rel, MAIN_FORKNUM, tbmpre->blockno);
 			}
 		}
 
@@ -513,14 +513,14 @@ BitmapPrefetch(BitmapHeapScanState *node, BitmapTableScanDesc scan)
 				node->pfblockno = tbmpre->blockno;
 
 				/* As above, skip prefetch if we expect not to need page */
-				skip_fetch = (!(scan->rs_flags & SO_NEED_TUPLES) &&
+				skip_fetch = (!(scan->flags & SO_NEED_TUPLES) &&
 							  !tbmpre->recheck &&
 							  VM_ALL_VISIBLE(node->ss.ss_currentRelation,
 											 tbmpre->blockno,
 											 &node->pvmbuffer));
 
 				if (!skip_fetch)
-					PrefetchBuffer(scan->rs_rd, MAIN_FORKNUM, tbmpre->blockno);
+					PrefetchBuffer(scan->rel, MAIN_FORKNUM, tbmpre->blockno);
 			}
 		}
 	}
