@@ -170,12 +170,12 @@ struct TIDBitmap
 };
 
 /*
- * When iterating over a bitmap in sorted order, a TBMIterator is used to
- * track our progress.  There can be several iterators scanning the same
- * bitmap concurrently.  Note that the bitmap becomes read-only as soon as
- * any iterator is created.
+ * When iterating over a backend-local bitmap in sorted order, a
+ * TBMSerialIterator is used to track our progress.  There can be several
+ * iterators scanning the same bitmap concurrently.  Note that the bitmap
+ * becomes read-only as soon as any iterator is created.
  */
-struct TBMIterator
+struct TBMSerialIterator
 {
 	TIDBitmap  *tbm;			/* TIDBitmap we're iterating over */
 	int			spageptr;		/* next spages index */
@@ -673,7 +673,7 @@ tbm_is_empty(const TIDBitmap *tbm)
 }
 
 /*
- * tbm_begin_iterate - prepare to iterate through a TIDBitmap
+ * tbm_begin_serial_iterate - prepare to iterate through a TIDBitmap
  *
  * The TBMIterator struct is created in the caller's memory context.
  * For a clean shutdown of the iteration, call tbm_end_iterate; but it's
@@ -685,10 +685,10 @@ tbm_is_empty(const TIDBitmap *tbm)
  * of the bitmap.  However, you can call this multiple times to scan the
  * contents repeatedly, including parallel scans.
  */
-TBMIterator *
-tbm_begin_iterate(TIDBitmap *tbm)
+TBMSerialIterator *
+tbm_begin_serial_iterate(TIDBitmap *tbm)
 {
-	TBMIterator *iterator;
+	TBMSerialIterator *iterator;
 
 	Assert(tbm->iterating != TBM_ITERATING_SHARED);
 
@@ -696,7 +696,7 @@ tbm_begin_iterate(TIDBitmap *tbm)
 	 * Create the TBMIterator struct, with enough trailing space to serve the
 	 * needs of the TBMIterateResult sub-struct.
 	 */
-	iterator = (TBMIterator *) palloc(sizeof(TBMIterator) +
+	iterator = (TBMSerialIterator *) palloc(sizeof(TBMSerialIterator) +
 									  MAX_TUPLES_PER_PAGE * sizeof(OffsetNumber));
 	iterator->tbm = tbm;
 
@@ -956,7 +956,7 @@ tbm_advance_schunkbit(PagetableEntry *chunk, int *schunkbitp)
 }
 
 /*
- * tbm_iterate - scan through next page of a TIDBitmap
+ * tbm_serial_iterate - scan through next page of a TIDBitmap
  *
  * Returns a TBMIterateResult representing one page, or NULL if there are
  * no more pages to scan.  Pages are guaranteed to be delivered in numerical
@@ -968,7 +968,7 @@ tbm_advance_schunkbit(PagetableEntry *chunk, int *schunkbitp)
  * testing, recheck is always set true when ntuples < 0.)
  */
 TBMIterateResult *
-tbm_iterate(TBMIterator *iterator)
+tbm_serial_iterate(TBMSerialIterator *iterator)
 {
 	TIDBitmap  *tbm = iterator->tbm;
 	TBMIterateResult *output = &(iterator->output);
@@ -1143,7 +1143,7 @@ tbm_shared_iterate(TBMSharedIterator *iterator)
  * bitmap to return to read/write status when there are no more iterators.)
  */
 void
-tbm_end_iterate(TBMIterator *iterator)
+tbm_end_serial_iterate(TBMSerialIterator *iterator)
 {
 	pfree(iterator);
 }
@@ -1560,10 +1560,13 @@ tbm_calculate_entries(double maxbytes)
 /*
  * Start iteration on a shared or non-shared bitmap iterator. Note that tbm
  * will only be provided by serial BitmapHeapScan callers. dsa and dsp will
- * only be provided by parallel BitmapHeapScan callers.
+ * only be provided by parallel BitmapHeapScan callers. For shared callers, one
+ * process must already have called tbm_prepare_shared_iterate() to create and
+ * set up the TBMSharedIteratorState. The TBMIterator is passed by reference to
+ * accommodate callers who would like to allocate it inside an existing struct.
  */
 void
-unified_tbm_begin_iterate(UnifiedTBMIterator *iterator, TIDBitmap *tbm,
+tbm_begin_iterate(TBMIterator *iterator, TIDBitmap *tbm,
 						  dsa_area *dsa, dsa_pointer dsp)
 {
 	Assert(iterator);
@@ -1576,19 +1579,19 @@ unified_tbm_begin_iterate(UnifiedTBMIterator *iterator, TIDBitmap *tbm,
 	if (DsaPointerIsValid(dsp))
 		iterator->parallel = tbm_attach_shared_iterate(dsa, dsp);
 	else
-		iterator->serial = tbm_begin_iterate(tbm);
+		iterator->serial = tbm_begin_serial_iterate(tbm);
 }
 
 /*
  * Clean up shared or non-shared bitmap iterator.
  */
 void
-unified_tbm_end_iterate(UnifiedTBMIterator *iterator)
+tbm_end_iterate(TBMIterator *iterator)
 {
 	Assert(iterator);
 
 	if (iterator->serial)
-		tbm_end_iterate(iterator->serial);
+		tbm_end_serial_iterate(iterator->serial);
 	else if (iterator->parallel)
 		tbm_end_shared_iterate(iterator->parallel);
 
@@ -1601,13 +1604,13 @@ unified_tbm_end_iterate(UnifiedTBMIterator *iterator)
  * Get the next TBMIterateResult from the shared or non-shared bitmap iterator.
  */
 TBMIterateResult *
-unified_tbm_iterate(UnifiedTBMIterator *iterator)
+tbm_iterate(TBMIterator *iterator)
 {
 	Assert(iterator);
 	Assert(!iterator->exhausted);
 
 	if (iterator->serial)
-		return tbm_iterate(iterator->serial);
+		return tbm_serial_iterate(iterator->serial);
 	else
 		return tbm_shared_iterate(iterator->parallel);
 }

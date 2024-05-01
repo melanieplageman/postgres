@@ -33,7 +33,7 @@
 typedef struct TIDBitmap TIDBitmap;
 
 /* Likewise, TBMIterator is private */
-typedef struct TBMIterator TBMIterator;
+typedef struct TBMSerialIterator TBMSerialIterator;
 typedef struct TBMSharedIterator TBMSharedIterator;
 
 /* Result structure for tbm_iterate */
@@ -50,12 +50,12 @@ typedef struct TBMIterateResult
  * Callers with both serial and parallel implementations can use this unified
  * API.
  */
-typedef struct UnifiedTBMIterator
+typedef struct TBMIterator
 {
-	TBMIterator *serial;
+	TBMSerialIterator *serial;
 	TBMSharedIterator *parallel;
 	bool		exhausted;
-} UnifiedTBMIterator;
+} TBMIterator;
 
 /* function prototypes in nodes/tidbitmap.c */
 
@@ -73,20 +73,20 @@ extern void tbm_intersect(TIDBitmap *a, const TIDBitmap *b);
 
 extern bool tbm_is_empty(const TIDBitmap *tbm);
 
-extern TBMIterator *tbm_begin_iterate(TIDBitmap *tbm);
+extern TBMSerialIterator *tbm_begin_serial_iterate(TIDBitmap *tbm);
 extern dsa_pointer tbm_prepare_shared_iterate(TIDBitmap *tbm);
-extern TBMIterateResult *tbm_iterate(TBMIterator *iterator);
+extern TBMIterateResult *tbm_serial_iterate(TBMSerialIterator *iterator);
 extern TBMIterateResult *tbm_shared_iterate(TBMSharedIterator *iterator);
-extern void tbm_end_iterate(TBMIterator *iterator);
+extern void tbm_end_serial_iterate(TBMSerialIterator *iterator);
 extern void tbm_end_shared_iterate(TBMSharedIterator *iterator);
 extern TBMSharedIterator *tbm_attach_shared_iterate(dsa_area *dsa,
 													dsa_pointer dp);
 extern long tbm_calculate_entries(double maxbytes);
 
-extern void unified_tbm_begin_iterate(UnifiedTBMIterator *iterator, TIDBitmap *tbm,
+extern void tbm_begin_iterate(TBMIterator *iterator, TIDBitmap *tbm,
 									  dsa_area *dsa, dsa_pointer dsp);
-extern void unified_tbm_end_iterate(UnifiedTBMIterator *iterator);
-extern TBMIterateResult *unified_tbm_iterate(UnifiedTBMIterator *iterator);
+extern void tbm_end_iterate(TBMIterator *iterator);
+extern TBMIterateResult *tbm_iterate(TBMIterator *iterator);
 
 
 #endif							/* TIDBITMAP_H */
