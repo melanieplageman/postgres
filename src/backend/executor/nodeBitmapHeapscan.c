@@ -51,10 +51,12 @@
 
 static TupleTableSlot *BitmapHeapNext(BitmapHeapScanState *node);
 static inline void BitmapDoneInitializingSharedState(ParallelBitmapHeapState *pstate);
-static inline void BitmapAdjustPrefetchIterator(BitmapHeapScanState *node);
-static inline void BitmapAdjustPrefetchTarget(BitmapHeapScanState *node);
+static inline void BitmapAdjustPrefetchIterator(BitmapHeapScanState *node,
+		BitmapTableScanDesc scan);
+static inline void BitmapAdjustPrefetchTarget(BitmapHeapScanState *node,
+		BitmapTableScanDesc scan);
 static inline void BitmapPrefetch(BitmapHeapScanState *node,
-								  TableScanDesc scan);
+								  BitmapTableScanDesc scan);
 static bool BitmapShouldInitializeSharedState(ParallelBitmapHeapState *pstate);
 
 
@@ -68,18 +70,19 @@ static TupleTableSlot *
 BitmapHeapNext(BitmapHeapScanState *node)
 {
 	ExprContext *econtext;
-	TableScanDesc scan;
+	BitmapTableScanDesc scan;
 	TIDBitmap  *tbm;
 	TupleTableSlot *slot;
 	ParallelBitmapHeapState *pstate = node->pstate;
 	dsa_area   *dsa = node->ss.ps.state->es_query_dsa;
+	Relation	rel = node->ss.ss_currentRelation;
 
 	/*
 	 * extract necessary information from index scan node
 	 */
 	econtext = node->ss.ps.ps_ExprContext;
 	slot = node->ss.ss_ScanTupleSlot;
-	scan = node->ss.ss_currentScanDesc;
+	scan = node->scan;
 	tbm = node->tbm;
 
 	/*
@@ -98,6 +101,15 @@ BitmapHeapNext(BitmapHeapScanState *node)
 	{
 		TBMSerialIterator *tbmiterator = NULL;
 		TBMSharedIterator *shared_tbmiterator = NULL;
+		int prefetch_maximum = 0;
+
+		/*
+		* Maximum number of prefetches for the tablespace if configured,
+		* otherwise the current value of the effective_io_concurrency GUC.
+		*/
+#ifdef USE_PREFETCH
+		prefetch_maximum = get_tablespace_io_concurrency(rel->rd_rel->reltablespace);
+#endif
 
 		if (!pstate)
 		{
@@ -110,7 +122,7 @@ BitmapHeapNext(BitmapHeapScanState *node)
 			tbmiterator = tbm_begin_serial_iterate(tbm);
 
 #ifdef USE_PREFETCH
-			if (node->prefetch_maximum > 0)
+			if (prefetch_maximum > 0)
 				node->prefetch_iterator = tbm_begin_serial_iterate(tbm);
 #endif							/* USE_PREFETCH */
 		}
@@ -136,7 +148,7 @@ BitmapHeapNext(BitmapHeapScanState *node)
 				 */
 				pstate->tbmiterator = tbm_prepare_shared_iterate(tbm);
 #ifdef USE_PREFETCH
-				if (node->prefetch_maximum > 0)
+				if (prefetch_maximum > 0)
 				{
 					pstate->prefetch_iterator =
 						tbm_prepare_shared_iterate(tbm);
@@ -151,7 +163,7 @@ BitmapHeapNext(BitmapHeapScanState *node)
 			shared_tbmiterator = tbm_attach_shared_iterate(dsa, pstate->tbmiterator);
 
 #ifdef USE_PREFETCH
-			if (node->prefetch_maximum > 0)
+			if (prefetch_maximum > 0)
 			{
 				node->shared_prefetch_iterator =
 					tbm_attach_shared_iterate(dsa, pstate->prefetch_iterator);
@@ -178,17 +190,14 @@ BitmapHeapNext(BitmapHeapScanState *node)
 			need_tuples = (node->ss.ps.plan->qual != NIL ||
 						   node->ss.ps.plan->targetlist != NIL);
 
-			scan = table_beginscan_bm(node->ss.ss_currentRelation,
+			node->scan = scan = table_beginscan_bm(node->ss.ss_currentRelation,
 									  node->ss.ps.state->es_snapshot,
-									  0,
-									  NULL,
 									  need_tuples);
-
-			node->ss.ss_currentScanDesc = scan;
 		}
 
-		scan->tbmiterator = tbmiterator;
-		scan->shared_tbmiterator = shared_tbmiterator;
+		scan->iterator = tbmiterator;
+		scan->shared_iterator = shared_tbmiterator;
+		scan->prefetch_maximum = prefetch_maximum;
 		node->initialized = true;
 
 		goto new_page;
@@ -212,14 +221,14 @@ BitmapHeapNext(BitmapHeapScanState *node)
 			 */
 			if (!pstate)
 			{
-				if (node->prefetch_target < node->prefetch_maximum)
-					node->prefetch_target++;
+				if (scan->prefetch_target < scan->prefetch_maximum)
+					scan->prefetch_target++;
 			}
-			else if (pstate->prefetch_target < node->prefetch_maximum)
+			else if (pstate->prefetch_target < scan->prefetch_maximum)
 			{
 				/* take spinlock while updating shared state */
 				SpinLockAcquire(&pstate->mutex);
-				if (pstate->prefetch_target < node->prefetch_maximum)
+				if (pstate->prefetch_target < scan->prefetch_maximum)
 					pstate->prefetch_target++;
 				SpinLockRelease(&pstate->mutex);
 			}
@@ -257,7 +266,7 @@ BitmapHeapNext(BitmapHeapScanState *node)
 
 new_page:
 
-		BitmapAdjustPrefetchIterator(node);
+		BitmapAdjustPrefetchIterator(node, scan);
 
 		if (!table_scan_bitmap_next_block(scan, &node->blockno, &node->recheck,
 										  &node->lossy_pages, &node->exact_pages))
@@ -273,7 +282,7 @@ new_page:
 			elog(ERROR, "prefetch and main iterators are out of sync");
 
 		/* Adjust the prefetch target */
-		BitmapAdjustPrefetchTarget(node);
+		BitmapAdjustPrefetchTarget(node, scan);
 	}
 
 	/*
@@ -305,7 +314,7 @@ BitmapDoneInitializingSharedState(ParallelBitmapHeapState *pstate)
  *	decrement prefetch_pages.
  */
 static inline void
-BitmapAdjustPrefetchIterator(BitmapHeapScanState *node)
+BitmapAdjustPrefetchIterator(BitmapHeapScanState *node, BitmapTableScanDesc scan)
 {
 #ifdef USE_PREFETCH
 	ParallelBitmapHeapState *pstate = node->pstate;
@@ -315,10 +324,10 @@ BitmapAdjustPrefetchIterator(BitmapHeapScanState *node)
 	{
 		TBMSerialIterator *prefetch_iterator = node->prefetch_iterator;
 
-		if (node->prefetch_pages > 0)
+		if (scan->prefetch_pages > 0)
 		{
 			/* The main iterator has closed the distance by one page */
-			node->prefetch_pages--;
+			scan->prefetch_pages--;
 		}
 		else if (prefetch_iterator)
 		{
@@ -338,7 +347,7 @@ BitmapAdjustPrefetchIterator(BitmapHeapScanState *node)
 	 * Note that moving the call site of BitmapAdjustPrefetchIterator()
 	 * exacerbates the effects of this bug.
 	 */
-	if (node->prefetch_maximum > 0)
+	if (scan->prefetch_maximum > 0)
 	{
 		TBMSharedIterator *prefetch_iterator = node->shared_prefetch_iterator;
 
@@ -380,32 +389,32 @@ BitmapAdjustPrefetchIterator(BitmapHeapScanState *node)
  * it doubles as later pages are fetched.
  */
 static inline void
-BitmapAdjustPrefetchTarget(BitmapHeapScanState *node)
+BitmapAdjustPrefetchTarget(BitmapHeapScanState *node, BitmapTableScanDesc scan)
 {
 #ifdef USE_PREFETCH
 	ParallelBitmapHeapState *pstate = node->pstate;
 
 	if (pstate == NULL)
 	{
-		if (node->prefetch_target >= node->prefetch_maximum)
+		if (scan->prefetch_target >= scan->prefetch_maximum)
 			 /* don't increase any further */ ;
-		else if (node->prefetch_target >= node->prefetch_maximum / 2)
-			node->prefetch_target = node->prefetch_maximum;
-		else if (node->prefetch_target > 0)
-			node->prefetch_target *= 2;
+		else if (scan->prefetch_target >= scan->prefetch_maximum / 2)
+			scan->prefetch_target = scan->prefetch_maximum;
+		else if (scan->prefetch_target > 0)
+			scan->prefetch_target *= 2;
 		else
-			node->prefetch_target++;
+			scan->prefetch_target++;
 		return;
 	}
 
 	/* Do an unlocked check first to save spinlock acquisitions. */
-	if (pstate->prefetch_target < node->prefetch_maximum)
+	if (pstate->prefetch_target < scan->prefetch_maximum)
 	{
 		SpinLockAcquire(&pstate->mutex);
-		if (pstate->prefetch_target >= node->prefetch_maximum)
+		if (pstate->prefetch_target >= scan->prefetch_maximum)
 			 /* don't increase any further */ ;
-		else if (pstate->prefetch_target >= node->prefetch_maximum / 2)
-			pstate->prefetch_target = node->prefetch_maximum;
+		else if (pstate->prefetch_target >= scan->prefetch_maximum / 2)
+			pstate->prefetch_target = scan->prefetch_maximum;
 		else if (pstate->prefetch_target > 0)
 			pstate->prefetch_target *= 2;
 		else
@@ -419,7 +428,7 @@ BitmapAdjustPrefetchTarget(BitmapHeapScanState *node)
  * BitmapPrefetch - Prefetch, if prefetch_pages are behind prefetch_target
  */
 static inline void
-BitmapPrefetch(BitmapHeapScanState *node, TableScanDesc scan)
+BitmapPrefetch(BitmapHeapScanState *node, BitmapTableScanDesc scan)
 {
 #ifdef USE_PREFETCH
 	ParallelBitmapHeapState *pstate = node->pstate;
@@ -430,7 +439,7 @@ BitmapPrefetch(BitmapHeapScanState *node, TableScanDesc scan)
 
 		if (prefetch_iterator)
 		{
-			while (node->prefetch_pages < node->prefetch_target)
+			while (scan->prefetch_pages < scan->prefetch_target)
 			{
 				TBMIterateResult *tbmpre = tbm_serial_iterate(prefetch_iterator);
 				bool		skip_fetch;
@@ -442,7 +451,7 @@ BitmapPrefetch(BitmapHeapScanState *node, TableScanDesc scan)
 					node->prefetch_iterator = NULL;
 					break;
 				}
-				node->prefetch_pages++;
+				scan->prefetch_pages++;
 				node->pfblockno = tbmpre->blockno;
 
 				/*
@@ -560,8 +569,8 @@ ExecReScanBitmapHeapScan(BitmapHeapScanState *node)
 	PlanState  *outerPlan = outerPlanState(node);
 
 	/* rescan to release any page pin */
-	if (node->ss.ss_currentScanDesc)
-		table_rescan(node->ss.ss_currentScanDesc, NULL);
+	if (node->scan)
+		table_rescan_bm(node->scan);
 
 	/* release bitmaps and buffers if any */
 	if (node->prefetch_iterator)
@@ -580,9 +589,6 @@ ExecReScanBitmapHeapScan(BitmapHeapScanState *node)
 	node->recheck = true;
 	node->blockno = InvalidBlockNumber;
 	node->pfblockno = InvalidBlockNumber;
-	/* Only used for serial BHS */
-	node->prefetch_pages = 0;
-	node->prefetch_target = -1;
 
 	ExecScanReScan(&node->ss);
 
@@ -601,12 +607,12 @@ ExecReScanBitmapHeapScan(BitmapHeapScanState *node)
 void
 ExecEndBitmapHeapScan(BitmapHeapScanState *node)
 {
-	TableScanDesc scanDesc;
+	BitmapTableScanDesc scanDesc;
 
 	/*
 	 * extract information from the node
 	 */
-	scanDesc = node->ss.ss_currentScanDesc;
+	scanDesc = node->scan;
 
 	/*
 	 * close down subplans
@@ -618,7 +624,7 @@ ExecEndBitmapHeapScan(BitmapHeapScanState *node)
 	 * close heap scan
 	 */
 	if (scanDesc)
-		table_endscan(scanDesc);
+		table_endscan_bm(scanDesc);
 
 	/*
 	 * release bitmaps and buffers if any
@@ -667,8 +673,6 @@ ExecInitBitmapHeapScan(BitmapHeapScan *node, EState *estate, int eflags)
 	scanstate->exact_pages = 0;
 	scanstate->lossy_pages = 0;
 	scanstate->prefetch_iterator = NULL;
-	scanstate->prefetch_pages = 0;
-	scanstate->prefetch_target = -1;
 	scanstate->initialized = false;
 	scanstate->shared_prefetch_iterator = NULL;
 	scanstate->pstate = NULL;
@@ -713,13 +717,6 @@ ExecInitBitmapHeapScan(BitmapHeapScan *node, EState *estate, int eflags)
 		ExecInitQual(node->scan.plan.qual, (PlanState *) scanstate);
 	scanstate->bitmapqualorig =
 		ExecInitQual(node->bitmapqualorig, (PlanState *) scanstate);
-
-	/*
-	 * Maximum number of prefetches for the tablespace if configured,
-	 * otherwise the current value of the effective_io_concurrency GUC.
-	 */
-	scanstate->prefetch_maximum =
-		get_tablespace_io_concurrency(currentRelation->rd_rel->reltablespace);
 
 	scanstate->ss.ss_currentRelation = currentRelation;
 

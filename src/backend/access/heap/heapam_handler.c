@@ -2119,11 +2119,11 @@ heapam_estimate_rel_size(Relation rel, int32 *attr_widths,
  */
 
 static bool
-heapam_scan_bitmap_next_block(TableScanDesc scan,
+heapam_scan_bitmap_next_block(BitmapTableScanDesc scan,
 							  BlockNumber *blockno, bool *recheck,
 							  long *lossy_pages, long *exact_pages)
 {
-	HeapScanDesc hscan = (HeapScanDesc) scan;
+	BitmapHeapScanDesc hscan = (BitmapHeapScanDesc) scan;
 	BlockNumber block;
 	Buffer		buffer;
 	Snapshot	snapshot;
@@ -2140,15 +2140,15 @@ heapam_scan_bitmap_next_block(TableScanDesc scan,
 	{
 		CHECK_FOR_INTERRUPTS();
 
-		if (scan->shared_tbmiterator)
-			tbmres = tbm_shared_iterate(scan->shared_tbmiterator);
+		if (scan->shared_iterator)
+			tbmres = tbm_shared_iterate(scan->shared_iterator);
 		else
-			tbmres = tbm_serial_iterate(scan->tbmiterator);
+			tbmres = tbm_serial_iterate(scan->iterator);
 
 		if (tbmres == NULL)
 		{
 			/* no more entries in the bitmap */
-			Assert(hscan->rs_empty_tuples_pending == 0);
+			Assert(hscan->empty_tuples_pending == 0);
 			return false;
 		}
 
@@ -2173,13 +2173,13 @@ heapam_scan_bitmap_next_block(TableScanDesc scan,
 	 */
 	if (!(scan->rs_flags & SO_NEED_TUPLES) &&
 		!tbmres->recheck &&
-		VM_ALL_VISIBLE(scan->rs_rd, tbmres->blockno, &hscan->rs_vmbuffer))
+		VM_ALL_VISIBLE(scan->rs_rd, tbmres->blockno, &hscan->vmbuffer))
 	{
 		/* can't be lossy in the skip_fetch case */
 		Assert(tbmres->ntuples >= 0);
-		Assert(hscan->rs_empty_tuples_pending >= 0);
+		Assert(hscan->empty_tuples_pending >= 0);
 
-		hscan->rs_empty_tuples_pending += tbmres->ntuples;
+		hscan->empty_tuples_pending += tbmres->ntuples;
 
 		return true;
 	}
@@ -2290,21 +2290,21 @@ heapam_scan_bitmap_next_block(TableScanDesc scan,
 }
 
 static bool
-heapam_scan_bitmap_next_tuple(TableScanDesc scan,
+heapam_scan_bitmap_next_tuple(BitmapTableScanDesc scan,
 							  TupleTableSlot *slot)
 {
-	HeapScanDesc hscan = (HeapScanDesc) scan;
+	BitmapHeapScanDesc hscan = (BitmapHeapScanDesc) scan;
 	OffsetNumber targoffset;
 	Page		page;
 	ItemId		lp;
 
-	if (hscan->rs_empty_tuples_pending > 0)
+	if (hscan->empty_tuples_pending > 0)
 	{
 		/*
 		 * If we don't have to fetch the tuple, just return nulls.
 		 */
 		ExecStoreAllNullTuple(slot);
-		hscan->rs_empty_tuples_pending--;
+		hscan->empty_tuples_pending--;
 		return true;
 	}
 
@@ -2635,6 +2635,10 @@ static const TableAmRoutine heapam_methods = {
 	.scan_end = heap_endscan,
 	.scan_rescan = heap_rescan,
 	.scan_getnextslot = heap_getnextslot,
+
+	.scan_begin_bm = heap_beginscan_bm,
+	.scan_rescan_bm = heap_rescan_bm,
+	.scan_end_bm = heap_endscan_bm,
 
 	.scan_set_tidrange = heap_set_tidrange,
 	.scan_getnextslot_tidrange = heap_getnextslot_tidrange,

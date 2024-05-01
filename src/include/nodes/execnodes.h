@@ -30,6 +30,7 @@
 #define EXECNODES_H
 
 #include "access/tupconvert.h"
+#include "access/relscan.h"
 #include "executor/instrument.h"
 #include "fmgr.h"
 #include "lib/ilist.h"
@@ -1795,9 +1796,6 @@ typedef struct ParallelBitmapHeapState
  *		exact_pages		   total number of exact pages retrieved
  *		lossy_pages		   total number of lossy pages retrieved
  *		prefetch_iterator  iterator for prefetching ahead of current page
- *		prefetch_pages	   # pages prefetch iterator is ahead of current
- *		prefetch_target    current target prefetch distance
- *		prefetch_maximum   maximum value for prefetch_target
  *		initialized		   is node is ready to iterate
  *		shared_prefetch_iterator shared iterator for prefetching
  *		pstate			   shared state for parallel bitmap scan
@@ -1809,15 +1807,13 @@ typedef struct ParallelBitmapHeapState
 typedef struct BitmapHeapScanState
 {
 	ScanState	ss;				/* its first field is NodeTag */
+	BitmapTableScanDesc scan;
 	ExprState  *bitmapqualorig;
 	TIDBitmap  *tbm;
 	Buffer		pvmbuffer;
 	long		exact_pages;
 	long		lossy_pages;
 	TBMSerialIterator *prefetch_iterator;
-	int			prefetch_pages;
-	int			prefetch_target;
-	int			prefetch_maximum;
 	bool		initialized;
 	TBMSharedIterator *shared_prefetch_iterator;
 	ParallelBitmapHeapState *pstate;

@@ -332,6 +332,7 @@ typedef struct TableAmRoutine
 								 ParallelTableScanDesc pscan,
 								 uint32 flags);
 
+
 	/*
 	 * Release resources and deallocate scan. If TableScanDesc.temp_snap,
 	 * TableScanDesc.rs_snapshot needs to be unregistered.
@@ -345,6 +346,24 @@ typedef struct TableAmRoutine
 	void		(*scan_rescan) (TableScanDesc scan, struct ScanKeyData *key,
 								bool set_params, bool allow_strat,
 								bool allow_sync, bool allow_pagemode);
+
+	/*
+	 * Functions to begin, restart, and end a scan of the underlying table of
+	 * a bitmap table scan.
+	 *
+	 * `rel`, `flags`, and `snapshot` serve the same purposes as in the
+	 * standard relation scan_[begin|rescan|end] functions documented above.
+	 */
+	BitmapTableScanDesc (*scan_begin_bm) (Relation rel,
+									Snapshot snapshot,
+									uint32 flags);
+
+	void		(*scan_rescan_bm) (BitmapTableScanDesc scan);
+
+	/*
+	 * Release resources and deallocate scan.
+	 */
+	void		(*scan_end_bm) (BitmapTableScanDesc scan);
 
 	/*
 	 * Return next tuple from `scan`, store in slot.
@@ -816,7 +835,7 @@ typedef struct TableAmRoutine
 	 * Optional callback, but either both scan_bitmap_next_block and
 	 * scan_bitmap_next_tuple need to exist, or neither.
 	 */
-	bool		(*scan_bitmap_next_block) (TableScanDesc scan,
+	bool		(*scan_bitmap_next_block) (BitmapTableScanDesc scan,
 										   BlockNumber *blockno, bool *recheck,
 										   long *lossy_pages, long *exact_pages);
 
@@ -827,7 +846,7 @@ typedef struct TableAmRoutine
 	 * Optional callback, but either both scan_bitmap_next_block and
 	 * scan_bitmap_next_tuple need to exist, or neither.
 	 */
-	bool		(*scan_bitmap_next_tuple) (TableScanDesc scan,
+	bool		(*scan_bitmap_next_tuple) (BitmapTableScanDesc scan,
 										   TupleTableSlot *slot);
 
 	/*
@@ -951,21 +970,65 @@ table_beginscan_strat(Relation rel, Snapshot snapshot,
  * really quite unlike a standard seqscan, there is just enough commonality to
  * make it worth using the same data structure.
  */
-static inline TableScanDesc
-table_beginscan_bm(Relation rel, Snapshot snapshot,
-				   int nkeys, struct ScanKeyData *key, bool need_tuple)
+static inline BitmapTableScanDesc
+table_beginscan_bm(Relation rel, Snapshot snapshot, bool need_tuple)
 {
-	TableScanDesc result;
+	BitmapTableScanDesc result;
 	uint32		flags = SO_TYPE_BITMAPSCAN | SO_ALLOW_PAGEMODE;
 
 	if (need_tuple)
 		flags |= SO_NEED_TUPLES;
 
-	result = rel->rd_tableam->scan_begin(rel, snapshot, nkeys, key, NULL, flags);
-	result->shared_tbmiterator = NULL;
-	result->tbmiterator = NULL;
+	result = rel->rd_tableam->scan_begin_bm(rel, snapshot, flags);
+
+	/* Only used for serial BHS */
+	result->prefetch_target = -1;
+	result->prefetch_pages = 0;
 	return result;
 }
+
+static inline void
+table_rescan_bm(BitmapTableScanDesc scan)
+{
+	if (scan->shared_iterator)
+	{
+		tbm_end_shared_iterate(scan->shared_iterator);
+		scan->shared_iterator = NULL;
+	}
+
+	if (scan->iterator)
+	{
+		tbm_end_serial_iterate(scan->iterator);
+		scan->iterator = NULL;
+	}
+
+	/* Only used for serial BHS */
+	scan->prefetch_target = -1;
+	scan->prefetch_pages = 0;
+
+	scan->rs_rd->rd_tableam->scan_rescan_bm(scan);
+
+	// TODO: should begin the next iteration here?
+}
+
+static inline void
+table_endscan_bm(BitmapTableScanDesc scan)
+{
+	if (scan->shared_iterator)
+	{
+		tbm_end_shared_iterate(scan->shared_iterator);
+		scan->shared_iterator = NULL;
+	}
+
+	if (scan->iterator)
+	{
+		tbm_end_serial_iterate(scan->iterator);
+		scan->iterator = NULL;
+	}
+
+	scan->rs_rd->rd_tableam->scan_end_bm(scan);
+}
+
 
 /*
  * table_beginscan_sampling is an alternative entry point for setting up a
@@ -1024,21 +1087,6 @@ table_beginscan_analyze(Relation rel)
 static inline void
 table_endscan(TableScanDesc scan)
 {
-	if (scan->rs_flags & SO_TYPE_BITMAPSCAN)
-	{
-		if (scan->shared_tbmiterator)
-		{
-			tbm_end_shared_iterate(scan->shared_tbmiterator);
-			scan->shared_tbmiterator = NULL;
-		}
-
-		if (scan->tbmiterator)
-		{
-			tbm_end_serial_iterate(scan->tbmiterator);
-			scan->tbmiterator = NULL;
-		}
-	}
-
 	scan->rs_rd->rd_tableam->scan_end(scan);
 }
 
@@ -1049,21 +1097,6 @@ static inline void
 table_rescan(TableScanDesc scan,
 			 struct ScanKeyData *key)
 {
-	if (scan->rs_flags & SO_TYPE_BITMAPSCAN)
-	{
-		if (scan->shared_tbmiterator)
-		{
-			tbm_end_shared_iterate(scan->shared_tbmiterator);
-			scan->shared_tbmiterator = NULL;
-		}
-
-		if (scan->tbmiterator)
-		{
-			tbm_end_serial_iterate(scan->tbmiterator);
-			scan->tbmiterator = NULL;
-		}
-	}
-
 	scan->rs_rd->rd_tableam->scan_rescan(scan, key, false, false, false, false);
 }
 
@@ -1995,7 +2028,7 @@ table_relation_estimate_size(Relation rel, int32 *attr_widths,
  * used after verifying the presence (at plan time or such).
  */
 static inline bool
-table_scan_bitmap_next_block(TableScanDesc scan,
+table_scan_bitmap_next_block(BitmapTableScanDesc scan,
 							 BlockNumber *blockno, bool *recheck,
 							 long *lossy_pages,
 							 long *exact_pages)
@@ -2022,7 +2055,7 @@ table_scan_bitmap_next_block(TableScanDesc scan,
  * returned false.
  */
 static inline bool
-table_scan_bitmap_next_tuple(TableScanDesc scan,
+table_scan_bitmap_next_tuple(BitmapTableScanDesc scan,
 							 TupleTableSlot *slot)
 {
 	/*

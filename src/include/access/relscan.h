@@ -39,10 +39,6 @@ typedef struct TableScanDescData
 	int			rs_nkeys;		/* number of scan keys */
 	struct ScanKeyData *rs_key; /* array of scan key descriptors */
 
-	/* Iterators for Bitmap Table Scans */
-	struct TBMSerialIterator *tbmiterator;
-	struct TBMSharedIterator *shared_tbmiterator;
-
 	/* Range of ItemPointers for table_scan_getnextslot_tidrange() to scan. */
 	ItemPointerData rs_mintid;
 	ItemPointerData rs_maxtid;
@@ -57,6 +53,38 @@ typedef struct TableScanDescData
 													 * information */
 } TableScanDescData;
 typedef struct TableScanDescData *TableScanDesc;
+
+typedef struct BitmapTableScanDescData
+{
+	Relation	rs_rd;			/* heap relation descriptor */
+	struct SnapshotData *rs_snapshot;	/* snapshot to see */
+
+	/*
+	 * Members common to Parallel and Serial BitmapTableScans
+	 */
+	struct TBMSerialIterator *iterator;
+	struct TBMSharedIterator *shared_iterator;
+
+	/*
+	 * Information about type and behaviour of the scan, a bitmask of members
+	 * of the ScanOptions enum (see tableam.h).
+	 */
+	uint32		rs_flags;
+
+	/* maximum value for prefetch_target */
+	int			prefetch_maximum;
+
+	/*
+	 * Serial-only members
+	 */
+
+	/* Current target for prefetch distance */
+	int			prefetch_target;
+	/* # pages prefetch iterator is ahead of current */
+	int			prefetch_pages;
+
+} BitmapTableScanDescData;
+typedef struct BitmapTableScanDescData *BitmapTableScanDesc;
 
 /*
  * Shared state for parallel table scan.
