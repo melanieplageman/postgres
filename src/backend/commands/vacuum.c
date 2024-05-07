@@ -1083,6 +1083,7 @@ vacuum_get_cutoffs(Relation rel, const VacuumParams *params,
 	MultiXactId nextMXID,
 				safeOldestMxact,
 				aggressiveMXIDCutoff;
+	GlobalVisState debug_vis;
 
 	/* Use mutable copies of freeze age parameters */
 	freeze_min_age = params->freeze_min_age;
@@ -1106,6 +1107,11 @@ vacuum_get_cutoffs(Relation rel, const VacuumParams *params,
 	 * any time, and that each vacuum is always an independent transaction.
 	 */
 	cutoffs->OldestXmin = GetOldestNonRemovableTransactionId(rel);
+	GetSharedGlobalVis(&debug_vis);
+	elog(WARNING, "cutoffs->OldestXmin: %u. maybe_needed: %lu. definitely_needed: %lu",
+			cutoffs->OldestXmin,
+			debug_vis.maybe_needed.value,
+			debug_vis.definitely_needed.value);
 
 	Assert(TransactionIdIsNormal(cutoffs->OldestXmin));
 

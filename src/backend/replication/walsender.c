@@ -83,6 +83,7 @@
 #include "storage/ipc.h"
 #include "storage/pmsignal.h"
 #include "storage/proc.h"
+#include "storage/procarray.h"
 #include "tcop/dest.h"
 #include "tcop/tcopprot.h"
 #include "utils/acl.h"
@@ -118,6 +119,7 @@ bool		am_cascading_walsender = false; /* Am I cascading WAL to another
 bool		am_db_walsender = false;	/* Connected to a database? */
 
 /* GUC variables */
+bool wal_sender_hang = false;
 int			max_wal_senders = 10;	/* the maximum number of concurrent
 									 * walsenders */
 int			wal_sender_timeout = 60 * 1000; /* maximum time to send one WAL
@@ -2576,7 +2578,32 @@ ProcessStandbyHSFeedbackMessage(void)
 	TransactionId feedbackCatalogXmin;
 	uint32		feedbackCatalogEpoch;
 	TimestampTz replyTime;
+	TransactionId before;
+	TransactionId after;
+	bool printed = false;
 
+	if (ConfigReloadPending)
+	{
+		ConfigReloadPending = false;
+		ProcessConfigFile(PGC_SIGHUP);
+		SyncRepInitConfig();
+	}
+	while (wal_sender_hang)
+	{
+		CHECK_FOR_INTERRUPTS();
+		if (ConfigReloadPending)
+		{
+			ConfigReloadPending = false;
+			ProcessConfigFile(PGC_SIGHUP);
+		}
+		if (!printed)
+			elog(WARNING, "WAL SEND SLEP");
+		printed = true;
+		pg_usleep(3000000);
+		continue;
+	}
+
+	before = GetOldestNonRemovableTransactionIdAll();
 	/*
 	 * Decipher the reply message. The caller already consumed the msgtype
 	 * byte. See XLogWalRcvSendHSFeedback() in walreceiver.c for the creation
@@ -2683,6 +2710,10 @@ ProcessStandbyHSFeedbackMessage(void)
 		else
 			MyProc->xmin = feedbackXmin;
 	}
+
+	after = GetOldestNonRemovableTransactionIdAll();
+	if (TransactionIdPrecedes(after, before))
+		elog(WARNING, "Feedback with xid: %u. Horizon before: %u. Horizon after: %u", feedbackXmin, before, after);
 }
 
 /*
@@ -2766,6 +2797,7 @@ WalSndCheckTimeOut(void)
 static void
 WalSndLoop(WalSndSendDataCallback send_data)
 {
+	bool printed = false;
 	/*
 	 * Initialize the last reply timestamp. That enables timeout processing
 	 * from hereon.
@@ -2790,6 +2822,20 @@ WalSndLoop(WalSndSendDataCallback send_data)
 			ConfigReloadPending = false;
 			ProcessConfigFile(PGC_SIGHUP);
 			SyncRepInitConfig();
+		}
+
+		while (wal_sender_hang)
+		{
+			CHECK_FOR_INTERRUPTS();
+			if (ConfigReloadPending)
+			{
+				ConfigReloadPending = false;
+				ProcessConfigFile(PGC_SIGHUP);
+			}
+			if (!printed)
+				elog(WARNING, "WAL SEND SLEP");
+			printed = true;
+			pg_usleep(3000000);
 		}
 
 		/* Check for input from the client */

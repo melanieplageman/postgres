@@ -26,12 +26,14 @@
 #include "miscadmin.h"
 #include "pgstat.h"
 #include "storage/bufmgr.h"
+#include "storage/procarray.h"
 #include "utils/rel.h"
 #include "utils/snapmgr.h"
 
 /* Working data for heap_page_prune_and_freeze() and subroutines */
 typedef struct
 {
+	Relation rel;
 	/*-------------------------------------------------------
 	 * Arguments passed to heap_page_prune_and_freeze()
 	 *-------------------------------------------------------
@@ -43,6 +45,7 @@ typedef struct
 	bool		mark_unused_now;
 	/* whether to attempt freezing tuples */
 	bool		freeze;
+	BlockNumber blkno;
 	struct VacuumCutoffs *cutoffs;
 
 	/*-------------------------------------------------------
@@ -150,6 +153,7 @@ typedef struct
 	bool		all_visible;
 	bool		all_frozen;
 	TransactionId visibility_cutoff_xid;
+	TransactionId OldestXmin;
 } PruneState;
 
 /* Local functions */
@@ -368,10 +372,16 @@ heap_page_prune_and_freeze(Relation relation, Buffer buffer,
 	int64		fpi_before = pgWalUsage.wal_fpi;
 
 	/* Copy parameters to prstate */
+	prstate.rel = relation;
+	prstate.blkno = blockno;
 	prstate.vistest = vistest;
 	prstate.mark_unused_now = (options & HEAP_PAGE_PRUNE_MARK_UNUSED_NOW) != 0;
 	prstate.freeze = (options & HEAP_PAGE_PRUNE_FREEZE) != 0;
 	prstate.cutoffs = cutoffs;
+	prstate.OldestXmin = InvalidTransactionId;
+
+	if (cutoffs)
+		prstate.OldestXmin = cutoffs->OldestXmin;
 
 	/*
 	 * Our strategy is to scan the page and make lists of items to change,
@@ -916,14 +926,48 @@ heap_prune_satisfies_vacuum(PruneState *prstate, HeapTuple tup, Buffer buffer)
 {
 	HTSV_Result res;
 	TransactionId dead_after;
+	GlobalVisState before;
+	GlobalVisState after_recalc;
 
 	res = HeapTupleSatisfiesVacuumHorizon(tup, buffer, &dead_after);
 
 	if (res != HEAPTUPLE_RECENTLY_DEAD)
 		return res;
 
+	GetThisGlobalVis(prstate->vistest, &before);
+	if (!FullTransactionIdEquals(before.maybe_needed, before.definitely_needed) &&
+			TransactionIdFollows(dead_after, XidFromFullTransactionId(before.maybe_needed)))
+		elog(WARNING, "AFTER. IN BETWEEN: rel: %s. blockno: %u. OldestXmin: %u. maybe_needed: %lu. dead_after: %u. definitely_needed: %lu.",
+				RelationGetRelationName(prstate->rel),
+				prstate->blkno,
+				prstate->OldestXmin,
+				before.maybe_needed.value,
+				dead_after,
+				before.definitely_needed.value);
+
+	if (TransactionIdPrecedes(dead_after, prstate->OldestXmin))
+		elog(WARNING, "BEFORE OLDEST: rel: %s. blockno: %u. OldestXmin: %u. maybe_needed: %lu. dead_after: %u. definitely_needed: %lu.",
+				RelationGetRelationName(prstate->rel),
+				prstate->blkno,
+				prstate->OldestXmin,
+				before.maybe_needed.value,
+				dead_after,
+				before.definitely_needed.value);
+
 	if (GlobalVisTestIsRemovableXid(prstate->vistest, dead_after))
 		res = HEAPTUPLE_DEAD;
+
+	GetThisGlobalVis(prstate->vistest, &after_recalc);
+
+	if (!FullTransactionIdEquals(before.maybe_needed, after_recalc.maybe_needed) ||
+			(!FullTransactionIdEquals(before.definitely_needed, after_recalc.definitely_needed)))
+		elog(WARNING, "GlobalVisState change: rel: %s. blockno: %u. before.maybe_needed: %lu. after.maybe_needed: %lu. before.definitely_needed: %lu. after.definitely_needed: %lu.",
+				RelationGetRelationName(prstate->rel),
+				prstate->blkno,
+				before.maybe_needed.value,
+				after_recalc.maybe_needed.value,
+				before.definitely_needed.value,
+				after_recalc.definitely_needed.value);
 
 	return res;
 }

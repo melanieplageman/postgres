@@ -1175,9 +1175,30 @@ XLogWalRcvSendHSFeedback(bool immed)
 				catalog_xmin_epoch;
 	TransactionId xmin,
 				catalog_xmin;
+	bool printed = false;
 
 	/* initially true so we always send at least one feedback message */
 	static bool primary_has_standby_xmin = true;
+
+	/* Process any requests or signals received recently */
+	if (ConfigReloadPending)
+	{
+		ConfigReloadPending = false;
+		ProcessConfigFile(PGC_SIGHUP);
+	}
+	while (wal_sender_hang)
+	{
+		CHECK_FOR_INTERRUPTS();
+		if (ConfigReloadPending)
+		{
+			ConfigReloadPending = false;
+			ProcessConfigFile(PGC_SIGHUP);
+		}
+		if (!printed)
+			elog(WARNING, "WAL SEND SLEP");
+		printed = true;
+		pg_usleep(3000000);
+	}
 
 	/*
 	 * If the user doesn't want status to be reported to the primary, be sure

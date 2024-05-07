@@ -780,6 +780,16 @@ struct config_bool ConfigureNamesBool[] =
 		NULL, NULL, NULL
 	},
 	{
+		{"wal_sender_hang", PGC_USERSET, QUERY_TUNING_METHOD,
+			gettext_noop("if true, the wal sender will startup and then loop until false"),
+			NULL,
+			GUC_EXPLAIN
+		},
+		&wal_sender_hang,
+		false,
+		NULL, NULL, NULL
+	},
+	{
 		{"enable_indexscan", PGC_USERSET, QUERY_TUNING_METHOD,
 			gettext_noop("Enables the planner's use of index-scan plans."),
 			NULL,
