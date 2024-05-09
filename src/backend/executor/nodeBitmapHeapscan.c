@@ -99,7 +99,6 @@ BitmapHeapNext(BitmapHeapScanState *node)
 	 */
 	if (!node->initialized)
 	{
-		TBMSerialIterator *tbmiterator = NULL;
 		TBMSharedIterator *shared_tbmiterator = NULL;
 		int prefetch_maximum = 0;
 
@@ -119,7 +118,6 @@ BitmapHeapNext(BitmapHeapScanState *node)
 				elog(ERROR, "unrecognized result from subplan");
 
 			node->tbm = tbm;
-			tbmiterator = tbm_begin_serial_iterate(tbm);
 
 #ifdef USE_PREFETCH
 			if (prefetch_maximum > 0)
@@ -175,7 +173,7 @@ BitmapHeapNext(BitmapHeapScanState *node)
 		 * If this is the first scan of the underlying table, create the table
 		 * scan descriptor and begin the scan.
 		 */
-		if (!scan)
+		if (!node->scan_initialized)
 		{
 			bool		need_tuples = false;
 
@@ -192,10 +190,21 @@ BitmapHeapNext(BitmapHeapScanState *node)
 
 			node->scan = scan = table_beginscan_bm(node->ss.ss_currentRelation,
 									  node->ss.ps.state->es_snapshot,
+									  pstate,
+									  tbm,
 									  need_tuples);
+			node->scan_initialized = true;
+		}
+		else
+		{
+			/* rescan to release any page pin */
+			table_rescan_bm(scan);
+			if (!pstate)
+				scan->iterator = tbm_begin_serial_iterate(tbm);
+			else
+				scan->iterator = NULL;
 		}
 
-		scan->iterator = tbmiterator;
 		scan->shared_iterator = shared_tbmiterator;
 		scan->prefetch_maximum = prefetch_maximum;
 		node->initialized = true;
@@ -568,10 +577,6 @@ ExecReScanBitmapHeapScan(BitmapHeapScanState *node)
 {
 	PlanState  *outerPlan = outerPlanState(node);
 
-	/* rescan to release any page pin */
-	if (node->scan)
-		table_rescan_bm(node->scan);
-
 	/* release bitmaps and buffers if any */
 	if (node->prefetch_iterator)
 		tbm_end_serial_iterate(node->prefetch_iterator);
@@ -674,6 +679,7 @@ ExecInitBitmapHeapScan(BitmapHeapScan *node, EState *estate, int eflags)
 	scanstate->lossy_pages = 0;
 	scanstate->prefetch_iterator = NULL;
 	scanstate->initialized = false;
+	scanstate->scan_initialized = false;
 	scanstate->shared_prefetch_iterator = NULL;
 	scanstate->pstate = NULL;
 	scanstate->recheck = true;

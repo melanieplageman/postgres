@@ -1815,6 +1815,7 @@ typedef struct BitmapHeapScanState
 	long		lossy_pages;
 	TBMSerialIterator *prefetch_iterator;
 	bool		initialized;
+	bool		scan_initialized;
 	TBMSharedIterator *shared_prefetch_iterator;
 	ParallelBitmapHeapState *pstate;
 	bool		recheck;

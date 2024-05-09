@@ -22,6 +22,7 @@
 #include "access/xact.h"
 #include "executor/tuptable.h"
 #include "nodes/tidbitmap.h"
+#include "nodes/execnodes.h"
 #include "storage/read_stream.h"
 #include "utils/rel.h"
 #include "utils/snapshot.h"
@@ -971,7 +972,10 @@ table_beginscan_strat(Relation rel, Snapshot snapshot,
  * make it worth using the same data structure.
  */
 static inline BitmapTableScanDesc
-table_beginscan_bm(Relation rel, Snapshot snapshot, bool need_tuple)
+table_beginscan_bm(Relation rel, Snapshot snapshot,
+		ParallelBitmapHeapState *pstate,
+		TIDBitmap *tbm,
+		bool need_tuple)
 {
 	BitmapTableScanDesc result;
 	uint32		flags = SO_TYPE_BITMAPSCAN | SO_ALLOW_PAGEMODE;
@@ -980,6 +984,10 @@ table_beginscan_bm(Relation rel, Snapshot snapshot, bool need_tuple)
 		flags |= SO_NEED_TUPLES;
 
 	result = rel->rd_tableam->scan_begin_bm(rel, snapshot, flags);
+	if (!pstate)
+		result->iterator = tbm_begin_serial_iterate(tbm);
+	else
+		result->iterator = NULL;
 
 	/* Only used for serial BHS */
 	result->prefetch_target = -1;
