@@ -37,6 +37,12 @@ typedef struct
 	GlobalVisState *vistest;
 
 	/*
+	 * Used only by vacuum. The oldest xmin at the beginning of vacuuming the
+	 * relation.
+	 */
+	TransactionId oldest_xmin;
+
+	/*
 	 * Thresholds set by TransactionIdLimitedForOldSnapshots() if they have
 	 * been computed (done on demand, and only if
 	 * OldSnapshotThresholdActive()). The first time a tuple is about to be
@@ -206,8 +212,8 @@ heap_page_prune_opt(Relation relation, Buffer buffer)
 			int			ndeleted,
 						nnewlpdead;
 
-			ndeleted = heap_page_prune(relation, buffer, vistest, limited_xmin,
-									   limited_ts, &nnewlpdead, NULL);
+			ndeleted = heap_page_prune(relation, buffer, vistest, InvalidTransactionId,
+					limited_xmin, limited_ts, &nnewlpdead, NULL);
 
 			/*
 			 * Report the number of tuples reclaimed to pgstats.  This is
@@ -248,11 +254,14 @@ heap_page_prune_opt(Relation relation, Buffer buffer)
  * also need to account for a reduction in the length of the line pointer
  * array following array truncation by us.
  *
- * vistest is used to distinguish whether tuples are DEAD or RECENTLY_DEAD
- * (see heap_prune_satisfies_vacuum and
- * HeapTupleSatisfiesVacuum). old_snap_xmin / old_snap_ts need to
- * either have been set by TransactionIdLimitedForOldSnapshots, or
- * InvalidTransactionId/0 respectively.
+ * vistest is used to distinguish whether tuples are DEAD or RECENTLY_DEAD (see
+ * heap_prune_satisfies_vacuum and HeapTupleSatisfiesVacuum).
+ *
+ * oldest_xmin is only set to a valid TransactionId by vacuum. It is the oldest
+ * removable TransactionId at the beginning of vacuuming the relation.
+ *
+ * old_snap_xmin / old_snap_ts need to either have been set by
+ * TransactionIdLimitedForOldSnapshots, or InvalidTransactionId/0 respectively.
  *
  * Sets *nnewlpdead for caller, indicating the number of items that were
  * newly set LP_DEAD during prune operation.
@@ -265,6 +274,7 @@ heap_page_prune_opt(Relation relation, Buffer buffer)
 int
 heap_page_prune(Relation relation, Buffer buffer,
 				GlobalVisState *vistest,
+				TransactionId oldest_xmin,
 				TransactionId old_snap_xmin,
 				TimestampTz old_snap_ts,
 				int *nnewlpdead,
@@ -292,6 +302,7 @@ heap_page_prune(Relation relation, Buffer buffer,
 	prstate.new_prune_xid = InvalidTransactionId;
 	prstate.rel = relation;
 	prstate.vistest = vistest;
+	prstate.oldest_xmin = oldest_xmin;
 	prstate.old_snap_xmin = old_snap_xmin;
 	prstate.old_snap_ts = old_snap_ts;
 	prstate.old_snap_used = false;
@@ -520,11 +531,14 @@ heap_prune_satisfies_vacuum(PruneState *prstate, HeapTuple tup, Buffer buffer)
 	}
 
 	/*
-	 * First check if GlobalVisTestIsRemovableXid() is sufficient to find the
-	 * row dead. If not, and old_snapshot_threshold is enabled, try to use the
-	 * lowered horizon.
+	 * First check if oldest_xmin or GlobalVisTestIsRemovableXid() is
+	 * sufficient to find the row dead. If not, and old_snapshot_threshold is
+	 * enabled, try to use the lowered horizon.
 	 */
-	if (GlobalVisTestIsRemovableXid(prstate->vistest, dead_after))
+	if (TransactionIdIsValid(prstate->oldest_xmin) &&
+			NormalTransactionIdPrecedes(dead_after, prstate->oldest_xmin))
+			res = HEAPTUPLE_DEAD;
+	else if (GlobalVisTestIsRemovableXid(prstate->vistest, dead_after))
 		res = HEAPTUPLE_DEAD;
 	else if (OldSnapshotThresholdActive())
 	{

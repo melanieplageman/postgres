@@ -1585,7 +1585,7 @@ retry:
 	 * lpdead_items's final value can be thought of as the number of tuples
 	 * that were deleted from indexes.
 	 */
-	tuples_deleted = heap_page_prune(rel, buf, vacrel->vistest,
+	tuples_deleted = heap_page_prune(rel, buf, vacrel->vistest, vacrel->OldestXmin,
 									 InvalidTransactionId, 0, &nnewlpdead,
 									 &vacrel->offnum);
 
