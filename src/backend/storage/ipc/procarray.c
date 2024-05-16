@@ -166,14 +166,6 @@ typedef struct ProcArrayStruct
  *
  * The typedef is in the header.
  */
-struct GlobalVisState
-{
-	/* XIDs >= are considered running by some backend */
-	FullTransactionId definitely_needed;
-
-	/* XIDs < are not considered to be running by any backend */
-	FullTransactionId maybe_needed;
-};
 
 /*
  * Result of ComputeXidHorizons().
@@ -2023,6 +2015,15 @@ GlobalVisHorizonKindForRel(Relation rel)
 		return VISHORIZON_TEMP;
 }
 
+TransactionId
+GetOldestNonRemovableTransactionIdAll(void)
+{
+   ComputeXidHorizonsResult horizons;
+
+   ComputeXidHorizons(&horizons);
+   return horizons.shared_oldest_nonremovable;
+}
+
 /*
  * Return the oldest XID for which deleted tuples must be preserved in the
  * passed table.
@@ -2564,6 +2565,8 @@ GetSnapshotData(Snapshot snapshot)
 		GlobalVisTempRels.maybe_needed = GlobalVisTempRels.definitely_needed;
 	}
 
+	elog(WARNING, "%d: GetSnapshotData(): RecentXmin before: %u. New RecentXmin: %u",
+			MyProcPid, RecentXmin, xmin);
 	RecentXmin = xmin;
 	Assert(TransactionIdPrecedesOrEquals(TransactionXmin, RecentXmin));
 
@@ -4136,8 +4139,18 @@ GlobalVisTestShouldUpdate(GlobalVisState *state)
 	 */
 	if (FullTransactionIdFollowsOrEquals(state->maybe_needed,
 										 state->definitely_needed))
+	{
+		elog(WARNING, "%d: DONT UPDATE because follows or equals: maybe_needed: %lu. definitely_needed: %lu",
+				MyProcPid, state->maybe_needed.value, state->definitely_needed.value);
 		return false;
+	}
 
+	if (RecentXmin == ComputeXidHorizonsResultLastXmin)
+		elog(WARNING, "%d: DONT UPDATE bc equals: RecentXmin: %u. ComputeXidHorizonsLastXmin: %u",
+				MyProcPid, RecentXmin, ComputeXidHorizonsResultLastXmin);
+	else
+		elog(WARNING, "%d: UPDATE bc diff: RecentXmin: %u. ComputeXidHorizonsLastXmin: %u",
+				MyProcPid, RecentXmin, ComputeXidHorizonsResultLastXmin);
 	/* does the last snapshot built have a different xmin? */
 	return RecentXmin != ComputeXidHorizonsResultLastXmin;
 }
@@ -4174,6 +4187,9 @@ GlobalVisUpdateApply(ComputeXidHorizonsResult *horizons)
 							   GlobalVisDataRels.definitely_needed);
 	GlobalVisTempRels.definitely_needed = GlobalVisTempRels.maybe_needed;
 
+	elog(WARNING, "%d: Setting ComputeXidHorizonsResultLastXmin: %u. to RecentXmin: %u",
+			MyProcPid, ComputeXidHorizonsResultLastXmin, RecentXmin);
+
 	ComputeXidHorizonsResultLastXmin = RecentXmin;
 }
 
@@ -4188,6 +4204,19 @@ GlobalVisUpdate(void)
 
 	/* updates the horizons as a side-effect */
 	ComputeXidHorizons(&horizons);
+}
+
+void GetThisGlobalVis(GlobalVisState *src, GlobalVisState *result)
+{
+   result->maybe_needed = src->maybe_needed;
+   result->definitely_needed = src->definitely_needed;
+}
+
+void
+GetSharedGlobalVis(GlobalVisState *vis)
+{
+   vis->maybe_needed = GlobalVisSharedRels.maybe_needed;
+   vis->definitely_needed = GlobalVisSharedRels.definitely_needed;
 }
 
 /*

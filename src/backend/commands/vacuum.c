@@ -975,6 +975,7 @@ vacuum_set_xid_limits(Relation rel,
 	MultiXactId mxactLimit;
 	MultiXactId safeMxactLimit;
 	int			freezetable;
+	GlobalVisState debug_vis;
 
 	/*
 	 * We can always ignore processes running lazy vacuum.  This is because we
@@ -986,6 +987,13 @@ vacuum_set_xid_limits(Relation rel,
 	 * any time, and that each vacuum is always an independent transaction.
 	 */
 	*oldestXmin = GetOldestNonRemovableTransactionId(rel);
+
+	GetSharedGlobalVis(&debug_vis);
+	elog(WARNING, "%d: vacuum_set_xid_limits(): OldestXmin: %u. maybe_needed: %lu. definitely_needed: %lu",
+			MyProcPid,
+			*oldestXmin,
+			debug_vis.maybe_needed.value,
+			debug_vis.definitely_needed.value);
 
 	if (OldSnapshotThresholdActive())
 	{

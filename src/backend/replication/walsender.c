@@ -2264,6 +2264,10 @@ ProcessStandbyHSFeedbackMessage(void)
 	TransactionId feedbackCatalogXmin;
 	uint32		feedbackCatalogEpoch;
 	TimestampTz replyTime;
+	TransactionId before;
+	TransactionId after;
+
+	before = GetOldestNonRemovableTransactionIdAll();
 
 	/*
 	 * Decipher the reply message. The caller already consumed the msgtype
@@ -2371,6 +2375,11 @@ ProcessStandbyHSFeedbackMessage(void)
 		else
 			MyProc->xmin = feedbackXmin;
 	}
+
+	after = GetOldestNonRemovableTransactionIdAll();
+	if (TransactionIdPrecedes(after, before))
+		elog(WARNING, "%d: Feedback with xid: %u. Horizon before: %u. Horizon after: %u",
+				MyProcPid, feedbackXmin, before, after);
 }
 
 /*

@@ -24,6 +24,8 @@
 #include "miscadmin.h"
 #include "pgstat.h"
 #include "storage/bufmgr.h"
+#include "storage/procarray.h"
+
 #include "utils/snapmgr.h"
 #include "utils/rel.h"
 #include "utils/snapmgr.h"
@@ -32,6 +34,8 @@
 typedef struct
 {
 	Relation	rel;
+	BlockNumber blkno;
+	TransactionId oldest_xmin;
 
 	/* tuple visibility test, initialized for the relation */
 	GlobalVisState *vistest;
@@ -206,7 +210,8 @@ heap_page_prune_opt(Relation relation, Buffer buffer)
 			int			ndeleted,
 						nnewlpdead;
 
-			ndeleted = heap_page_prune(relation, buffer, vistest, limited_xmin,
+			ndeleted = heap_page_prune(relation, buffer, vistest, InvalidTransactionId,
+					limited_xmin,
 									   limited_ts, &nnewlpdead, NULL);
 
 			/*
@@ -265,6 +270,7 @@ heap_page_prune_opt(Relation relation, Buffer buffer)
 int
 heap_page_prune(Relation relation, Buffer buffer,
 				GlobalVisState *vistest,
+				TransactionId oldest_xmin,
 				TransactionId old_snap_xmin,
 				TimestampTz old_snap_ts,
 				int *nnewlpdead,
@@ -292,6 +298,8 @@ heap_page_prune(Relation relation, Buffer buffer,
 	prstate.new_prune_xid = InvalidTransactionId;
 	prstate.rel = relation;
 	prstate.vistest = vistest;
+	prstate.oldest_xmin = oldest_xmin;
+	prstate.blkno = blockno;
 	prstate.old_snap_xmin = old_snap_xmin;
 	prstate.old_snap_ts = old_snap_ts;
 	prstate.old_snap_used = false;
@@ -500,11 +508,35 @@ heap_prune_satisfies_vacuum(PruneState *prstate, HeapTuple tup, Buffer buffer)
 {
 	HTSV_Result res;
 	TransactionId dead_after;
+	GlobalVisState before;
+	GlobalVisState after_recalc;
 
 	res = HeapTupleSatisfiesVacuumHorizon(tup, buffer, &dead_after);
 
 	if (res != HEAPTUPLE_RECENTLY_DEAD)
 		return res;
+
+	GetThisGlobalVis(prstate->vistest, &before);
+	if (!FullTransactionIdEquals(before.maybe_needed, before.definitely_needed) &&
+			TransactionIdFollows(dead_after, XidFromFullTransactionId(before.maybe_needed)))
+		elog(WARNING, "%d: AFTER. IN BETWEEN: rel: %s. blockno: %u. oldest_xmin: %u. maybe_needed: %lu. dead_after: %u. definitely_needed: %lu.",
+				MyProcPid,
+				RelationGetRelationName(prstate->rel),
+				prstate->blkno,
+				prstate->oldest_xmin,
+				before.maybe_needed.value,
+				dead_after,
+				before.definitely_needed.value);
+
+	if (TransactionIdPrecedes(dead_after, prstate->oldest_xmin))
+		elog(WARNING, "%d: BEFORE OLDEST: rel: %s. blockno: %u. oldest_xmin: %u. maybe_needed: %lu. dead_after: %u. definitely_needed: %lu.",
+				MyProcPid,
+				RelationGetRelationName(prstate->rel),
+				prstate->blkno,
+				prstate->oldest_xmin,
+				before.maybe_needed.value,
+				dead_after,
+				before.definitely_needed.value);
 
 	/*
 	 * If we are already relying on the limited xmin, there is no need to
@@ -553,6 +585,18 @@ heap_prune_satisfies_vacuum(PruneState *prstate, HeapTuple tup, Buffer buffer)
 			res = HEAPTUPLE_DEAD;
 		}
 	}
+
+	GetThisGlobalVis(prstate->vistest, &after_recalc);
+
+	if (!FullTransactionIdEquals(before.maybe_needed, after_recalc.maybe_needed) ||
+			(!FullTransactionIdEquals(before.definitely_needed, after_recalc.definitely_needed)))
+		elog(WARNING, "GlobalVisState change: rel: %s. blockno: %u. before.maybe_needed: %lu. after.maybe_needed: %lu. before.definitely_needed: %lu. after.definitely_needed: %lu.",
+				RelationGetRelationName(prstate->rel),
+				prstate->blkno,
+				before.maybe_needed.value,
+				after_recalc.maybe_needed.value,
+				before.definitely_needed.value,
+				after_recalc.definitely_needed.value);
 
 	return res;
 }

@@ -19,6 +19,14 @@
 #include "utils/relcache.h"
 #include "utils/snapshot.h"
 
+typedef struct GlobalVisState
+{
+	/* XIDs >= are considered running by some backend */
+	FullTransactionId definitely_needed;
+
+	/* XIDs < are not considered to be running by any backend */
+	FullTransactionId maybe_needed;
+} GlobalVisState;
 
 extern Size ProcArrayShmemSize(void);
 extern void CreateSharedProcArray(void);
@@ -55,6 +63,8 @@ extern RunningTransactions GetRunningTransactionData(void);
 extern bool TransactionIdIsInProgress(TransactionId xid);
 extern bool TransactionIdIsActive(TransactionId xid);
 extern TransactionId GetOldestNonRemovableTransactionId(Relation rel);
+
+extern TransactionId GetOldestNonRemovableTransactionIdAll(void);
 extern TransactionId GetOldestTransactionIdConsideredRunning(void);
 extern TransactionId GetOldestActiveTransactionId(void);
 extern TransactionId GetOldestSafeDecodingTransactionId(bool catalogOnly);

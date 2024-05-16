@@ -414,8 +414,10 @@ heap_vacuum_rel(Relation rel, VacuumParams *params,
 
 	/* Set up high level stuff about rel and its indexes */
 	vacrel->rel = rel;
+	elog(WARNING, "%d: vac_open_indexes() before", MyProcPid);
 	vac_open_indexes(vacrel->rel, RowExclusiveLock, &vacrel->nindexes,
 					 &vacrel->indrels);
+	elog(WARNING, "%d: vac_open_indexes() after", MyProcPid);
 	if (instrument && vacrel->nindexes > 0)
 	{
 		/* Copy index names used by instrumentation (not error reporting) */
@@ -1556,6 +1558,7 @@ lazy_scan_prune(LVRelState *vacrel,
 	MultiXactId NewRelminMxid;
 	OffsetNumber deadoffsets[MaxHeapTuplesPerPage];
 	xl_heap_freeze_tuple frozen[MaxHeapTuplesPerPage];
+	int retried = 0;
 
 	Assert(BufferGetBlockNumber(buf) == blkno);
 
@@ -1567,6 +1570,14 @@ lazy_scan_prune(LVRelState *vacrel,
 	maxoff = PageGetMaxOffsetNumber(page);
 
 retry:
+
+	if (retried >= 3)
+	{
+		elog(WARNING, "DUMPING CORE BECAUSE RETRIED 3 TIMES");
+		Assert(false);
+	}
+	retried++;
+
 
 	/* Initialize (or reset) page-level state */
 	NewRelfrozenXid = vacrel->NewRelfrozenXid;
@@ -1586,6 +1597,7 @@ retry:
 	 * that were deleted from indexes.
 	 */
 	tuples_deleted = heap_page_prune(rel, buf, vacrel->vistest,
+			vacrel->OldestXmin,
 									 InvalidTransactionId, 0, &nnewlpdead,
 									 &vacrel->offnum);
 
