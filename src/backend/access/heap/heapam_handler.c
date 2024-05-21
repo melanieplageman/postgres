@@ -2415,10 +2415,10 @@ heapam_scan_bitmap_next_tuple(BitmapTableScanDesc scan,
 
 #ifdef USE_PREFETCH
 
-		/*
-		* Try to prefetch at least a few pages even before we get to the
-		* second page if we don't stop reading after the first tuple.
-		*/
+	/*
+	 * Try to prefetch at least a few pages even before we get to the second
+	 * page if we don't stop reading after the first tuple.
+	 */
 	if (!pstate)
 	{
 		if (scan->prefetch_target < scan->prefetch_maximum)
@@ -2434,14 +2434,13 @@ heapam_scan_bitmap_next_tuple(BitmapTableScanDesc scan,
 	}
 #endif							/* USE_PREFETCH */
 
-		/*
-		* We issue prefetch requests *after* fetching the current page to
-		* try to avoid having prefetching interfere with the main I/O.
-		* Also, this should happen only when we have determined there is
-		* still something to do on the current page, else we may
-		* uselessly prefetch the same page we are just about to request
-		* for real.
-		*/
+	/*
+	 * We issue prefetch requests *after* fetching the current page to try to
+	 * avoid having prefetching interfere with the main I/O. Also, this should
+	 * happen only when we have determined there is still something to do on
+	 * the current page, else we may uselessly prefetch the same page we are
+	 * just about to request for real.
+	 */
 	BitmapPrefetch(scan);
 
 

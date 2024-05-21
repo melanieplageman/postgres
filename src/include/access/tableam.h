@@ -988,15 +988,15 @@ table_beginscan_bm(Relation rel, Snapshot snapshot,
 	result = rel->rd_tableam->scan_begin_bm(rel, snapshot, flags);
 
 	tbm_begin_iterate(&result->iterator, tbm, dsa,
-								pstate ?
-								pstate->tbmiterator:
-								InvalidDsaPointer);
+					  pstate ?
+					  pstate->tbmiterator :
+					  InvalidDsaPointer);
 #ifdef USE_PREFETCH
 	if (prefetch_maximum > 0)
 		tbm_begin_iterate(&result->prefetch_iterator, tbm, dsa,
-				pstate ?
-				pstate->prefetch_iterator :
-				InvalidDsaPointer);
+						  pstate ?
+						  pstate->prefetch_iterator :
+						  InvalidDsaPointer);
 #endif							/* USE_PREFETCH */
 
 	result->prefetch_maximum = prefetch_maximum;
@@ -1038,15 +1038,15 @@ table_rescan_bm(BitmapTableScanDesc scan,
 	scan->pfblockno = InvalidBlockNumber;
 
 	tbm_begin_iterate(&scan->iterator, tbm, dsa,
-								pstate ?
-								pstate->tbmiterator:
-								InvalidDsaPointer);
+					  pstate ?
+					  pstate->tbmiterator :
+					  InvalidDsaPointer);
 #ifdef USE_PREFETCH
 	if (prefetch_maximum > 0)
 		tbm_begin_iterate(&scan->prefetch_iterator, tbm, dsa,
-				pstate ?
-				pstate->prefetch_iterator :
-				InvalidDsaPointer);
+						  pstate ?
+						  pstate->prefetch_iterator :
+						  InvalidDsaPointer);
 #endif							/* USE_PREFETCH */
 }
 
