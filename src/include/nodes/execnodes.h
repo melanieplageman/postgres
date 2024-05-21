@@ -1792,7 +1792,6 @@ typedef struct ParallelBitmapHeapState
  *
  *		bitmapqualorig	   execution state for bitmapqualorig expressions
  *		tbm				   bitmap obtained from child index scan(s)
- *		pvmbuffer		   buffer for visibility-map lookups of prefetched pages
  *		exact_pages		   total number of exact pages retrieved
  *		lossy_pages		   total number of lossy pages retrieved
  *		initialized		   is node is ready to iterate
@@ -1808,7 +1807,6 @@ typedef struct BitmapHeapScanState
 	BitmapTableScanDesc scan;
 	ExprState  *bitmapqualorig;
 	TIDBitmap  *tbm;
-	Buffer		pvmbuffer;
 	long		exact_pages;
 	long		lossy_pages;
 	bool		initialized;

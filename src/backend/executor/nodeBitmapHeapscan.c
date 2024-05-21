@@ -304,7 +304,7 @@ static inline void
 BitmapAdjustPrefetchIterator(BitmapHeapScanState *node, BitmapTableScanDesc scan)
 {
 #ifdef USE_PREFETCH
-	ParallelBitmapHeapState *pstate = node->pstate;
+	ParallelBitmapHeapState *pstate = scan->pstate;
 	TBMIterateResult *tbmpre;
 
 	if (pstate == NULL)
@@ -379,7 +379,7 @@ static inline void
 BitmapAdjustPrefetchTarget(BitmapHeapScanState *node, BitmapTableScanDesc scan)
 {
 #ifdef USE_PREFETCH
-	ParallelBitmapHeapState *pstate = node->pstate;
+	ParallelBitmapHeapState *pstate = scan->pstate;
 
 	if (pstate == NULL)
 	{
@@ -418,7 +418,7 @@ static inline void
 BitmapPrefetch(BitmapHeapScanState *node, BitmapTableScanDesc scan)
 {
 #ifdef USE_PREFETCH
-	ParallelBitmapHeapState *pstate = node->pstate;
+	ParallelBitmapHeapState *pstate = scan->pstate;
 
 	if (pstate == NULL)
 	{
@@ -448,9 +448,9 @@ BitmapPrefetch(BitmapHeapScanState *node, BitmapTableScanDesc scan)
 				 */
 				skip_fetch = (!(scan->flags & SO_NEED_TUPLES) &&
 							  !tbmpre->recheck &&
-							  VM_ALL_VISIBLE(node->ss.ss_currentRelation,
+							  VM_ALL_VISIBLE(scan->rel,
 											 tbmpre->blockno,
-											 &node->pvmbuffer));
+											 &scan->pvmbuffer));
 
 				if (!skip_fetch)
 					PrefetchBuffer(scan->rel, MAIN_FORKNUM, tbmpre->blockno);
@@ -500,9 +500,9 @@ BitmapPrefetch(BitmapHeapScanState *node, BitmapTableScanDesc scan)
 				/* As above, skip prefetch if we expect not to need page */
 				skip_fetch = (!(scan->flags & SO_NEED_TUPLES) &&
 							  !tbmpre->recheck &&
-							  VM_ALL_VISIBLE(node->ss.ss_currentRelation,
+							  VM_ALL_VISIBLE(scan->rel,
 											 tbmpre->blockno,
-											 &node->pvmbuffer));
+											 &scan->pvmbuffer));
 
 				if (!skip_fetch)
 					PrefetchBuffer(scan->rel, MAIN_FORKNUM, tbmpre->blockno);
@@ -556,11 +556,8 @@ ExecReScanBitmapHeapScan(BitmapHeapScanState *node)
 	/* release bitmaps and buffers if any */
 	if (node->tbm)
 		tbm_free(node->tbm);
-	if (node->pvmbuffer != InvalidBuffer)
-		ReleaseBuffer(node->pvmbuffer);
 	node->tbm = NULL;
 	node->initialized = false;
-	node->pvmbuffer = InvalidBuffer;
 	node->recheck = true;
 	node->blockno = InvalidBlockNumber;
 	node->pfblockno = InvalidBlockNumber;
@@ -606,8 +603,6 @@ ExecEndBitmapHeapScan(BitmapHeapScanState *node)
 	 */
 	if (node->tbm)
 		tbm_free(node->tbm);
-	if (node->pvmbuffer != InvalidBuffer)
-		ReleaseBuffer(node->pvmbuffer);
 }
 
 /* ----------------------------------------------------------------
@@ -640,7 +635,6 @@ ExecInitBitmapHeapScan(BitmapHeapScan *node, EState *estate, int eflags)
 	scanstate->ss.ps.ExecProcNode = ExecBitmapHeapScan;
 
 	scanstate->tbm = NULL;
-	scanstate->pvmbuffer = InvalidBuffer;
 	scanstate->exact_pages = 0;
 	scanstate->lossy_pages = 0;
 	scanstate->initialized = false;

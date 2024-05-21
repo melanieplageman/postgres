@@ -1000,6 +1000,8 @@ table_beginscan_bm(Relation rel, Snapshot snapshot,
 #endif							/* USE_PREFETCH */
 
 	result->prefetch_maximum = prefetch_maximum;
+	result->pstate = pstate;
+	result->pvmbuffer = InvalidBuffer;
 
 	/* Only used for serial BHS */
 	result->prefetch_target = -1;
@@ -1017,6 +1019,10 @@ table_rescan_bm(BitmapTableScanDesc scan,
 	tbm_end_iterate(&scan->iterator);
 	tbm_end_iterate(&scan->prefetch_iterator);
 
+	if (scan->pvmbuffer != InvalidBuffer)
+		ReleaseBuffer(scan->pvmbuffer);
+	scan->pvmbuffer = InvalidBuffer;
+
 	/*
 	 * This is only needed as a parameter if we assume it can change on rescan
 	 */
@@ -1027,6 +1033,7 @@ table_rescan_bm(BitmapTableScanDesc scan,
 	scan->prefetch_pages = 0;
 
 	scan->rel->rd_tableam->scan_rescan_bm(scan);
+	scan->pstate = pstate;
 
 	tbm_begin_iterate(&scan->iterator, tbm, dsa,
 								pstate ?
@@ -1046,6 +1053,9 @@ table_endscan_bm(BitmapTableScanDesc scan)
 {
 	tbm_end_iterate(&scan->iterator);
 	tbm_end_iterate(&scan->prefetch_iterator);
+
+	if (scan->pvmbuffer != InvalidBuffer)
+		ReleaseBuffer(scan->pvmbuffer);
 
 	scan->rel->rd_tableam->scan_end_bm(scan);
 }
