@@ -1614,7 +1614,7 @@ tbm_iterate(TBMIterator *iterator)
 {
 	Assert(iterator);
 
-	if (iterator->shared)
+	if (iterator->is_shared)
 		return tbm_shared_iterate(iterator->shared);
 	else
 		return tbm_private_iterate(iterator->private);
