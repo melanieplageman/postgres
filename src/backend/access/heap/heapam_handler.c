@@ -2334,18 +2334,22 @@ BitmapAdjustPrefetchTarget(BitmapHeapScanDesc *scan)
 #endif							/* USE_PREFETCH */
 }
 
-
-/* ------------------------------------------------------------------------
- * Executor related callbacks for the heap AM
- * ------------------------------------------------------------------------
+/*
+ * Prepare to fetch / check / return tuples as part of a bitmap heap scan.
+ * `scan` needs to have been started via heap_beginscan_bm(). Returns false if
+ * there are no more blocks in the bitmap, true otherwise. `lossy_pages` is
+ * incremented if the block's representation in the bitmap is lossy; otherwise,
+ * `exact_pages` is incremented.
+ *
+ * `recheck` is set to indicate whether or not the tuples from this block
+ * should be rechecked. Tuples from lossy pages will always need to be
+ * rechecked, but some non-lossy pages' tuples may also require recheck.
  */
-
 static bool
-heapam_scan_bitmap_next_block(BitmapTableScanDesc *sscan,
+heapam_scan_bitmap_next_block(BitmapHeapScanDesc *scan,
 							  bool *recheck,
 							  long *lossy_pages, long *exact_pages)
 {
-	BitmapHeapScanDesc *scan = (BitmapHeapScanDesc *) sscan;
 	BlockNumber block;
 	Buffer		buffer;
 	Snapshot	snapshot;
@@ -2515,9 +2519,16 @@ heapam_scan_bitmap_next_block(BitmapTableScanDesc *sscan,
 	return true;
 }
 
+
+/* ------------------------------------------------------------------------
+ * Executor related callbacks for the heap AM
+ * ------------------------------------------------------------------------
+ */
+
 static bool
 heapam_scan_bitmap_next_tuple(BitmapTableScanDesc *sscan,
-							  TupleTableSlot *slot)
+							  TupleTableSlot *slot, bool *recheck,
+							  long *lossy_pages, long *exact_pages)
 {
 	BitmapHeapScanDesc *scan = (BitmapHeapScanDesc *) sscan;
 	ParallelBitmapHeapState *pstate = scan->pstate;
@@ -2525,22 +2536,28 @@ heapam_scan_bitmap_next_tuple(BitmapTableScanDesc *sscan,
 	Page		page;
 	ItemId		lp;
 
-	if (scan->empty_tuples_pending > 0)
-	{
-		/*
-		 * If we don't have to fetch the tuple, just return nulls.
-		 */
-		ExecStoreAllNullTuple(slot);
-		scan->empty_tuples_pending--;
-		BitmapPrefetch(scan);
-		return true;
-	}
-
 	/*
 	 * Out of range?  If so, nothing more to look at on this page
 	 */
-	if (scan->vis_idx < 0 || scan->vis_idx >= scan->vis_ntuples)
-		return false;
+	while (scan->vis_idx < 0 || scan->vis_idx >= scan->vis_ntuples)
+	{
+		/*
+		 * Emit empty tuples before advancing to the next block
+		 */
+		if (scan->empty_tuples_pending > 0)
+		{
+			/*
+			 * If we don't have to fetch the tuple, just return nulls.
+			 */
+			ExecStoreAllNullTuple(slot);
+			scan->empty_tuples_pending--;
+			BitmapPrefetch(scan);
+			return true;
+		}
+
+		if (!heapam_scan_bitmap_next_block(scan, recheck, lossy_pages, exact_pages))
+			return false;
+	}
 
 #ifdef USE_PREFETCH
 
@@ -2941,7 +2958,6 @@ static const TableAmRoutine heapam_methods = {
 
 	.relation_estimate_size = heapam_estimate_rel_size,
 
-	.scan_bitmap_next_block = heapam_scan_bitmap_next_block,
 	.scan_bitmap_next_tuple = heapam_scan_bitmap_next_tuple,
 	.scan_sample_next_block = heapam_scan_sample_next_block,
 	.scan_sample_next_tuple = heapam_scan_sample_next_tuple
