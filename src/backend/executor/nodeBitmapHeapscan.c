@@ -51,8 +51,6 @@
 
 static TupleTableSlot *BitmapHeapNext(BitmapHeapScanState *node);
 static inline void BitmapDoneInitializingSharedState(ParallelBitmapHeapState *pstate);
-static inline void BitmapAdjustPrefetchIterator(BitmapHeapScanState *node,
-												BitmapTableScanDesc scan);
 static inline void BitmapAdjustPrefetchTarget(BitmapHeapScanState *node,
 											  BitmapTableScanDesc scan);
 static bool BitmapShouldInitializeSharedState(ParallelBitmapHeapState *pstate);
@@ -219,8 +217,6 @@ BitmapHeapNext(BitmapHeapScanState *node)
 
 new_page:
 
-		BitmapAdjustPrefetchIterator(node, scan);
-
 		if (!table_scan_bitmap_next_block(scan, &node->blockno, &node->recheck,
 										  &node->lossy_pages, &node->exact_pages))
 			break;
@@ -257,80 +253,6 @@ BitmapDoneInitializingSharedState(ParallelBitmapHeapState *pstate)
 	pstate->state = BM_FINISHED;
 	SpinLockRelease(&pstate->mutex);
 	ConditionVariableBroadcast(&pstate->cv);
-}
-
-/*
- *	BitmapAdjustPrefetchIterator - Adjust the prefetch iterator
- *
- *	We keep track of how far the prefetch iterator is ahead of the main
- *	iterator in prefetch_pages. For each block the main iterator returns, we
- *	decrement prefetch_pages.
- */
-static inline void
-BitmapAdjustPrefetchIterator(BitmapHeapScanState *node, BitmapTableScanDesc scan)
-{
-#ifdef USE_PREFETCH
-	ParallelBitmapHeapState *pstate = scan->pstate;
-	TBMIterateResult *tbmpre;
-
-	if (pstate == NULL)
-	{
-		TBMIterator *prefetch_iterator = &scan->prefetch_iterator;
-
-		if (scan->prefetch_pages > 0)
-		{
-			/* The main iterator has closed the distance by one page */
-			scan->prefetch_pages--;
-		}
-		else if (!prefetch_iterator->exhausted)
-		{
-			/* Do not let the prefetch iterator get behind the main one */
-			tbmpre = tbm_iterate(prefetch_iterator);
-			scan->pfblockno = tbmpre ? tbmpre->blockno : InvalidBlockNumber;
-		}
-		return;
-	}
-
-	/*
-	 * XXX: There is a known issue with keeping the prefetch and current block
-	 * iterators in sync for parallel bitmapheapscans. This can lead to
-	 * prefetching blocks that have already been read. See the discussion
-	 * here:
-	 * https://postgr.es/m/20240315211449.en2jcmdqxv5o6tlz%40alap3.anarazel.de
-	 * Note that moving the call site of BitmapAdjustPrefetchIterator()
-	 * exacerbates the effects of this bug.
-	 */
-	if (scan->prefetch_maximum > 0)
-	{
-		TBMIterator *prefetch_iterator = &scan->prefetch_iterator;
-
-		SpinLockAcquire(&pstate->mutex);
-		if (pstate->prefetch_pages > 0)
-		{
-			pstate->prefetch_pages--;
-			SpinLockRelease(&pstate->mutex);
-		}
-		else
-		{
-			/* Release the mutex before iterating */
-			SpinLockRelease(&pstate->mutex);
-
-			/*
-			 * In case of shared mode, we can not ensure that the current
-			 * blockno of the main iterator and that of the prefetch iterator
-			 * are same.  It's possible that whatever blockno we are
-			 * prefetching will be processed by another process.  Therefore,
-			 * we don't validate the blockno here as we do in non-parallel
-			 * case.
-			 */
-			if (!prefetch_iterator->exhausted)
-			{
-				tbmpre = tbm_iterate(prefetch_iterator);
-				scan->pfblockno = tbmpre ? tbmpre->blockno : InvalidBlockNumber;
-			}
-		}
-	}
-#endif							/* USE_PREFETCH */
 }
 
 /*
