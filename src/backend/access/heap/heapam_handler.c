@@ -2131,7 +2131,7 @@ BitmapPrefetch(BitmapTableScanDesc scan)
 
 		if (!prefetch_iterator->exhausted)
 		{
-			while (scan->prefetch_pages < scan->prefetch_target)
+			while (hscan->prefetch_pages < hscan->prefetch_target)
 			{
 				TBMIterateResult *tbmpre = tbm_iterate(prefetch_iterator);
 				bool		skip_fetch;
@@ -2142,7 +2142,7 @@ BitmapPrefetch(BitmapTableScanDesc scan)
 					tbm_end_iterate(prefetch_iterator);
 					break;
 				}
-				scan->prefetch_pages++;
+				hscan->prefetch_pages++;
 				hscan->pfblock = tbmpre->blockno;
 
 				/*
@@ -2237,10 +2237,10 @@ BitmapAdjustPrefetchIterator(BitmapTableScanDesc scan)
 	{
 		TBMIterator *prefetch_iterator = &scan->prefetch_iterator;
 
-		if (scan->prefetch_pages > 0)
+		if (hscan->prefetch_pages > 0)
 		{
 			/* The main iterator has closed the distance by one page */
-			scan->prefetch_pages--;
+			hscan->prefetch_pages--;
 		}
 		else if (!prefetch_iterator->exhausted)
 		{
@@ -2304,19 +2304,20 @@ BitmapAdjustPrefetchIterator(BitmapTableScanDesc scan)
 static inline void
 BitmapAdjustPrefetchTarget(BitmapTableScanDesc scan)
 {
+	BitmapHeapScanDesc hscan = (BitmapHeapScanDesc) scan;
 #ifdef USE_PREFETCH
 	ParallelBitmapHeapState *pstate = scan->pstate;
 
 	if (pstate == NULL)
 	{
-		if (scan->prefetch_target >= scan->prefetch_maximum)
+		if (hscan->prefetch_target >= scan->prefetch_maximum)
 			 /* don't increase any further */ ;
-		else if (scan->prefetch_target >= scan->prefetch_maximum / 2)
-			scan->prefetch_target = scan->prefetch_maximum;
-		else if (scan->prefetch_target > 0)
-			scan->prefetch_target *= 2;
+		else if (hscan->prefetch_target >= scan->prefetch_maximum / 2)
+			hscan->prefetch_target = scan->prefetch_maximum;
+		else if (hscan->prefetch_target > 0)
+			hscan->prefetch_target *= 2;
 		else
-			scan->prefetch_target++;
+			hscan->prefetch_target++;
 		return;
 	}
 
@@ -2556,8 +2557,8 @@ heapam_scan_bitmap_next_tuple(BitmapTableScanDesc scan,
 	 */
 	if (!pstate)
 	{
-		if (scan->prefetch_target < scan->prefetch_maximum)
-			scan->prefetch_target++;
+		if (hscan->prefetch_target < scan->prefetch_maximum)
+			hscan->prefetch_target++;
 	}
 	else if (pstate->prefetch_target < scan->prefetch_maximum)
 	{

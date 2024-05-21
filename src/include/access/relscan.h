@@ -74,15 +74,6 @@ typedef struct BitmapTableScanDescData
 
 	/* maximum value for prefetch_target */
 	int			prefetch_maximum;
-
-	/*
-	 * Serial-only members
-	 */
-
-	/* Current target for prefetch distance */
-	int			prefetch_target;
-	/* # pages prefetch iterator is ahead of current */
-	int			prefetch_pages;
 }			BitmapTableScanDescData;
 typedef struct BitmapTableScanDescData *BitmapTableScanDesc;
 

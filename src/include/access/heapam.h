@@ -115,6 +115,11 @@ typedef struct BitmapHeapScanDescData
 	BlockNumber cblock;			/* current block # in scan, if any */
 	BlockNumber pfblock;
 
+	/* Current target for prefetch distance */
+	int			prefetch_target;
+	/* # pages prefetch iterator is ahead of current */
+	int			prefetch_pages;
+
 	/*
 	 * These fields are only used for bitmap scans for the "skip fetch"
 	 * optimization. Bitmap scans needing no fields from the heap may skip

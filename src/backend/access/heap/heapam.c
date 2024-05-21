@@ -1267,10 +1267,9 @@ heap_beginscan_bm(Relation relation, Snapshot snapshot, uint32 flags)
 	scan->pvmbuffer = InvalidBuffer;
 	scan->empty_tuples_pending = 0;
 
-	/*
-	 * The rest of the BitmapHeapScanDesc members related to prefetching will
-	 * be initialized in heap_rescan_bm().
-	 */
+	/* Only used for serial BHS */
+	scan->prefetch_target = -1;
+	scan->prefetch_pages = 0;
 
 	return (BitmapTableScanDesc) scan;
 }
@@ -1303,6 +1302,10 @@ heap_rescan_bm(BitmapTableScanDesc sscan)
 	ItemPointerSetInvalid(&scan->rs_ctup.t_self);
 	scan->cbuf = InvalidBuffer;
 	scan->cblock = InvalidBlockNumber;
+
+	/* Only used for serial BHS */
+	scan->prefetch_target = -1;
+	scan->prefetch_pages = 0;
 }
 
 void

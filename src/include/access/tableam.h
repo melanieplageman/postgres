@@ -1001,10 +1001,6 @@ table_beginscan_bm(Relation rel, Snapshot snapshot,
 
 	result->prefetch_maximum = prefetch_maximum;
 	result->pstate = pstate;
-
-	/* Only used for serial BHS */
-	result->prefetch_target = -1;
-	result->prefetch_pages = 0;
 	return result;
 }
 
@@ -1022,10 +1018,6 @@ table_rescan_bm(BitmapTableScanDesc scan,
 	 * This is only needed as a parameter if we assume it can change on rescan
 	 */
 	scan->prefetch_maximum = prefetch_maximum;
-
-	/* Only used for serial BHS */
-	scan->prefetch_target = -1;
-	scan->prefetch_pages = 0;
 
 	scan->rel->rd_tableam->scan_rescan_bm(scan);
 	scan->pstate = pstate;
