@@ -2123,7 +2123,7 @@ BitmapPrefetch(BitmapTableScanDesc scan)
 {
 	BitmapHeapScanDesc hscan = (BitmapHeapScanDesc) scan;
 #ifdef USE_PREFETCH
-	ParallelBitmapHeapState *pstate = scan->pstate;
+	ParallelBitmapHeapState *pstate = hscan->pstate;
 
 	if (pstate == NULL)
 	{
@@ -2230,7 +2230,7 @@ BitmapAdjustPrefetchIterator(BitmapTableScanDesc scan)
 {
 	BitmapHeapScanDesc hscan = (BitmapHeapScanDesc) scan;
 #ifdef USE_PREFETCH
-	ParallelBitmapHeapState *pstate = scan->pstate;
+	ParallelBitmapHeapState *pstate = hscan->pstate;
 	TBMIterateResult *tbmpre;
 
 	if (pstate == NULL)
@@ -2260,7 +2260,7 @@ BitmapAdjustPrefetchIterator(BitmapTableScanDesc scan)
 	 * Note that moving the call site of BitmapAdjustPrefetchIterator()
 	 * exacerbates the effects of this bug.
 	 */
-	if (scan->prefetch_maximum > 0)
+	if (hscan->prefetch_maximum > 0)
 	{
 		TBMIterator *prefetch_iterator = &hscan->prefetch_iterator;
 
@@ -2306,14 +2306,14 @@ BitmapAdjustPrefetchTarget(BitmapTableScanDesc scan)
 {
 	BitmapHeapScanDesc hscan = (BitmapHeapScanDesc) scan;
 #ifdef USE_PREFETCH
-	ParallelBitmapHeapState *pstate = scan->pstate;
+	ParallelBitmapHeapState *pstate = hscan->pstate;
 
 	if (pstate == NULL)
 	{
-		if (hscan->prefetch_target >= scan->prefetch_maximum)
+		if (hscan->prefetch_target >= hscan->prefetch_maximum)
 			 /* don't increase any further */ ;
-		else if (hscan->prefetch_target >= scan->prefetch_maximum / 2)
-			hscan->prefetch_target = scan->prefetch_maximum;
+		else if (hscan->prefetch_target >= hscan->prefetch_maximum / 2)
+			hscan->prefetch_target = hscan->prefetch_maximum;
 		else if (hscan->prefetch_target > 0)
 			hscan->prefetch_target *= 2;
 		else
@@ -2322,13 +2322,13 @@ BitmapAdjustPrefetchTarget(BitmapTableScanDesc scan)
 	}
 
 	/* Do an unlocked check first to save spinlock acquisitions. */
-	if (pstate->prefetch_target < scan->prefetch_maximum)
+	if (pstate->prefetch_target < hscan->prefetch_maximum)
 	{
 		SpinLockAcquire(&pstate->mutex);
-		if (pstate->prefetch_target >= scan->prefetch_maximum)
+		if (pstate->prefetch_target >= hscan->prefetch_maximum)
 			 /* don't increase any further */ ;
-		else if (pstate->prefetch_target >= scan->prefetch_maximum / 2)
-			pstate->prefetch_target = scan->prefetch_maximum;
+		else if (pstate->prefetch_target >= hscan->prefetch_maximum / 2)
+			pstate->prefetch_target = hscan->prefetch_maximum;
 		else if (pstate->prefetch_target > 0)
 			pstate->prefetch_target *= 2;
 		else
@@ -2505,7 +2505,7 @@ heapam_scan_bitmap_next_block(BitmapTableScanDesc scan,
 	 * If serial, we can error out if the the prefetch block doesn't stay
 	 * ahead of the current block.
 	 */
-	if (scan->pstate == NULL &&
+	if (hscan->pstate == NULL &&
 		!hscan->prefetch_iterator.exhausted &&
 		hscan->pfblock < block)
 		elog(ERROR, "prefetch and main iterators are out of sync");
@@ -2528,7 +2528,7 @@ heapam_scan_bitmap_next_tuple(BitmapTableScanDesc scan,
 							  TupleTableSlot *slot)
 {
 	BitmapHeapScanDesc hscan = (BitmapHeapScanDesc) scan;
-	ParallelBitmapHeapState *pstate = scan->pstate;
+	ParallelBitmapHeapState *pstate = hscan->pstate;
 	OffsetNumber targoffset;
 	Page		page;
 	ItemId		lp;
@@ -2557,14 +2557,14 @@ heapam_scan_bitmap_next_tuple(BitmapTableScanDesc scan,
 	 */
 	if (!pstate)
 	{
-		if (hscan->prefetch_target < scan->prefetch_maximum)
+		if (hscan->prefetch_target < hscan->prefetch_maximum)
 			hscan->prefetch_target++;
 	}
-	else if (pstate->prefetch_target < scan->prefetch_maximum)
+	else if (pstate->prefetch_target < hscan->prefetch_maximum)
 	{
 		/* take spinlock while updating shared state */
 		SpinLockAcquire(&pstate->mutex);
-		if (pstate->prefetch_target < scan->prefetch_maximum)
+		if (pstate->prefetch_target < hscan->prefetch_maximum)
 			pstate->prefetch_target++;
 		SpinLockRelease(&pstate->mutex);
 	}

@@ -57,17 +57,12 @@ typedef struct BitmapTableScanDescData
 	Relation	rel;			/* heap relation descriptor */
 	struct SnapshotData *snapshot;	/* snapshot to see */
 
-	/* Parallel Only Members */
-	struct ParallelBitmapHeapState *pstate;
-
 	/*
 	 * Information about type and behaviour of the scan, a bitmask of members
 	 * of the ScanOptions enum (see tableam.h).
 	 */
 	uint32		flags;
 
-	/* maximum value for prefetch_target */
-	int			prefetch_maximum;
 }			BitmapTableScanDescData;
 typedef struct BitmapTableScanDescData *BitmapTableScanDesc;
 

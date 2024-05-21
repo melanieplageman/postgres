@@ -117,10 +117,16 @@ typedef struct BitmapHeapScanDescData
 	TBMIterator iterator;
 	TBMIterator prefetch_iterator;
 
+	/* maximum value for prefetch_target */
+	int			prefetch_maximum;
+
 	/* Current target for prefetch distance */
 	int			prefetch_target;
 	/* # pages prefetch iterator is ahead of current */
 	int			prefetch_pages;
+
+	/* Parallel Only */
+	struct ParallelBitmapHeapState *pstate;
 
 	/*
 	 * These fields are only used for bitmap scans for the "skip fetch"

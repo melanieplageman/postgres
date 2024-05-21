@@ -987,18 +987,13 @@ table_beginscan_bm(Relation rel, Snapshot snapshot,
 				   bool need_tuple,
 				   int prefetch_maximum)
 {
-	BitmapTableScanDesc result;
 	uint32		flags = SO_TYPE_BITMAPSCAN | SO_ALLOW_PAGEMODE;
 
 	if (need_tuple)
 		flags |= SO_NEED_TUPLES;
 
-	result = rel->rd_tableam->scan_begin_bm(rel, snapshot, flags, tbm, pstate, dsa,
-											prefetch_maximum);
-
-	result->prefetch_maximum = prefetch_maximum;
-	result->pstate = pstate;
-	return result;
+	return rel->rd_tableam->scan_begin_bm(rel, snapshot, flags, tbm, pstate, dsa,
+										  prefetch_maximum);
 }
 
 static inline void
@@ -1008,14 +1003,7 @@ table_rescan_bm(BitmapTableScanDesc scan,
 				dsa_area *dsa,
 				int prefetch_maximum)
 {
-	/*
-	 * This is only needed as a parameter if we assume it can change on rescan
-	 */
-	scan->prefetch_maximum = prefetch_maximum;
-
 	scan->rel->rd_tableam->scan_rescan_bm(scan, tbm, pstate, dsa, prefetch_maximum);
-	scan->pstate = pstate;
-
 }
 
 static inline void

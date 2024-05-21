@@ -1269,6 +1269,9 @@ heap_beginscan_bm(Relation relation, Snapshot snapshot, uint32 flags,
 	scan->pvmbuffer = InvalidBuffer;
 	scan->empty_tuples_pending = 0;
 
+	scan->pstate = pstate;
+
+	scan->prefetch_maximum = prefetch_maximum;
 	/* Only used for serial BHS */
 	scan->prefetch_target = -1;
 	scan->prefetch_pages = 0;
@@ -1322,6 +1325,13 @@ heap_rescan_bm(BitmapTableScanDesc sscan, TIDBitmap *tbm,
 	ItemPointerSetInvalid(&scan->rs_ctup.t_self);
 	scan->cbuf = InvalidBuffer;
 	scan->cblock = InvalidBlockNumber;
+
+	/*
+	 * This is only needed as a parameter if we assume it can change on rescan
+	 */
+	scan->prefetch_maximum = prefetch_maximum;
+
+	scan->pstate = pstate;
 
 	/* Only used for serial BHS */
 	scan->prefetch_target = -1;
