@@ -55,8 +55,7 @@ static inline void BitmapAdjustPrefetchIterator(BitmapHeapScanState *node,
 												BitmapTableScanDesc scan);
 static inline void BitmapAdjustPrefetchTarget(BitmapHeapScanState *node,
 											  BitmapTableScanDesc scan);
-static inline void BitmapPrefetch(BitmapHeapScanState *node,
-								  BitmapTableScanDesc scan);
+static inline void BitmapPrefetch(BitmapTableScanDesc scan);
 static bool BitmapShouldInitializeSharedState(ParallelBitmapHeapState *pstate);
 
 /*
@@ -229,7 +228,7 @@ BitmapHeapNext(BitmapHeapScanState *node)
 			 * uselessly prefetch the same page we are just about to request
 			 * for real.
 			 */
-			BitmapPrefetch(node, scan);
+			BitmapPrefetch(scan);
 
 			/*
 			 * If we are using lossy info, we have to recheck the qual
@@ -265,7 +264,7 @@ new_page:
 		 */
 		if (node->pstate == NULL &&
 			!scan->prefetch_iterator.exhausted &&
-			node->pfblockno < node->blockno)
+			scan->pfblockno < node->blockno)
 			elog(ERROR, "prefetch and main iterators are out of sync");
 
 		/* Adjust the prefetch target */
@@ -320,7 +319,7 @@ BitmapAdjustPrefetchIterator(BitmapHeapScanState *node, BitmapTableScanDesc scan
 		{
 			/* Do not let the prefetch iterator get behind the main one */
 			tbmpre = tbm_iterate(prefetch_iterator);
-			node->pfblockno = tbmpre ? tbmpre->blockno : InvalidBlockNumber;
+			scan->pfblockno = tbmpre ? tbmpre->blockno : InvalidBlockNumber;
 		}
 		return;
 	}
@@ -360,7 +359,7 @@ BitmapAdjustPrefetchIterator(BitmapHeapScanState *node, BitmapTableScanDesc scan
 			if (!prefetch_iterator->exhausted)
 			{
 				tbmpre = tbm_iterate(prefetch_iterator);
-				node->pfblockno = tbmpre ? tbmpre->blockno : InvalidBlockNumber;
+				scan->pfblockno = tbmpre ? tbmpre->blockno : InvalidBlockNumber;
 			}
 		}
 	}
@@ -415,7 +414,7 @@ BitmapAdjustPrefetchTarget(BitmapHeapScanState *node, BitmapTableScanDesc scan)
  * BitmapPrefetch - Prefetch, if prefetch_pages are behind prefetch_target
  */
 static inline void
-BitmapPrefetch(BitmapHeapScanState *node, BitmapTableScanDesc scan)
+BitmapPrefetch(BitmapTableScanDesc scan)
 {
 #ifdef USE_PREFETCH
 	ParallelBitmapHeapState *pstate = scan->pstate;
@@ -438,7 +437,7 @@ BitmapPrefetch(BitmapHeapScanState *node, BitmapTableScanDesc scan)
 					break;
 				}
 				scan->prefetch_pages++;
-				node->pfblockno = tbmpre->blockno;
+				scan->pfblockno = tbmpre->blockno;
 
 				/*
 				 * If we expect not to have to actually read this heap page,
@@ -495,7 +494,7 @@ BitmapPrefetch(BitmapHeapScanState *node, BitmapTableScanDesc scan)
 					break;
 				}
 
-				node->pfblockno = tbmpre->blockno;
+				scan->pfblockno = tbmpre->blockno;
 
 				/* As above, skip prefetch if we expect not to need page */
 				skip_fetch = (!(scan->flags & SO_NEED_TUPLES) &&
@@ -560,7 +559,6 @@ ExecReScanBitmapHeapScan(BitmapHeapScanState *node)
 	node->initialized = false;
 	node->recheck = true;
 	node->blockno = InvalidBlockNumber;
-	node->pfblockno = InvalidBlockNumber;
 
 	ExecScanReScan(&node->ss);
 
@@ -642,7 +640,6 @@ ExecInitBitmapHeapScan(BitmapHeapScan *node, EState *estate, int eflags)
 	scanstate->pstate = NULL;
 	scanstate->recheck = true;
 	scanstate->blockno = InvalidBlockNumber;
-	scanstate->pfblockno = InvalidBlockNumber;
 
 	/*
 	 * Miscellaneous initialization

@@ -1002,6 +1002,7 @@ table_beginscan_bm(Relation rel, Snapshot snapshot,
 	result->prefetch_maximum = prefetch_maximum;
 	result->pstate = pstate;
 	result->pvmbuffer = InvalidBuffer;
+	result->pfblockno = InvalidBlockNumber;
 
 	/* Only used for serial BHS */
 	result->prefetch_target = -1;
@@ -1034,6 +1035,7 @@ table_rescan_bm(BitmapTableScanDesc scan,
 
 	scan->rel->rd_tableam->scan_rescan_bm(scan);
 	scan->pstate = pstate;
+	scan->pfblockno = InvalidBlockNumber;
 
 	tbm_begin_iterate(&scan->iterator, tbm, dsa,
 								pstate ?
