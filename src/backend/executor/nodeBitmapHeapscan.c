@@ -51,8 +51,6 @@
 
 static TupleTableSlot *BitmapHeapNext(BitmapHeapScanState *node);
 static inline void BitmapDoneInitializingSharedState(ParallelBitmapHeapState *pstate);
-static inline void BitmapAdjustPrefetchTarget(BitmapHeapScanState *node,
-											  BitmapTableScanDesc scan);
 static bool BitmapShouldInitializeSharedState(ParallelBitmapHeapState *pstate);
 
 /*
@@ -217,21 +215,9 @@ BitmapHeapNext(BitmapHeapScanState *node)
 
 new_page:
 
-		if (!table_scan_bitmap_next_block(scan, &node->blockno, &node->recheck,
+		if (!table_scan_bitmap_next_block(scan, &scan->blockno, &node->recheck,
 										  &node->lossy_pages, &node->exact_pages))
 			break;
-
-		/*
-		 * If serial, we can error out if the the prefetch block doesn't stay
-		 * ahead of the current block.
-		 */
-		if (node->pstate == NULL &&
-			!scan->prefetch_iterator.exhausted &&
-			scan->pfblockno < node->blockno)
-			elog(ERROR, "prefetch and main iterators are out of sync");
-
-		/* Adjust the prefetch target */
-		BitmapAdjustPrefetchTarget(node, scan);
 	}
 
 	/*
@@ -254,51 +240,6 @@ BitmapDoneInitializingSharedState(ParallelBitmapHeapState *pstate)
 	SpinLockRelease(&pstate->mutex);
 	ConditionVariableBroadcast(&pstate->cv);
 }
-
-/*
- * BitmapAdjustPrefetchTarget - Adjust the prefetch target
- *
- * Increase prefetch target if it's not yet at the max.  Note that
- * we will increase it to zero after fetching the very first
- * page/tuple, then to one after the second tuple is fetched, then
- * it doubles as later pages are fetched.
- */
-static inline void
-BitmapAdjustPrefetchTarget(BitmapHeapScanState *node, BitmapTableScanDesc scan)
-{
-#ifdef USE_PREFETCH
-	ParallelBitmapHeapState *pstate = scan->pstate;
-
-	if (pstate == NULL)
-	{
-		if (scan->prefetch_target >= scan->prefetch_maximum)
-			 /* don't increase any further */ ;
-		else if (scan->prefetch_target >= scan->prefetch_maximum / 2)
-			scan->prefetch_target = scan->prefetch_maximum;
-		else if (scan->prefetch_target > 0)
-			scan->prefetch_target *= 2;
-		else
-			scan->prefetch_target++;
-		return;
-	}
-
-	/* Do an unlocked check first to save spinlock acquisitions. */
-	if (pstate->prefetch_target < scan->prefetch_maximum)
-	{
-		SpinLockAcquire(&pstate->mutex);
-		if (pstate->prefetch_target >= scan->prefetch_maximum)
-			 /* don't increase any further */ ;
-		else if (pstate->prefetch_target >= scan->prefetch_maximum / 2)
-			pstate->prefetch_target = scan->prefetch_maximum;
-		else if (pstate->prefetch_target > 0)
-			pstate->prefetch_target *= 2;
-		else
-			pstate->prefetch_target++;
-		SpinLockRelease(&pstate->mutex);
-	}
-#endif							/* USE_PREFETCH */
-}
-
 
 /*
  * BitmapHeapRecheck -- access method routine to recheck a tuple in EvalPlanQual
@@ -347,7 +288,6 @@ ExecReScanBitmapHeapScan(BitmapHeapScanState *node)
 	node->tbm = NULL;
 	node->initialized = false;
 	node->recheck = true;
-	node->blockno = InvalidBlockNumber;
 
 	ExecScanReScan(&node->ss);
 
@@ -428,7 +368,6 @@ ExecInitBitmapHeapScan(BitmapHeapScan *node, EState *estate, int eflags)
 	scanstate->scan_in_progress = false;
 	scanstate->pstate = NULL;
 	scanstate->recheck = true;
-	scanstate->blockno = InvalidBlockNumber;
 
 	/*
 	 * Miscellaneous initialization

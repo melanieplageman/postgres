@@ -1797,7 +1797,6 @@ typedef struct ParallelBitmapHeapState
  *		initialized		   is node is ready to iterate
  *		pstate			   shared state for parallel bitmap scan
  *		recheck			   do current page's tuples need recheck
- *		blockno			   used to validate pf and current block in sync
  * ----------------
  */
 typedef struct BitmapHeapScanState
@@ -1812,7 +1811,6 @@ typedef struct BitmapHeapScanState
 	bool		scan_in_progress;
 	ParallelBitmapHeapState *pstate;
 	bool		recheck;
-	BlockNumber blockno;
 } BitmapHeapScanState;
 
 /* ----------------

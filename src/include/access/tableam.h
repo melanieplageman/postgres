@@ -1003,6 +1003,7 @@ table_beginscan_bm(Relation rel, Snapshot snapshot,
 	result->pstate = pstate;
 	result->pvmbuffer = InvalidBuffer;
 	result->pfblockno = InvalidBlockNumber;
+	result->blockno = InvalidBlockNumber;
 
 	/* Only used for serial BHS */
 	result->prefetch_target = -1;
@@ -1036,6 +1037,7 @@ table_rescan_bm(BitmapTableScanDesc scan,
 	scan->rel->rd_tableam->scan_rescan_bm(scan);
 	scan->pstate = pstate;
 	scan->pfblockno = InvalidBlockNumber;
+	scan->blockno = InvalidBlockNumber;
 
 	tbm_begin_iterate(&scan->iterator, tbm, dsa,
 					  pstate ?

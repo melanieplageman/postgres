@@ -67,6 +67,7 @@ typedef struct BitmapTableScanDescData
 	TBMIterator prefetch_iterator;
 	Buffer		pvmbuffer;
 	BlockNumber pfblockno;
+	BlockNumber blockno;
 
 	/*
 	 * Information about type and behaviour of the scan, a bitmask of members

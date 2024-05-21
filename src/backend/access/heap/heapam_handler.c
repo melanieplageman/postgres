@@ -56,6 +56,7 @@ static bool SampleHeapTupleVisible(TableScanDesc scan, Buffer buffer,
 
 static inline void BitmapPrefetch(BitmapTableScanDesc scan);
 static inline void BitmapAdjustPrefetchIterator(BitmapTableScanDesc scan);
+static inline void BitmapAdjustPrefetchTarget(BitmapTableScanDesc scan);
 static BlockNumber heapam_scan_get_blocks_done(HeapScanDesc hscan);
 
 static const TableAmRoutine heapam_methods;
@@ -2290,6 +2291,51 @@ BitmapAdjustPrefetchIterator(BitmapTableScanDesc scan)
 #endif							/* USE_PREFETCH */
 }
 
+/*
+ * BitmapAdjustPrefetchTarget - Adjust the prefetch target
+ *
+ * Increase prefetch target if it's not yet at the max.  Note that
+ * we will increase it to zero after fetching the very first
+ * page/tuple, then to one after the second tuple is fetched, then
+ * it doubles as later pages are fetched.
+ */
+static inline void
+BitmapAdjustPrefetchTarget(BitmapTableScanDesc scan)
+{
+#ifdef USE_PREFETCH
+	ParallelBitmapHeapState *pstate = scan->pstate;
+
+	if (pstate == NULL)
+	{
+		if (scan->prefetch_target >= scan->prefetch_maximum)
+			 /* don't increase any further */ ;
+		else if (scan->prefetch_target >= scan->prefetch_maximum / 2)
+			scan->prefetch_target = scan->prefetch_maximum;
+		else if (scan->prefetch_target > 0)
+			scan->prefetch_target *= 2;
+		else
+			scan->prefetch_target++;
+		return;
+	}
+
+	/* Do an unlocked check first to save spinlock acquisitions. */
+	if (pstate->prefetch_target < scan->prefetch_maximum)
+	{
+		SpinLockAcquire(&pstate->mutex);
+		if (pstate->prefetch_target >= scan->prefetch_maximum)
+			 /* don't increase any further */ ;
+		else if (pstate->prefetch_target >= scan->prefetch_maximum / 2)
+			pstate->prefetch_target = scan->prefetch_maximum;
+		else if (pstate->prefetch_target > 0)
+			pstate->prefetch_target *= 2;
+		else
+			pstate->prefetch_target++;
+		SpinLockRelease(&pstate->mutex);
+	}
+#endif							/* USE_PREFETCH */
+}
+
+
 /* ------------------------------------------------------------------------
  * Executor related callbacks for the heap AM
  * ------------------------------------------------------------------------
@@ -2454,6 +2500,18 @@ heapam_scan_bitmap_next_block(BitmapTableScanDesc scan,
 		(*lossy_pages)++;
 	else
 		(*exact_pages)++;
+
+	/*
+	 * If serial, we can error out if the the prefetch block doesn't stay
+	 * ahead of the current block.
+	 */
+	if (scan->pstate == NULL &&
+		!scan->prefetch_iterator.exhausted &&
+		scan->pfblockno < scan->blockno)
+		elog(ERROR, "prefetch and main iterators are out of sync");
+
+	/* Adjust the prefetch target */
+	BitmapAdjustPrefetchTarget(scan);
 
 	/*
 	 * Return true to indicate that a valid block was found and the bitmap is
