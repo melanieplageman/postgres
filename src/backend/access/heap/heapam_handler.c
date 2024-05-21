@@ -54,6 +54,7 @@ static bool SampleHeapTupleVisible(TableScanDesc scan, Buffer buffer,
 								   HeapTuple tuple,
 								   OffsetNumber tupoffset);
 
+static inline void BitmapPrefetch(BitmapTableScanDesc scan);
 static BlockNumber heapam_scan_get_blocks_done(HeapScanDesc hscan);
 
 static const TableAmRoutine heapam_methods;
@@ -2112,6 +2113,106 @@ heapam_estimate_rel_size(Relation rel, int32 *attr_widths,
 									   HEAP_USABLE_BYTES_PER_PAGE);
 }
 
+/*
+ * BitmapPrefetch - Prefetch, if prefetch_pages are behind prefetch_target
+ */
+static inline void
+BitmapPrefetch(BitmapTableScanDesc scan)
+{
+#ifdef USE_PREFETCH
+	ParallelBitmapHeapState *pstate = scan->pstate;
+
+	if (pstate == NULL)
+	{
+		TBMIterator *prefetch_iterator = &scan->prefetch_iterator;
+
+		if (!prefetch_iterator->exhausted)
+		{
+			while (scan->prefetch_pages < scan->prefetch_target)
+			{
+				TBMIterateResult *tbmpre = tbm_iterate(prefetch_iterator);
+				bool		skip_fetch;
+
+				if (tbmpre == NULL)
+				{
+					/* No more pages to prefetch */
+					tbm_end_iterate(prefetch_iterator);
+					break;
+				}
+				scan->prefetch_pages++;
+				scan->pfblockno = tbmpre->blockno;
+
+				/*
+				 * If we expect not to have to actually read this heap page,
+				 * skip this prefetch call, but continue to run the prefetch
+				 * logic normally.  (Would it be better not to increment
+				 * prefetch_pages?)
+				 */
+				skip_fetch = (!(scan->flags & SO_NEED_TUPLES) &&
+							  !tbmpre->recheck &&
+							  VM_ALL_VISIBLE(scan->rel,
+											 tbmpre->blockno,
+											 &scan->pvmbuffer));
+
+				if (!skip_fetch)
+					PrefetchBuffer(scan->rel, MAIN_FORKNUM, tbmpre->blockno);
+			}
+		}
+
+		return;
+	}
+
+	if (pstate->prefetch_pages < pstate->prefetch_target)
+	{
+		TBMIterator *prefetch_iterator = &scan->prefetch_iterator;
+
+		if (!prefetch_iterator->exhausted)
+		{
+			while (1)
+			{
+				TBMIterateResult *tbmpre;
+				bool		do_prefetch = false;
+				bool		skip_fetch;
+
+				/*
+				 * Recheck under the mutex. If some other process has already
+				 * done enough prefetching then we need not to do anything.
+				 */
+				SpinLockAcquire(&pstate->mutex);
+				if (pstate->prefetch_pages < pstate->prefetch_target)
+				{
+					pstate->prefetch_pages++;
+					do_prefetch = true;
+				}
+				SpinLockRelease(&pstate->mutex);
+
+				if (!do_prefetch)
+					return;
+
+				tbmpre = tbm_iterate(prefetch_iterator);
+				if (tbmpre == NULL)
+				{
+					/* No more pages to prefetch */
+					tbm_end_iterate(prefetch_iterator);
+					break;
+				}
+
+				scan->pfblockno = tbmpre->blockno;
+
+				/* As above, skip prefetch if we expect not to need page */
+				skip_fetch = (!(scan->flags & SO_NEED_TUPLES) &&
+							  !tbmpre->recheck &&
+							  VM_ALL_VISIBLE(scan->rel,
+											 tbmpre->blockno,
+											 &scan->pvmbuffer));
+
+				if (!skip_fetch)
+					PrefetchBuffer(scan->rel, MAIN_FORKNUM, tbmpre->blockno);
+			}
+		}
+	}
+#endif							/* USE_PREFETCH */
+}
 
 /* ------------------------------------------------------------------------
  * Executor related callbacks for the heap AM
@@ -2291,6 +2392,7 @@ heapam_scan_bitmap_next_tuple(BitmapTableScanDesc scan,
 							  TupleTableSlot *slot)
 {
 	BitmapHeapScanDesc hscan = (BitmapHeapScanDesc) scan;
+	ParallelBitmapHeapState *pstate = scan->pstate;
 	OffsetNumber targoffset;
 	Page		page;
 	ItemId		lp;
@@ -2310,6 +2412,38 @@ heapam_scan_bitmap_next_tuple(BitmapTableScanDesc scan,
 	 */
 	if (hscan->vis_idx < 0 || hscan->vis_idx >= hscan->vis_ntuples)
 		return false;
+
+#ifdef USE_PREFETCH
+
+		/*
+		* Try to prefetch at least a few pages even before we get to the
+		* second page if we don't stop reading after the first tuple.
+		*/
+	if (!pstate)
+	{
+		if (scan->prefetch_target < scan->prefetch_maximum)
+			scan->prefetch_target++;
+	}
+	else if (pstate->prefetch_target < scan->prefetch_maximum)
+	{
+		/* take spinlock while updating shared state */
+		SpinLockAcquire(&pstate->mutex);
+		if (pstate->prefetch_target < scan->prefetch_maximum)
+			pstate->prefetch_target++;
+		SpinLockRelease(&pstate->mutex);
+	}
+#endif							/* USE_PREFETCH */
+
+		/*
+		* We issue prefetch requests *after* fetching the current page to
+		* try to avoid having prefetching interfere with the main I/O.
+		* Also, this should happen only when we have determined there is
+		* still something to do on the current page, else we may
+		* uselessly prefetch the same page we are just about to request
+		* for real.
+		*/
+	BitmapPrefetch(scan);
+
 
 	targoffset = hscan->vis_tuples[hscan->vis_idx];
 	page = BufferGetPage(hscan->cbuf);
