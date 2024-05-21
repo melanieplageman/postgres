@@ -1812,7 +1812,7 @@ typedef struct BitmapHeapScanState
 	long		exact_pages;
 	long		lossy_pages;
 	bool		initialized;
-	bool		scan_initialized;
+	bool		scan_in_progress;
 	ParallelBitmapHeapState *pstate;
 	bool		recheck;
 	BlockNumber blockno;
