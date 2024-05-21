@@ -830,25 +830,6 @@ typedef struct TableAmRoutine
 	 * lossy_pages is incremented if the bitmap is lossy for the selected
 	 * block; otherwise, exact_pages is incremented.
 	 *
-	 * XXX: Currently this may only be implemented if the AM uses md.c as its
-	 * storage manager, and uses ItemPointer->ip_blkid in a manner that maps
-	 * blockids directly to the underlying storage. nodeBitmapHeapscan.c
-	 * performs prefetching directly using that interface.  This probably
-	 * needs to be rectified at a later point.
-	 *
-	 * XXX: Currently this may only be implemented if the AM uses the
-	 * visibilitymap, as nodeBitmapHeapscan.c unconditionally accesses it to
-	 * perform prefetching.  This probably needs to be rectified at a later
-	 * point.
-	 *
-	 * Optional callback, but either both scan_bitmap_next_block and
-	 * scan_bitmap_next_tuple need to exist, or neither.
-	 */
-	bool		(*scan_bitmap_next_block) (BitmapTableScanDesc scan,
-										   bool *recheck,
-										   long *lossy_pages, long *exact_pages);
-
-	/*
 	 * Fetch the next tuple of a bitmap table scan into `slot` and return true
 	 * if a visible tuple was found, false otherwise.
 	 *
@@ -856,7 +837,8 @@ typedef struct TableAmRoutine
 	 * scan_bitmap_next_tuple need to exist, or neither.
 	 */
 	bool		(*scan_bitmap_next_tuple) (BitmapTableScanDesc scan,
-										   TupleTableSlot *slot);
+										   TupleTableSlot *slot, bool *recheck,
+										   long *lossy_pages, long *exact_pages);
 
 	/*
 	 * Prepare to fetch tuples from the next block in a sample scan. Return
@@ -2000,36 +1982,13 @@ table_relation_estimate_size(Relation rel, int32 *attr_widths,
  * ----------------------------------------------------------------------------
  */
 
+
 /*
  * Prepare to fetch / check / return tuples as part of a bitmap table scan.
  * `scan` needs to have been started via table_beginscan_bm(). Returns false if
  * there are no more blocks in the bitmap, true otherwise. lossy_pages is
  * incremented is the block's representation in the bitmap is lossy; otherwise,
  * exact_pages is incremented.
- *
- * Note, this is an optionally implemented function, therefore should only be
- * used after verifying the presence (at plan time or such).
- */
-static inline bool
-table_scan_bitmap_next_block(BitmapTableScanDesc scan,
-							 bool *recheck,
-							 long *lossy_pages,
-							 long *exact_pages)
-{
-	/*
-	 * We don't expect direct calls to table_scan_bitmap_next_block with valid
-	 * CheckXidAlive for catalog or regular tables.  See detailed comments in
-	 * xact.c where these variables are declared.
-	 */
-	if (unlikely(TransactionIdIsValid(CheckXidAlive) && !bsysscan))
-		elog(ERROR, "unexpected table_scan_bitmap_next_block call during logical decoding");
-
-	return scan->rel->rd_tableam->scan_bitmap_next_block(scan,
-														 recheck,
-														 lossy_pages, exact_pages);
-}
-
-/*
  * Fetch the next tuple of a bitmap table scan into `slot` and return true if
  * a visible tuple was found, false otherwise.
  * table_scan_bitmap_next_block() needs to previously have selected a
@@ -2039,7 +1998,10 @@ table_scan_bitmap_next_block(BitmapTableScanDesc scan,
  */
 static inline bool
 table_scan_bitmap_next_tuple(BitmapTableScanDesc scan,
-							 TupleTableSlot *slot)
+							 TupleTableSlot *slot,
+							 bool *recheck,
+							 long *lossy_pages,
+							 long *exact_pages)
 {
 	/*
 	 * We don't expect direct calls to table_scan_bitmap_next_tuple with valid
@@ -2050,7 +2012,8 @@ table_scan_bitmap_next_tuple(BitmapTableScanDesc scan,
 		elog(ERROR, "unexpected table_scan_bitmap_next_tuple call during logical decoding");
 
 	return scan->rel->rd_tableam->scan_bitmap_next_tuple(scan,
-														 slot);
+														 slot, recheck,
+														 lossy_pages, exact_pages);
 }
 
 /*

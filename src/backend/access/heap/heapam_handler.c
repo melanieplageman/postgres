@@ -2338,12 +2338,6 @@ BitmapAdjustPrefetchTarget(BitmapTableScanDesc scan)
 #endif							/* USE_PREFETCH */
 }
 
-
-/* ------------------------------------------------------------------------
- * Executor related callbacks for the heap AM
- * ------------------------------------------------------------------------
- */
-
 static bool
 heapam_scan_bitmap_next_block(BitmapTableScanDesc scan,
 							  bool *recheck,
@@ -2523,9 +2517,16 @@ heapam_scan_bitmap_next_block(BitmapTableScanDesc scan,
 	return true;
 }
 
+
+/* ------------------------------------------------------------------------
+ * Executor related callbacks for the heap AM
+ * ------------------------------------------------------------------------
+ */
+
 static bool
 heapam_scan_bitmap_next_tuple(BitmapTableScanDesc scan,
-							  TupleTableSlot *slot)
+							  TupleTableSlot *slot, bool *recheck,
+							  long *lossy_pages, long *exact_pages)
 {
 	BitmapHeapScanDesc hscan = (BitmapHeapScanDesc) scan;
 	ParallelBitmapHeapState *pstate = hscan->pstate;
@@ -2533,21 +2534,29 @@ heapam_scan_bitmap_next_tuple(BitmapTableScanDesc scan,
 	Page		page;
 	ItemId		lp;
 
-	if (hscan->empty_tuples_pending > 0)
-	{
-		/*
-		 * If we don't have to fetch the tuple, just return nulls.
-		 */
-		ExecStoreAllNullTuple(slot);
-		hscan->empty_tuples_pending--;
-		return true;
-	}
 
 	/*
 	 * Out of range?  If so, nothing more to look at on this page
 	 */
-	if (hscan->vis_idx < 0 || hscan->vis_idx >= hscan->vis_ntuples)
-		return false;
+	while (hscan->vis_idx < 0 || hscan->vis_idx >= hscan->vis_ntuples)
+	{
+		/*
+		 * Emit empty tuples before advancing to the next block
+		 */
+		if (hscan->empty_tuples_pending > 0)
+		{
+			/*
+			 * If we don't have to fetch the tuple, just return nulls.
+			 */
+			ExecStoreAllNullTuple(slot);
+			hscan->empty_tuples_pending--;
+			return true;
+		}
+
+		if (!heapam_scan_bitmap_next_block(scan, recheck, lossy_pages, exact_pages))
+			return false;
+	}
+
 
 #ifdef USE_PREFETCH
 
@@ -2949,7 +2958,6 @@ static const TableAmRoutine heapam_methods = {
 
 	.relation_estimate_size = heapam_estimate_rel_size,
 
-	.scan_bitmap_next_block = heapam_scan_bitmap_next_block,
 	.scan_bitmap_next_tuple = heapam_scan_bitmap_next_tuple,
 	.scan_sample_next_block = heapam_scan_sample_next_block,
 	.scan_sample_next_tuple = heapam_scan_sample_next_tuple
