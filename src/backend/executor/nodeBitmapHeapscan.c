@@ -147,7 +147,6 @@ BitmapHeapNext(BitmapHeapScanState *node)
 						tbm_prepare_shared_iterate(tbm);
 				}
 #endif
-
 				/* We have initialized the shared state so wake up others. */
 				BitmapDoneInitializingSharedState(pstate);
 			}
@@ -187,30 +186,16 @@ BitmapHeapNext(BitmapHeapScanState *node)
 									  node->ss.ps.state->es_snapshot,
 									  pstate,
 									  tbm,
-									  need_tuples);
+									  need_tuples, prefetch_maximum);
 			node->scan_initialized = true;
 		}
 		else
 		{
 			/* rescan to release any page pin */
-			table_rescan_bm(scan);
-			if (!pstate)
-			{
-				scan->iterator = tbm_begin_serial_iterate(tbm);
-#ifdef USE_PREFETCH
-				if (prefetch_maximum > 0)
-					scan->prefetch_iterator = tbm_begin_serial_iterate(tbm);
-#endif							/* USE_PREFETCH */
-			}
-			else
-			{
-				scan->iterator = NULL;
-				scan->prefetch_iterator = NULL;
-			}
+			table_rescan_bm(scan, tbm, prefetch_maximum);
 		}
 
 		scan->shared_iterator = shared_tbmiterator;
-		scan->prefetch_maximum = prefetch_maximum;
 		node->initialized = true;
 
 		goto new_page;

@@ -975,7 +975,8 @@ static inline BitmapTableScanDesc
 table_beginscan_bm(Relation rel, Snapshot snapshot,
 		ParallelBitmapHeapState *pstate,
 		TIDBitmap *tbm,
-		bool need_tuple)
+		bool need_tuple,
+		int prefetch_maximum)
 {
 	BitmapTableScanDesc result;
 	uint32		flags = SO_TYPE_BITMAPSCAN | SO_ALLOW_PAGEMODE;
@@ -984,16 +985,20 @@ table_beginscan_bm(Relation rel, Snapshot snapshot,
 		flags |= SO_NEED_TUPLES;
 
 	result = rel->rd_tableam->scan_begin_bm(rel, snapshot, flags);
+	result->iterator = NULL;
+	result->prefetch_iterator = NULL;
+
 	if (!pstate)
 	{
 		result->iterator = tbm_begin_serial_iterate(tbm);
-		result->prefetch_iterator = tbm_begin_serial_iterate(tbm);
+
+#ifdef USE_PREFETCH
+		if (prefetch_maximum > 0)
+			result->prefetch_iterator = tbm_begin_serial_iterate(tbm);
+#endif							/* USE_PREFETCH */
 	}
-	else
-	{
-		result->iterator = NULL;
-		result->prefetch_iterator = NULL;
-	}
+
+	result->prefetch_maximum = prefetch_maximum;
 
 	/* Only used for serial BHS */
 	result->prefetch_target = -1;
@@ -1002,25 +1007,32 @@ table_beginscan_bm(Relation rel, Snapshot snapshot,
 }
 
 static inline void
-table_rescan_bm(BitmapTableScanDesc scan)
+table_rescan_bm(BitmapTableScanDesc scan,
+		TIDBitmap *tbm,
+		int prefetch_maximum)
 {
+	bool parallel = false;
+
 	if (scan->shared_iterator)
 	{
 		tbm_end_shared_iterate(scan->shared_iterator);
 		scan->shared_iterator = NULL;
+		parallel = true;
 	}
 
 	if (scan->iterator)
-	{
 		tbm_end_serial_iterate(scan->iterator);
-		scan->iterator = NULL;
-	}
 	if (scan->prefetch_iterator)
-	{
 		tbm_end_serial_iterate(scan->prefetch_iterator);
-		scan->prefetch_iterator = NULL;
-	}
 
+	scan->iterator = NULL;
+	scan->prefetch_iterator = NULL;
+
+	/*
+	 * This is only needed as a parameter if we assume it can change on
+	 * rescan
+	 */
+	scan->prefetch_maximum = prefetch_maximum;
 
 	/* Only used for serial BHS */
 	scan->prefetch_target = -1;
@@ -1028,7 +1040,14 @@ table_rescan_bm(BitmapTableScanDesc scan)
 
 	scan->rel->rd_tableam->scan_rescan_bm(scan);
 
-	// TODO: should begin the next iteration here?
+	if (!parallel)
+	{
+		scan->iterator = tbm_begin_serial_iterate(tbm);
+#ifdef USE_PREFETCH
+		if (prefetch_maximum > 0)
+			scan->prefetch_iterator = tbm_begin_serial_iterate(tbm);
+#endif							/* USE_PREFETCH */
+	}
 }
 
 static inline void
