@@ -61,8 +61,7 @@ typedef struct BitmapTableScanDescData
 	 * Members common to Parallel and Serial BitmapTableScans
 	 */
 	TBMIterator iterator;
-	struct TBMSerialIterator *prefetch_iterator;
-	struct TBMSharedIterator *shared_prefetch_iterator;
+	TBMIterator prefetch_iterator;
 
 	/*
 	 * Information about type and behaviour of the scan, a bitmask of members

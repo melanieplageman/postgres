@@ -991,26 +991,13 @@ table_beginscan_bm(Relation rel, Snapshot snapshot,
 								pstate ?
 								pstate->tbmiterator:
 								InvalidDsaPointer);
-	result->prefetch_iterator = NULL;
-	result->shared_prefetch_iterator = NULL;
-
-	if (!pstate)
-	{
 #ifdef USE_PREFETCH
-		if (prefetch_maximum > 0)
-			result->prefetch_iterator = tbm_begin_serial_iterate(tbm);
+	if (prefetch_maximum > 0)
+		tbm_begin_iterate(&result->prefetch_iterator, tbm, dsa,
+				pstate ?
+				pstate->prefetch_iterator :
+				InvalidDsaPointer);
 #endif							/* USE_PREFETCH */
-	}
-	else
-	{
-#ifdef USE_PREFETCH
-		if (prefetch_maximum > 0)
-		{
-			result->shared_prefetch_iterator =
-				tbm_attach_shared_iterate(dsa, pstate->prefetch_iterator);
-		}
-#endif							/* USE_PREFETCH */
-	}
 
 	result->prefetch_maximum = prefetch_maximum;
 
@@ -1028,16 +1015,7 @@ table_rescan_bm(BitmapTableScanDesc scan,
 				int prefetch_maximum)
 {
 	tbm_end_iterate(&scan->iterator);
-	if (scan->prefetch_iterator)
-		tbm_end_serial_iterate(scan->prefetch_iterator);
-	scan->prefetch_iterator = NULL;
-
-	if (scan->shared_prefetch_iterator)
-	{
-		tbm_end_shared_iterate(scan->shared_prefetch_iterator);
-		scan->shared_prefetch_iterator = NULL;
-	}
-	scan->shared_prefetch_iterator = NULL;
+	tbm_end_iterate(&scan->prefetch_iterator);
 
 	/*
 	 * This is only needed as a parameter if we assume it can change on rescan
@@ -1054,41 +1032,20 @@ table_rescan_bm(BitmapTableScanDesc scan,
 								pstate ?
 								pstate->tbmiterator:
 								InvalidDsaPointer);
-
-	if (!pstate)
-	{
 #ifdef USE_PREFETCH
-		if (prefetch_maximum > 0)
-			scan->prefetch_iterator = tbm_begin_serial_iterate(tbm);
+	if (prefetch_maximum > 0)
+		tbm_begin_iterate(&scan->prefetch_iterator, tbm, dsa,
+				pstate ?
+				pstate->prefetch_iterator :
+				InvalidDsaPointer);
 #endif							/* USE_PREFETCH */
-	}
-	else
-	{
-#ifdef USE_PREFETCH
-		if (prefetch_maximum > 0)
-		{
-			scan->shared_prefetch_iterator =
-				tbm_attach_shared_iterate(dsa, pstate->prefetch_iterator);
-		}
-#endif							/* USE_PREFETCH */
-	}
 }
 
 static inline void
 table_endscan_bm(BitmapTableScanDesc scan)
 {
 	tbm_end_iterate(&scan->iterator);
-
-	if (scan->shared_prefetch_iterator)
-	{
-		tbm_end_shared_iterate(scan->shared_prefetch_iterator);
-		scan->shared_prefetch_iterator = NULL;
-	}
-	if (scan->prefetch_iterator)
-	{
-		tbm_end_serial_iterate(scan->prefetch_iterator);
-		scan->prefetch_iterator = NULL;
-	}
+	tbm_end_iterate(&scan->prefetch_iterator);
 
 	scan->rel->rd_tableam->scan_end_bm(scan);
 }
