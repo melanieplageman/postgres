@@ -1796,7 +1796,6 @@ typedef struct ParallelBitmapHeapState
  *		exact_pages		   total number of exact pages retrieved
  *		lossy_pages		   total number of lossy pages retrieved
  *		initialized		   is node is ready to iterate
- *		shared_prefetch_iterator shared iterator for prefetching
  *		pstate			   shared state for parallel bitmap scan
  *		recheck			   do current page's tuples need recheck
  *		blockno			   used to validate pf and current block in sync
@@ -1814,7 +1813,6 @@ typedef struct BitmapHeapScanState
 	long		lossy_pages;
 	bool		initialized;
 	bool		scan_initialized;
-	TBMSharedIterator *shared_prefetch_iterator;
 	ParallelBitmapHeapState *pstate;
 	bool		recheck;
 	BlockNumber blockno;
