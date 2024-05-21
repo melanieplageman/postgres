@@ -1795,7 +1795,6 @@ typedef struct ParallelBitmapHeapState
  *		pvmbuffer		   buffer for visibility-map lookups of prefetched pages
  *		exact_pages		   total number of exact pages retrieved
  *		lossy_pages		   total number of lossy pages retrieved
- *		prefetch_iterator  iterator for prefetching ahead of current page
  *		initialized		   is node is ready to iterate
  *		shared_prefetch_iterator shared iterator for prefetching
  *		pstate			   shared state for parallel bitmap scan
@@ -1813,7 +1812,6 @@ typedef struct BitmapHeapScanState
 	Buffer		pvmbuffer;
 	long		exact_pages;
 	long		lossy_pages;
-	TBMSerialIterator *prefetch_iterator;
 	bool		initialized;
 	bool		scan_initialized;
 	TBMSharedIterator *shared_prefetch_iterator;

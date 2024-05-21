@@ -985,9 +985,15 @@ table_beginscan_bm(Relation rel, Snapshot snapshot,
 
 	result = rel->rd_tableam->scan_begin_bm(rel, snapshot, flags);
 	if (!pstate)
+	{
 		result->iterator = tbm_begin_serial_iterate(tbm);
+		result->prefetch_iterator = tbm_begin_serial_iterate(tbm);
+	}
 	else
+	{
 		result->iterator = NULL;
+		result->prefetch_iterator = NULL;
+	}
 
 	/* Only used for serial BHS */
 	result->prefetch_target = -1;
@@ -1009,6 +1015,12 @@ table_rescan_bm(BitmapTableScanDesc scan)
 		tbm_end_serial_iterate(scan->iterator);
 		scan->iterator = NULL;
 	}
+	if (scan->prefetch_iterator)
+	{
+		tbm_end_serial_iterate(scan->prefetch_iterator);
+		scan->prefetch_iterator = NULL;
+	}
+
 
 	/* Only used for serial BHS */
 	scan->prefetch_target = -1;
@@ -1032,6 +1044,12 @@ table_endscan_bm(BitmapTableScanDesc scan)
 	{
 		tbm_end_serial_iterate(scan->iterator);
 		scan->iterator = NULL;
+	}
+
+	if (scan->prefetch_iterator)
+	{
+		tbm_end_serial_iterate(scan->prefetch_iterator);
+		scan->prefetch_iterator = NULL;
 	}
 
 	scan->rel->rd_tableam->scan_end_bm(scan);
