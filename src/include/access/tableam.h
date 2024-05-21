@@ -1001,7 +1001,6 @@ table_beginscan_bm(Relation rel, Snapshot snapshot,
 
 	result->prefetch_maximum = prefetch_maximum;
 	result->pstate = pstate;
-	result->pvmbuffer = InvalidBuffer;
 	result->pfblockno = InvalidBlockNumber;
 	result->blockno = InvalidBlockNumber;
 
@@ -1020,10 +1019,6 @@ table_rescan_bm(BitmapTableScanDesc scan,
 {
 	tbm_end_iterate(&scan->iterator);
 	tbm_end_iterate(&scan->prefetch_iterator);
-
-	if (scan->pvmbuffer != InvalidBuffer)
-		ReleaseBuffer(scan->pvmbuffer);
-	scan->pvmbuffer = InvalidBuffer;
 
 	/*
 	 * This is only needed as a parameter if we assume it can change on rescan
@@ -1057,9 +1052,6 @@ table_endscan_bm(BitmapTableScanDesc scan)
 {
 	tbm_end_iterate(&scan->iterator);
 	tbm_end_iterate(&scan->prefetch_iterator);
-
-	if (scan->pvmbuffer != InvalidBuffer)
-		ReleaseBuffer(scan->pvmbuffer);
 
 	scan->rel->rd_tableam->scan_end_bm(scan);
 }

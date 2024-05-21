@@ -122,6 +122,7 @@ typedef struct BitmapHeapScanDescData
 	 * to return. They are common to parallel and serial BitmapHeapScans
 	 */
 	Buffer		vmbuffer;
+	Buffer		pvmbuffer;
 	int			empty_tuples_pending;
 }			BitmapHeapScanDescData;
 typedef struct BitmapHeapScanDescData *BitmapHeapScanDesc;

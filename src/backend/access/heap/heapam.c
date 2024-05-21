@@ -1264,6 +1264,7 @@ heap_beginscan_bm(Relation relation, Snapshot snapshot, uint32 flags)
 	scan->vis_ntuples = 0;
 
 	scan->vmbuffer = InvalidBuffer;
+	scan->pvmbuffer = InvalidBuffer;
 	scan->empty_tuples_pending = 0;
 
 	/*
@@ -1288,6 +1289,12 @@ heap_rescan_bm(BitmapTableScanDesc sscan)
 		scan->vmbuffer = InvalidBuffer;
 	}
 
+	if (BufferIsValid(scan->pvmbuffer))
+	{
+		ReleaseBuffer(scan->pvmbuffer);
+		scan->pvmbuffer = InvalidBuffer;
+	}
+
 	scan->empty_tuples_pending = 0;
 
 	scan->nblocks = RelationGetNumberOfBlocks(scan->base.rel);
@@ -1308,6 +1315,9 @@ heap_endscan_bm(BitmapTableScanDesc sscan)
 
 	if (BufferIsValid(scan->vmbuffer))
 		ReleaseBuffer(scan->vmbuffer);
+
+	if (BufferIsValid(scan->pvmbuffer))
+		ReleaseBuffer(scan->pvmbuffer);
 
 	/*
 	 * decrement relation reference count and free scan descriptor storage

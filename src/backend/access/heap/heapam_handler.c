@@ -2121,6 +2121,7 @@ heapam_estimate_rel_size(Relation rel, int32 *attr_widths,
 static inline void
 BitmapPrefetch(BitmapTableScanDesc scan)
 {
+	BitmapHeapScanDesc hscan = (BitmapHeapScanDesc) scan;
 #ifdef USE_PREFETCH
 	ParallelBitmapHeapState *pstate = scan->pstate;
 
@@ -2154,7 +2155,7 @@ BitmapPrefetch(BitmapTableScanDesc scan)
 							  !tbmpre->recheck &&
 							  VM_ALL_VISIBLE(scan->rel,
 											 tbmpre->blockno,
-											 &scan->pvmbuffer));
+											 &hscan->pvmbuffer));
 
 				if (!skip_fetch)
 					PrefetchBuffer(scan->rel, MAIN_FORKNUM, tbmpre->blockno);
@@ -2206,7 +2207,7 @@ BitmapPrefetch(BitmapTableScanDesc scan)
 							  !tbmpre->recheck &&
 							  VM_ALL_VISIBLE(scan->rel,
 											 tbmpre->blockno,
-											 &scan->pvmbuffer));
+											 &hscan->pvmbuffer));
 
 				if (!skip_fetch)
 					PrefetchBuffer(scan->rel, MAIN_FORKNUM, tbmpre->blockno);
