@@ -86,6 +86,9 @@ BitmapHeapScanSetup(BitmapHeapScanState *node)
 	prefetch_maximum = get_tablespace_io_concurrency(rel->rd_rel->reltablespace);
 #endif
 
+	/*
+	 * Scan the index, build the bitmap, and set up shared state for parallel.
+	 */
 	if (!pstate)
 	{
 		node->tbm = (TIDBitmap *) MultiExecProcNode(outerPlanState(node));
