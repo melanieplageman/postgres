@@ -2140,10 +2140,7 @@ heapam_scan_bitmap_next_block(BitmapTableScanDesc scan,
 	{
 		CHECK_FOR_INTERRUPTS();
 
-		if (scan->shared_iterator)
-			tbmres = tbm_shared_iterate(scan->shared_iterator);
-		else
-			tbmres = tbm_serial_iterate(scan->iterator);
+		tbmres = tbm_iterate(&scan->iterator);
 
 		if (tbmres == NULL)
 		{

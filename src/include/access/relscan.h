@@ -16,6 +16,7 @@
 
 #include "access/htup_details.h"
 #include "access/itup.h"
+#include "nodes/tidbitmap.h"
 #include "port/atomics.h"
 #include "storage/buf.h"
 #include "storage/spin.h"
@@ -23,9 +24,6 @@
 
 
 struct ParallelTableScanDescData;
-
-struct TBMSerialIterator;
-struct TBMSharedIterator;
 
 /*
  * Generic descriptor for table scans. This is the base-class for table scans,
@@ -62,8 +60,7 @@ typedef struct BitmapTableScanDescData
 	/*
 	 * Members common to Parallel and Serial BitmapTableScans
 	 */
-	struct TBMSerialIterator *iterator;
-	struct TBMSharedIterator *shared_iterator;
+	TBMIterator iterator;
 	struct TBMSerialIterator *prefetch_iterator;
 	struct TBMSharedIterator *shared_prefetch_iterator;
 

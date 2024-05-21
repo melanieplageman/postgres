@@ -986,15 +986,16 @@ table_beginscan_bm(Relation rel, Snapshot snapshot,
 		flags |= SO_NEED_TUPLES;
 
 	result = rel->rd_tableam->scan_begin_bm(rel, snapshot, flags);
-	result->iterator = NULL;
-	result->shared_iterator = NULL;
+
+	tbm_begin_iterate(&result->iterator, tbm, dsa,
+								pstate ?
+								pstate->tbmiterator:
+								InvalidDsaPointer);
 	result->prefetch_iterator = NULL;
 	result->shared_prefetch_iterator = NULL;
 
 	if (!pstate)
 	{
-		result->iterator = tbm_begin_serial_iterate(tbm);
-
 #ifdef USE_PREFETCH
 		if (prefetch_maximum > 0)
 			result->prefetch_iterator = tbm_begin_serial_iterate(tbm);
@@ -1002,9 +1003,6 @@ table_beginscan_bm(Relation rel, Snapshot snapshot,
 	}
 	else
 	{
-		/* Allocate a private iterator and attach the shared state to it */
-		result->shared_iterator = tbm_attach_shared_iterate(dsa, pstate->tbmiterator);
-
 #ifdef USE_PREFETCH
 		if (prefetch_maximum > 0)
 		{
@@ -1029,28 +1027,16 @@ table_rescan_bm(BitmapTableScanDesc scan,
 				dsa_area *dsa,
 				int prefetch_maximum)
 {
-	bool		parallel = false;
+	tbm_end_iterate(&scan->iterator);
+	if (scan->prefetch_iterator)
+		tbm_end_serial_iterate(scan->prefetch_iterator);
+	scan->prefetch_iterator = NULL;
 
-	if (scan->shared_iterator)
-	{
-		tbm_end_shared_iterate(scan->shared_iterator);
-		scan->shared_iterator = NULL;
-		parallel = true;
-	}
 	if (scan->shared_prefetch_iterator)
 	{
 		tbm_end_shared_iterate(scan->shared_prefetch_iterator);
 		scan->shared_prefetch_iterator = NULL;
 	}
-
-	if (scan->iterator)
-		tbm_end_serial_iterate(scan->iterator);
-	if (scan->prefetch_iterator)
-		tbm_end_serial_iterate(scan->prefetch_iterator);
-
-	scan->iterator = NULL;
-	scan->prefetch_iterator = NULL;
-	scan->shared_iterator = NULL;
 	scan->shared_prefetch_iterator = NULL;
 
 	/*
@@ -1064,9 +1050,13 @@ table_rescan_bm(BitmapTableScanDesc scan,
 
 	scan->rel->rd_tableam->scan_rescan_bm(scan);
 
-	if (!parallel)
+	tbm_begin_iterate(&scan->iterator, tbm, dsa,
+								pstate ?
+								pstate->tbmiterator:
+								InvalidDsaPointer);
+
+	if (!pstate)
 	{
-		scan->iterator = tbm_begin_serial_iterate(tbm);
 #ifdef USE_PREFETCH
 		if (prefetch_maximum > 0)
 			scan->prefetch_iterator = tbm_begin_serial_iterate(tbm);
@@ -1074,9 +1064,6 @@ table_rescan_bm(BitmapTableScanDesc scan,
 	}
 	else
 	{
-		/* Allocate a private iterator and attach the shared state to it */
-		scan->shared_iterator = tbm_attach_shared_iterate(dsa, pstate->tbmiterator);
-
 #ifdef USE_PREFETCH
 		if (prefetch_maximum > 0)
 		{
@@ -1090,24 +1077,13 @@ table_rescan_bm(BitmapTableScanDesc scan,
 static inline void
 table_endscan_bm(BitmapTableScanDesc scan)
 {
-	if (scan->shared_iterator)
-	{
-		tbm_end_shared_iterate(scan->shared_iterator);
-		scan->shared_iterator = NULL;
-	}
+	tbm_end_iterate(&scan->iterator);
 
 	if (scan->shared_prefetch_iterator)
 	{
 		tbm_end_shared_iterate(scan->shared_prefetch_iterator);
 		scan->shared_prefetch_iterator = NULL;
 	}
-
-	if (scan->iterator)
-	{
-		tbm_end_serial_iterate(scan->iterator);
-		scan->iterator = NULL;
-	}
-
 	if (scan->prefetch_iterator)
 	{
 		tbm_end_serial_iterate(scan->prefetch_iterator);
