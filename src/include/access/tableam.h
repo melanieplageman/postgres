@@ -355,11 +355,17 @@ typedef struct TableAmRoutine
 	 * `rel`, `flags`, and `snapshot` serve the same purposes as in the
 	 * standard relation scan_[begin|rescan|end] functions documented above.
 	 */
-				BitmapTableScanDesc(*scan_begin_bm) (Relation rel,
-													 Snapshot snapshot,
-													 uint32 flags);
+	BitmapTableScanDesc (*scan_begin_bm) (Relation rel,
+										  Snapshot snapshot,
+										  uint32 flags,
+										  TIDBitmap *tbm,
+										  ParallelBitmapHeapState *pstate,
+										  dsa_area *dsa);
 
-	void		(*scan_rescan_bm) (BitmapTableScanDesc scan);
+	void		(*scan_rescan_bm) (BitmapTableScanDesc scan,
+								   TIDBitmap *tbm,
+								   ParallelBitmapHeapState *pstate,
+								   dsa_area *dsa);
 
 	/*
 	 * Release resources and deallocate scan.
@@ -985,12 +991,8 @@ table_beginscan_bm(Relation rel, Snapshot snapshot,
 	if (need_tuple)
 		flags |= SO_NEED_TUPLES;
 
-	result = rel->rd_tableam->scan_begin_bm(rel, snapshot, flags);
+	result = rel->rd_tableam->scan_begin_bm(rel, snapshot, flags, tbm, pstate, dsa);
 
-	tbm_begin_iterate(&result->iterator, tbm, dsa,
-					  pstate ?
-					  pstate->tbmiterator :
-					  InvalidDsaPointer);
 #ifdef USE_PREFETCH
 	if (prefetch_maximum > 0)
 		tbm_begin_iterate(&result->prefetch_iterator, tbm, dsa,
@@ -1011,7 +1013,6 @@ table_rescan_bm(BitmapTableScanDesc scan,
 				dsa_area *dsa,
 				int prefetch_maximum)
 {
-	tbm_end_iterate(&scan->iterator);
 	tbm_end_iterate(&scan->prefetch_iterator);
 
 	/*
@@ -1019,13 +1020,9 @@ table_rescan_bm(BitmapTableScanDesc scan,
 	 */
 	scan->prefetch_maximum = prefetch_maximum;
 
-	scan->rel->rd_tableam->scan_rescan_bm(scan);
+	scan->rel->rd_tableam->scan_rescan_bm(scan, tbm, pstate, dsa);
 	scan->pstate = pstate;
 
-	tbm_begin_iterate(&scan->iterator, tbm, dsa,
-					  pstate ?
-					  pstate->tbmiterator :
-					  InvalidDsaPointer);
 #ifdef USE_PREFETCH
 	if (prefetch_maximum > 0)
 		tbm_begin_iterate(&scan->prefetch_iterator, tbm, dsa,
@@ -1038,7 +1035,6 @@ table_rescan_bm(BitmapTableScanDesc scan,
 static inline void
 table_endscan_bm(BitmapTableScanDesc scan)
 {
-	tbm_end_iterate(&scan->iterator);
 	tbm_end_iterate(&scan->prefetch_iterator);
 
 	scan->rel->rd_tableam->scan_end_bm(scan);

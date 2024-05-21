@@ -1230,7 +1230,8 @@ heap_endscan(TableScanDesc sscan)
 }
 
 BitmapTableScanDesc
-heap_beginscan_bm(Relation relation, Snapshot snapshot, uint32 flags)
+heap_beginscan_bm(Relation relation, Snapshot snapshot, uint32 flags,
+				  TIDBitmap *tbm, ParallelBitmapHeapState *pstate, dsa_area *dsa)
 {
 	BitmapHeapScanDesc scan;
 
@@ -1271,13 +1272,21 @@ heap_beginscan_bm(Relation relation, Snapshot snapshot, uint32 flags)
 	scan->prefetch_target = -1;
 	scan->prefetch_pages = 0;
 
+	tbm_begin_iterate(&scan->iterator, tbm, dsa,
+					  pstate ?
+					  pstate->tbmiterator :
+					  InvalidDsaPointer);
+
 	return (BitmapTableScanDesc) scan;
 }
 
 void
-heap_rescan_bm(BitmapTableScanDesc sscan)
+heap_rescan_bm(BitmapTableScanDesc sscan, TIDBitmap *tbm,
+			   ParallelBitmapHeapState *pstate, dsa_area *dsa)
 {
 	BitmapHeapScanDesc scan = (BitmapHeapScanDesc) sscan;
+
+	tbm_end_iterate(&scan->iterator);
 
 	if (BufferIsValid(scan->cbuf))
 		ReleaseBuffer(scan->cbuf);
@@ -1306,12 +1315,19 @@ heap_rescan_bm(BitmapTableScanDesc sscan)
 	/* Only used for serial BHS */
 	scan->prefetch_target = -1;
 	scan->prefetch_pages = 0;
+
+	tbm_begin_iterate(&scan->iterator, tbm, dsa,
+					  pstate ?
+					  pstate->tbmiterator :
+					  InvalidDsaPointer);
 }
 
 void
 heap_endscan_bm(BitmapTableScanDesc sscan)
 {
 	BitmapHeapScanDesc scan = (BitmapHeapScanDesc) sscan;
+
+	tbm_end_iterate(&scan->iterator);
 
 	if (BufferIsValid(scan->cbuf))
 		ReleaseBuffer(scan->cbuf);

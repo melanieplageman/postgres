@@ -114,6 +114,7 @@ typedef struct BitmapHeapScanDescData
 
 	BlockNumber cblock;			/* current block # in scan, if any */
 	BlockNumber pfblock;
+	TBMIterator iterator;
 
 	/* Current target for prefetch distance */
 	int			prefetch_target;
@@ -323,8 +324,11 @@ extern void heap_rescan(TableScanDesc sscan, ScanKey key, bool set_params,
 extern void heap_endscan(TableScanDesc sscan);
 
 extern BitmapTableScanDesc heap_beginscan_bm(Relation relation,
-											 Snapshot snapshot, uint32 flags);
-extern void heap_rescan_bm(BitmapTableScanDesc sscan);
+											 Snapshot snapshot, uint32 flags,
+											 TIDBitmap *tbm, ParallelBitmapHeapState *pstate,
+											 dsa_area *dsa);
+extern void heap_rescan_bm(BitmapTableScanDesc sscan,
+						   TIDBitmap *tbm, ParallelBitmapHeapState *pstate, dsa_area *dsa);
 void		heap_endscan_bm(BitmapTableScanDesc sscan);
 
 extern HeapTuple heap_getnext(TableScanDesc sscan, ScanDirection direction);

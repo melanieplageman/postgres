@@ -270,6 +270,7 @@ BitmapOr
 BitmapOrPath
 BitmapOrState
 Bitmapset
+BitmapTableScanDesc
 Block
 BlockId
 BlockIdData

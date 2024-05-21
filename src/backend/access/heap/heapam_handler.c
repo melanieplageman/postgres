@@ -2367,7 +2367,7 @@ heapam_scan_bitmap_next_block(BitmapTableScanDesc scan,
 	{
 		CHECK_FOR_INTERRUPTS();
 
-		tbmres = tbm_iterate(&scan->iterator);
+		tbmres = tbm_iterate(&hscan->iterator);
 
 		if (tbmres == NULL)
 		{

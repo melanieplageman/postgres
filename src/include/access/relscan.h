@@ -60,10 +60,6 @@ typedef struct BitmapTableScanDescData
 	/* Parallel Only Members */
 	struct ParallelBitmapHeapState *pstate;
 
-	/*
-	 * Members common to Parallel and Serial BitmapTableScans
-	 */
-	TBMIterator iterator;
 	TBMIterator prefetch_iterator;
 
 	/*
