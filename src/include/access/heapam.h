@@ -113,6 +113,7 @@ typedef struct BitmapHeapScanDescData
 	HeapTupleData rs_ctup;		/* current tuple in scan, if any */
 
 	BlockNumber cblock;			/* current block # in scan, if any */
+	BlockNumber pfblock;
 
 	/*
 	 * These fields are only used for bitmap scans for the "skip fetch"

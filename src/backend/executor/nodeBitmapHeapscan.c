@@ -215,7 +215,7 @@ BitmapHeapNext(BitmapHeapScanState *node)
 
 new_page:
 
-		if (!table_scan_bitmap_next_block(scan, &scan->blockno, &node->recheck,
+		if (!table_scan_bitmap_next_block(scan, &node->recheck,
 										  &node->lossy_pages, &node->exact_pages))
 			break;
 	}

@@ -837,7 +837,7 @@ typedef struct TableAmRoutine
 	 * scan_bitmap_next_tuple need to exist, or neither.
 	 */
 	bool		(*scan_bitmap_next_block) (BitmapTableScanDesc scan,
-										   BlockNumber *blockno, bool *recheck,
+										   bool *recheck,
 										   long *lossy_pages, long *exact_pages);
 
 	/*
@@ -1001,8 +1001,6 @@ table_beginscan_bm(Relation rel, Snapshot snapshot,
 
 	result->prefetch_maximum = prefetch_maximum;
 	result->pstate = pstate;
-	result->pfblockno = InvalidBlockNumber;
-	result->blockno = InvalidBlockNumber;
 
 	/* Only used for serial BHS */
 	result->prefetch_target = -1;
@@ -1031,8 +1029,6 @@ table_rescan_bm(BitmapTableScanDesc scan,
 
 	scan->rel->rd_tableam->scan_rescan_bm(scan);
 	scan->pstate = pstate;
-	scan->pfblockno = InvalidBlockNumber;
-	scan->blockno = InvalidBlockNumber;
 
 	tbm_begin_iterate(&scan->iterator, tbm, dsa,
 					  pstate ?
@@ -2056,7 +2052,7 @@ table_relation_estimate_size(Relation rel, int32 *attr_widths,
  */
 static inline bool
 table_scan_bitmap_next_block(BitmapTableScanDesc scan,
-							 BlockNumber *blockno, bool *recheck,
+							 bool *recheck,
 							 long *lossy_pages,
 							 long *exact_pages)
 {
@@ -2069,7 +2065,7 @@ table_scan_bitmap_next_block(BitmapTableScanDesc scan,
 		elog(ERROR, "unexpected table_scan_bitmap_next_block call during logical decoding");
 
 	return scan->rel->rd_tableam->scan_bitmap_next_block(scan,
-														 blockno, recheck,
+														 recheck,
 														 lossy_pages, exact_pages);
 }
 

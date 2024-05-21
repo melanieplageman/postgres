@@ -2143,7 +2143,7 @@ BitmapPrefetch(BitmapTableScanDesc scan)
 					break;
 				}
 				scan->prefetch_pages++;
-				scan->pfblockno = tbmpre->blockno;
+				hscan->pfblock = tbmpre->blockno;
 
 				/*
 				 * If we expect not to have to actually read this heap page,
@@ -2200,7 +2200,7 @@ BitmapPrefetch(BitmapTableScanDesc scan)
 					break;
 				}
 
-				scan->pfblockno = tbmpre->blockno;
+				hscan->pfblock = tbmpre->blockno;
 
 				/* As above, skip prefetch if we expect not to need page */
 				skip_fetch = (!(scan->flags & SO_NEED_TUPLES) &&
@@ -2228,6 +2228,7 @@ BitmapPrefetch(BitmapTableScanDesc scan)
 static inline void
 BitmapAdjustPrefetchIterator(BitmapTableScanDesc scan)
 {
+	BitmapHeapScanDesc hscan = (BitmapHeapScanDesc) scan;
 #ifdef USE_PREFETCH
 	ParallelBitmapHeapState *pstate = scan->pstate;
 	TBMIterateResult *tbmpre;
@@ -2245,7 +2246,7 @@ BitmapAdjustPrefetchIterator(BitmapTableScanDesc scan)
 		{
 			/* Do not let the prefetch iterator get behind the main one */
 			tbmpre = tbm_iterate(prefetch_iterator);
-			scan->pfblockno = tbmpre ? tbmpre->blockno : InvalidBlockNumber;
+			hscan->pfblock = tbmpre ? tbmpre->blockno : InvalidBlockNumber;
 		}
 		return;
 	}
@@ -2285,7 +2286,7 @@ BitmapAdjustPrefetchIterator(BitmapTableScanDesc scan)
 			if (!prefetch_iterator->exhausted)
 			{
 				tbmpre = tbm_iterate(prefetch_iterator);
-				scan->pfblockno = tbmpre ? tbmpre->blockno : InvalidBlockNumber;
+				hscan->pfblock = tbmpre ? tbmpre->blockno : InvalidBlockNumber;
 			}
 		}
 	}
@@ -2344,7 +2345,7 @@ BitmapAdjustPrefetchTarget(BitmapTableScanDesc scan)
 
 static bool
 heapam_scan_bitmap_next_block(BitmapTableScanDesc scan,
-							  BlockNumber *blockno, bool *recheck,
+							  bool *recheck,
 							  long *lossy_pages, long *exact_pages)
 {
 	BitmapHeapScanDesc hscan = (BitmapHeapScanDesc) scan;
@@ -2357,7 +2358,6 @@ heapam_scan_bitmap_next_block(BitmapTableScanDesc scan,
 	hscan->vis_idx = 0;
 	hscan->vis_ntuples = 0;
 
-	*blockno = InvalidBlockNumber;
 	*recheck = true;
 
 	BitmapAdjustPrefetchIterator(scan);
@@ -2386,8 +2386,8 @@ heapam_scan_bitmap_next_block(BitmapTableScanDesc scan,
 	} while (!IsolationIsSerializable() && tbmres->blockno >= hscan->nblocks);
 
 	/* Got a valid block */
-	*blockno = tbmres->blockno;
 	*recheck = tbmres->recheck;
+	block = tbmres->blockno;
 
 	/*
 	 * We can skip fetching the heap page if we don't need any fields from the
@@ -2406,8 +2406,6 @@ heapam_scan_bitmap_next_block(BitmapTableScanDesc scan,
 
 		return true;
 	}
-
-	block = tbmres->blockno;
 
 	/*
 	 * Acquire pin on the target heap page, trading in any pin we held before.
@@ -2508,7 +2506,7 @@ heapam_scan_bitmap_next_block(BitmapTableScanDesc scan,
 	 */
 	if (scan->pstate == NULL &&
 		!scan->prefetch_iterator.exhausted &&
-		scan->pfblockno < scan->blockno)
+		hscan->pfblock < block)
 		elog(ERROR, "prefetch and main iterators are out of sync");
 
 	/* Adjust the prefetch target */
