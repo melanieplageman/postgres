@@ -60,8 +60,6 @@ typedef struct BitmapTableScanDescData
 	/* Parallel Only Members */
 	struct ParallelBitmapHeapState *pstate;
 
-	TBMIterator prefetch_iterator;
-
 	/*
 	 * Information about type and behaviour of the scan, a bitmask of members
 	 * of the ScanOptions enum (see tableam.h).

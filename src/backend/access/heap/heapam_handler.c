@@ -2127,7 +2127,7 @@ BitmapPrefetch(BitmapTableScanDesc scan)
 
 	if (pstate == NULL)
 	{
-		TBMIterator *prefetch_iterator = &scan->prefetch_iterator;
+		TBMIterator *prefetch_iterator = &hscan->prefetch_iterator;
 
 		if (!prefetch_iterator->exhausted)
 		{
@@ -2167,7 +2167,7 @@ BitmapPrefetch(BitmapTableScanDesc scan)
 
 	if (pstate->prefetch_pages < pstate->prefetch_target)
 	{
-		TBMIterator *prefetch_iterator = &scan->prefetch_iterator;
+		TBMIterator *prefetch_iterator = &hscan->prefetch_iterator;
 
 		if (!prefetch_iterator->exhausted)
 		{
@@ -2235,7 +2235,7 @@ BitmapAdjustPrefetchIterator(BitmapTableScanDesc scan)
 
 	if (pstate == NULL)
 	{
-		TBMIterator *prefetch_iterator = &scan->prefetch_iterator;
+		TBMIterator *prefetch_iterator = &hscan->prefetch_iterator;
 
 		if (hscan->prefetch_pages > 0)
 		{
@@ -2262,7 +2262,7 @@ BitmapAdjustPrefetchIterator(BitmapTableScanDesc scan)
 	 */
 	if (scan->prefetch_maximum > 0)
 	{
-		TBMIterator *prefetch_iterator = &scan->prefetch_iterator;
+		TBMIterator *prefetch_iterator = &hscan->prefetch_iterator;
 
 		SpinLockAcquire(&pstate->mutex);
 		if (pstate->prefetch_pages > 0)
@@ -2506,7 +2506,7 @@ heapam_scan_bitmap_next_block(BitmapTableScanDesc scan,
 	 * ahead of the current block.
 	 */
 	if (scan->pstate == NULL &&
-		!scan->prefetch_iterator.exhausted &&
+		!hscan->prefetch_iterator.exhausted &&
 		hscan->pfblock < block)
 		elog(ERROR, "prefetch and main iterators are out of sync");
 

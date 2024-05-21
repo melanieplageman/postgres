@@ -1231,7 +1231,8 @@ heap_endscan(TableScanDesc sscan)
 
 BitmapTableScanDesc
 heap_beginscan_bm(Relation relation, Snapshot snapshot, uint32 flags,
-				  TIDBitmap *tbm, ParallelBitmapHeapState *pstate, dsa_area *dsa)
+				  TIDBitmap *tbm, ParallelBitmapHeapState *pstate, dsa_area *dsa,
+				  int prefetch_maximum)
 {
 	BitmapHeapScanDesc scan;
 
@@ -1277,16 +1278,26 @@ heap_beginscan_bm(Relation relation, Snapshot snapshot, uint32 flags,
 					  pstate->tbmiterator :
 					  InvalidDsaPointer);
 
+#ifdef USE_PREFETCH
+	if (prefetch_maximum > 0)
+		tbm_begin_iterate(&scan->prefetch_iterator, tbm, dsa,
+						  pstate ?
+						  pstate->prefetch_iterator :
+						  InvalidDsaPointer);
+#endif							/* USE_PREFETCH */
+
 	return (BitmapTableScanDesc) scan;
 }
 
 void
 heap_rescan_bm(BitmapTableScanDesc sscan, TIDBitmap *tbm,
-			   ParallelBitmapHeapState *pstate, dsa_area *dsa)
+			   ParallelBitmapHeapState *pstate, dsa_area *dsa,
+			   int prefetch_maximum)
 {
 	BitmapHeapScanDesc scan = (BitmapHeapScanDesc) sscan;
 
 	tbm_end_iterate(&scan->iterator);
+	tbm_end_iterate(&scan->prefetch_iterator);
 
 	if (BufferIsValid(scan->cbuf))
 		ReleaseBuffer(scan->cbuf);
@@ -1320,6 +1331,15 @@ heap_rescan_bm(BitmapTableScanDesc sscan, TIDBitmap *tbm,
 					  pstate ?
 					  pstate->tbmiterator :
 					  InvalidDsaPointer);
+
+#ifdef USE_PREFETCH
+	if (prefetch_maximum > 0)
+		tbm_begin_iterate(&scan->prefetch_iterator, tbm, dsa,
+						  pstate ?
+						  pstate->prefetch_iterator :
+						  InvalidDsaPointer);
+#endif							/* USE_PREFETCH */
+
 }
 
 void
@@ -1328,6 +1348,7 @@ heap_endscan_bm(BitmapTableScanDesc sscan)
 	BitmapHeapScanDesc scan = (BitmapHeapScanDesc) sscan;
 
 	tbm_end_iterate(&scan->iterator);
+	tbm_end_iterate(&scan->prefetch_iterator);
 
 	if (BufferIsValid(scan->cbuf))
 		ReleaseBuffer(scan->cbuf);

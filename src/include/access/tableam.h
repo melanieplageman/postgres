@@ -360,12 +360,14 @@ typedef struct TableAmRoutine
 										  uint32 flags,
 										  TIDBitmap *tbm,
 										  ParallelBitmapHeapState *pstate,
-										  dsa_area *dsa);
+										  dsa_area *dsa,
+										  int prefetch_maximum);
 
 	void		(*scan_rescan_bm) (BitmapTableScanDesc scan,
 								   TIDBitmap *tbm,
 								   ParallelBitmapHeapState *pstate,
-								   dsa_area *dsa);
+								   dsa_area *dsa,
+								   int prefetch_maximum);
 
 	/*
 	 * Release resources and deallocate scan.
@@ -991,15 +993,8 @@ table_beginscan_bm(Relation rel, Snapshot snapshot,
 	if (need_tuple)
 		flags |= SO_NEED_TUPLES;
 
-	result = rel->rd_tableam->scan_begin_bm(rel, snapshot, flags, tbm, pstate, dsa);
-
-#ifdef USE_PREFETCH
-	if (prefetch_maximum > 0)
-		tbm_begin_iterate(&result->prefetch_iterator, tbm, dsa,
-						  pstate ?
-						  pstate->prefetch_iterator :
-						  InvalidDsaPointer);
-#endif							/* USE_PREFETCH */
+	result = rel->rd_tableam->scan_begin_bm(rel, snapshot, flags, tbm, pstate, dsa,
+											prefetch_maximum);
 
 	result->prefetch_maximum = prefetch_maximum;
 	result->pstate = pstate;
@@ -1013,30 +1008,19 @@ table_rescan_bm(BitmapTableScanDesc scan,
 				dsa_area *dsa,
 				int prefetch_maximum)
 {
-	tbm_end_iterate(&scan->prefetch_iterator);
-
 	/*
 	 * This is only needed as a parameter if we assume it can change on rescan
 	 */
 	scan->prefetch_maximum = prefetch_maximum;
 
-	scan->rel->rd_tableam->scan_rescan_bm(scan, tbm, pstate, dsa);
+	scan->rel->rd_tableam->scan_rescan_bm(scan, tbm, pstate, dsa, prefetch_maximum);
 	scan->pstate = pstate;
 
-#ifdef USE_PREFETCH
-	if (prefetch_maximum > 0)
-		tbm_begin_iterate(&scan->prefetch_iterator, tbm, dsa,
-						  pstate ?
-						  pstate->prefetch_iterator :
-						  InvalidDsaPointer);
-#endif							/* USE_PREFETCH */
 }
 
 static inline void
 table_endscan_bm(BitmapTableScanDesc scan)
 {
-	tbm_end_iterate(&scan->prefetch_iterator);
-
 	scan->rel->rd_tableam->scan_end_bm(scan);
 }
 
