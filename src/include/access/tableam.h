@@ -355,9 +355,9 @@ typedef struct TableAmRoutine
 	 * `rel`, `flags`, and `snapshot` serve the same purposes as in the
 	 * standard relation scan_[begin|rescan|end] functions documented above.
 	 */
-	BitmapTableScanDesc (*scan_begin_bm) (Relation rel,
-									Snapshot snapshot,
-									uint32 flags);
+				BitmapTableScanDesc(*scan_begin_bm) (Relation rel,
+													 Snapshot snapshot,
+													 uint32 flags);
 
 	void		(*scan_rescan_bm) (BitmapTableScanDesc scan);
 
@@ -973,11 +973,11 @@ table_beginscan_strat(Relation rel, Snapshot snapshot,
  */
 static inline BitmapTableScanDesc
 table_beginscan_bm(Relation rel, Snapshot snapshot,
-		TIDBitmap *tbm,
-		ParallelBitmapHeapState *pstate,
-		dsa_area *dsa,
-		bool need_tuple,
-		int prefetch_maximum)
+				   TIDBitmap *tbm,
+				   ParallelBitmapHeapState *pstate,
+				   dsa_area *dsa,
+				   bool need_tuple,
+				   int prefetch_maximum)
 {
 	BitmapTableScanDesc result;
 	uint32		flags = SO_TYPE_BITMAPSCAN | SO_ALLOW_PAGEMODE;
@@ -1024,12 +1024,12 @@ table_beginscan_bm(Relation rel, Snapshot snapshot,
 
 static inline void
 table_rescan_bm(BitmapTableScanDesc scan,
-		TIDBitmap *tbm,
-		ParallelBitmapHeapState *pstate,
-		dsa_area *dsa,
-		int prefetch_maximum)
+				TIDBitmap *tbm,
+				ParallelBitmapHeapState *pstate,
+				dsa_area *dsa,
+				int prefetch_maximum)
 {
-	bool parallel = false;
+	bool		parallel = false;
 
 	if (scan->shared_iterator)
 	{
@@ -1054,8 +1054,7 @@ table_rescan_bm(BitmapTableScanDesc scan,
 	scan->shared_prefetch_iterator = NULL;
 
 	/*
-	 * This is only needed as a parameter if we assume it can change on
-	 * rescan
+	 * This is only needed as a parameter if we assume it can change on rescan
 	 */
 	scan->prefetch_maximum = prefetch_maximum;
 
@@ -2131,8 +2130,8 @@ table_scan_bitmap_next_block(BitmapTableScanDesc scan,
 		elog(ERROR, "unexpected table_scan_bitmap_next_block call during logical decoding");
 
 	return scan->rel->rd_tableam->scan_bitmap_next_block(scan,
-														   blockno, recheck,
-														   lossy_pages, exact_pages);
+														 blockno, recheck,
+														 lossy_pages, exact_pages);
 }
 
 /*
@@ -2156,7 +2155,7 @@ table_scan_bitmap_next_tuple(BitmapTableScanDesc scan,
 		elog(ERROR, "unexpected table_scan_bitmap_next_tuple call during logical decoding");
 
 	return scan->rel->rd_tableam->scan_bitmap_next_tuple(scan,
-														   slot);
+														 slot);
 }
 
 /*

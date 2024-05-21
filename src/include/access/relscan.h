@@ -84,7 +84,7 @@ typedef struct BitmapTableScanDescData
 	int			prefetch_target;
 	/* # pages prefetch iterator is ahead of current */
 	int			prefetch_pages;
-} BitmapTableScanDescData;
+}			BitmapTableScanDescData;
 typedef struct BitmapTableScanDescData *BitmapTableScanDesc;
 
 /*

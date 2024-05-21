@@ -2190,8 +2190,8 @@ heapam_scan_bitmap_next_block(BitmapTableScanDesc scan,
 	 * Acquire pin on the target heap page, trading in any pin we held before.
 	 */
 	hscan->cbuf = ReleaseAndReadBuffer(hscan->cbuf,
-										  scan->rel,
-										  block);
+									   scan->rel,
+									   block);
 	hscan->cblock = block;
 	buffer = hscan->cbuf;
 	snapshot = scan->snapshot;

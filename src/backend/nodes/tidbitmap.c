@@ -697,7 +697,7 @@ tbm_begin_serial_iterate(TIDBitmap *tbm)
 	 * needs of the TBMIterateResult sub-struct.
 	 */
 	iterator = (TBMSerialIterator *) palloc(sizeof(TBMSerialIterator) +
-									  MAX_TUPLES_PER_PAGE * sizeof(OffsetNumber));
+											MAX_TUPLES_PER_PAGE * sizeof(OffsetNumber));
 	iterator->tbm = tbm;
 
 	/*
@@ -968,7 +968,7 @@ tbm_advance_schunkbit(PagetableEntry *chunk, int *schunkbitp)
  * testing, recheck is always set true when ntuples < 0.)
  */
 TBMIterateResult *
-tbm_serial_iterate(TBMSerialIterator *iterator)
+tbm_serial_iterate(TBMSerialIterator * iterator)
 {
 	TIDBitmap  *tbm = iterator->tbm;
 	TBMIterateResult *output = &(iterator->output);
@@ -1143,7 +1143,7 @@ tbm_shared_iterate(TBMSharedIterator *iterator)
  * bitmap to return to read/write status when there are no more iterators.)
  */
 void
-tbm_end_serial_iterate(TBMSerialIterator *iterator)
+tbm_end_serial_iterate(TBMSerialIterator * iterator)
 {
 	pfree(iterator);
 }
@@ -1567,7 +1567,7 @@ tbm_calculate_entries(double maxbytes)
  */
 void
 tbm_begin_iterate(TBMIterator *iterator, TIDBitmap *tbm,
-						  dsa_area *dsa, dsa_pointer dsp)
+				  dsa_area *dsa, dsa_pointer dsp)
 {
 	Assert(iterator);
 

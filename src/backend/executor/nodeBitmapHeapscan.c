@@ -52,9 +52,9 @@
 static TupleTableSlot *BitmapHeapNext(BitmapHeapScanState *node);
 static inline void BitmapDoneInitializingSharedState(ParallelBitmapHeapState *pstate);
 static inline void BitmapAdjustPrefetchIterator(BitmapHeapScanState *node,
-		BitmapTableScanDesc scan);
+												BitmapTableScanDesc scan);
 static inline void BitmapAdjustPrefetchTarget(BitmapHeapScanState *node,
-		BitmapTableScanDesc scan);
+											  BitmapTableScanDesc scan);
 static inline void BitmapPrefetch(BitmapHeapScanState *node,
 								  BitmapTableScanDesc scan);
 static bool BitmapShouldInitializeSharedState(ParallelBitmapHeapState *pstate);
@@ -76,12 +76,12 @@ BitmapHeapScanSetup(BitmapHeapScanState *node)
 	ParallelBitmapHeapState *pstate = node->pstate;
 	dsa_area   *dsa = node->ss.ps.state->es_query_dsa;
 	Relation	rel = node->ss.ss_currentRelation;
-	int prefetch_maximum = 0;
+	int			prefetch_maximum = 0;
 
 	/*
-	* Maximum number of prefetches for the tablespace if configured,
-	* otherwise the current value of the effective_io_concurrency GUC.
-	*/
+	 * Maximum number of prefetches for the tablespace if configured,
+	 * otherwise the current value of the effective_io_concurrency GUC.
+	 */
 #ifdef USE_PREFETCH
 	prefetch_maximum = get_tablespace_io_concurrency(rel->rd_rel->reltablespace);
 #endif
@@ -96,10 +96,9 @@ BitmapHeapScanSetup(BitmapHeapScanState *node)
 	else
 	{
 		/*
-			* The leader will immediately come out of the function, but
-			* others will be blocked until leader populates the TBM and wakes
-			* them up.
-			*/
+		 * The leader will immediately come out of the function, but others
+		 * will be blocked until leader populates the TBM and wakes them up.
+		 */
 		if (BitmapShouldInitializeSharedState(pstate))
 		{
 			node->tbm = (TIDBitmap *) MultiExecProcNode(outerPlanState(node));
@@ -107,10 +106,10 @@ BitmapHeapScanSetup(BitmapHeapScanState *node)
 				elog(ERROR, "unrecognized result from subplan");
 
 			/*
-				* Prepare to iterate over the TBM. This will return the
-				* dsa_pointer of the iterator state which will be used by
-				* multiple processes to iterate jointly.
-				*/
+			 * Prepare to iterate over the TBM. This will return the
+			 * dsa_pointer of the iterator state which will be used by
+			 * multiple processes to iterate jointly.
+			 */
 			pstate->tbmiterator = tbm_prepare_shared_iterate(node->tbm);
 #ifdef USE_PREFETCH
 			if (prefetch_maximum > 0)
@@ -125,30 +124,29 @@ BitmapHeapScanSetup(BitmapHeapScanState *node)
 	}
 
 	/*
-		* If this is the first scan of the underlying table, create the table
-		* scan descriptor and begin the scan.
-		*/
+	 * If this is the first scan of the underlying table, create the table
+	 * scan descriptor and begin the scan.
+	 */
 	if (!node->scan_in_progress)
 	{
 		bool		need_tuples = false;
 
 		/*
-			* We can potentially skip fetching heap pages if we do not need
-			* any columns of the table, either for checking non-indexable
-			* quals or for returning data.  This test is a bit simplistic, as
-			* it checks the stronger condition that there's no qual or return
-			* tlist at all. But in most cases it's probably not worth working
-			* harder than that.
-			*/
+		 * We can potentially skip fetching heap pages if we do not need any
+		 * columns of the table, either for checking non-indexable quals or
+		 * for returning data.  This test is a bit simplistic, as it checks
+		 * the stronger condition that there's no qual or return tlist at all.
+		 * But in most cases it's probably not worth working harder than that.
+		 */
 		need_tuples = (node->ss.ps.plan->qual != NIL ||
-						node->ss.ps.plan->targetlist != NIL);
+					   node->ss.ps.plan->targetlist != NIL);
 
 		node->scan = table_beginscan_bm(node->ss.ss_currentRelation,
-									node->ss.ps.state->es_snapshot,
-									node->tbm,
-									pstate,
-									dsa,
-									need_tuples, prefetch_maximum);
+										node->ss.ps.state->es_snapshot,
+										node->tbm,
+										pstate,
+										dsa,
+										need_tuples, prefetch_maximum);
 		node->scan_in_progress = true;
 	}
 	else
