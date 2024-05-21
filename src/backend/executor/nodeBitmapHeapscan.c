@@ -56,13 +56,13 @@ static bool BitmapShouldInitializeSharedState(ParallelBitmapHeapState *pstate);
 /*
  * Do the underlying index scan, build the bitmap, and begin iteration.
  *
-	* For prefetching, we use *two* iterators, one for the pages we are
-	* actually scanning and another that runs ahead of the first for
-	* prefetching.  node->prefetch_pages tracks exactly how many pages ahead
-	* the prefetch iterator is.  Also, node->prefetch_target tracks the
-	* desired prefetch distance, which starts small and increases up to the
-	* prefetch_maximum.  This is to avoid doing a lot of prefetching in
-	* a scan that stops after a few tuples because of a LIMIT.
+* For prefetching, we use *two* iterators, one for the pages we are
+* actually scanning and another that runs ahead of the first for
+* prefetching.  node->prefetch_pages tracks exactly how many pages ahead
+* the prefetch iterator is.  Also, node->prefetch_target tracks the
+* desired prefetch distance, which starts small and increases up to the
+* prefetch_maximum.  This is to avoid doing a lot of prefetching in
+* a scan that stops after a few tuples because of a LIMIT.
  */
 static void
 BitmapHeapScanSetup(BitmapHeapScanState *node)
@@ -90,34 +90,31 @@ BitmapHeapScanSetup(BitmapHeapScanState *node)
 		if (!node->tbm || !IsA(node->tbm, TIDBitmap))
 			elog(ERROR, "unrecognized result from subplan");
 	}
-	else
+	else if (BitmapShouldInitializeSharedState(pstate))
 	{
 		/*
 		 * The leader will immediately come out of the function, but others
 		 * will be blocked until leader populates the TBM and wakes them up.
 		 */
-		if (BitmapShouldInitializeSharedState(pstate))
-		{
-			node->tbm = (TIDBitmap *) MultiExecProcNode(outerPlanState(node));
-			if (!node->tbm || !IsA(node->tbm, TIDBitmap))
-				elog(ERROR, "unrecognized result from subplan");
+		node->tbm = (TIDBitmap *) MultiExecProcNode(outerPlanState(node));
+		if (!node->tbm || !IsA(node->tbm, TIDBitmap))
+			elog(ERROR, "unrecognized result from subplan");
 
-			/*
-			 * Prepare to iterate over the TBM. This will return the
-			 * dsa_pointer of the iterator state which will be used by
-			 * multiple processes to iterate jointly.
-			 */
-			pstate->tbmiterator = tbm_prepare_shared_iterate(node->tbm);
+		/*
+		 * Prepare to iterate over the TBM. This will return the dsa_pointer
+		 * of the iterator state which will be used by multiple processes to
+		 * iterate jointly.
+		 */
+		pstate->tbmiterator = tbm_prepare_shared_iterate(node->tbm);
 #ifdef USE_PREFETCH
-			if (prefetch_maximum > 0)
-			{
-				pstate->prefetch_iterator =
-					tbm_prepare_shared_iterate(node->tbm);
-			}
-#endif
-			/* We have initialized the shared state so wake up others. */
-			BitmapDoneInitializingSharedState(pstate);
+		if (prefetch_maximum > 0)
+		{
+			pstate->prefetch_iterator =
+				tbm_prepare_shared_iterate(node->tbm);
 		}
+#endif
+		/* We have initialized the shared state so wake up others. */
+		BitmapDoneInitializingSharedState(pstate);
 	}
 
 	/*
