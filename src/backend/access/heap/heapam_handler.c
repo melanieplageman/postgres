@@ -2588,7 +2588,6 @@ heapam_scan_bitmap_next_tuple(BitmapTableScanDesc scan,
 	 */
 	BitmapPrefetch(scan);
 
-
 	targoffset = hscan->vis_tuples[hscan->vis_idx];
 	page = BufferGetPage(hscan->cbuf);
 	lp = PageGetItemId(page, targoffset);

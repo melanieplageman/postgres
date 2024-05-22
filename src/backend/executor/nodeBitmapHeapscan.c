@@ -183,7 +183,6 @@ BitmapHeapNext(BitmapHeapScanState *node)
 		/*
 		 * Continuing in previously obtained page.
 		 */
-
 		CHECK_FOR_INTERRUPTS();
 
 		/*
