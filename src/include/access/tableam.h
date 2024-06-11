@@ -346,6 +346,24 @@ typedef struct TableAmRoutine
 								bool allow_sync, bool allow_pagemode);
 
 	/*
+	 * Functions to begin, restart, and end a scan of the underlying table of
+	 * a bitmap table scan.
+	 *
+	 * `rel`, `flags`, and `snapshot` serve the same purposes as in the
+	 * standard relation scan_[begin|rescan|end] functions documented above.
+	 */
+	BitmapTableScanDesc *(*scan_begin_bm) (Relation rel,
+										   Snapshot snapshot,
+										   uint32 flags);
+
+	void		(*scan_rescan_bm) (BitmapTableScanDesc *scan);
+
+	/*
+	 * Release resources and deallocate scan.
+	 */
+	void		(*scan_end_bm) (BitmapTableScanDesc *scan);
+
+	/*
 	 * Return next tuple from `scan`, store in slot.
 	 */
 	bool		(*scan_getnextslot) (TableScanDesc scan,
@@ -815,7 +833,7 @@ typedef struct TableAmRoutine
 	 * Optional callback, but either both scan_bitmap_next_block and
 	 * scan_bitmap_next_tuple need to exist, or neither.
 	 */
-	bool		(*scan_bitmap_next_block) (TableScanDesc scan,
+	bool		(*scan_bitmap_next_block) (BitmapTableScanDesc *scan,
 										   BlockNumber *blockno, bool *recheck,
 										   long *lossy_pages, long *exact_pages);
 
@@ -826,7 +844,7 @@ typedef struct TableAmRoutine
 	 * Optional callback, but either both scan_bitmap_next_block and
 	 * scan_bitmap_next_tuple need to exist, or neither.
 	 */
-	bool		(*scan_bitmap_next_tuple) (TableScanDesc scan,
+	bool		(*scan_bitmap_next_tuple) (BitmapTableScanDesc *scan,
 										   TupleTableSlot *slot);
 
 	/*
@@ -851,8 +869,8 @@ typedef struct TableAmRoutine
 	 * is obviously OK.
 	 *
 	 * Currently it is required to implement this interface, as there's no
-	 * alternative way (contrary e.g. to bitmap scans) to implement sample
-	 * scans. If infeasible to implement, the AM may raise an error.
+	 * alternative way to implement sample scans. If infeasible to implement,
+	 * the AM may raise an error.
 	 */
 	bool		(*scan_sample_next_block) (TableScanDesc scan,
 										   struct SampleScanState *scanstate);
@@ -945,29 +963,50 @@ table_beginscan_strat(Relation rel, Snapshot snapshot,
 }
 
 /*
- * table_beginscan_bm is an alternative entry point for setting up a
- * TableScanDesc for a bitmap heap scan.  Although that scan technology is
- * really quite unlike a standard seqscan, there is just enough commonality to
- * make it worth using the same data structure.
+ * table_beginscan_bm is an entry point for setting up a BitmapTableScanDesc
+ * for a bitmap table scan.
  */
-static inline TableScanDesc
+static inline BitmapTableScanDesc *
 table_beginscan_bm(Relation rel, Snapshot snapshot,
-				   int nkeys, struct ScanKeyData *key, bool need_tuple)
+				   dsa_area *dsa,
+				   bool need_tuple,
+				   int prefetch_maximum)
 {
 	uint32		flags = SO_TYPE_BITMAPSCAN | SO_ALLOW_PAGEMODE;
 
 	if (need_tuple)
 		flags |= SO_NEED_TUPLES;
 
-	return rel->rd_tableam->scan_begin(rel, snapshot, nkeys, key, NULL, flags);
+	return rel->rd_tableam->scan_begin_bm(rel, snapshot, flags);
 }
 
 /*
+ * Restart a bitmap table scan.
+ */
+static inline void
+table_rescan_bm(BitmapTableScanDesc *scan,
+				dsa_area *dsa,
+				int prefetch_maximum)
+{
+	scan->rs_rd->rd_tableam->scan_rescan_bm(scan);
+}
+
+/*
+ * End a bitmap table scan.
+ */
+static inline void
+table_endscan_bm(BitmapTableScanDesc *scan)
+{
+	scan->rs_rd->rd_tableam->scan_end_bm(scan);
+}
+
+
+/*
  * table_beginscan_sampling is an alternative entry point for setting up a
- * TableScanDesc for a TABLESAMPLE scan.  As with bitmap scans, it's worth
- * using the same data structure although the behavior is rather different.
- * In addition to the options offered by table_beginscan_strat, this call
- * also allows control of whether page-mode visibility checking is used.
+ * TableScanDesc for a TABLESAMPLE scan.  It's worth using the same data
+ * structure although the behavior is rather different. In addition to the
+ * options offered by table_beginscan_strat, this call also allows control of
+ * whether page-mode visibility checking is used.
  */
 static inline TableScanDesc
 table_beginscan_sampling(Relation rel, Snapshot snapshot,
@@ -989,7 +1028,7 @@ table_beginscan_sampling(Relation rel, Snapshot snapshot,
 
 /*
  * table_beginscan_tid is an alternative entry point for setting up a
- * TableScanDesc for a Tid scan. As with bitmap scans, it's worth using
+ * TableScanDesc for a Tid scan. As with sample scans, it's worth using
  * the same data structure although the behavior is rather different.
  */
 static inline TableScanDesc
@@ -1002,7 +1041,7 @@ table_beginscan_tid(Relation rel, Snapshot snapshot)
 
 /*
  * table_beginscan_analyze is an alternative entry point for setting up a
- * TableScanDesc for an ANALYZE scan.  As with bitmap scans, it's worth using
+ * TableScanDesc for an ANALYZE scan.  As with sample scans, it's worth using
  * the same data structure although the behavior is rather different.
  */
 static inline TableScanDesc
@@ -1019,9 +1058,6 @@ table_beginscan_analyze(Relation rel)
 static inline void
 table_endscan(TableScanDesc scan)
 {
-	if (scan->rs_flags & SO_TYPE_BITMAPSCAN)
-		tbm_end_iterate(&scan->tbmiterator);
-
 	scan->rs_rd->rd_tableam->scan_end(scan);
 }
 
@@ -1032,9 +1068,6 @@ static inline void
 table_rescan(TableScanDesc scan,
 			 struct ScanKeyData *key)
 {
-	if (scan->rs_flags & SO_TYPE_BITMAPSCAN)
-		tbm_end_iterate(&scan->tbmiterator);
-
 	scan->rs_rd->rd_tableam->scan_rescan(scan, key, false, false, false, false);
 }
 
@@ -1974,7 +2007,7 @@ table_relation_estimate_size(Relation rel, int32 *attr_widths,
  * used after verifying the presence (at plan time or such).
  */
 static inline bool
-table_scan_bitmap_next_block(TableScanDesc scan,
+table_scan_bitmap_next_block(BitmapTableScanDesc *scan,
 							 BlockNumber *blockno, bool *recheck,
 							 long *lossy_pages,
 							 long *exact_pages)
@@ -2001,7 +2034,7 @@ table_scan_bitmap_next_block(TableScanDesc scan,
  * returned false.
  */
 static inline bool
-table_scan_bitmap_next_tuple(TableScanDesc scan,
+table_scan_bitmap_next_tuple(BitmapTableScanDesc *scan,
 							 TupleTableSlot *slot)
 {
 	/*
