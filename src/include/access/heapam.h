@@ -20,6 +20,8 @@
 #include "access/skey.h"
 #include "access/table.h"		/* for backward compatibility */
 #include "access/tableam.h"
+/* XXX: temporary include so lift and shift works */
+#include "nodes/execnodes.h"
 #include "nodes/lockoptions.h"
 #include "nodes/primnodes.h"
 #include "storage/bufpage.h"
@@ -385,6 +387,14 @@ extern void simple_heap_update(Relation relation, ItemPointer otid,
 
 extern TransactionId heap_index_delete_tuples(Relation rel,
 											  TM_IndexDeleteOp *delstate);
+
+/* in heapam_handler.c */
+extern void BitmapPrefetch(BitmapHeapScanState *node,
+						   BitmapTableScanDesc *scan);
+
+extern void BitmapAdjustPrefetchIterator(BitmapHeapScanState *node);
+
+extern void BitmapAdjustPrefetchTarget(BitmapHeapScanState *node);
 
 /* in heap/pruneheap.c */
 struct GlobalVisState;
