@@ -988,7 +988,7 @@ table_rescan_bm(BitmapTableScanDesc *scan,
 				dsa_area *dsa,
 				int prefetch_maximum)
 {
-	scan->rs_rd->rd_tableam->scan_rescan_bm(scan);
+	scan->rel->rd_tableam->scan_rescan_bm(scan);
 }
 
 /*
@@ -997,7 +997,7 @@ table_rescan_bm(BitmapTableScanDesc *scan,
 static inline void
 table_endscan_bm(BitmapTableScanDesc *scan)
 {
-	scan->rs_rd->rd_tableam->scan_end_bm(scan);
+	scan->rel->rd_tableam->scan_end_bm(scan);
 }
 
 
@@ -2020,9 +2020,9 @@ table_scan_bitmap_next_block(BitmapTableScanDesc *scan,
 	if (unlikely(TransactionIdIsValid(CheckXidAlive) && !bsysscan))
 		elog(ERROR, "unexpected table_scan_bitmap_next_block call during logical decoding");
 
-	return scan->rs_rd->rd_tableam->scan_bitmap_next_block(scan,
-														   blockno, recheck,
-														   lossy_pages, exact_pages);
+	return scan->rel->rd_tableam->scan_bitmap_next_block(scan,
+														 blockno, recheck,
+														 lossy_pages, exact_pages);
 }
 
 /*
@@ -2045,8 +2045,8 @@ table_scan_bitmap_next_tuple(BitmapTableScanDesc *scan,
 	if (unlikely(TransactionIdIsValid(CheckXidAlive) && !bsysscan))
 		elog(ERROR, "unexpected table_scan_bitmap_next_tuple call during logical decoding");
 
-	return scan->rs_rd->rd_tableam->scan_bitmap_next_tuple(scan,
-														   slot);
+	return scan->rel->rd_tableam->scan_bitmap_next_tuple(scan,
+														 slot);
 }
 
 /*

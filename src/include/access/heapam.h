@@ -100,19 +100,19 @@ typedef struct HeapScanDescData *HeapScanDesc;
 
 typedef struct BitmapHeapScanDesc
 {
-	BitmapTableScanDesc rs_base;
+	BitmapTableScanDesc base;
 
-	BlockNumber rs_nblocks;		/* total number of blocks in rel */
+	BlockNumber nblocks;		/* total number of blocks in rel */
 
-	int			rs_cindex;		/* current tuple's index in vistuples */
-	int			rs_ntuples;		/* number of visible tuples on page */
-	OffsetNumber rs_vistuples[MaxHeapTuplesPerPage];	/* their offsets */
+	int			vis_idx;		/* current tuple's index in vistuples */
+	int			vis_ntuples;	/* number of visible tuples on page */
+	OffsetNumber vis_tuples[MaxHeapTuplesPerPage];	/* their offsets */
 
-	Buffer		rs_cbuf;		/* current buffer in scan, if any */
-	/* NB: if rs_cbuf is not InvalidBuffer, we hold a pin on that buffer */
-	HeapTupleData rs_ctup;		/* current tuple in scan, if any */
+	Buffer		cbuf;			/* current buffer in scan, if any */
+	/* NB: if cbuf is not InvalidBuffer, we hold a pin on that buffer */
+	HeapTupleData ctup;			/* current tuple in scan, if any */
 
-	BlockNumber rs_cblock;		/* current block # in scan, if any */
+	BlockNumber cblock;			/* current block # in scan, if any */
 
 	/*
 	 * These fields are only used for bitmap scans for the "skip fetch"
@@ -121,8 +121,8 @@ typedef struct BitmapHeapScanDesc
 	 * block reported by the bitmap to determine how many NULL-filled tuples
 	 * to return. They are common to parallel and serial BitmapHeapScans
 	 */
-	Buffer		rs_vmbuffer;
-	int			rs_empty_tuples_pending;
+	Buffer		vmbuffer;
+	int			empty_tuples_pending;
 } BitmapHeapScanDesc;
 
 /*
