@@ -394,6 +394,14 @@ extern void simple_heap_update(Relation relation, ItemPointer otid,
 extern TransactionId heap_index_delete_tuples(Relation rel,
 											  TM_IndexDeleteOp *delstate);
 
+/* in heapam_handler.c */
+extern void BitmapPrefetch(BitmapHeapScanState *node,
+						   BitmapTableScanDesc *scan);
+
+extern void BitmapAdjustPrefetchIterator(BitmapHeapScanState *node);
+
+extern void BitmapAdjustPrefetchTarget(BitmapHeapScanState *node);
+
 /* in heap/pruneheap.c */
 struct GlobalVisState;
 extern void heap_page_prune_opt(Relation relation, Buffer buffer);
