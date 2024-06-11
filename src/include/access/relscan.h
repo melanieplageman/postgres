@@ -54,19 +54,19 @@ typedef struct TableScanDescData *TableScanDesc;
 
 typedef struct BitmapTableScanDesc
 {
-	Relation	rs_rd;			/* heap relation descriptor */
-	struct SnapshotData *rs_snapshot;	/* snapshot to see */
+	Relation	rel;			/* heap relation descriptor */
+	struct SnapshotData *snapshot;	/* snapshot to see */
 
 	/*
 	 * Members common to Parallel and Serial BitmapTableScans
 	 */
-	TBMIterator tbmiterator;
+	TBMIterator iterator;
 
 	/*
 	 * Information about type and behaviour of the scan, a bitmask of members
 	 * of the ScanOptions enum (see tableam.h).
 	 */
-	uint32		rs_flags;
+	uint32		flags;
 } BitmapTableScanDesc;
 
 /*

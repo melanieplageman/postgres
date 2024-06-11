@@ -166,11 +166,11 @@ BitmapHeapNext(BitmapHeapScanState *node)
 		{
 			Assert(scan);
 			/* rescan to release any page pin */
-			tbm_end_iterate(&scan->tbmiterator);
+			tbm_end_iterate(&scan->iterator);
 			table_rescan_bm(scan);
 		}
 
-		tbm_begin_iterate(&scan->tbmiterator, node->tbm, dsa,
+		tbm_begin_iterate(&scan->iterator, node->tbm, dsa,
 						  pstate ?
 						  pstate->tbmiterator :
 						  InvalidDsaPointer);
@@ -440,14 +440,14 @@ BitmapPrefetch(BitmapHeapScanState *node, BitmapTableScanDesc *scan)
 				 * logic normally.  (Would it be better not to increment
 				 * prefetch_pages?)
 				 */
-				skip_fetch = (!(scan->rs_flags & SO_NEED_TUPLES) &&
+				skip_fetch = (!(scan->flags & SO_NEED_TUPLES) &&
 							  !tbmpre->recheck &&
 							  VM_ALL_VISIBLE(node->ss.ss_currentRelation,
 											 tbmpre->blockno,
 											 &node->pvmbuffer));
 
 				if (!skip_fetch)
-					PrefetchBuffer(scan->rs_rd, MAIN_FORKNUM, tbmpre->blockno);
+					PrefetchBuffer(scan->rel, MAIN_FORKNUM, tbmpre->blockno);
 			}
 		}
 
@@ -492,14 +492,14 @@ BitmapPrefetch(BitmapHeapScanState *node, BitmapTableScanDesc *scan)
 				node->pfblockno = tbmpre->blockno;
 
 				/* As above, skip prefetch if we expect not to need page */
-				skip_fetch = (!(scan->rs_flags & SO_NEED_TUPLES) &&
+				skip_fetch = (!(scan->flags & SO_NEED_TUPLES) &&
 							  !tbmpre->recheck &&
 							  VM_ALL_VISIBLE(node->ss.ss_currentRelation,
 											 tbmpre->blockno,
 											 &node->pvmbuffer));
 
 				if (!skip_fetch)
-					PrefetchBuffer(scan->rs_rd, MAIN_FORKNUM, tbmpre->blockno);
+					PrefetchBuffer(scan->rel, MAIN_FORKNUM, tbmpre->blockno);
 			}
 		}
 	}
@@ -599,7 +599,7 @@ ExecEndBitmapHeapScan(BitmapHeapScanState *node)
 		/*
 		 * End iteration on iterators saved in scan descriptor.
 		 */
-		tbm_end_iterate(&scanDesc->tbmiterator);
+		tbm_end_iterate(&scanDesc->iterator);
 
 		/*
 		 * close table scan
