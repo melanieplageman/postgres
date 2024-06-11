@@ -54,7 +54,7 @@ static inline void BitmapDoneInitializingSharedState(ParallelBitmapHeapState *ps
 static inline void BitmapAdjustPrefetchIterator(BitmapHeapScanState *node);
 static inline void BitmapAdjustPrefetchTarget(BitmapHeapScanState *node);
 static inline void BitmapPrefetch(BitmapHeapScanState *node,
-								  TableScanDesc scan);
+								  BitmapTableScanDesc *scan);
 static bool BitmapShouldInitializeSharedState(ParallelBitmapHeapState *pstate);
 
 
@@ -68,7 +68,7 @@ static TupleTableSlot *
 BitmapHeapNext(BitmapHeapScanState *node)
 {
 	ExprContext *econtext;
-	TableScanDesc scan;
+	BitmapTableScanDesc *scan;
 	TupleTableSlot *slot;
 	ParallelBitmapHeapState *pstate = node->pstate;
 	dsa_area   *dsa = node->ss.ps.state->es_query_dsa;
@@ -158,15 +158,18 @@ BitmapHeapNext(BitmapHeapScanState *node)
 
 			scan = table_beginscan_bm(node->ss.ss_currentRelation,
 									  node->ss.ps.state->es_snapshot,
-									  0,
-									  NULL,
 									  need_tuples);
-
 			node->scandesc = scan;
 			node->scan_in_progress = true;
 		}
+		else
+		{
+			Assert(scan);
+			/* rescan to release any page pin */
+			tbm_end_iterate(&scan->tbmiterator);
+			table_rescan_bm(scan);
+		}
 
-		Assert(scan);
 		tbm_begin_iterate(&scan->tbmiterator, node->tbm, dsa,
 						  pstate ?
 						  pstate->tbmiterator :
@@ -406,7 +409,7 @@ BitmapAdjustPrefetchTarget(BitmapHeapScanState *node)
  * BitmapPrefetch - Prefetch, if prefetch_pages are behind prefetch_target
  */
 static inline void
-BitmapPrefetch(BitmapHeapScanState *node, TableScanDesc scan)
+BitmapPrefetch(BitmapHeapScanState *node, BitmapTableScanDesc *scan)
 {
 #ifdef USE_PREFETCH
 	ParallelBitmapHeapState *pstate = node->pstate;
@@ -544,19 +547,6 @@ ExecReScanBitmapHeapScan(BitmapHeapScanState *node)
 {
 	PlanState  *outerPlan = outerPlanState(node);
 
-	TableScanDesc scan = node->scandesc;
-
-	if (scan)
-	{
-		/*
-		 * End iteration on iterators saved in scan descriptor.
-		 */
-		tbm_end_iterate(&scan->tbmiterator);
-
-		/* rescan to release any page pin */
-		table_rescan(node->scandesc, NULL);
-	}
-
 	/* End iteration on iterators saved in the node . */
 	tbm_end_iterate(&node->prefetch_iterator);
 
@@ -592,7 +582,7 @@ ExecReScanBitmapHeapScan(BitmapHeapScanState *node)
 void
 ExecEndBitmapHeapScan(BitmapHeapScanState *node)
 {
-	TableScanDesc scanDesc;
+	BitmapTableScanDesc *scanDesc;
 
 	/*
 	 * extract information from the node
@@ -614,7 +604,7 @@ ExecEndBitmapHeapScan(BitmapHeapScanState *node)
 		/*
 		 * close table scan
 		 */
-		table_endscan(scanDesc);
+		table_endscan_bm(scanDesc);
 	}
 
 	/* End iteration on iterators saved in the node . */

@@ -2119,11 +2119,11 @@ heapam_estimate_rel_size(Relation rel, int32 *attr_widths,
  */
 
 static bool
-heapam_scan_bitmap_next_block(TableScanDesc scan,
+heapam_scan_bitmap_next_block(BitmapTableScanDesc *scan,
 							  BlockNumber *blockno, bool *recheck,
 							  long *lossy_pages, long *exact_pages)
 {
-	HeapScanDesc hscan = (HeapScanDesc) scan;
+	BitmapHeapScanDesc *hscan = (BitmapHeapScanDesc *) scan;
 	BlockNumber block;
 	Buffer		buffer;
 	Snapshot	snapshot;
@@ -2283,10 +2283,10 @@ heapam_scan_bitmap_next_block(TableScanDesc scan,
 }
 
 static bool
-heapam_scan_bitmap_next_tuple(TableScanDesc scan,
+heapam_scan_bitmap_next_tuple(BitmapTableScanDesc *scan,
 							  TupleTableSlot *slot)
 {
-	HeapScanDesc hscan = (HeapScanDesc) scan;
+	BitmapHeapScanDesc *hscan = (BitmapHeapScanDesc *) scan;
 	OffsetNumber targoffset;
 	Page		page;
 	ItemId		lp;
@@ -2628,6 +2628,10 @@ static const TableAmRoutine heapam_methods = {
 	.scan_end = heap_endscan,
 	.scan_rescan = heap_rescan,
 	.scan_getnextslot = heap_getnextslot,
+
+	.scan_begin_bm = heap_beginscan_bm,
+	.scan_rescan_bm = heap_rescan_bm,
+	.scan_end_bm = heap_endscan_bm,
 
 	.scan_set_tidrange = heap_set_tidrange,
 	.scan_getnextslot_tidrange = heap_getnextslot_tidrange,
