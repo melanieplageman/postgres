@@ -145,11 +145,11 @@ TidListEval(TidScanState *tidstate)
 	 * the size of the table), so it makes sense to delay that until needed -
 	 * the node might never get executed.
 	 */
-	if (tidstate->ss.ss_currentScanDesc == NULL)
-		tidstate->ss.ss_currentScanDesc =
+	if (tidstate->ss_currentScanDesc == NULL)
+		tidstate->ss_currentScanDesc =
 			table_beginscan_tid(tidstate->ss.ss_currentRelation,
 								tidstate->ss.ps.state->es_snapshot);
-	scan = tidstate->ss.ss_currentScanDesc;
+	scan = tidstate->ss_currentScanDesc;
 
 	/*
 	 * We initialize the array with enough slots for the case that all quals
@@ -336,7 +336,7 @@ TidNext(TidScanState *node)
 	if (node->tss_TidList == NULL)
 		TidListEval(node);
 
-	scan = node->ss.ss_currentScanDesc;
+	scan = node->ss_currentScanDesc;
 	tidList = node->tss_TidList;
 	numTids = node->tss_NumTids;
 
@@ -453,8 +453,8 @@ ExecReScanTidScan(TidScanState *node)
 	node->tss_TidPtr = -1;
 
 	/* not really necessary, but seems good form */
-	if (node->ss.ss_currentScanDesc)
-		table_rescan(node->ss.ss_currentScanDesc, NULL);
+	if (node->ss_currentScanDesc)
+		table_rescan(node->ss_currentScanDesc, NULL);
 
 	ExecScanReScan(&node->ss);
 }
@@ -469,8 +469,8 @@ ExecReScanTidScan(TidScanState *node)
 void
 ExecEndTidScan(TidScanState *node)
 {
-	if (node->ss.ss_currentScanDesc)
-		table_endscan(node->ss.ss_currentScanDesc);
+	if (node->ss_currentScanDesc)
+		table_endscan(node->ss_currentScanDesc);
 }
 
 /* ----------------------------------------------------------------
@@ -518,7 +518,7 @@ ExecInitTidScan(TidScan *node, EState *estate, int eflags)
 	currentRelation = ExecOpenScanRelation(estate, node->scan.scanrelid, eflags);
 
 	tidstate->ss.ss_currentRelation = currentRelation;
-	tidstate->ss.ss_currentScanDesc = NULL; /* no heap scan here */
+	tidstate->ss_currentScanDesc = NULL;	/* no heap scan here */
 
 	/*
 	 * get the scan type from the relation descriptor.

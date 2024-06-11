@@ -78,7 +78,7 @@ BitmapHeapNext(BitmapHeapScanState *node)
 	 */
 	econtext = node->ss.ps.ps_ExprContext;
 	slot = node->ss.ss_ScanTupleSlot;
-	scan = node->ss.ss_currentScanDesc;
+	scan = node->ss_currentScanDesc;
 
 	/*
 	 * If we haven't yet performed the underlying index scan, do it, and begin
@@ -162,7 +162,7 @@ BitmapHeapNext(BitmapHeapScanState *node)
 									  NULL,
 									  need_tuples);
 
-			node->ss.ss_currentScanDesc = scan;
+			node->ss_currentScanDesc = scan;
 		}
 
 		tbm_begin_iterate(&scan->tbmiterator, node->tbm, dsa,
@@ -542,7 +542,7 @@ ExecReScanBitmapHeapScan(BitmapHeapScanState *node)
 {
 	PlanState  *outerPlan = outerPlanState(node);
 
-	TableScanDesc scan = node->ss.ss_currentScanDesc;
+	TableScanDesc scan = node->ss_currentScanDesc;
 
 	if (scan)
 	{
@@ -552,7 +552,7 @@ ExecReScanBitmapHeapScan(BitmapHeapScanState *node)
 		tbm_end_iterate(&scan->tbmiterator);
 
 		/* rescan to release any page pin */
-		table_rescan(node->ss.ss_currentScanDesc, NULL);
+		table_rescan(node->ss_currentScanDesc, NULL);
 	}
 
 	/* End iteration on iterators saved in the node . */
@@ -595,7 +595,7 @@ ExecEndBitmapHeapScan(BitmapHeapScanState *node)
 	/*
 	 * extract information from the node
 	 */
-	scanDesc = node->ss.ss_currentScanDesc;
+	scanDesc = node->ss_currentScanDesc;
 
 	/*
 	 * close down subplans
