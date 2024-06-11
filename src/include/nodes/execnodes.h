@@ -1572,7 +1572,7 @@ typedef struct ScanState
 typedef struct SeqScanState
 {
 	ScanState	ss;				/* its first field is NodeTag */
-	struct TableScanDescData *ss_currentScanDesc;	/* current scan descriptor */
+	struct TableScanDescData *scandesc; /* current scan descriptor */
 	Size		pscan_len;		/* size of parallel heap scan descriptor */
 } SeqScanState;
 
@@ -1583,7 +1583,7 @@ typedef struct SeqScanState
 typedef struct SampleScanState
 {
 	ScanState	ss;
-	struct TableScanDescData *ss_currentScanDesc;	/* current scan descriptor */
+	struct TableScanDescData *scandesc; /* current scan descriptor */
 	List	   *args;			/* expr states for TABLESAMPLE params */
 	ExprState  *repeatable;		/* expr state for REPEATABLE expr */
 	/* use struct pointer to avoid including tsmapi.h here */
@@ -1793,7 +1793,7 @@ typedef struct ParallelBitmapHeapState
 /* ----------------
  *	 BitmapHeapScanState information
  *
- *      currentScanDesc    current scan descriptor for scan (NULL if none)
+ *      scandesc		   current scan descriptor for scan (NULL if none)
  *		bitmapqualorig	   execution state for bitmapqualorig expressions
  *		tbm				   bitmap obtained from child index scan(s)
  *		pvmbuffer		   buffer for visibility-map lookups of prefetched pages
@@ -1813,7 +1813,7 @@ typedef struct ParallelBitmapHeapState
 typedef struct BitmapHeapScanState
 {
 	ScanState	ss;				/* its first field is NodeTag */
-	struct TableScanDescData *ss_currentScanDesc;
+	struct TableScanDescData *scandesc;
 	ExprState  *bitmapqualorig;
 	TIDBitmap  *tbm;
 	Buffer		pvmbuffer;
@@ -1833,7 +1833,7 @@ typedef struct BitmapHeapScanState
 /* ----------------
  *	 TidScanState information
  *
- *      currentScanDesc    current scan descriptor for scan (NULL if none)
+ *      scandesc	   current scan descriptor for scan (NULL if none)
  *		tidexprs	   list of TidExpr structs (see nodeTidscan.c)
  *		isCurrentOf    scan has a CurrentOfExpr qual
  *		NumTids		   number of tids in this scan
@@ -1844,7 +1844,7 @@ typedef struct BitmapHeapScanState
 typedef struct TidScanState
 {
 	ScanState	ss;				/* its first field is NodeTag */
-	struct TableScanDescData *ss_currentScanDesc;
+	struct TableScanDescData *scandesc;
 	List	   *tss_tidexprs;
 	bool		tss_isCurrentOf;
 	int			tss_NumTids;
@@ -1855,7 +1855,7 @@ typedef struct TidScanState
 /* ----------------
  *	 TidRangeScanState information
  *
- *      currentScanDesc    current scan descriptor for scan (NULL if none)
+ *      scandesc			current scan descriptor for scan (NULL if none)
  *		trss_tidexprs		list of TidOpExpr structs (see nodeTidrangescan.c)
  *		trss_mintid			the lowest TID in the scan range
  *		trss_maxtid			the highest TID in the scan range
@@ -1865,7 +1865,7 @@ typedef struct TidScanState
 typedef struct TidRangeScanState
 {
 	ScanState	ss;				/* its first field is NodeTag */
-	struct TableScanDescData *ss_currentScanDesc;
+	struct TableScanDescData *scandesc;
 	List	   *trss_tidexprs;
 	ItemPointerData trss_mintid;
 	ItemPointerData trss_maxtid;
