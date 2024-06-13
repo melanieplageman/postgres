@@ -141,7 +141,7 @@ BitmapHeapNext(BitmapHeapScanState *node)
 		 * If this is the first scan of the underlying table, create the table
 		 * scan descriptor and begin the scan.
 		 */
-		if (!scan)
+		if (!node->scan_in_progress)
 		{
 			bool		need_tuples = false;
 
@@ -163,6 +163,7 @@ BitmapHeapNext(BitmapHeapScanState *node)
 									  need_tuples);
 
 			node->scandesc = scan;
+			node->scan_in_progress = true;
 		}
 
 		tbm_begin_iterate(&scan->tbmiterator, node->tbm, dsa,
@@ -640,6 +641,7 @@ ExecInitBitmapHeapScan(BitmapHeapScan *node, EState *estate, int eflags)
 	scanstate->prefetch_pages = 0;
 	scanstate->prefetch_target = -1;
 	scanstate->initialized = false;
+	scanstate->scan_in_progress = false;
 	scanstate->pstate = NULL;
 	scanstate->recheck = true;
 	scanstate->blockno = InvalidBlockNumber;
