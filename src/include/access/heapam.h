@@ -20,6 +20,7 @@
 #include "access/skey.h"
 #include "access/table.h"		/* for backward compatibility */
 #include "access/tableam.h"
+#include "nodes/execnodes.h"
 #include "nodes/lockoptions.h"
 #include "nodes/primnodes.h"
 #include "storage/bufpage.h"
@@ -113,6 +114,7 @@ typedef struct BitmapHeapScanDesc
 	HeapTupleData ctup;			/* current tuple in scan, if any */
 
 	BlockNumber cblock;			/* current block # in scan, if any */
+	TBMIterator iterator;
 
 	/*
 	 * These fields are only used for bitmap scans for the "skip fetch"
@@ -315,8 +317,14 @@ extern void heap_rescan(TableScanDesc sscan, ScanKey key, bool set_params,
 extern void heap_endscan(TableScanDesc sscan);
 
 extern BitmapTableScanDesc *heap_beginscan_bm(Relation relation,
-											  Snapshot snapshot, uint32 flags);
-extern void heap_rescan_bm(BitmapTableScanDesc *sscan);
+											  Snapshot snapshot, uint32 flags,
+											  TIDBitmap *tbm,
+											  ParallelBitmapHeapState *pstate,
+											  dsa_area *dsa);
+extern void heap_rescan_bm(BitmapTableScanDesc *sscan,
+						   TIDBitmap *tbm,
+						   ParallelBitmapHeapState *pstate,
+						   dsa_area *dsa);
 void		heap_endscan_bm(BitmapTableScanDesc *sscan);
 
 extern HeapTuple heap_getnext(TableScanDesc sscan, ScanDirection direction);

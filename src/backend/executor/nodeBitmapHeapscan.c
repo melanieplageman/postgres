@@ -158,6 +158,8 @@ BitmapHeapNext(BitmapHeapScanState *node)
 
 			scan = table_beginscan_bm(node->ss.ss_currentRelation,
 									  node->ss.ps.state->es_snapshot,
+									  node->tbm,
+									  node->pstate,
 									  dsa,
 									  need_tuples, node->prefetch_maximum);
 			node->scandesc = scan;
@@ -166,14 +168,8 @@ BitmapHeapNext(BitmapHeapScanState *node)
 		else
 		{
 			/* rescan to release any page pin */
-			tbm_end_iterate(&scan->iterator);
-			table_rescan_bm(scan, dsa, node->prefetch_maximum);
+			table_rescan_bm(scan, node->tbm, pstate, dsa, node->prefetch_maximum);
 		}
-
-		tbm_begin_iterate(&scan->iterator, node->tbm, dsa,
-						  pstate ?
-						  pstate->tbmiterator :
-						  InvalidDsaPointer);
 
 		node->initialized = true;
 
@@ -593,10 +589,7 @@ ExecEndBitmapHeapScan(BitmapHeapScanState *node)
 	 * close heap scan
 	 */
 	if (scanDesc)
-	{
-		tbm_end_iterate(&scanDesc->iterator);
 		table_endscan_bm(scanDesc);
-	}
 
 	/*
 	 * release bitmaps and buffers if any

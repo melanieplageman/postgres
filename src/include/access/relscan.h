@@ -58,11 +58,6 @@ typedef struct BitmapTableScanDesc
 	struct SnapshotData *snapshot;	/* snapshot to see */
 
 	/*
-	 * Members common to Parallel and Serial BitmapTableScans
-	 */
-	TBMIterator iterator;
-
-	/*
 	 * Information about type and behaviour of the scan, a bitmask of members
 	 * of the ScanOptions enum (see tableam.h).
 	 */

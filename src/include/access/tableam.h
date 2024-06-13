@@ -36,6 +36,7 @@ extern PGDLLIMPORT bool synchronize_seqscans;
 
 struct BulkInsertStateData;
 struct IndexInfo;
+struct ParallelBitmapHeapState;
 struct SampleScanState;
 struct VacuumParams;
 struct ValidateIndexState;
@@ -354,9 +355,15 @@ typedef struct TableAmRoutine
 	 */
 	BitmapTableScanDesc *(*scan_begin_bm) (Relation rel,
 										   Snapshot snapshot,
-										   uint32 flags);
+										   uint32 flags,
+										   TIDBitmap *tbm,
+										   struct ParallelBitmapHeapState *pstate,
+										   dsa_area *dsa);
 
-	void		(*scan_rescan_bm) (BitmapTableScanDesc *scan);
+	void		(*scan_rescan_bm) (BitmapTableScanDesc *scan,
+								   TIDBitmap *tbm,
+								   struct ParallelBitmapHeapState *pstate,
+								   dsa_area *dsa);
 
 	/*
 	 * Release resources and deallocate scan.
@@ -968,6 +975,8 @@ table_beginscan_strat(Relation rel, Snapshot snapshot,
  */
 static inline BitmapTableScanDesc *
 table_beginscan_bm(Relation rel, Snapshot snapshot,
+				   TIDBitmap *tbm,
+				   struct ParallelBitmapHeapState *pstate,
 				   dsa_area *dsa,
 				   bool need_tuple,
 				   int prefetch_maximum)
@@ -977,7 +986,7 @@ table_beginscan_bm(Relation rel, Snapshot snapshot,
 	if (need_tuple)
 		flags |= SO_NEED_TUPLES;
 
-	return rel->rd_tableam->scan_begin_bm(rel, snapshot, flags);
+	return rel->rd_tableam->scan_begin_bm(rel, snapshot, flags, tbm, pstate, dsa);
 }
 
 /*
@@ -985,10 +994,12 @@ table_beginscan_bm(Relation rel, Snapshot snapshot,
  */
 static inline void
 table_rescan_bm(BitmapTableScanDesc *scan,
+				TIDBitmap *tbm,
+				struct ParallelBitmapHeapState *pstate,
 				dsa_area *dsa,
 				int prefetch_maximum)
 {
-	scan->rel->rd_tableam->scan_rescan_bm(scan);
+	scan->rel->rd_tableam->scan_rescan_bm(scan, tbm, pstate, dsa);
 }
 
 /*
