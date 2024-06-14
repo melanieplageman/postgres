@@ -83,8 +83,8 @@ extern bool tbm_is_empty(const TIDBitmap *tbm);
 
 extern TBMSerialIterator *tbm_begin_serial_iterate(TIDBitmap *tbm);
 extern dsa_pointer tbm_prepare_shared_iterate(TIDBitmap *tbm);
-extern TBMIterateResult *tbm_serial_iterate(TBMSerialIterator *iterator);
-extern TBMIterateResult *tbm_shared_iterate(TBMSharedIterator *iterator);
+extern void tbm_serial_iterate(TBMSerialIterator *iterator, TBMIterateResult *tbmres);
+extern void tbm_shared_iterate(TBMSharedIterator *iterator, TBMIterateResult *tbmres);
 extern void tbm_end_serial_iterate(TBMSerialIterator *iterator);
 extern void tbm_end_shared_iterate(TBMSharedIterator *iterator);
 extern TBMSharedIterator *tbm_attach_shared_iterate(dsa_area *dsa,
@@ -94,7 +94,7 @@ extern long tbm_calculate_entries(double maxbytes);
 extern void tbm_begin_iterate(TBMIterator *iterator, TIDBitmap *tbm,
 							  dsa_area *dsa, dsa_pointer dsp);
 extern void tbm_end_iterate(TBMIterator *iterator);
-extern TBMIterateResult *tbm_iterate(TBMIterator *iterator);
+extern void tbm_iterate(TBMIterator *iterator, TBMIterateResult *tbmres);
 
 
 #endif							/* TIDBITMAP_H */
