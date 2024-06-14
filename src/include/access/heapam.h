@@ -114,16 +114,7 @@ typedef struct BitmapHeapScanDesc
 
 	BlockNumber cblock;			/* current block # in scan, if any */
 
-	/* used to validate pf stays ahead of current block */
-	BlockNumber pfblock;
-
-	/* maximum value for prefetch_target */
-	int			prefetch_maximum;
-
-	/* Current target for prefetch distance */
-	int			prefetch_target;
-	/* # pages prefetch iterator is ahead of current */
-	int			prefetch_pages;
+	ReadStream *read_stream;
 
 	/*
 	 * These fields are only used for bitmap scans for the "skip fetch"
@@ -330,8 +321,7 @@ extern void heap_rescan(TableScanDesc sscan, ScanKey key, bool set_params,
 extern void heap_endscan(TableScanDesc sscan);
 
 extern BitmapTableScanDesc *heap_beginscan_bm(Relation relation,
-											  Snapshot snapshot, uint32 flags,
-											  int prefetch_maximum);
+											  Snapshot snapshot, uint32 flags);
 extern void heap_rescan_bm(BitmapTableScanDesc *sscan);
 void		heap_endscan_bm(BitmapTableScanDesc *sscan);
 

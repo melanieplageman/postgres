@@ -57,14 +57,10 @@ typedef struct BitmapTableScanDesc
 	Relation	rel;			/* heap relation descriptor */
 	struct SnapshotData *snapshot;	/* snapshot to see */
 
-	struct ParallelBitmapHeapState *pstate;
-
 	/*
 	 * Members common to Parallel and Serial BitmapTableScans
 	 */
 	TBMIterator iterator;
-	/* iterator for prefetching ahead of current page */
-	TBMIterator prefetch_iterator;
 
 	/*
 	 * Information about type and behaviour of the scan, a bitmask of members

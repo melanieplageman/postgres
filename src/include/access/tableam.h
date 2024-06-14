@@ -354,7 +354,7 @@ typedef struct TableAmRoutine
 	 */
 	BitmapTableScanDesc *(*scan_begin_bm) (Relation rel,
 										   Snapshot snapshot,
-										   uint32 flags, int prefetch_maximum);
+										   uint32 flags);
 
 	void		(*scan_rescan_bm) (BitmapTableScanDesc *scan);
 
@@ -944,19 +944,14 @@ table_beginscan_strat(Relation rel, Snapshot snapshot,
  */
 static inline BitmapTableScanDesc *
 table_beginscan_bm(Relation rel, Snapshot snapshot,
-				   struct ParallelBitmapHeapState *pstate,
-				   bool need_tuple,
-				   int prefetch_maximum)
+				   bool need_tuple)
 {
-	BitmapTableScanDesc *result;
 	uint32		flags = SO_TYPE_BITMAPSCAN | SO_ALLOW_PAGEMODE;
 
 	if (need_tuple)
 		flags |= SO_NEED_TUPLES;
 
-	result = rel->rd_tableam->scan_begin_bm(rel, snapshot, flags, prefetch_maximum);
-	result->pstate = pstate;
-	return result;
+	return rel->rd_tableam->scan_begin_bm(rel, snapshot, flags);
 }
 
 /*

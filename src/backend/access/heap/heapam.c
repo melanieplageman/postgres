@@ -285,6 +285,59 @@ heap_scan_stream_read_next_serial(ReadStream *stream,
 	return scan->rs_prefetch_block;
 }
 
+static BlockNumber
+heap_bitmap_scan_stream_read_next(ReadStream *stream,
+								  void *callback_private_data,
+								  void *per_buffer_data)
+{
+	TBMIterateResult *tbmres = per_buffer_data;
+	BitmapHeapScanDesc *scan = callback_private_data;
+
+	for (;;)
+	{
+		CHECK_FOR_INTERRUPTS();
+
+		tbm_iterate(&scan->base.iterator, tbmres);
+
+		/* no more entries in the bitmap */
+		if (!BlockNumberIsValid(tbmres->blockno))
+			return InvalidBlockNumber;
+
+		/*
+		 * Ignore any claimed entries past what we think is the end of the
+		 * relation. It may have been extended after the start of our scan (we
+		 * only hold an AccessShareLock, and it could be inserts from this
+		 * backend).  We don't take this optimization in SERIALIZABLE
+		 * isolation though, as we need to examine all invisible tuples
+		 * reachable by the index.
+		 */
+		if (!IsolationIsSerializable() && tbmres->blockno >= scan->nblocks)
+			continue;
+
+		/*
+		 * We can skip fetching the heap page if we don't need any fields from
+		 * the heap, the bitmap entries don't need rechecking, and all tuples
+		 * on the page are visible to our transaction.
+		 */
+		if (!(scan->base.flags & SO_NEED_TUPLES) &&
+			!tbmres->recheck &&
+			VM_ALL_VISIBLE(scan->base.rel, tbmres->blockno, &scan->vmbuffer))
+		{
+			/* can't be lossy in the skip_fetch case */
+			Assert(tbmres->ntuples >= 0);
+			Assert(scan->empty_tuples_pending >= 0);
+
+			scan->empty_tuples_pending += tbmres->ntuples;
+			continue;
+		}
+
+		return tbmres->blockno;
+	}
+
+	/* not reachable */
+	Assert(false);
+}
+
 /* ----------------
  *		initscan - scan code common to heap_beginscan and heap_rescan
  * ----------------
@@ -1230,8 +1283,7 @@ heap_endscan(TableScanDesc sscan)
 }
 
 BitmapTableScanDesc *
-heap_beginscan_bm(Relation relation, Snapshot snapshot, uint32 flags,
-				  int prefetch_maximum)
+heap_beginscan_bm(Relation relation, Snapshot snapshot, uint32 flags)
 {
 	BitmapHeapScanDesc *scan;
 
@@ -1268,11 +1320,13 @@ heap_beginscan_bm(Relation relation, Snapshot snapshot, uint32 flags,
 	scan->pvmbuffer = InvalidBuffer;
 	scan->empty_tuples_pending = 0;
 
-	scan->prefetch_maximum = prefetch_maximum;
-
-	/* Only used for serial BHS */
-	scan->prefetch_target = -1;
-	scan->prefetch_pages = 0;
+	scan->read_stream = read_stream_begin_relation(READ_STREAM_DEFAULT,
+												   NULL,
+												   scan->base.rel,
+												   MAIN_FORKNUM,
+												   heap_bitmap_scan_stream_read_next,
+												   scan,
+												   sizeof(TBMIterateResult));
 
 	return (BitmapTableScanDesc *) scan;
 }
@@ -1281,6 +1335,10 @@ void
 heap_rescan_bm(BitmapTableScanDesc *sscan)
 {
 	BitmapHeapScanDesc *scan = (BitmapHeapScanDesc *) sscan;
+
+	/* Reset the read stream on rescan. */
+	if (scan->read_stream)
+		read_stream_reset(scan->read_stream);
 
 	if (BufferIsValid(scan->cbuf))
 	{
@@ -1313,16 +1371,15 @@ heap_rescan_bm(BitmapTableScanDesc *sscan)
 
 	scan->ctup.t_data = NULL;
 	ItemPointerSetInvalid(&scan->ctup.t_self);
-
-	/* Only used for serial BHS */
-	scan->prefetch_target = -1;
-	scan->prefetch_pages = 0;
 }
 
 void
 heap_endscan_bm(BitmapTableScanDesc *sscan)
 {
 	BitmapHeapScanDesc *scan = (BitmapHeapScanDesc *) sscan;
+
+	if (scan->read_stream)
+		read_stream_end(scan->read_stream);
 
 	if (BufferIsValid(scan->cbuf))
 		ReleaseBuffer(scan->cbuf);
