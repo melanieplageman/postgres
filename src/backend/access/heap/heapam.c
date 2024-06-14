@@ -1230,7 +1230,8 @@ heap_endscan(TableScanDesc sscan)
 }
 
 BitmapTableScanDesc *
-heap_beginscan_bm(Relation relation, Snapshot snapshot, uint32 flags)
+heap_beginscan_bm(Relation relation, Snapshot snapshot, uint32 flags,
+				  int prefetch_maximum)
 {
 	BitmapHeapScanDesc *scan;
 
@@ -1264,7 +1265,14 @@ heap_beginscan_bm(Relation relation, Snapshot snapshot, uint32 flags)
 	scan->vis_ntuples = 0;
 
 	scan->vmbuffer = InvalidBuffer;
+	scan->pvmbuffer = InvalidBuffer;
 	scan->empty_tuples_pending = 0;
+
+	scan->prefetch_maximum = prefetch_maximum;
+
+	/* Only used for serial BHS */
+	scan->prefetch_target = -1;
+	scan->prefetch_pages = 0;
 
 	return (BitmapTableScanDesc *) scan;
 }
@@ -1288,6 +1296,12 @@ heap_rescan_bm(BitmapTableScanDesc *sscan)
 
 	scan->cblock = InvalidBlockNumber;
 
+	if (BufferIsValid(scan->pvmbuffer))
+	{
+		ReleaseBuffer(scan->pvmbuffer);
+		scan->pvmbuffer = InvalidBuffer;
+	}
+
 	/*
 	 * Reset empty_tuples_pending, a field only used by bitmap heap scan, to
 	 * avoid incorrectly emitting NULL-filled tuples from a previous scan on
@@ -1299,6 +1313,10 @@ heap_rescan_bm(BitmapTableScanDesc *sscan)
 
 	scan->ctup.t_data = NULL;
 	ItemPointerSetInvalid(&scan->ctup.t_self);
+
+	/* Only used for serial BHS */
+	scan->prefetch_target = -1;
+	scan->prefetch_pages = 0;
 }
 
 void
@@ -1311,6 +1329,9 @@ heap_endscan_bm(BitmapTableScanDesc *sscan)
 
 	if (BufferIsValid(scan->vmbuffer))
 		ReleaseBuffer(scan->vmbuffer);
+
+	if (BufferIsValid(scan->pvmbuffer))
+		ReleaseBuffer(scan->pvmbuffer);
 
 	/*
 	 * decrement relation reference count and free scan descriptor storage

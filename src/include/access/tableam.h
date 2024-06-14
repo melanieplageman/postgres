@@ -354,7 +354,7 @@ typedef struct TableAmRoutine
 	 */
 	BitmapTableScanDesc *(*scan_begin_bm) (Relation rel,
 										   Snapshot snapshot,
-										   uint32 flags);
+										   uint32 flags, int prefetch_maximum);
 
 	void		(*scan_rescan_bm) (BitmapTableScanDesc *scan);
 
@@ -808,33 +808,26 @@ typedef struct TableAmRoutine
 	 */
 
 	/*
-	 * Prepare to fetch / check / return tuples from `blockno` as part of a
-	 * bitmap table scan. `scan` was started via table_beginscan_bm(). Return
-	 * false if the bitmap is exhausted and true otherwise.
+	 * Prepare to fetch / check / return tuples from as part of a bitmap table
+	 * scan. `scan` was started via table_beginscan_bm(). Return false if the
+	 * bitmap is exhausted and true otherwise.
 	 *
-	 * This will typically read and pin the target block, and do the necessary
-	 * work to allow scan_bitmap_next_tuple() to return tuples (e.g. it might
-	 * make sense to perform tuple visibility checks at this time).
+	 * This will typically read and pin a block, and do the necessary work to
+	 * allow scan_bitmap_next_tuple() to return tuples (e.g. depending on the
+	 * table AM, it might make sense to perform tuple visibility checks at
+	 * this time).
 	 *
 	 * `lossy_pages` is incremented if the bitmap is lossy for the selected
 	 * block; otherwise, `exact_pages` is incremented.
 	 *
-	 * XXX: Currently this may only be implemented if the AM uses md.c as its
-	 * storage manager, and uses ItemPointer->ip_blkid in a manner that maps
-	 * blockids directly to the underlying storage. nodeBitmapHeapscan.c
-	 * performs prefetching directly using that interface.  This probably
-	 * needs to be rectified at a later point.
-	 *
-	 * XXX: Currently this may only be implemented if the AM uses the
-	 * visibilitymap, as nodeBitmapHeapscan.c unconditionally accesses it to
-	 * perform prefetching.  This probably needs to be rectified at a later
-	 * point.
+	 * Prefetching future blocks indicated in the bitmap is left to the table
+	 * AM.
 	 *
 	 * Optional callback, but either both scan_bitmap_next_block and
 	 * scan_bitmap_next_tuple need to exist, or neither.
 	 */
 	bool		(*scan_bitmap_next_block) (BitmapTableScanDesc *scan,
-										   BlockNumber *blockno, bool *recheck,
+										   bool *recheck,
 										   long *lossy_pages, long *exact_pages);
 
 	/*
@@ -968,14 +961,19 @@ table_beginscan_strat(Relation rel, Snapshot snapshot,
  */
 static inline BitmapTableScanDesc *
 table_beginscan_bm(Relation rel, Snapshot snapshot,
-				   bool need_tuple)
+				   struct ParallelBitmapHeapState *pstate,
+				   bool need_tuple,
+				   int prefetch_maximum)
 {
+	BitmapTableScanDesc *result;
 	uint32		flags = SO_TYPE_BITMAPSCAN | SO_ALLOW_PAGEMODE;
 
 	if (need_tuple)
 		flags |= SO_NEED_TUPLES;
 
-	return rel->rd_tableam->scan_begin_bm(rel, snapshot, flags);
+	result = rel->rd_tableam->scan_begin_bm(rel, snapshot, flags, prefetch_maximum);
+	result->pstate = pstate;
+	return result;
 }
 
 /*
@@ -2004,7 +2002,7 @@ table_relation_estimate_size(Relation rel, int32 *attr_widths,
  */
 static inline bool
 table_scan_bitmap_next_block(BitmapTableScanDesc *scan,
-							 BlockNumber *blockno, bool *recheck,
+							 bool *recheck,
 							 long *lossy_pages,
 							 long *exact_pages)
 {
@@ -2017,7 +2015,7 @@ table_scan_bitmap_next_block(BitmapTableScanDesc *scan,
 		elog(ERROR, "unexpected table_scan_bitmap_next_block call during logical decoding");
 
 	return scan->rel->rd_tableam->scan_bitmap_next_block(scan,
-														 blockno, recheck,
+														 recheck,
 														 lossy_pages, exact_pages);
 }
 

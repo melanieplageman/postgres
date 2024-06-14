@@ -20,8 +20,6 @@
 #include "access/skey.h"
 #include "access/table.h"		/* for backward compatibility */
 #include "access/tableam.h"
-/* XXX: temporary include so lift and shift works */
-#include "nodes/execnodes.h"
 #include "nodes/lockoptions.h"
 #include "nodes/primnodes.h"
 #include "storage/bufpage.h"
@@ -116,6 +114,17 @@ typedef struct BitmapHeapScanDesc
 
 	BlockNumber cblock;			/* current block # in scan, if any */
 
+	/* used to validate pf stays ahead of current block */
+	BlockNumber pfblock;
+
+	/* maximum value for prefetch_target */
+	int			prefetch_maximum;
+
+	/* Current target for prefetch distance */
+	int			prefetch_target;
+	/* # pages prefetch iterator is ahead of current */
+	int			prefetch_pages;
+
 	/*
 	 * These fields are only used for bitmap scans for the "skip fetch"
 	 * optimization. Bitmap scans needing no fields from the heap may skip
@@ -123,7 +132,11 @@ typedef struct BitmapHeapScanDesc
 	 * block reported by the bitmap to determine how many NULL-filled tuples
 	 * to return. They are common to parallel and serial BitmapHeapScans
 	 */
+
+	/* page of VM containing info for current block */
 	Buffer		vmbuffer;
+	/* page of VM containing info for prefetch block */
+	Buffer		pvmbuffer;
 	int			empty_tuples_pending;
 } BitmapHeapScanDesc;
 
@@ -317,7 +330,8 @@ extern void heap_rescan(TableScanDesc sscan, ScanKey key, bool set_params,
 extern void heap_endscan(TableScanDesc sscan);
 
 extern BitmapTableScanDesc *heap_beginscan_bm(Relation relation,
-											  Snapshot snapshot, uint32 flags);
+											  Snapshot snapshot, uint32 flags,
+											  int prefetch_maximum);
 extern void heap_rescan_bm(BitmapTableScanDesc *sscan);
 void		heap_endscan_bm(BitmapTableScanDesc *sscan);
 
@@ -387,14 +401,6 @@ extern void simple_heap_update(Relation relation, ItemPointer otid,
 
 extern TransactionId heap_index_delete_tuples(Relation rel,
 											  TM_IndexDeleteOp *delstate);
-
-/* in heapam_handler.c */
-extern void BitmapPrefetch(BitmapHeapScanState *node,
-						   BitmapTableScanDesc *scan);
-
-extern void BitmapAdjustPrefetchIterator(BitmapHeapScanState *node);
-
-extern void BitmapAdjustPrefetchTarget(BitmapHeapScanState *node);
 
 /* in heap/pruneheap.c */
 struct GlobalVisState;
