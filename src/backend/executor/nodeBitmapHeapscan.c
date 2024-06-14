@@ -96,23 +96,12 @@ BitmapTableScanSetup(BitmapHeapScanState *node)
 			elog(ERROR, "unrecognized result from subplan");
 
 		/*
-		 * Two iterators are used -- one for the pages being scanned and one
-		 * for the blocks being prefetched.
-		 */
-
-		/*
 		 * Prepare to iterate over the TBM. This will return the dsa_pointer
 		 * of the iterator state which will be used by multiple processes to
 		 * iterate jointly.
 		 */
 		pstate->tbmiterator = tbm_prepare_shared_iterate(node->tbm);
-#ifdef USE_PREFETCH
-		if (prefetch_maximum > 0)
-		{
-			pstate->prefetch_iterator =
-				tbm_prepare_shared_iterate(node->tbm);
-		}
-#endif
+
 		/* We have initialized the shared state so wake up others. */
 		BitmapDoneInitializingSharedState(pstate);
 	}
@@ -471,12 +460,9 @@ ExecBitmapHeapInitializeDSM(BitmapHeapScanState *node,
 	pstate = shm_toc_allocate(pcxt->toc, sizeof(ParallelBitmapHeapState));
 
 	pstate->tbmiterator = 0;
-	pstate->prefetch_iterator = 0;
 
 	/* Initialize the mutex */
 	SpinLockInit(&pstate->mutex);
-	pstate->prefetch_pages = 0;
-	pstate->prefetch_target = -1;
 	pstate->state = BM_INITIAL;
 
 	ConditionVariableInit(&pstate->cv);
@@ -503,17 +489,9 @@ ExecBitmapHeapReInitializeDSM(BitmapHeapScanState *node,
 		return;
 
 	pstate->state = BM_INITIAL;
-	pstate->prefetch_pages = 0;
-	pstate->prefetch_target = -1;
 
 	if (DsaPointerIsValid(pstate->tbmiterator))
 		tbm_free_shared_area(dsa, pstate->tbmiterator);
-
-	if (DsaPointerIsValid(pstate->prefetch_iterator))
-		tbm_free_shared_area(dsa, pstate->prefetch_iterator);
-
-	pstate->tbmiterator = InvalidDsaPointer;
-	pstate->prefetch_iterator = InvalidDsaPointer;
 }
 
 /* ----------------------------------------------------------------

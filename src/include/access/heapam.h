@@ -116,19 +116,7 @@ typedef struct BitmapHeapScanDesc
 	BlockNumber cblock;			/* current block # in scan, if any */
 	TBMIterator iterator;
 
-	/* used to validate pf stays ahead of current block */
-	BlockNumber pfblock;
-
-	/* iterator for prefetching ahead of current page */
-	TBMIterator prefetch_iterator;
-
-	/* maximum value for prefetch_target */
-	int			prefetch_maximum;
-
-	/* Current target for prefetch distance */
-	int			prefetch_target;
-	/* # pages prefetch iterator is ahead of current */
-	int			prefetch_pages;
+	ReadStream *read_stream;
 
 	struct ParallelBitmapHeapState *pstate;
 
