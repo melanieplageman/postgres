@@ -116,6 +116,22 @@ typedef struct BitmapHeapScanDesc
 	BlockNumber cblock;			/* current block # in scan, if any */
 	TBMIterator iterator;
 
+	/* used to validate pf stays ahead of current block */
+	BlockNumber pfblock;
+
+	/* iterator for prefetching ahead of current page */
+	TBMIterator prefetch_iterator;
+
+	/* maximum value for prefetch_target */
+	int			prefetch_maximum;
+
+	/* Current target for prefetch distance */
+	int			prefetch_target;
+	/* # pages prefetch iterator is ahead of current */
+	int			prefetch_pages;
+
+	struct ParallelBitmapHeapState *pstate;
+
 	/*
 	 * These fields are only used for bitmap scans for the "skip fetch"
 	 * optimization. Bitmap scans needing no fields from the heap may skip
@@ -123,7 +139,11 @@ typedef struct BitmapHeapScanDesc
 	 * block reported by the bitmap to determine how many NULL-filled tuples
 	 * to return. They are common to parallel and serial BitmapHeapScans
 	 */
+
+	/* page of VM containing info for current block */
 	Buffer		vmbuffer;
+	/* page of VM containing info for prefetch block */
+	Buffer		pvmbuffer;
 	int			empty_tuples_pending;
 } BitmapHeapScanDesc;
 
@@ -320,7 +340,7 @@ extern BitmapTableScanDesc *heap_beginscan_bm(Relation relation,
 											  Snapshot snapshot, uint32 flags,
 											  TIDBitmap *tbm,
 											  ParallelBitmapHeapState *pstate,
-											  dsa_area *dsa);
+											  dsa_area *dsa, int prefetch_maximum);
 extern void heap_rescan_bm(BitmapTableScanDesc *sscan,
 						   TIDBitmap *tbm,
 						   ParallelBitmapHeapState *pstate,
@@ -393,14 +413,6 @@ extern void simple_heap_update(Relation relation, ItemPointer otid,
 
 extern TransactionId heap_index_delete_tuples(Relation rel,
 											  TM_IndexDeleteOp *delstate);
-
-/* in heapam_handler.c */
-extern void BitmapPrefetch(BitmapHeapScanState *node,
-						   BitmapTableScanDesc *scan);
-
-extern void BitmapAdjustPrefetchIterator(BitmapHeapScanState *node);
-
-extern void BitmapAdjustPrefetchTarget(BitmapHeapScanState *node);
 
 /* in heap/pruneheap.c */
 struct GlobalVisState;

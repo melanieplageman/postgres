@@ -1232,7 +1232,7 @@ heap_endscan(TableScanDesc sscan)
 BitmapTableScanDesc *
 heap_beginscan_bm(Relation relation, Snapshot snapshot, uint32 flags,
 				  TIDBitmap *tbm, ParallelBitmapHeapState *pstate,
-				  dsa_area *dsa)
+				  dsa_area *dsa, int prefetch_maximum)
 {
 	BitmapHeapScanDesc *scan;
 
@@ -1266,12 +1266,37 @@ heap_beginscan_bm(Relation relation, Snapshot snapshot, uint32 flags,
 	scan->vis_ntuples = 0;
 
 	scan->vmbuffer = InvalidBuffer;
+	scan->pvmbuffer = InvalidBuffer;
 	scan->empty_tuples_pending = 0;
 
+	scan->pstate = pstate;
+
+	scan->prefetch_maximum = prefetch_maximum;
+	/* Only used for serial BHS */
+	scan->prefetch_target = -1;
+	scan->prefetch_pages = 0;
+
+	/*
+	 * We use *two* iterators, one for the pages we are actually scanning and
+	 * another that runs ahead of the first for prefetching.
+	 * scan->prefetch_pages tracks exactly how many pages ahead the prefetch
+	 * iterator is.  Also, scan->prefetch_target tracks the desired prefetch
+	 * distance, which starts small and increases up to the prefetch_maximum.
+	 * This is to avoid doing a lot of prefetching in a scan that stops after
+	 * a few tuples because of a LIMIT.
+	 */
 	tbm_begin_iterate(&scan->iterator, tbm, dsa,
 					  pstate ?
 					  pstate->tbmiterator :
 					  InvalidDsaPointer);
+
+#ifdef USE_PREFETCH
+	if (prefetch_maximum > 0)
+		tbm_begin_iterate(&scan->prefetch_iterator, tbm, dsa,
+						  pstate ?
+						  pstate->prefetch_iterator :
+						  InvalidDsaPointer);
+#endif							/* USE_PREFETCH */
 
 	return (BitmapTableScanDesc *) scan;
 }
@@ -1284,6 +1309,7 @@ heap_rescan_bm(BitmapTableScanDesc *sscan, TIDBitmap *tbm,
 	BitmapHeapScanDesc *scan = (BitmapHeapScanDesc *) sscan;
 
 	tbm_end_iterate(&scan->iterator);
+	tbm_end_iterate(&scan->prefetch_iterator);
 
 	if (BufferIsValid(scan->cbuf))
 	{
@@ -1299,6 +1325,12 @@ heap_rescan_bm(BitmapTableScanDesc *sscan, TIDBitmap *tbm,
 
 	scan->cblock = InvalidBlockNumber;
 
+	if (BufferIsValid(scan->pvmbuffer))
+	{
+		ReleaseBuffer(scan->pvmbuffer);
+		scan->pvmbuffer = InvalidBuffer;
+	}
+
 	/*
 	 * Reset empty_tuples_pending, a field only used by bitmap heap scan, to
 	 * avoid incorrectly emitting NULL-filled tuples from a previous scan on
@@ -1311,10 +1343,25 @@ heap_rescan_bm(BitmapTableScanDesc *sscan, TIDBitmap *tbm,
 	scan->ctup.t_data = NULL;
 	ItemPointerSetInvalid(&scan->ctup.t_self);
 
+	scan->pstate = pstate;
+
+	/* Only used for serial BHS */
+	scan->prefetch_target = -1;
+	scan->prefetch_pages = 0;
+
 	tbm_begin_iterate(&scan->iterator, tbm, dsa,
 					  pstate ?
 					  pstate->tbmiterator :
 					  InvalidDsaPointer);
+
+#ifdef USE_PREFETCH
+	if (scan->prefetch_maximum > 0)
+		tbm_begin_iterate(&scan->prefetch_iterator, tbm, dsa,
+						  pstate ?
+						  pstate->prefetch_iterator :
+						  InvalidDsaPointer);
+#endif							/* USE_PREFETCH */
+
 }
 
 void
@@ -1323,12 +1370,16 @@ heap_endscan_bm(BitmapTableScanDesc *sscan)
 	BitmapHeapScanDesc *scan = (BitmapHeapScanDesc *) sscan;
 
 	tbm_end_iterate(&scan->iterator);
+	tbm_end_iterate(&scan->prefetch_iterator);
 
 	if (BufferIsValid(scan->cbuf))
 		ReleaseBuffer(scan->cbuf);
 
 	if (BufferIsValid(scan->vmbuffer))
 		ReleaseBuffer(scan->vmbuffer);
+
+	if (BufferIsValid(scan->pvmbuffer))
+		ReleaseBuffer(scan->pvmbuffer);
 
 	/*
 	 * decrement relation reference count and free scan descriptor storage
