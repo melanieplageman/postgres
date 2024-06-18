@@ -1688,12 +1688,14 @@ lazy_scan_heap(LVRelState *vacrel, VacuumParams *params, bool aggressive)
  * of complexity just so we could deal with tuples that were DEAD to VACUUM,
  * but nevertheless were left with storage after pruning.
  *
- * The approach we take now is to restart pruning when the race condition is
- * detected.  This allows heap_page_prune() to prune the tuples inserted by
- * the now-aborted transaction.  This is a little crude, but it guarantees
- * that any items that make it into the dead_tuples array are simple LP_DEAD
- * line pointers, and that every remaining item with tuple storage is
- * considered as a candidate for freezing.
+ * As of minor release blah, we circumvent this problem altogether by reusing
+ * the result of heap_page_prune()'s visibility check. Without the second call
+ * to HeapTupleSatisfiesVacuum(), there is no new HTSV_Result and there can be
+ * no disagreement. We'll just handle such tuples as if they had become fully
+ * dead right after this operation completes instead of in the middle of it.
+ * Note that any tuple that becomes dead after the call to heap_page_prune()
+ * can't need to be frozen, because it was visible to another session when
+ * vacuum started.
  */
 static void
 lazy_scan_prune(LVRelState *vacrel,
@@ -1707,8 +1709,6 @@ lazy_scan_prune(LVRelState *vacrel,
 	OffsetNumber offnum,
 				maxoff;
 	ItemId		itemid;
-	HeapTupleData tuple;
-	HTSV_Result res;
 	int			tuples_deleted,
 				lpdead_items,
 				new_dead_tuples,
@@ -1717,10 +1717,10 @@ lazy_scan_prune(LVRelState *vacrel,
 	int			nfrozen;
 	OffsetNumber deadoffsets[MaxHeapTuplesPerPage];
 	xl_heap_freeze_tuple frozen[MaxHeapTuplesPerPage];
+	int8 htsv[MaxHeapTuplesPerPage + 1];
 
 	maxoff = PageGetMaxOffsetNumber(page);
 
-retry:
 
 	/* Initialize (or reset) page-level counters */
 	tuples_deleted = 0;
@@ -1739,7 +1739,7 @@ retry:
 	 * that were deleted from indexes.
 	 */
 	tuples_deleted = heap_page_prune(rel, buf, vistest,
-									 InvalidTransactionId, 0, false,
+									 InvalidTransactionId, 0, false, htsv,
 									 &vacrel->offnum);
 
 	/*
@@ -1757,6 +1757,7 @@ retry:
 		 offnum <= maxoff;
 		 offnum = OffsetNumberNext(offnum))
 	{
+		HeapTupleHeader htup;
 		bool		tuple_totally_frozen;
 
 		/*
@@ -1803,21 +1804,7 @@ retry:
 
 		Assert(ItemIdIsNormal(itemid));
 
-		ItemPointerSet(&(tuple.t_self), blkno, offnum);
-		tuple.t_data = (HeapTupleHeader) PageGetItem(page, itemid);
-		tuple.t_len = ItemIdGetLength(itemid);
-		tuple.t_tableOid = RelationGetRelid(rel);
-
-		/*
-		 * DEAD tuples are almost always pruned into LP_DEAD line pointers by
-		 * heap_page_prune(), but it's possible that the tuple state changed
-		 * since heap_page_prune() looked.  Handle that here by restarting.
-		 * (See comments at the top of function for a full explanation.)
-		 */
-		res = HeapTupleSatisfiesVacuum(&tuple, vacrel->OldestXmin, buf);
-
-		if (unlikely(res == HEAPTUPLE_DEAD))
-			goto retry;
+		htup = (HeapTupleHeader) PageGetItem(page, itemid);
 
 		/*
 		 * The criteria for counting a tuple as live in this block need to
@@ -1837,7 +1824,7 @@ retry:
 		 * bypass index vacuuming will violate our assumption, but the overall
 		 * impact of that should be negligible.)
 		 */
-		switch (res)
+		switch (htsv_get_valid_status(htsv[offnum]))
 		{
 			case HEAPTUPLE_LIVE:
 
@@ -1859,7 +1846,7 @@ retry:
 				{
 					TransactionId xmin;
 
-					if (!HeapTupleHeaderXminCommitted(tuple.t_data))
+					if (!HeapTupleHeaderXminCommitted(htup))
 					{
 						prunestate->all_visible = false;
 						break;
@@ -1869,7 +1856,7 @@ retry:
 					 * The inserter definitely committed. But is it old enough
 					 * that everyone sees it as committed?
 					 */
-					xmin = HeapTupleHeaderGetXmin(tuple.t_data);
+					xmin = HeapTupleHeaderGetXmin(htup);
 					if (!TransactionIdPrecedes(xmin, vacrel->OldestXmin))
 					{
 						prunestate->all_visible = false;
@@ -1926,7 +1913,7 @@ retry:
 		 */
 		num_tuples++;
 		prunestate->hastup = true;
-		if (heap_prepare_freeze_tuple(tuple.t_data,
+		if (heap_prepare_freeze_tuple(htup,
 									  vacrel->relfrozenxid,
 									  vacrel->relminmxid,
 									  vacrel->FreezeLimit,

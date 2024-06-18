@@ -190,6 +190,7 @@ extern int	heap_page_prune(Relation relation, Buffer buffer,
 							TransactionId old_snap_xmin,
 							TimestampTz old_snap_ts_ts,
 							bool report_stats,
+							int8 htsv[MaxHeapTuplesPerPage + 1],
 							OffsetNumber *off_loc);
 extern void heap_page_prune_execute(Buffer buffer,
 									OffsetNumber *redirected, int nredirected,
@@ -231,5 +232,19 @@ extern bool ResolveCminCmaxDuringDecoding(struct HTAB *tuplecid_data,
 										  CommandId *cmin, CommandId *cmax);
 extern void HeapCheckForSerializableConflictOut(bool valid, Relation relation, HeapTuple tuple,
 												Buffer buffer, Snapshot snapshot);
+
+/*
+ * Pruning calculates tuple visibility once and saves the results in an array
+ * of int8. See PruneResult.htsv for details. This helper function is meant to
+ * guard against examining visibility status array members which have not yet
+ * been computed.
+ */
+static inline HTSV_Result
+htsv_get_valid_status(int status)
+{
+   Assert(status >= HEAPTUPLE_DEAD &&
+		   status <= HEAPTUPLE_DELETE_IN_PROGRESS);
+   return (HTSV_Result) status;
+}
 
 #endif							/* HEAPAM_H */
