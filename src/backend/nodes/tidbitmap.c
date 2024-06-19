@@ -40,21 +40,12 @@
 
 #include <limits.h>
 
-#include "access/htup_details.h"
 #include "common/hashfn.h"
 #include "common/int.h"
 #include "nodes/bitmapset.h"
 #include "nodes/tidbitmap.h"
 #include "storage/lwlock.h"
 #include "utils/dsa.h"
-
-/*
- * The maximum number of tuples per page is not large (typically 256 with
- * 8K pages, or 1024 with 32K pages).  So there's not much point in making
- * the per-page bitmaps variable size.  We just legislate that the size
- * is this:
- */
-#define MAX_TUPLES_PER_PAGE  MaxHeapTuplesPerPage
 
 /*
  * When we have to switch over to lossy storage, we use a data structure
@@ -181,7 +172,7 @@ struct TBMPrivateIterator
 	int			spageptr;		/* next spages index */
 	int			schunkptr;		/* next schunks index */
 	int			schunkbit;		/* next bit to check in current schunk */
-	TBMIterateResult output;	/* MUST BE LAST (because variable-size) */
+	TBMIterateResult output;
 };
 
 /*
@@ -222,7 +213,7 @@ struct TBMSharedIterator
 	PTEntryArray *ptbase;		/* pagetable element array */
 	PTIterationArray *ptpages;	/* sorted exact page index list */
 	PTIterationArray *ptchunks; /* sorted lossy page index list */
-	TBMIterateResult output;	/* MUST BE LAST (because variable-size) */
+	TBMIterateResult output;
 };
 
 /* Local function prototypes */
@@ -696,8 +687,7 @@ tbm_begin_private_iterate(TIDBitmap *tbm)
 	 * Create the TBMPrivateIterator struct, with enough trailing space to
 	 * serve the needs of the TBMIterateResult sub-struct.
 	 */
-	iterator = (TBMPrivateIterator *) palloc(sizeof(TBMPrivateIterator) +
-											 MAX_TUPLES_PER_PAGE * sizeof(OffsetNumber));
+	iterator = palloc(sizeof(TBMPrivateIterator));
 	iterator->tbm = tbm;
 
 	/*
@@ -1467,8 +1457,7 @@ tbm_attach_shared_iterate(dsa_area *dsa, dsa_pointer dp)
 	 * Create the TBMSharedIterator struct, with enough trailing space to
 	 * serve the needs of the TBMIterateResult sub-struct.
 	 */
-	iterator = (TBMSharedIterator *) palloc0(sizeof(TBMSharedIterator) +
-											 MAX_TUPLES_PER_PAGE * sizeof(OffsetNumber));
+	iterator = (TBMSharedIterator *) palloc0(sizeof(TBMSharedIterator));
 
 	istate = (TBMSharedIteratorState *) dsa_get_address(dsa, dp);
 

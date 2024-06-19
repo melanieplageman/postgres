@@ -22,9 +22,17 @@
 #ifndef TIDBITMAP_H
 #define TIDBITMAP_H
 
+#include "access/htup_details.h"
 #include "storage/itemptr.h"
 #include "utils/dsa.h"
 
+/*
+ * The maximum number of tuples per page is not large (typically 256 with
+ * 8K pages, or 1024 with 32K pages).  So there's not much point in making
+ * the per-page bitmaps variable size.  We just legislate that the size
+ * is this:
+ */
+#define MAX_TUPLES_PER_PAGE  MaxHeapTuplesPerPage
 
 /*
  * Actual bitmap representation is private to tidbitmap.c.  Callers can
@@ -52,9 +60,9 @@ typedef struct TBMIterateResult
 {
 	BlockNumber blockno;		/* page number containing tuples */
 	int			ntuples;		/* -1 indicates lossy result */
-	bool		recheck;		/* should the tuples be rechecked? */
 	/* Note: recheck is always true if ntuples < 0 */
-	OffsetNumber offsets[FLEXIBLE_ARRAY_MEMBER];
+	bool		recheck;		/* should the tuples be rechecked? */
+	OffsetNumber offsets[MAX_TUPLES_PER_PAGE];
 } TBMIterateResult;
 
 /* function prototypes in nodes/tidbitmap.c */
