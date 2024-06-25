@@ -6502,7 +6502,7 @@ FreezeMultiXactId(MultiXactId multi, uint16 t_infomask,
  * recovery.  We really need to remove old xids.
  */
 bool
-heap_prepare_freeze_tuple(HeapTupleHeader tuple,
+heap_prepare_freeze_tuple(HeapTupleHeader tuple, TransactionId OldestXmin,
 						  TransactionId relfrozenxid, TransactionId relminmxid,
 						  TransactionId cutoff_xid, TransactionId cutoff_multi,
 						  xl_heap_freeze_tuple *frz, bool *totally_frozen_p)
@@ -6618,6 +6618,11 @@ heap_prepare_freeze_tuple(HeapTupleHeader tuple,
 					 errmsg_internal("found xmax %u from before relfrozenxid %u",
 									 xid, relfrozenxid)));
 
+		if (TransactionIdIsNormal(OldestXmin) &&
+				TransactionIdPrecedes(xid, OldestXmin) &&
+				!TransactionIdPrecedes(xid, cutoff_xid))
+			elog(WARNING, "xmax %u younger than cutoff_xid %u but older than OldestXmin %u",
+					xid, cutoff_xid, OldestXmin);
 		if (TransactionIdPrecedes(xid, cutoff_xid))
 		{
 			/*
@@ -6760,7 +6765,7 @@ heap_freeze_tuple(HeapTupleHeader tuple,
 	bool		do_freeze;
 	bool		tuple_totally_frozen;
 
-	do_freeze = heap_prepare_freeze_tuple(tuple,
+	do_freeze = heap_prepare_freeze_tuple(tuple, InvalidTransactionId,
 										  relfrozenxid, relminmxid,
 										  cutoff_xid, cutoff_multi,
 										  &frz, &tuple_totally_frozen);

@@ -404,7 +404,7 @@ extern void heap_xlog_logical_rewrite(XLogReaderState *r);
 extern XLogRecPtr log_heap_freeze(Relation reln, Buffer buffer,
 								  TransactionId cutoff_xid, xl_heap_freeze_tuple *tuples,
 								  int ntuples);
-extern bool heap_prepare_freeze_tuple(HeapTupleHeader tuple,
+extern bool heap_prepare_freeze_tuple(HeapTupleHeader tuple, TransactionId OldestXmin,
 									  TransactionId relfrozenxid,
 									  TransactionId relminmxid,
 									  TransactionId cutoff_xid,

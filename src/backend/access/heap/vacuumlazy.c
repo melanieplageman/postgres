@@ -1913,7 +1913,7 @@ lazy_scan_prune(LVRelState *vacrel,
 		 */
 		num_tuples++;
 		prunestate->hastup = true;
-		if (heap_prepare_freeze_tuple(htup,
+		if (heap_prepare_freeze_tuple(htup, vacrel->OldestXmin,
 									  vacrel->relfrozenxid,
 									  vacrel->relminmxid,
 									  vacrel->FreezeLimit,
