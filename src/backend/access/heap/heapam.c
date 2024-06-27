@@ -2703,6 +2703,7 @@ heap_delete(Relation relation, ItemPointer tid,
 	uint8		old_vmbits = 0;
 	XLogRecPtr	insert_lsn = InvalidXLogRecPtr;
 	XLogRecPtr	page_lsn = InvalidXLogRecPtr;
+	TimestampTz page_ts = 0;
 	HeapTuple	old_key_tuple = NULL;	/* replica identity of the tuple */
 	bool		old_key_copied = false;
 
@@ -3048,6 +3049,7 @@ l1:
 
 		insert_lsn = recptr = XLogInsert(RM_HEAP_ID, XLOG_HEAP_DELETE);
 		page_lsn = PageGetLSN(page);
+		page_ts = PageGetTime(page);
 
 		PageSetLSN(page, recptr);
 		PageSetTime(page, GetCurrentTimestamp());
@@ -3094,7 +3096,7 @@ l1:
 	pgstat_count_heap_delete(relation);
 
 	if (old_vmbits & VISIBILITYMAP_ALL_VISIBLE)
-		pgstat_count_vm_unset(relation, page_lsn, insert_lsn, old_vmbits);
+		pgstat_count_vm_unset(relation, page_lsn, page_ts, insert_lsn, old_vmbits);
 
 	if (old_key_tuple != NULL && old_key_copied)
 		heap_freetuple(old_key_tuple);
@@ -3207,6 +3209,8 @@ heap_update(Relation relation, ItemPointer otid, HeapTuple newtup,
 	XLogRecPtr	old_page_lsn = InvalidXLogRecPtr;
 	XLogRecPtr	new_page_lsn = InvalidXLogRecPtr;
 	XLogRecPtr	insert_lsn = InvalidXLogRecPtr;
+	TimestampTz old_page_ts;
+	TimestampTz new_page_ts;
 
 	Assert(ItemPointerIsValid(otid));
 
@@ -3769,6 +3773,7 @@ l2:
 			XLogRegisterData((char *) &xlrec, SizeOfHeapLock);
 			insert_lsn = recptr = XLogInsert(RM_HEAP_ID, XLOG_HEAP_LOCK);
 			old_page_lsn = PageGetLSN(page);
+			old_page_ts = PageGetTime(page);
 			PageSetLSN(page, recptr);
 			PageSetTime(page, GetCurrentTimestamp());
 		}
@@ -3996,9 +4001,11 @@ l2:
 	/* XLOG stuff */
 	if (RelationNeedsWAL(relation))
 	{
+		TimestampTz time;
 		XLogRecPtr	recptr;
+
 		page = BufferGetPage(buffer);
-		TimestampTz time = GetCurrentTimestamp();
+		time = GetCurrentTimestamp();
 
 		/*
 		 * For logical decoding we need combo CIDs to properly decode the
@@ -4017,13 +4024,16 @@ l2:
 											  all_visible_cleared_new);
 		if (newbuf != buffer)
 		{
-			Page newpage = BufferGetPage(newbuf);
+			Page		newpage = BufferGetPage(newbuf);
+
 			new_page_lsn = PageGetLSN(newpage);
+			new_page_ts = PageGetTime(newpage);
 			PageSetLSN(newpage, recptr);
 			PageSetTime(newpage, time);
 		}
 
 		old_page_lsn = PageGetLSN(page);
+		old_page_ts = PageGetTime(page);
 		PageSetTime(page, time);
 		PageSetLSN(page, recptr);
 	}
@@ -4060,13 +4070,14 @@ l2:
 		UnlockTupleTuplock(relation, &(oldtup.t_self), *lockmode);
 
 	if (old_page_old_vmbits & VISIBILITYMAP_ALL_VISIBLE)
-		pgstat_count_vm_unset(relation, old_page_lsn,
+		pgstat_count_vm_unset(relation, old_page_lsn, old_page_ts,
 							  insert_lsn, old_page_old_vmbits);
 
 	/* MTODO: figure out if we whether or not to count unfreezing new page */
 	if (newbuf != buffer &&
 		new_page_old_vmbits & VISIBILITYMAP_ALL_VISIBLE)
-		pgstat_count_vm_unset(relation, new_page_lsn, insert_lsn, new_page_old_vmbits);
+		pgstat_count_vm_unset(relation, new_page_lsn, new_page_ts,
+							  insert_lsn, new_page_old_vmbits);
 
 	pgstat_count_heap_update(relation, use_hot_update, newbuf != buffer);
 
@@ -4366,6 +4377,7 @@ heap_lock_tuple(Relation relation, HeapTuple tuple,
 	bool		cleared_all_frozen = false;
 	XLogRecPtr	insert_lsn = InvalidXLogRecPtr;
 	XLogRecPtr	page_lsn = InvalidXLogRecPtr;
+	TimestampTz page_ts = 0;
 	uint8		old_vmbits = 0;
 
 
@@ -5005,6 +5017,7 @@ failed:
 
 		insert_lsn = recptr = XLogInsert(RM_HEAP_ID, XLOG_HEAP_LOCK);
 		page_lsn = PageGetLSN(page);
+		page_ts = PageGetTime(page);
 
 		PageSetLSN(page, recptr);
 		PageSetTime(page, GetCurrentTimestamp());
@@ -5034,7 +5047,7 @@ out_unlocked:
 		UnlockTupleTuplock(relation, tid, mode);
 
 	if (old_vmbits & VISIBILITYMAP_ALL_VISIBLE)
-		pgstat_count_vm_unset(relation, page_lsn, insert_lsn, old_vmbits);
+		pgstat_count_vm_unset(relation, page_lsn, page_ts, insert_lsn, old_vmbits);
 
 	return result;
 }
@@ -5491,6 +5504,7 @@ heap_lock_updated_tuple_rec(Relation rel, ItemPointer tid, TransactionId xid,
 	uint8		old_vmbits = 0;
 	XLogRecPtr	page_lsn = InvalidXLogRecPtr;
 	XLogRecPtr	insert_lsn = InvalidXLogRecPtr;
+	TimestampTz page_ts = 0;
 	bool		pinned_desired_page;
 	Buffer		vmbuffer = InvalidBuffer;
 	BlockNumber block;
@@ -5766,6 +5780,7 @@ l4:
 
 			insert_lsn = recptr = XLogInsert(RM_HEAP2_ID, XLOG_HEAP2_LOCK_UPDATED);
 			page_lsn = PageGetLSN(page);
+			page_ts = PageGetTime(page);
 
 			PageSetLSN(page, recptr);
 			PageSetTime(page, GetCurrentTimestamp());
@@ -5800,7 +5815,7 @@ out_unlocked:
 		ReleaseBuffer(vmbuffer);
 
 	if (old_vmbits & VISIBILITYMAP_ALL_VISIBLE)
-		pgstat_count_vm_unset(rel, page_lsn, insert_lsn, old_vmbits);
+		pgstat_count_vm_unset(rel, page_lsn, page_ts, insert_lsn, old_vmbits);
 
 	return result;
 }

@@ -288,6 +288,7 @@ visibilitymap_set(Relation rel, BlockNumber heapBlk, Buffer heapBuf,
 		if (RelationNeedsWAL(rel))
 		{
 			TimestampTz time = GetCurrentTimestamp();
+
 			if (XLogRecPtrIsInvalid(recptr))
 			{
 				Assert(!InRecovery);

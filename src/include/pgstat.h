@@ -532,8 +532,6 @@ typedef struct PgStat_StatTabEntry
 	TimestampTz last_autoanalyze_time;	/* autovacuum initiated */
 	PgStat_Counter autoanalyze_count;
 
-	/* calculated at vac start and used upon unset */
-	XLogRecPtr	target_frz_dur_lsns;
 	/* updated upon VM unset */
 	PgStat_VMUnset vm_unset;
 } PgStat_StatTabEntry;
@@ -709,6 +707,7 @@ extern void pgstat_report_analyze(Relation rel,
 extern void pgstat_refresh_frz_dur(Oid tableoid, bool shared);
 
 extern void pgstat_count_vm_unset(Relation relation, XLogRecPtr page_lsn,
+								  TimestampTz page_ts,
 								  XLogRecPtr current_lsn, uint8 old_vmbits);
 
 /*

@@ -393,6 +393,12 @@ PageSetLSN(Page page, XLogRecPtr lsn)
 	PageXLogRecPtrSet(((PageHeader) page)->pd_lsn, lsn);
 }
 
+static inline TimestampTz
+PageGetTime(Page page)
+{
+	return ((PageHeader) page)->last_modified;
+}
+
 static inline void
 PageSetTime(Page page, TimestampTz time)
 {

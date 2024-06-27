@@ -206,83 +206,6 @@ pgstat_drop_relation(Relation rel)
 }
 
 
-/*
- * The first time a page is modified after having been set all visible, we
- * check the duration it was unmodified against the target_freeze_duration. The
- * page has only an LSN, not a timestmap, so we must translate the page LSN to
- * time using the LSNTimeline. Because the LSN consumption rate can change, we
- * want to refresh this translated value periodically. Doing so at the start of
- * each table vacuum is convenient.
- */
-void
-pgstat_refresh_frz_dur(Oid tableoid, bool shared)
-{
-	PgStat_EntryRef *entry_ref;
-	PgStat_StatTabEntry *tabentry;
-	TimestampTz cur_time;
-	XLogRecPtr	cur_lsn;
-	TimestampTz target_time;
-	XLogRecPtr	target_lsn;
-	uint64		target_dur_usecs;
-	Oid			dboid = (shared ? InvalidOid : MyDatabaseId);
-
-	if (!pgstat_track_counts)
-		return;
-
-	target_dur_usecs = target_freeze_duration * USECS_PER_SEC;
-
-	cur_time = GetCurrentTimestamp();
-
-	/*
-	 * We can afford to acquire exact (not approximate) insert LSN at the
-	 * start of each relation vacuum. The translation of the GUC value to time
-	 * will be more accurate.
-	 */
-	cur_lsn = GetXLogInsertRecPtr();
-
-	/*
-	 * How long ago would a page have to have been set all visible for it to
-	 * qualify as having remained unmodified for target_freeze_duration. It
-	 * shouldn't happen that current time - target_freeze_duration is less
-	 * than zero, but TimestampTz is signed, so we better do this check.
-	 */
-	target_time = target_dur_usecs >= cur_time ? 0 : cur_time - target_dur_usecs;
-
-	/*
-	 * Use the global LSNTimeline stored in WAL statistics to translate the
-	 * target_time into an LSN based on our LSN consumption over that period.
-	 */
-	target_lsn = pgstat_wal_estimate_lsn_at_time(target_time);
-
-	/* Now get the table-level stats */
-	entry_ref = pgstat_get_entry_ref_locked(PGSTAT_KIND_RELATION,
-											dboid, tableoid, false);
-
-	Assert(entry_ref != NULL && entry_ref->shared_stats != NULL);
-
-	tabentry = &((PgStatShared_Relation *) entry_ref->shared_stats)->stats;
-
-	/*
-	 * Update the translated value of target_freeze_duration so that table
-	 * modifications use a fresh value when determining whether or not a page
-	 * was modified sooner than target_freeze_duration after having been set
-	 * all visible. There is no reason for this to be cached at the table
-	 * level, but it is easiest to keep it here for now.
-	 */
-	tabentry->target_frz_dur_lsns = cur_lsn - target_lsn;
-
-	pgstat_unlock_entry(entry_ref);
-
-	/*
-	 * MTODO: would like to flush table stats so future unsets use
-	 * target_frz_dur_lsns new value. However pgstat_report_stat() can't be
-	 * called here due to being in a transaction. Is there some other way to
-	 * do this?
-	 */
-
-	return;
-}
-
 
 /*
  * Upon update, delete, or tuple lock, if the page being modified was
@@ -301,13 +224,16 @@ pgstat_refresh_frz_dur(Oid tableoid, bool shared)
  * on the page.
  */
 void
-pgstat_count_vm_unset(Relation relation, XLogRecPtr page_lsn,
+pgstat_count_vm_unset(Relation relation, XLogRecPtr page_lsn, TimestampTz page_ts,
 					  XLogRecPtr current_lsn, uint8 old_vmbits)
 {
-	PgStat_StatTabEntry *tabentry;
-	XLogRecPtr	target_frz_duration;
 	XLogRecPtr	vm_duration_lsns;
 	PgStat_TableCounts *tabcounts;
+	TimestampTz cur_time = GetCurrentTimestamp();
+	long		visible_duration;
+	int			visible_duration_us;
+
+	TimestampDifference(cur_time, page_ts, &visible_duration, &visible_duration_us);
 
 	/*
 	 * Can't be all frozen without being all visible and we shouldn't call
@@ -317,15 +243,6 @@ pgstat_count_vm_unset(Relation relation, XLogRecPtr page_lsn,
 
 	if (!pgstat_track_counts)
 		return;
-
-	tabentry = pgstat_fetch_stat_tabentry_ext(relation->rd_rel->relisshared,
-											  RelationGetRelid(relation));
-
-	/*
-	 * MTODO: Where can we cache this such that it is easy to get here but not
-	 * table-level?
-	 */
-	target_frz_duration = tabentry->target_frz_dur_lsns;
 
 	vm_duration_lsns = current_lsn - page_lsn;
 	vm_duration_lsns = Max(vm_duration_lsns, 0);
@@ -341,7 +258,7 @@ pgstat_count_vm_unset(Relation relation, XLogRecPtr page_lsn,
 	 * amount of time has elapsed, irrespective of whether or not we got it
 	 * right last vacuum.
 	 */
-	if (vm_duration_lsns < target_frz_duration)
+	if (visible_duration < target_freeze_duration)
 		accumulator_insert(&tabcounts->unsets.early_unsets, vm_duration_lsns);
 
 	/*
@@ -353,10 +270,10 @@ pgstat_count_vm_unset(Relation relation, XLogRecPtr page_lsn,
 	{
 		tabcounts->unsets.vm_unfreezes++;
 
-		if (vm_duration_lsns < target_frz_duration)
+		if (visible_duration < target_freeze_duration)
 			tabcounts->unsets.early_unfreezes++;
 	}
-	else if (vm_duration_lsns >= target_frz_duration)
+	else if (visible_duration >= target_freeze_duration)
 		tabcounts->unsets.missed_freezes++;
 }
 
