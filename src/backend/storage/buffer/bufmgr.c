@@ -5111,7 +5111,10 @@ MarkBufferDirtyHint(Buffer buffer, bool buffer_std)
 			 * sometime later in this checkpoint cycle.
 			 */
 			if (!XLogRecPtrIsInvalid(lsn))
+			{
 				PageSetLSN(page, lsn);
+				PageSetTime(page, GetCurrentTimestamp());
+			}
 		}
 
 		buf_state |= BM_DIRTY | BM_JUST_DIRTIED;

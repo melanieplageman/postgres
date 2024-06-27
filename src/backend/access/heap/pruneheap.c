@@ -2169,4 +2169,5 @@ log_heap_prune_and_freeze(Relation relation, Buffer buffer,
 	recptr = XLogInsert(RM_HEAP2_ID, info);
 
 	PageSetLSN(BufferGetPage(buffer), recptr);
+	PageSetTime(BufferGetPage(buffer), GetCurrentTimestamp());
 }

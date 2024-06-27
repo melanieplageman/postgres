@@ -2143,6 +2143,7 @@ heap_insert(Relation relation, HeapTuple tup, CommandId cid,
 		recptr = XLogInsert(RM_HEAP_ID, info);
 
 		PageSetLSN(page, recptr);
+		PageSetTime(page, GetCurrentTimestamp());
 	}
 
 	END_CRIT_SECTION();
@@ -2539,6 +2540,7 @@ heap_multi_insert(Relation relation, TupleTableSlot **slots, int ntuples,
 			recptr = XLogInsert(RM_HEAP2_ID, info);
 
 			PageSetLSN(page, recptr);
+			PageSetTime(page, GetCurrentTimestamp());
 		}
 
 		END_CRIT_SECTION();
@@ -3044,6 +3046,7 @@ l1:
 		recptr = XLogInsert(RM_HEAP_ID, XLOG_HEAP_DELETE);
 
 		PageSetLSN(page, recptr);
+		PageSetTime(page, GetCurrentTimestamp());
 	}
 
 	END_CRIT_SECTION();
@@ -3751,6 +3754,7 @@ l2:
 			XLogRegisterData((char *) &xlrec, SizeOfHeapLock);
 			recptr = XLogInsert(RM_HEAP_ID, XLOG_HEAP_LOCK);
 			PageSetLSN(page, recptr);
+			PageSetTime(page, GetCurrentTimestamp());
 		}
 
 		END_CRIT_SECTION();
@@ -3995,8 +3999,11 @@ l2:
 								 all_visible_cleared_new);
 		if (newbuf != buffer)
 		{
-			PageSetLSN(BufferGetPage(newbuf), recptr);
+			Page newpage = BufferGetPage(newbuf);
+			PageSetLSN(newpage, recptr);
+			PageSetTime(newpage, GetCurrentTimestamp());
 		}
+		PageSetTime(BufferGetPage(buffer), GetCurrentTimestamp());
 		PageSetLSN(BufferGetPage(buffer), recptr);
 	}
 
@@ -4964,6 +4971,7 @@ failed:
 		recptr = XLogInsert(RM_HEAP_ID, XLOG_HEAP_LOCK);
 
 		PageSetLSN(page, recptr);
+		PageSetTime(page, GetCurrentTimestamp());
 	}
 
 	END_CRIT_SECTION();
@@ -5715,6 +5723,7 @@ l4:
 			recptr = XLogInsert(RM_HEAP2_ID, XLOG_HEAP2_LOCK_UPDATED);
 
 			PageSetLSN(page, recptr);
+			PageSetTime(page, GetCurrentTimestamp());
 		}
 
 		END_CRIT_SECTION();
@@ -5869,6 +5878,7 @@ heap_finish_speculative(Relation relation, ItemPointer tid)
 		recptr = XLogInsert(RM_HEAP_ID, XLOG_HEAP_CONFIRM);
 
 		PageSetLSN(page, recptr);
+		PageSetTime(page, GetCurrentTimestamp());
 	}
 
 	END_CRIT_SECTION();
@@ -6016,6 +6026,7 @@ heap_abort_speculative(Relation relation, ItemPointer tid)
 		recptr = XLogInsert(RM_HEAP_ID, XLOG_HEAP_DELETE);
 
 		PageSetLSN(page, recptr);
+		PageSetTime(page, GetCurrentTimestamp());
 	}
 
 	END_CRIT_SECTION();
@@ -6128,6 +6139,7 @@ heap_inplace_update(Relation relation, HeapTuple tuple)
 		recptr = XLogInsert(RM_HEAP_ID, XLOG_HEAP_INPLACE);
 
 		PageSetLSN(page, recptr);
+		PageSetTime(page, GetCurrentTimestamp());
 	}
 
 	END_CRIT_SECTION();
@@ -8866,6 +8878,7 @@ heap_xlog_prune_freeze(XLogReaderState *record)
 		 */
 
 		PageSetLSN(page, lsn);
+		PageSetTime(page, GetCurrentTimestamp());
 		MarkBufferDirty(buffer);
 	}
 
@@ -8950,7 +8963,10 @@ heap_xlog_visible(XLogReaderState *record)
 		PageSetAllVisible(page);
 
 		if (XLogHintBitIsNeeded())
+		{
 			PageSetLSN(page, lsn);
+			PageSetTime(page, GetCurrentTimestamp());
+		}
 
 		MarkBufferDirty(buffer);
 	}
@@ -9123,6 +9139,7 @@ heap_xlog_delete(XLogReaderState *record)
 		else
 			htup->t_ctid = target_tid;
 		PageSetLSN(page, lsn);
+		PageSetTime(page, GetCurrentTimestamp());
 		MarkBufferDirty(buffer);
 	}
 	if (BufferIsValid(buffer))
@@ -9220,6 +9237,7 @@ heap_xlog_insert(XLogReaderState *record)
 		freespace = PageGetHeapFreeSpace(page); /* needed to update FSM below */
 
 		PageSetLSN(page, lsn);
+		PageSetTime(page, GetCurrentTimestamp());
 
 		if (xlrec->flags & XLH_INSERT_ALL_VISIBLE_CLEARED)
 			PageClearAllVisible(page);
@@ -9367,6 +9385,7 @@ heap_xlog_multi_insert(XLogReaderState *record)
 		freespace = PageGetHeapFreeSpace(page); /* needed to update FSM below */
 
 		PageSetLSN(page, lsn);
+		PageSetTime(page, GetCurrentTimestamp());
 
 		if (xlrec->flags & XLH_INSERT_ALL_VISIBLE_CLEARED)
 			PageClearAllVisible(page);
@@ -9504,6 +9523,7 @@ heap_xlog_update(XLogReaderState *record, bool hot_update)
 			PageClearAllVisible(page);
 
 		PageSetLSN(page, lsn);
+		PageSetTime(page, GetCurrentTimestamp());
 		MarkBufferDirty(obuffer);
 	}
 
@@ -9641,6 +9661,7 @@ heap_xlog_update(XLogReaderState *record, bool hot_update)
 		freespace = PageGetHeapFreeSpace(page); /* needed to update FSM below */
 
 		PageSetLSN(page, lsn);
+		PageSetTime(page, GetCurrentTimestamp());
 		MarkBufferDirty(nbuffer);
 	}
 
@@ -9698,6 +9719,7 @@ heap_xlog_confirm(XLogReaderState *record)
 		ItemPointerSet(&htup->t_ctid, BufferGetBlockNumber(buffer), offnum);
 
 		PageSetLSN(page, lsn);
+		PageSetTime(page, GetCurrentTimestamp());
 		MarkBufferDirty(buffer);
 	}
 	if (BufferIsValid(buffer))
@@ -9769,6 +9791,7 @@ heap_xlog_lock(XLogReaderState *record)
 		HeapTupleHeaderSetXmax(htup, xlrec->xmax);
 		HeapTupleHeaderSetCmax(htup, FirstCommandId, false);
 		PageSetLSN(page, lsn);
+		PageSetTime(page, GetCurrentTimestamp());
 		MarkBufferDirty(buffer);
 	}
 	if (BufferIsValid(buffer))
@@ -9829,6 +9852,7 @@ heap_xlog_lock_updated(XLogReaderState *record)
 		HeapTupleHeaderSetXmax(htup, xlrec->xmax);
 
 		PageSetLSN(page, lsn);
+		PageSetTime(page, GetCurrentTimestamp());
 		MarkBufferDirty(buffer);
 	}
 	if (BufferIsValid(buffer))
@@ -9870,6 +9894,7 @@ heap_xlog_inplace(XLogReaderState *record)
 		memcpy((char *) htup + htup->t_hoff, newtup, newlen);
 
 		PageSetLSN(page, lsn);
+		PageSetTime(page, GetCurrentTimestamp());
 		MarkBufferDirty(buffer);
 	}
 	if (BufferIsValid(buffer))

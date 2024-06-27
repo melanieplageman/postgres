@@ -96,6 +96,7 @@
 #include "storage/smgr.h"
 #include "utils/inval.h"
 #include "utils/rel.h"
+#include "utils/timestamp.h"
 
 
 /*#define TRACE_VISIBILITYMAP */
@@ -283,6 +284,7 @@ visibilitymap_set(Relation rel, BlockNumber heapBlk, Buffer heapBuf,
 
 		if (RelationNeedsWAL(rel))
 		{
+			TimestampTz time = GetCurrentTimestamp();
 			if (XLogRecPtrIsInvalid(recptr))
 			{
 				Assert(!InRecovery);
@@ -302,9 +304,11 @@ visibilitymap_set(Relation rel, BlockNumber heapBlk, Buffer heapBuf,
 					Page		heapPage = BufferGetPage(heapBuf);
 
 					PageSetLSN(heapPage, recptr);
+					PageSetTime(heapPage, time);
 				}
 			}
 			PageSetLSN(page, recptr);
+			PageSetTime(page, time);
 		}
 
 		END_CRIT_SECTION();

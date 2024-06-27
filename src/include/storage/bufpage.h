@@ -18,6 +18,7 @@
 #include "storage/block.h"
 #include "storage/item.h"
 #include "storage/off.h"
+#include "datatype/timestamp.h"
 
 /*
  * A postgres disk page is an abstraction layered on top of a postgres
@@ -154,6 +155,7 @@ PageXLogRecPtrGet(PageXLogRecPtr val)
 
 typedef struct PageHeaderData
 {
+	TimestampTz last_modified;
 	/* XXX LSN is member of *any* block, not only page-organized ones */
 	PageXLogRecPtr pd_lsn;		/* LSN: next byte after last byte of xlog
 								 * record for last change to this page */
@@ -389,6 +391,12 @@ static inline void
 PageSetLSN(Page page, XLogRecPtr lsn)
 {
 	PageXLogRecPtrSet(((PageHeader) page)->pd_lsn, lsn);
+}
+
+static inline void
+PageSetTime(Page page, TimestampTz time)
+{
+	((PageHeader) page)->last_modified = time;
 }
 
 static inline bool
