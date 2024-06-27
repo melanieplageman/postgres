@@ -293,6 +293,33 @@ heap_page_prune_opt(Relation relation, Buffer buffer)
 	}
 }
 
+/*
+ * Determine whether or not vacuum to opportunistically freeze a page.
+ */
+static bool
+do_opp_freeze(struct VacuumCutoffs *cutoffs,
+			  XLogRecPtr page_lsn,
+			  bool do_freeze)
+{
+	int64		page_age;
+
+	Assert(cutoffs);
+
+	page_age = GetInsertRecPtr() - page_lsn;
+	page_age = Max(page_age, 0);
+
+	if (opp_freeze_algo == 0)
+		return do_freeze;
+
+	if (opp_freeze_algo == 1)
+	{
+		if (cutoffs->frz_threshold_min == InvalidXLogRecPtr)
+			return true;
+		return page_age > cutoffs->frz_threshold_min;
+	}
+
+	return false;
+}
 
 /*
  * Prune and repair fragmentation and potentially freeze tuples on the
@@ -358,6 +385,7 @@ heap_page_prune_and_freeze(Relation relation, Buffer buffer,
 						   MultiXactId *new_relmin_mxid)
 {
 	Page		page = BufferGetPage(buffer);
+	XLogRecPtr	page_lsn = PageGetLSN(page);
 	BlockNumber blockno = BufferGetBlockNumber(buffer);
 	OffsetNumber offnum,
 				maxoff;
@@ -716,6 +744,10 @@ heap_page_prune_and_freeze(Relation relation, Buffer buffer,
 						if (XLogHintBitIsNeeded() && XLogCheckBufferNeedsBackup(buffer))
 							do_freeze = true;
 					}
+					if (prstate.cutoffs)
+						do_freeze = do_opp_freeze(prstate.cutoffs,
+												  page_lsn, do_freeze);
+
 				}
 			}
 		}

@@ -710,6 +710,8 @@ extern void pgstat_count_vm_unset(Relation relation, XLogRecPtr page_lsn,
 								  TimestampTz page_ts,
 								  XLogRecPtr current_lsn, uint8 old_vmbits);
 
+extern XLogRecPtr pgstat_calc_frz_threshold_min(Oid tableoid, bool shared);
+
 /*
  * If stats are enabled, but pending data hasn't been prepared yet, call
  * pgstat_assoc_relation() to do so. See its comment for why this is done

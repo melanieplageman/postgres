@@ -159,6 +159,7 @@ int64		VacuumPageDirty = 0;
 
 int			VacuumCostBalance = 0;	/* working state for vacuum */
 bool		VacuumCostActive = false;
+int			opp_freeze_algo = 0;
 
 /* configurable SLRU buffer sizes */
 int			commit_timestamp_buffers = 0;
