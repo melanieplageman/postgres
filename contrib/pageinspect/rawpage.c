@@ -251,8 +251,8 @@ page_header(PG_FUNCTION_ARGS)
 
 	Datum		result;
 	HeapTuple	tuple;
-	Datum		values[9];
-	bool		nulls[9];
+	Datum		values[10];
+	bool		nulls[10];
 
 	Page		page;
 	PageHeader	pageheader;
@@ -315,6 +315,7 @@ page_header(PG_FUNCTION_ARGS)
 
 	values[7] = UInt16GetDatum(PageGetPageLayoutVersion(page));
 	values[8] = TransactionIdGetDatum(pageheader->pd_prune_xid);
+	values[9] = TimestampTzGetDatum(pageheader->last_modified);
 
 	/* Build and return the tuple. */
 
