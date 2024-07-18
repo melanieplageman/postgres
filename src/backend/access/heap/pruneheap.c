@@ -315,7 +315,12 @@ do_opp_freeze(struct VacuumCutoffs *cutoffs,
 	{
 		if (cutoffs->frz_threshold_min == InvalidXLogRecPtr)
 			return true;
-		return page_age > cutoffs->frz_threshold_min;
+		if (page_age <= cutoffs->frz_threshold_min)
+		{
+			cutoffs->nofrz_age++;
+			return false;
+		}
+		return true;
 	}
 
 	return false;
@@ -749,6 +754,8 @@ heap_page_prune_and_freeze(Relation relation, Buffer buffer,
 												  page_lsn, do_freeze);
 
 				}
+				else if (prstate.nfrozen > 0 && prstate.cutoffs)
+					prstate.cutoffs->nofrz_partial++;
 			}
 		}
 	}

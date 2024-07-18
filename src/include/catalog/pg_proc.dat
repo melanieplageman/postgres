@@ -5480,6 +5480,17 @@
   prosrc => 'pg_stat_get_last_frz_threshold_min' },
 
 
+{ oid => '388', descr => 'statistics: number of pages scanned by vacuum not frozen bc they wouldnt be all frozen',
+  proname => 'pg_stat_get_nofrz_partial', provolatile => 's', proparallel => 'r',
+  prorettype => 'int8', proargtypes => 'oid',
+  prosrc => 'pg_stat_get_nofrz_partial' },
+
+{ oid => '389', descr => 'statistics: number of pages scanned by vacuum not frozen bc they arent old enough',
+  proname => 'pg_stat_get_nofrz_age', provolatile => 's', proparallel => 'r',
+  prorettype => 'int8', proargtypes => 'oid',
+  prosrc => 'pg_stat_get_nofrz_age' },
+
+
 { oid => '3055', descr => 'statistics: number of auto vacuums for a table',
   proname => 'pg_stat_get_autovacuum_count', provolatile => 's',
   proparallel => 'r', prorettype => 'int8', proargtypes => 'oid',

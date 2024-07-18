@@ -1097,6 +1097,8 @@ vacuum_get_cutoffs(Relation rel, const VacuumParams *params,
 	cutoffs->frz_threshold_min = pgstat_calc_frz_threshold_min(
 															   RelationGetRelid(rel),
 															   rel->rd_rel->relisshared);
+	cutoffs->nofrz_age = 0;
+	cutoffs->nofrz_partial = 0;
 
 	/*
 	 * Acquire OldestXmin.
