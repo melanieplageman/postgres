@@ -3205,12 +3205,9 @@ heap_update(Relation relation, ItemPointer otid, HeapTuple newtup,
 				infomask2_new_tuple;
 
 	uint8		old_page_old_vmbits = 0;
-	uint8		new_page_old_vmbits = 0;
 	XLogRecPtr	old_page_lsn = InvalidXLogRecPtr;
-	XLogRecPtr	new_page_lsn = InvalidXLogRecPtr;
 	XLogRecPtr	insert_lsn = InvalidXLogRecPtr;
 	TimestampTz old_page_ts;
-	TimestampTz new_page_ts;
 
 	Assert(ItemPointerIsValid(otid));
 
@@ -3990,7 +3987,7 @@ l2:
 	{
 		all_visible_cleared_new = true;
 		PageClearAllVisible(BufferGetPage(newbuf));
-		new_page_old_vmbits = visibilitymap_clear(relation, BufferGetBlockNumber(newbuf),
+		visibilitymap_clear(relation, BufferGetBlockNumber(newbuf),
 												  vmbuffer_new, VISIBILITYMAP_VALID_BITS);
 	}
 
@@ -4026,8 +4023,6 @@ l2:
 		{
 			Page		newpage = BufferGetPage(newbuf);
 
-			new_page_lsn = PageGetLSN(newpage);
-			new_page_ts = PageGetTime(newpage);
 			PageSetLSN(newpage, recptr);
 			PageSetTime(newpage, time);
 		}
@@ -4072,12 +4067,6 @@ l2:
 	if (old_page_old_vmbits & VISIBILITYMAP_ALL_VISIBLE)
 		pgstat_count_vm_unset(relation, old_page_lsn, old_page_ts,
 							  insert_lsn, old_page_old_vmbits);
-
-	/* MTODO: figure out if we whether or not to count unfreezing new page */
-	if (newbuf != buffer &&
-		new_page_old_vmbits & VISIBILITYMAP_ALL_VISIBLE)
-		pgstat_count_vm_unset(relation, new_page_lsn, new_page_ts,
-							  insert_lsn, new_page_old_vmbits);
 
 	pgstat_count_heap_update(relation, use_hot_update, newbuf != buffer);
 
