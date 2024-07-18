@@ -575,6 +575,7 @@ typedef struct PgStat_StatTabEntry
 	TimestampTz last_autoanalyze_time;	/* autovacuum initiated */
 	PgStat_Counter autoanalyze_count;
 
+	XLogRecPtr last_frz_threshold_min;
 	/* updated upon VM unset */
 	PgStat_VMUnset vm_unset;
 	/* updated during vacuum and used in stats */
@@ -755,7 +756,8 @@ extern void pgstat_count_vm_unset(Relation relation, XLogRecPtr page_lsn,
 								  TimestampTz page_ts,
 								  XLogRecPtr current_lsn, uint8 old_vmbits);
 
-extern void pgstat_report_heap_vacfrz(Oid tableoid, bool shared, PgStat_VMSet *vmsets);
+extern void pgstat_report_heap_vacfrz(Oid tableoid, bool shared, PgStat_VMSet *vmsets,
+		XLogRecPtr frz_threshold_min);
 
 extern XLogRecPtr pgstat_calc_frz_threshold_min(Oid tableoid, bool shared);
 

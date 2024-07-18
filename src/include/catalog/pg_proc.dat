@@ -5474,6 +5474,11 @@
   prorettype => 'int8', proargtypes => 'oid',
   prosrc => 'pg_stat_get_freeze_fpis' },
 
+{ oid => '5555', descr => 'statistics: last vacuums frz_threshold_min',
+  proname => 'pg_stat_get_last_frz_threshold_min', provolatile => 's', proparallel => 'r',
+  prorettype => 'pg_lsn', proargtypes => 'oid',
+  prosrc => 'pg_stat_get_last_frz_threshold_min' },
+
 
 { oid => '3055', descr => 'statistics: number of auto vacuums for a table',
   proname => 'pg_stat_get_autovacuum_count', provolatile => 's',

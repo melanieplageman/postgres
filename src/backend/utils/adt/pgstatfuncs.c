@@ -203,6 +203,18 @@ pg_stat_get_freeze_fpis(PG_FUNCTION_ARGS)
 	PG_RETURN_INT64(tabentry->vm_set.freeze_fpis);
 }
 
+Datum
+pg_stat_get_last_frz_threshold_min(PG_FUNCTION_ARGS)
+{
+	Oid relid = PG_GETARG_OID(0);
+	PgStat_StatTabEntry *tabentry;
+
+	if ((tabentry = pgstat_fetch_stat_tabentry(relid)) == NULL)
+		PG_RETURN_NULL();
+
+	PG_RETURN_LSN(tabentry->last_frz_threshold_min);
+}
+
 #define PG_STAT_GET_RELENTRY_TIMESTAMPTZ(stat)					\
 Datum															\
 CppConcat(pg_stat_get_,stat)(PG_FUNCTION_ARGS)					\
