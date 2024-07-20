@@ -176,18 +176,16 @@ accumulator_remove(PgStat_Accumulator *accumulator)
 {
 	uint64		n;
 	double		s;
-	double		q;
 
 	Assert(accumulator->n > 0);
 
 	/* save the original values */
 	n = accumulator->n;
 	s = accumulator->s;
-	q = accumulator->q;
 
 	accumulator->n--;
 	accumulator->s -= s / n;
-	accumulator->q = q * (2 * n - 1) / pow(n, 2);
+	accumulator->q -= pow((s / n), 2);
 }
 
 static inline void
@@ -209,14 +207,17 @@ accumulator_calculate(PgStat_Accumulator *accumulator, double *mean,
 		return;
 
 	*mean = accumulator->s / accumulator->n;
-	*stddev = sqrt((accumulator->q - pow(accumulator->s, 2) / accumulator->n) / accumulator->n);
+	*stddev = sqrt(
+			(accumulator->q - (pow(accumulator->s, 2) / accumulator->n)) /
+			accumulator->n
+			);
 }
 
 /*
  * Start removing data from the accumulator when inserting new unsets after
  * this capacity has been reached.
  */
-#define FRZ_UNSET_CAPACITY 2000
+#define FRZ_UNSET_CAPACITY 10000
 
 typedef struct PgStat_VMUnset
 {
