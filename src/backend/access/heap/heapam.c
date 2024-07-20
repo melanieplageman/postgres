@@ -3207,7 +3207,7 @@ heap_update(Relation relation, ItemPointer otid, HeapTuple newtup,
 	uint8		old_page_old_vmbits = 0;
 	XLogRecPtr	old_page_lsn = InvalidXLogRecPtr;
 	XLogRecPtr	insert_lsn = InvalidXLogRecPtr;
-	TimestampTz old_page_ts;
+	TimestampTz old_page_ts = 0;
 
 	Assert(ItemPointerIsValid(otid));
 
