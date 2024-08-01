@@ -726,8 +726,12 @@ heap_page_prune_and_freeze(Relation relation, Buffer buffer,
 
 				Assert(cutoffs);
 				do_freeze = page_age > cutoffs->frz_threshold_min;
+				if (page_age <= cutoffs->frz_threshold_min)
+					prstate.cutoffs->nofrz_age++;
 			}
 		}
+		else if (prstate.nfrozen > 0 && prstate.cutoffs)
+			prstate.cutoffs->nofrz_partial++;
 	}
 
 	if (do_freeze)

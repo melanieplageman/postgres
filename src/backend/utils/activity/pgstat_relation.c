@@ -476,7 +476,8 @@ pgstat_report_vacuum(Oid tableoid, bool shared,
 }
 
 void
-pgstat_report_heap_vacfrz(Oid tableoid, bool shared, PgStat_VMSet *vmsets)
+pgstat_report_heap_vacfrz(Oid tableoid, bool shared, PgStat_VMSet *vmsets,
+						  XLogRecPtr frz_threshold_min, int64 nofrz_age, int64 nofrz_partial)
 {
 	PgStat_EntryRef *entry_ref;
 	PgStat_StatTabEntry *tabentry;
@@ -496,6 +497,10 @@ pgstat_report_heap_vacfrz(Oid tableoid, bool shared, PgStat_VMSet *vmsets)
 	tabentry->vm_set.page_freezes += vmsets->page_freezes;
 	tabentry->vm_set.vm_freezes += vmsets->vm_freezes;
 	tabentry->vm_set.freeze_fpis += vmsets->freeze_fpis;
+	tabentry->last_frz_threshold_min = frz_threshold_min;
+
+	tabentry->nofrz_age += nofrz_age;
+	tabentry->nofrz_partial += nofrz_partial;
 
 	pgstat_unlock_entry(entry_ref);
 }

@@ -599,7 +599,10 @@ heap_vacuum_rel(Relation rel, VacuumParams *params,
 
 	pgstat_report_heap_vacfrz(RelationGetRelid(rel),
 							  rel->rd_rel->relisshared,
-							  &vacrel->vmsets);
+							  &vacrel->vmsets,
+							  vacrel->cutoffs.frz_threshold_min,
+							  vacrel->cutoffs.nofrz_age,
+							  vacrel->cutoffs.nofrz_partial);
 
 	pgstat_progress_end_command();
 

@@ -203,6 +203,43 @@ pg_stat_get_freeze_fpis(PG_FUNCTION_ARGS)
 	PG_RETURN_INT64(tabentry->vm_set.freeze_fpis);
 }
 
+Datum
+pg_stat_get_last_frz_threshold_min(PG_FUNCTION_ARGS)
+{
+	Oid			relid = PG_GETARG_OID(0);
+	PgStat_StatTabEntry *tabentry;
+
+	if ((tabentry = pgstat_fetch_stat_tabentry(relid)) == NULL)
+		PG_RETURN_NULL();
+
+	PG_RETURN_LSN(tabentry->last_frz_threshold_min);
+}
+
+
+Datum
+pg_stat_get_nofrz_age(PG_FUNCTION_ARGS)
+{
+	Oid			relid = PG_GETARG_OID(0);
+	PgStat_StatTabEntry *tabentry;
+
+	if ((tabentry = pgstat_fetch_stat_tabentry(relid)) == NULL)
+		PG_RETURN_NULL();
+
+	PG_RETURN_INT64(tabentry->nofrz_age);
+}
+
+Datum
+pg_stat_get_nofrz_partial(PG_FUNCTION_ARGS)
+{
+	Oid			relid = PG_GETARG_OID(0);
+	PgStat_StatTabEntry *tabentry;
+
+	if ((tabentry = pgstat_fetch_stat_tabentry(relid)) == NULL)
+		PG_RETURN_NULL();
+
+	PG_RETURN_INT64(tabentry->nofrz_partial);
+}
+
 #define PG_STAT_GET_RELENTRY_TIMESTAMPTZ(stat)					\
 Datum															\
 CppConcat(pg_stat_get_,stat)(PG_FUNCTION_ARGS)					\
@@ -1565,7 +1602,7 @@ pg_stat_get_io(PG_FUNCTION_ARGS)
 Datum
 pg_stat_get_wal(PG_FUNCTION_ARGS)
 {
-#define PG_STAT_GET_WAL_COLS	9
+#define PG_STAT_GET_WAL_COLS	10
 	TupleDesc	tupdesc;
 	Datum		values[PG_STAT_GET_WAL_COLS] = {0};
 	bool		nulls[PG_STAT_GET_WAL_COLS] = {0};
@@ -1592,6 +1629,8 @@ pg_stat_get_wal(PG_FUNCTION_ARGS)
 					   FLOAT8OID, -1, 0);
 	TupleDescInitEntry(tupdesc, (AttrNumber) 9, "stats_reset",
 					   TIMESTAMPTZOID, -1, 0);
+	TupleDescInitEntry(tupdesc, (AttrNumber) 10, "target_freeze_duration_lsns",
+						PG_LSNOID, -1, 0);
 
 	BlessTupleDesc(tupdesc);
 
@@ -1618,6 +1657,7 @@ pg_stat_get_wal(PG_FUNCTION_ARGS)
 	values[7] = Float8GetDatum(((double) wal_stats->wal_sync_time) / 1000.0);
 
 	values[8] = TimestampTzGetDatum(wal_stats->stat_reset_timestamp);
+	values[9] = LSNGetDatum(wal_stats->target_frz_dur_lsns);
 
 	/* Returns the record as Datum */
 	PG_RETURN_DATUM(HeapTupleGetDatum(heap_form_tuple(tupdesc, values, nulls)));

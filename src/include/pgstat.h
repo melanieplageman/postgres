@@ -603,6 +603,16 @@ typedef struct PgStat_StatTabEntry
 	TimestampTz last_autoanalyze_time;	/* autovacuum initiated */
 	PgStat_Counter autoanalyze_count;
 
+	/*
+	 * number of pages vacuum scanned but didn't freeze bc wouldn't be all
+	 * frozen
+	 */
+	int64		nofrz_partial;
+
+	/* number of pages vacuum scanned but didn't freeze bc weren't old enough */
+	int64		nofrz_age;
+	XLogRecPtr	last_frz_threshold_min;
+
 	/* updated upon VM unset */
 	PgStat_VMUnset vm_unset;
 	/* updated during vacuum and used in stats */
@@ -827,7 +837,9 @@ extern void pgstat_report_analyze(Relation rel,
 								  bool resetcounter);
 
 extern XLogRecPtr pgstat_min_freezable_page_age(Oid tableoid, bool shared);
-extern void pgstat_report_heap_vacfrz(Oid tableoid, bool shared, PgStat_VMSet *vmsets);
+extern void pgstat_report_heap_vacfrz(Oid tableoid, bool shared, PgStat_VMSet *vmsets,
+									  XLogRecPtr frz_threshold_min, int64 nofrz_age,
+									  int64 nofrz_partial);
 extern void pgstat_count_vm_unset(Relation relation, XLogRecPtr page_lsn,
 								  XLogRecPtr current_lsn, uint8 old_vmbits);
 

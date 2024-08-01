@@ -1094,6 +1094,9 @@ vacuum_get_cutoffs(Relation rel, const VacuumParams *params,
 	cutoffs->relfrozenxid = rel->rd_rel->relfrozenxid;
 	cutoffs->relminmxid = rel->rd_rel->relminmxid;
 
+	cutoffs->nofrz_age = 0;
+	cutoffs->nofrz_partial = 0;
+
 	/*
 	 * Acquire OldestXmin.
 	 *

@@ -697,6 +697,9 @@ CREATE VIEW pg_stat_all_tables AS
             pg_stat_get_missed_freezes(C.oid) AS missed_freezes,
             pg_stat_get_early_unfreezes(C.oid) AS early_unfreezes,
             pg_stat_get_freeze_fpis(C.oid) AS freeze_fpis,
+            pg_stat_get_nofrz_age(C.oid) AS nofrz_age,
+            pg_stat_get_nofrz_partial(C.oid) AS nofrz_partial,
+            pg_stat_get_last_frz_threshold_min(C.oid) AS last_frz_threshold_min,
             pg_stat_get_autovacuum_count(C.oid) AS autovacuum_count,
             pg_stat_get_analyze_count(C.oid) AS analyze_count,
             pg_stat_get_autoanalyze_count(C.oid) AS autoanalyze_count

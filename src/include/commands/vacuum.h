@@ -284,6 +284,9 @@ struct VacuumCutoffs
 	 * vacuuming a relation.
 	 */
 	XLogRecPtr	frz_threshold_min;
+
+	int64		nofrz_age;
+	int64		nofrz_partial;
 };
 
 /*

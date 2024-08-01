@@ -5507,6 +5507,22 @@
   prorettype => 'int8', proargtypes => 'oid',
   prosrc => 'pg_stat_get_freeze_fpis' },
 
+{ oid => '5555', descr => 'statistics: last vacuums frz_threshold_min',
+  proname => 'pg_stat_get_last_frz_threshold_min', provolatile => 's', proparallel => 'r',
+  prorettype => 'pg_lsn', proargtypes => 'oid',
+  prosrc => 'pg_stat_get_last_frz_threshold_min' },
+
+
+{ oid => '388', descr => 'statistics: number of pages scanned by vacuum not frozen bc they wouldnt be all frozen',
+  proname => 'pg_stat_get_nofrz_partial', provolatile => 's', proparallel => 'r',
+  prorettype => 'int8', proargtypes => 'oid',
+  prosrc => 'pg_stat_get_nofrz_partial' },
+
+{ oid => '389', descr => 'statistics: number of pages scanned by vacuum not frozen bc they arent old enough',
+  proname => 'pg_stat_get_nofrz_age', provolatile => 's', proparallel => 'r',
+  prorettype => 'int8', proargtypes => 'oid',
+  prosrc => 'pg_stat_get_nofrz_age' },
+
 
 { oid => '3055', descr => 'statistics: number of auto vacuums for a table',
   proname => 'pg_stat_get_autovacuum_count', provolatile => 's',
@@ -5876,10 +5892,11 @@
 { oid => '1136', descr => 'statistics: information about WAL activity',
   proname => 'pg_stat_get_wal', proisstrict => 'f', provolatile => 's',
   proparallel => 'r', prorettype => 'record', proargtypes => '',
-  proallargtypes => '{int8,int8,numeric,int8,int8,int8,float8,float8,timestamptz}',
-  proargmodes => '{o,o,o,o,o,o,o,o,o}',
-  proargnames => '{wal_records,wal_fpi,wal_bytes,wal_buffers_full,wal_write,wal_sync,wal_write_time,wal_sync_time,stats_reset}',
+  proallargtypes => '{int8,int8,numeric,int8,int8,int8,float8,float8,timestamptz,pg_lsn}',
+  proargmodes => '{o,o,o,o,o,o,o,o,o,o}',
+  proargnames => '{wal_records,wal_fpi,wal_bytes,wal_buffers_full,wal_write,wal_sync,wal_write_time,wal_sync_time,stats_reset,target_freeze_duration_lsns}',
   prosrc => 'pg_stat_get_wal' },
+
 { oid => '6248', descr => 'statistics: information about WAL prefetching',
   proname => 'pg_stat_get_recovery_prefetch', prorows => '1', proretset => 't',
   provolatile => 'v', prorettype => 'record', proargtypes => '',
