@@ -91,6 +91,20 @@ static TimestampTz last_stream_check_ts;
 /* The LSN we last updated the LSNTimeStream with */
 static XLogRecPtr last_stream_update_lsn = InvalidXLogRecPtr;
 
+/*
+ * The interval at which background writer translates the
+ * target_freeze_duration GUC from time to LSNs and saves the updated value in
+ * WAL stats. Backends modifying a previously all-visible page compare the page
+ * LSN to this translated value to determine whether or not the page was
+ * unmodified for at least target_freeze_duration.
+ */
+#define TRANSLATE_FRZ_DUR_INTERVAL_MS 120000
+
+/*
+ * Time at which we last checked if the cached target freeze duration in LSNs
+ * should be updated.
+ */
+static TimestampTz last_frz_dur_refresh = 0;
 
 /*
  * Main entry point for bgwriter process
@@ -295,6 +309,7 @@ BackgroundWriterMain(char *startup_data, size_t startup_data_len)
 		{
 			TimestampTz timeout = 0;
 			TimestampTz now = GetCurrentTimestamp();
+			XLogRecPtr	insert_lsn = InvalidXLogRecPtr;
 
 			if (XLogStandbyInfoActive())
 			{
@@ -328,7 +343,7 @@ BackgroundWriterMain(char *startup_data, size_t startup_data_len)
 			 */
 			if (now >= timeout)
 			{
-				XLogRecPtr	insert_lsn = GetXLogInsertRecPtr();
+				insert_lsn = GetXLogInsertRecPtr();
 
 				Assert(insert_lsn != InvalidXLogRecPtr);
 
@@ -346,6 +361,22 @@ BackgroundWriterMain(char *startup_data, size_t startup_data_len)
 				}
 
 				last_stream_check_ts = now;
+			}
+
+			/*
+			 * Periodically refresh the cached value of target_freeze_duration
+			 * in LSNs saved in WAL stats.
+			 */
+			timeout = TimestampTzPlusMilliseconds(last_frz_dur_refresh,
+												  TRANSLATE_FRZ_DUR_INTERVAL_MS);
+
+			if (now >= timeout)
+			{
+				if (insert_lsn == InvalidXLogRecPtr)
+					insert_lsn = GetXLogInsertRecPtr();
+
+				pgstat_wal_refresh_target_frz_dur(now, insert_lsn);
+				last_frz_dur_refresh = now;
 			}
 		}
 
