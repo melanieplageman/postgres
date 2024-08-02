@@ -622,3 +622,100 @@ time_bounds_for_lsn(const LSNTimeStream *stream, XLogRecPtr target_lsn,
 
 	Assert(upper->time >= lower->time);
 }
+
+
+/*
+* The WAL stats data structure keeps a cached value of the GUC
+* target_freeze_duration translated to LSNs using the LSNTimeStream.
+* pgstat_wal_refresh_target_frz_dur() function translates
+* target_freeze_duration to LSNs using the global LSNTimeStream. Because the
+* LSN generation rate fluctuates, a time duration may translate to a different
+* LSN duration at different points in time.
+*/
+void
+pgstat_wal_refresh_target_frz_dur(TimestampTz cur_time, XLogRecPtr cur_lsn)
+{
+	int64		target_freeze_dur_usec;
+	int64		target_time;
+	XLogRecPtr	target_lsn;
+	XLogRecPtr	current_frz_dur_lsns,
+				new_frz_dur_lsns;
+	PgStatShared_Wal *stats_shmem;
+	double		time_quantile;
+	uint64		interval_time;
+	uint64		time_since_start;
+	XLogRecPtr	interval_lsns;
+	LSNTime		upper;
+	LSNTime		lower;
+
+	stats_shmem = &pgStatLocal.shmem->wal;
+
+	/* TODO: how often does bgwriter check for new GUC values */
+	target_freeze_dur_usec = target_freeze_duration * USECS_PER_SEC;
+	Assert(target_freeze_dur_usec > 0 &&
+		   target_freeze_dur_usec <= INT64_MAX);
+	Assert(cur_time > 0 &&
+			cur_time <= INT64_MAX);
+	Assert(cur_time >= target_freeze_dur_usec);
+
+	/*
+	 * How long ago a page would have to have been set all visible for it to
+	 * qualify as having remained unmodified for target_freeze_duration.
+	 */
+	target_time = (uint64) cur_time - target_freeze_dur_usec;
+
+	/*
+	 * Determine the LSN corresponding to the target time. Also check the
+	 * current value of target_frz_dur_lsns. If it hasn't changed, we'll avoid
+	 * taking an exclusive lock and writing to it.
+	 */
+	LWLockAcquire(&stats_shmem->lock, LW_SHARED);
+	lsn_bounds_for_time(&stats_shmem->stats.stream, target_time, &lower, &upper);
+	current_frz_dur_lsns = stats_shmem->stats.target_frz_dur_lsns;
+	LWLockRelease(&stats_shmem->lock);
+
+	/*
+	 * we know that target_time is in the past. so, result.upper should be
+	 * valid
+	 */
+	Assert(upper.lsn < UINT64_MAX);
+
+	/*
+	 * If it is too far in the past, we may not have enough information to
+	 * establish a valid lower bound. In this case, the target freeze duration
+	 * in LSNs is essentially infinity. All modifications of previously
+	 * all-visible pages are considered "early".
+	 */
+	if (lower.lsn == InvalidXLogRecPtr)
+		new_frz_dur_lsns = UINT64_MAX;
+	else
+	{
+		Assert(target_time >= lower.time && target_time < upper.time);
+
+		/* Linearly interpolate the value of target_lsn */
+		interval_time = (uint64) upper.time - lower.time;
+		time_since_start = (uint64) target_time - lower.time;
+
+		time_quantile = (double) time_since_start / interval_time;
+		Assert(time_quantile >= 0 && time_quantile <= 1);
+
+		interval_lsns = upper.lsn - lower.lsn;
+
+		target_lsn = lower.lsn + (XLogRecPtr) (time_quantile * interval_lsns);
+
+		Assert(target_lsn <= cur_lsn);
+
+		/*
+		 * How many LSNs a page has to stay unmodified to qualify as meeting
+		 * target_freeze_duration.
+		 */
+		new_frz_dur_lsns = cur_lsn - target_lsn;
+	}
+
+	if (new_frz_dur_lsns != current_frz_dur_lsns)
+	{
+		LWLockAcquire(&stats_shmem->lock, LW_EXCLUSIVE);
+		stats_shmem->stats.target_frz_dur_lsns = new_frz_dur_lsns;
+		LWLockRelease(&stats_shmem->lock);
+	}
+}

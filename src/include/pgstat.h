@@ -608,6 +608,15 @@ typedef struct PgStat_WalStats
 	PgStat_Counter wal_write_time;
 	PgStat_Counter wal_sync_time;
 	LSNTimeStream stream;
+
+	/*
+	 * The GUC target_freeze_duration translated from a time duration to a LSN
+	 * duration and cached here for easy access. It is updated by bgwriter and
+	 * used by backends when updating a previously all visible page to
+	 * determine whether or not the page was modified sooner than
+	 * target_freeze_duration.
+	 */
+	XLogRecPtr	target_frz_dur_lsns;
 	TimestampTz stat_reset_timestamp;
 } PgStat_WalStats;
 
@@ -896,9 +905,11 @@ extern void time_bounds_for_lsn(const LSNTimeStream *stream,
 								XLogRecPtr target_lsn,
 								LSNTime *lower, LSNTime *upper);
 
-/* Helper for maintaining the global LSNTimeStream */
+/* Helpers for maintaining and using the global LSNTimeStream */
 extern void pgstat_wal_update_lsntime_stream(XLogRecPtr lsn,
 											 TimestampTz time);
+extern void pgstat_wal_refresh_target_frz_dur(TimestampTz cur_time,
+											  XLogRecPtr cur_lsn);
 
 
 /*
