@@ -48,7 +48,6 @@ static void lsntime_insert(LSNTimeStream *stream, TimestampTz time,
 /*
  * LSNTimeStream usage helper function
  */
-pg_attribute_unused()
 static void stream_get_bounds_for_time(const LSNTimeStream *stream,
 									   TimestampTz target_time,
 									   LSNTime *lower,
@@ -462,4 +461,98 @@ stream_get_bounds_for_time(const LSNTimeStream *stream,
 	 * stream is our lower bound.
 	 */
 	*lower = stream->data[stream->length - 1];
+}
+
+/*
+ * Translate the target_freeze_duration GUC from a time duration to an LSN
+ * duration using the global LSNTimeStream and save the translated value in WAL
+ * stats. We linearly interpolate the LSN value corresponding to cur_time -
+ * target_freeze_duration on the LSNTimeStream.
+ *
+ * In order to determine if pages have been all-visible for
+ * target_freeze_duration, it must be converted to LSNs, as pages do not
+ * contain the timestamp of their last modification.
+ */
+void
+pgstat_wal_refresh_target_frz_dur(TimestampTz cur_time, XLogRecPtr cur_lsn)
+{
+	int64		target_freeze_dur_usec;
+	TimestampTz target_time;
+	XLogRecPtr	target_lsn;
+	LSNInterval cur_frz_dur_lsn_interval,
+				new_frz_dur_lsn_interval;
+	PgStatShared_Wal *stats_shmem;
+	double		time_quantile;
+	TimeInterval time_interval;
+	TimeInterval time_since_start_interval;
+	LSNInterval lsn_interval;
+	LSNTime		upper;
+	LSNTime		lower;
+
+	target_freeze_dur_usec = target_freeze_duration * USECS_PER_SEC;
+	Assert(target_freeze_dur_usec >= 0);
+	Assert(cur_time >= target_freeze_dur_usec);
+
+	/*
+	 * How long ago a page would have to have been set all visible for it to
+	 * qualify as having remained unmodified for target_freeze_duration.
+	 */
+	target_time = cur_time - target_freeze_dur_usec;
+
+	/*
+	 * Determine the LSN corresponding to the target time. Also check the
+	 * current value of lsn_target_frz_dur. If it hasn't changed, we'll avoid
+	 * writing to it.
+	 */
+	stats_shmem = &pgStatLocal.shmem->wal;
+	LWLockAcquire(&stats_shmem->lock, LW_SHARED);
+	stream_get_bounds_for_time(&stats_shmem->stats.stream, target_time, &lower, &upper);
+	cur_frz_dur_lsn_interval = stats_shmem->stats.lsn_target_frz_dur;
+	LWLockRelease(&stats_shmem->lock);
+
+	/*
+	 * We know the target_time is in the past, so if we didn't find an upper
+	 * bound on the stream, use the current time.
+	 */
+	if (upper.lsn == InvalidXLogRecPtr)
+		upper = LSNTIME_INIT(cur_lsn, cur_time);
+
+	/*
+	 * If the target_time is before the oldest data we have, including if the
+	 * stream is empty, we can't calculate a valid value. If the cached value
+	 * of lsn_target_frz_dur is valid, we should update it to
+	 * InvalidXLogRecPtr.
+	 */
+	if (lower.lsn == InvalidXLogRecPtr)
+		new_frz_dur_lsn_interval = InvalidXLogRecPtr;
+	else
+	{
+		Assert(target_time >= lower.time && target_time < upper.time);
+
+		/* Linearly interpolate the value of target_lsn */
+		time_interval = (TimeInterval) upper.time - lower.time;
+		time_since_start_interval = (TimeInterval) target_time - lower.time;
+
+		time_quantile = (double) time_since_start_interval / time_interval;
+		Assert(time_quantile >= 0 && time_quantile <= 1);
+
+		lsn_interval = upper.lsn - lower.lsn;
+
+		target_lsn = lower.lsn + (XLogRecPtr) (time_quantile * lsn_interval);
+
+		Assert(target_lsn <= cur_lsn);
+
+		/*
+		 * How many LSNs a page has to stay unmodified to be considered as
+		 * having been all-visible for target_freeze_duration.
+		 */
+		new_frz_dur_lsn_interval = cur_lsn - target_lsn;
+	}
+
+	if (new_frz_dur_lsn_interval == cur_frz_dur_lsn_interval)
+		return;
+
+	LWLockAcquire(&stats_shmem->lock, LW_EXCLUSIVE);
+	stats_shmem->stats.lsn_target_frz_dur = new_frz_dur_lsn_interval;
+	LWLockRelease(&stats_shmem->lock);
 }
