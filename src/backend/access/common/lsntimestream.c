@@ -8,18 +8,6 @@
  */
 static uint32 lsntime_to_drop(LSNTimeStream *stream);
 
-extern void lsntime_insert(LSNTimeStream *stream, XLogRecPtr lsn,
-						   TimestampTz time);
-
-/*
- * LSNTimeStream usage helper function
- */
-pg_attribute_unused()
-static void stream_get_bounds_for_time(const LSNTimeStream *stream,
-									   TimestampTz target_time,
-									   LSNTime *lower,
-									   LSNTime *upper);
-
 /*
  * Returns the index of the LSNTime to drop from a full LSNTimeStream.
  *
@@ -117,7 +105,7 @@ lsntime_insert(LSNTimeStream *stream, XLogRecPtr lsn,
  * The caller must check if upper and/or lower's lsn member is
  * InvalidXLogRecPtr to detect whether that bound is valid.
  */
-static void
+void
 stream_get_bounds_for_time(const LSNTimeStream *stream,
 						   TimestampTz target_time,
 						   LSNTime *lower,
