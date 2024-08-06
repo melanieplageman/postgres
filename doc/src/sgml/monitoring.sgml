@@ -3195,6 +3195,15 @@ description | Waiting for a newly initialized WAL file to reach durable storage
    </tgroup>
   </table>
 
+  <para>
+   In addition to these WAL stats, all of the LSN-time pairs in the global
+   LSNTimeStream can be viewed via the function
+   <function>pg_stat_lsntime_stream</function> ()
+   <returnvalue>setof record</returnvalue>
+   ( <parameter>lsn</parameter> <type>pg_lsn</type>,
+   <parameter>time</parameter> <type>timestamp with time zone</type>).
+  </para>
+
 </sect2>
 
  <sect2 id="monitoring-pg-stat-database-view">
