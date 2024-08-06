@@ -6402,6 +6402,18 @@
   proargmodes => '{o,o}', proargnames => '{lsn,time}',
   prosrc => 'pg_stat_lsntime_stream' },
 
+
+{ oid => '9992',
+  descr => 'test the LSN Time Stream',
+  proname => 'lsntime_stream_test', prorows => '64',
+  proretset => 't', provolatile => 'v', proparallel => 's',
+  prorettype => 'record', proargtypes => 'int4',
+  proallargtypes => '{int4,timestamptz,pg_lsn}',
+  proargmodes => '{i,o,o}',
+  proargnames => '{ninputlength, time, lsn}',
+  prosrc => 'lsntime_stream_test' },
+
+
 { oid => '6168',
   descr => 'get commit timestamp and replication origin of a transaction',
   proname => 'pg_xact_commit_timestamp_origin', provolatile => 'v',

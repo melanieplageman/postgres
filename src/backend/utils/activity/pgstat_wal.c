@@ -625,3 +625,35 @@ time_bounds_for_lsn(const LSNTimeStream *stream, XLogRecPtr target_lsn,
 	if (upper->lsn == InvalidXLogRecPtr && target_lsn <= current_lsn)
 		*upper = LSNTIME_INIT(current_lsn, current_time);
 }
+
+Datum
+lsntime_stream_test(PG_FUNCTION_ARGS)
+{
+	ReturnSetInfo *rsinfo;
+	LSNTimeStream stream = {0};
+	TimestampTz time = GetCurrentTimestamp();
+	XLogRecPtr	lsn = GetXLogInsertRecPtr();
+	int			num_insertions = PG_GETARG_UINT16(0);
+
+	for (int i = 0; i < num_insertions; i++)
+	{
+		lsn = lsn + 10000;
+		time = TimestampTzPlusSeconds(time, 100);
+		lsntime_insert(&stream, time, lsn);
+	}
+
+	InitMaterializedSRF(fcinfo, 0);
+	rsinfo = (ReturnSetInfo *) fcinfo->resultinfo;
+	for (size_t i = 0; i < stream.length; i++)
+	{
+		Datum		values[2] = {0};
+		bool		nulls[2] = {0};
+
+		values[0] = stream.data[i].time;
+		values[1] = stream.data[i].lsn;
+		tuplestore_putvalues(rsinfo->setResult, rsinfo->setDesc,
+							 values, nulls);
+	}
+
+	return (Datum) 0;
+}
