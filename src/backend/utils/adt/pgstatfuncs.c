@@ -30,6 +30,7 @@
 #include "storage/procarray.h"
 #include "utils/acl.h"
 #include "utils/builtins.h"
+#include "utils/pg_lsn.h"
 #include "utils/timestamp.h"
 
 #define UINT32_ACCESS_ONCE(var)		 ((uint32)(*((volatile uint32 *)&(var))))
@@ -1524,6 +1525,33 @@ pg_stat_get_wal(PG_FUNCTION_ARGS)
 
 	/* Returns the record as Datum */
 	PG_RETURN_DATUM(HeapTupleGetDatum(heap_form_tuple(tupdesc, values, nulls)));
+}
+
+Datum
+pg_stat_lsntime_stream(PG_FUNCTION_ARGS)
+{
+	ReturnSetInfo *rsinfo;
+	PgStat_WalStats *stats;
+	LSNTimeStream *stream;
+
+	InitMaterializedSRF(fcinfo, 0);
+	rsinfo = (ReturnSetInfo *) fcinfo->resultinfo;
+
+	stats = pgstat_fetch_stat_wal();
+	stream = &stats->stream;
+
+	for (size_t i = 0; i < stream->length; i++)
+	{
+		Datum		values[2] = {0};
+		bool		nulls[2] = {0};
+
+		values[0] = LSNGetDatum(stream->data[i].lsn);
+		values[1] = TimestampTzGetDatum(stream->data[i].time);
+		tuplestore_putvalues(rsinfo->setResult, rsinfo->setDesc,
+							 values, nulls);
+	}
+
+	return (Datum) 0;
 }
 
 /*

@@ -39,7 +39,6 @@ static WalUsage prevWalUsage;
  */
 static uint32 lsntime_to_drop(LSNTimeStream *stream);
 
-pg_attribute_unused()
 static void lsntime_insert(LSNTimeStream *stream, XLogRecPtr lsn,
 						   TimestampTz time);
 
@@ -307,6 +306,21 @@ lsntime_insert(LSNTimeStream *stream, XLogRecPtr lsn,
 				sizeof(LSNTime) * (stream->length - 1 - drop));
 
 	stream->data[stream->length - 1] = entrant;
+}
+
+
+/*
+ * Utility function for inserting a new member into the LSNTimeStream member
+ * of WAL stats.
+ */
+void
+pgstat_wal_update_lsntime_stream(XLogRecPtr lsn, TimestampTz time)
+{
+	PgStatShared_Wal *stats_shmem = &pgStatLocal.shmem->wal;
+
+	LWLockAcquire(&stats_shmem->lock, LW_EXCLUSIVE);
+	lsntime_insert(&stats_shmem->stats.stream, lsn, time);
+	LWLockRelease(&stats_shmem->lock);
 }
 
 

@@ -12255,4 +12255,13 @@
   proargnames => '{summarized_tli,summarized_lsn,pending_lsn,summarizer_pid}',
   prosrc => 'pg_get_wal_summarizer_state' },
 
+{ oid => '9994',
+  descr => 'print the LSN Time Stream',
+  proname => 'pg_stat_lsntime_stream', prorows => '64',
+  provolatile => 'v', proparallel => 'u',
+  proretset => 't', prorettype => 'record',
+  proargtypes => '', proallargtypes => '{pg_lsn,timestamptz}',
+  proargmodes => '{o,o}', proargnames => '{lsn,time}',
+  prosrc => 'pg_stat_lsntime_stream' },
+
 ]
