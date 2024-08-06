@@ -67,4 +67,7 @@ typedef struct LSNTimeStream
 #define LSNTIMESTREAM_NSECTIONS \
 	(LSNTIMESTREAM_VOLUME / LSNTIMESTREAM_CAPACITY_REPEATS)
 
+extern void lsntime_insert(LSNTimeStream *stream, XLogRecPtr lsn,
+						   TimestampTz time);
+
 #endif

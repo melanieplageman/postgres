@@ -17,6 +17,7 @@
 
 #include "postgres.h"
 
+#include "access/lsntimestream.h"
 #include "executor/instrument.h"
 #include "utils/pgstat_internal.h"
 
@@ -30,7 +31,6 @@ PgStat_PendingWalStats PendingWalStats = {0};
  * the previous counters from the current ones.
  */
 static WalUsage prevWalUsage;
-
 
 /*
  * Calculate how much WAL usage counters have increased and update
@@ -199,5 +199,19 @@ pgstat_wal_snapshot_cb(void)
 	LWLockAcquire(&stats_shmem->lock, LW_SHARED);
 	memcpy(&pgStatLocal.snapshot.wal, &stats_shmem->stats,
 		   sizeof(pgStatLocal.snapshot.wal));
+	LWLockRelease(&stats_shmem->lock);
+}
+
+/*
+ * Utility function for inserting a new member into the LSNTimeStream member
+ * of WAL stats.
+ */
+void
+pgstat_wal_update_lsntime_stream(XLogRecPtr lsn, TimestampTz time)
+{
+	PgStatShared_Wal *stats_shmem = &pgStatLocal.shmem->wal;
+
+	LWLockAcquire(&stats_shmem->lock, LW_EXCLUSIVE);
+	lsntime_insert(&stats_shmem->stats.stream, lsn, time);
 	LWLockRelease(&stats_shmem->lock);
 }

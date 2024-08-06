@@ -12315,5 +12315,13 @@
   proname => 'gist_stratnum_identity', prorettype => 'int2',
   proargtypes => 'int2',
   prosrc => 'gist_stratnum_identity' },
+{ oid => '9994',
+  descr => 'print the LSN Time Stream',
+  proname => 'pg_stat_lsntime_stream', prorows => '64',
+  provolatile => 'v', proparallel => 'u',
+  proretset => 't', prorettype => 'record',
+  proargtypes => '', proallargtypes => '{pg_lsn,timestamptz}',
+  proargmodes => '{o,o}', proargnames => '{lsn,time}',
+  prosrc => 'pg_stat_lsntime_stream' },
 
 ]

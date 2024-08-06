@@ -8,8 +8,7 @@
  */
 static uint32 lsntime_to_drop(LSNTimeStream *stream);
 
-pg_attribute_unused()
-static void lsntime_insert(LSNTimeStream *stream, XLogRecPtr lsn,
+extern void lsntime_insert(LSNTimeStream *stream, XLogRecPtr lsn,
 						   TimestampTz time);
 
 /*
@@ -59,7 +58,7 @@ lsntime_to_drop(LSNTimeStream *stream)
  * in the first available element. If there are no empty elements, drop an
  * LSNTime from the stream to make room for the new LSNTime.
  */
-static void
+void
 lsntime_insert(LSNTimeStream *stream, XLogRecPtr lsn,
 			   TimestampTz time)
 {
