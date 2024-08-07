@@ -504,9 +504,10 @@ lsn_bounds_for_time(const LSNTimeStream *stream, TimestampTz target_time,
  * Returns a range of LSNTimes starting at lower and ending at upper and
  * covering the target_lsn. If target_lsn is older than the oldest value on the
  * stream, lower will be zeroed out. If target_lsn is newer than the newest
- * value on the stream, upper will be zeroed out. If the stream is empty, both
- * upper and lower will be zeroed out. The caller should always check if both
- * upper and/or lower's LSN member is InvalidXLogRecPtr to detect this.
+ * value on the stream, upper will be zeroed out. If the stream is empty or the
+ * provided target_lsn is invalid, both upper and lower will be zeroed out. The
+ * caller should always check if both upper and/or lower's LSN member is
+ * InvalidXLogRecPtr to detect this.
  */
 static void
 stream_get_bounds_for_lsn(const LSNTimeStream *stream,
@@ -530,6 +531,10 @@ stream_get_bounds_for_lsn(const LSNTimeStream *stream,
 			 target_lsn);
 		return;
 	}
+
+	/* Don't try and locate an invalid LSN */
+	if (target_lsn == InvalidXLogRecPtr)
+		return;
 
 	/*
 	 * If the target_lsn is older than the stream, the oldest member in the
@@ -591,6 +596,14 @@ time_bounds_for_lsn(const LSNTimeStream *stream, XLogRecPtr target_lsn,
 	XLogRecPtr	current_lsn;
 
 	stream_get_bounds_for_lsn(stream, target_lsn, lower, upper);
+
+	/*
+	 * If target_lsn is invalid, do not consult the current time to try and
+	 * add a boundary. This would likely add the current time as an upper
+	 * bound and this doesn't make sense.
+	 */
+	if (target_lsn == InvalidXLogRecPtr)
+		return;
 
 	/*
 	 * We found valid upper and lower bounds for target_lsn, so we're done.

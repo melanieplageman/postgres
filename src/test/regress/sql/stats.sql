@@ -411,6 +411,35 @@ SELECT (n_tup_ins + n_tup_upd) > 0 AS has_data FROM pg_stat_all_tables
 -- Test that various stats views are being properly populated
 -----
 
+-- Test the functions querying the global LSNTimeStream stored in WAL stats.
+
+-- An range covering a time 100 years in the past should have a NULL lower
+-- bound and a non-zero upper bound (either the oldest LSN in the stream or the
+-- current insert LSN).
+SELECT lower IS NULL,
+       upper > pg_lsn(0)
+  FROM pg_stat_lsn_bounds_for_time(now() - make_interval(years=> 100));
+
+-- An LSN range covering a time 100 years in the future should have a non-zero
+-- lower bound and a NULL upper bound. The lower bound will likely be roughly
+-- the current time.
+SELECT lower > pg_lsn(0),
+       upper IS NULL
+    FROM pg_stat_lsn_bounds_for_time(now() + make_interval(years=> 100));
+
+-- An invalid LSN should produce a completely NULL range.
+SELECT lower IS NULL,
+       upper IS NULL
+    FROM pg_stat_time_bounds_for_lsn(pg_lsn(0));
+
+-- A TimestampTz range covering an LSN 1 GB in the future should have a
+-- non-zero lower bound and a NULL upper bound. The lower bound will likely be
+-- roughly the current time.
+SELECT lower::time > 'allballs'::time,
+       upper IS NULL
+    FROM pg_stat_time_bounds_for_lsn(
+         pg_current_wal_insert_lsn() + 1000000000);
+
 -- Test that sessions is incremented when a new session is started in pg_stat_database
 SELECT sessions AS db_stat_sessions FROM pg_stat_database WHERE datname = (SELECT current_database()) \gset
 \c
