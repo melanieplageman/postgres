@@ -276,6 +276,14 @@ struct VacuumCutoffs
 	 */
 	TransactionId FreezeLimit;
 	MultiXactId MultiXactCutoff;
+
+	/*
+	 * The youngest page we predict will stay unmodified for
+	 * target_freeze_duration. We will not opportunistically freeze pages
+	 * younger than this threshold. This is calculated at the beginning of
+	 * vacuuming a relation.
+	 */
+	XLogRecPtr	frz_threshold_min;
 };
 
 /*

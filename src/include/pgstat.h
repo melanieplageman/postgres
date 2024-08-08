@@ -809,6 +809,7 @@ extern void pgstat_report_analyze(Relation rel,
 								  PgStat_Counter livetuples, PgStat_Counter deadtuples,
 								  bool resetcounter);
 
+extern XLogRecPtr pgstat_min_freezable_page_age(Oid tableoid, bool shared);
 extern void pgstat_count_vm_unset(Relation relation, XLogRecPtr page_lsn,
 								  XLogRecPtr current_lsn, uint8 old_vmbits);
 
