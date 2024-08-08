@@ -358,6 +358,7 @@ heap_page_prune_and_freeze(Relation relation, Buffer buffer,
 						   MultiXactId *new_relmin_mxid)
 {
 	Page		page = BufferGetPage(buffer);
+	XLogRecPtr	page_lsn = PageGetLSN(page);
 	BlockNumber blockno = BufferGetBlockNumber(buffer);
 	OffsetNumber offnum,
 				maxoff;
@@ -366,8 +367,6 @@ heap_page_prune_and_freeze(Relation relation, Buffer buffer,
 	bool		do_freeze;
 	bool		do_prune;
 	bool		do_hint;
-	bool		hint_bit_fpi;
-	int64		fpi_before = pgWalUsage.wal_fpi;
 
 	/* Copy parameters to prstate */
 	prstate.vistest = vistest;
@@ -552,12 +551,6 @@ heap_page_prune_and_freeze(Relation relation, Buffer buffer,
 	}
 
 	/*
-	 * If checksums are enabled, heap_prune_satisfies_vacuum() may have caused
-	 * an FPI to be emitted.
-	 */
-	hint_bit_fpi = fpi_before != pgWalUsage.wal_fpi;
-
-	/*
 	 * Process HOT chains.
 	 *
 	 * We added the items to the array starting from 'maxoff', so by
@@ -682,41 +675,28 @@ heap_page_prune_and_freeze(Relation relation, Buffer buffer,
 			 */
 			do_freeze = true;
 		}
-		else
+		else if (prstate.all_visible && prstate.all_frozen &&
+				 prstate.nfrozen > 0 && RelationNeedsWAL(relation))
 		{
 			/*
-			 * Opportunistically freeze the page if we are generating an FPI
-			 * anyway and if doing so means that we can set the page
-			 * all-frozen afterwards (might not happen until VACUUM's final
-			 * heap pass).
-			 *
-			 * XXX: Previously, we knew if pruning emitted an FPI by checking
-			 * pgWalUsage.wal_fpi before and after pruning.  Once the freeze
-			 * and prune records were combined, this heuristic couldn't be
-			 * used anymore.  The opportunistic freeze heuristic must be
-			 * improved; however, for now, try to approximate the old logic.
+			 * Opportunistically freeze the page if doing so means that we can
+			 * set the page all-frozen afterwards (might not happen until
+			 * VACUUM's final heap pass) and if the page seems old enough that
+			 * it is unlikely to be modified (and unfrozen) again soon.
 			 */
-			if (prstate.all_visible && prstate.all_frozen && prstate.nfrozen > 0)
+			XLogRecPtr	page_age;
+			XLogRecPtr	insert_lsn;
+
+			insert_lsn = GetInsertRecPtr();
+
+			if (insert_lsn < page_lsn)
+				do_freeze = false;
+			else
 			{
-				/*
-				 * Freezing would make the page all-frozen.  Have already
-				 * emitted an FPI or will do so anyway?
-				 */
-				if (RelationNeedsWAL(relation))
-				{
-					if (hint_bit_fpi)
-						do_freeze = true;
-					else if (do_prune)
-					{
-						if (XLogCheckBufferNeedsBackup(buffer))
-							do_freeze = true;
-					}
-					else if (do_hint)
-					{
-						if (XLogHintBitIsNeeded() && XLogCheckBufferNeedsBackup(buffer))
-							do_freeze = true;
-					}
-				}
+				page_age = insert_lsn - page_lsn;
+
+				Assert(cutoffs);
+				do_freeze = page_age > cutoffs->frz_threshold_min;
 			}
 		}
 	}
