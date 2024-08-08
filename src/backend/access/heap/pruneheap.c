@@ -293,6 +293,23 @@ heap_page_prune_opt(Relation relation, Buffer buffer)
 	}
 }
 
+static bool
+old_freeze_logic(Buffer buffer, bool do_freeze,
+				 bool do_prune,
+				 bool do_hint,
+				 bool hint_bit_fpi)
+{
+	if (hint_bit_fpi)
+		return true;
+	if (do_prune && XLogCheckBufferNeedsBackup(buffer))
+		return true;
+	if (do_hint && XLogHintBitIsNeeded() &&
+		XLogCheckBufferNeedsBackup(buffer))
+		return true;
+
+	return do_freeze;
+}
+
 
 /*
  * Prune and repair fragmentation and potentially freeze tuples on the
@@ -692,18 +709,24 @@ heap_page_prune_and_freeze(Relation relation, Buffer buffer,
 			 * VACUUM's final heap pass) and if the page seems old enough that
 			 * it is unlikely to be modified (and unfrozen) again soon.
 			 */
-			XLogRecPtr	page_age;
-			XLogRecPtr	insert_lsn;
+			if (opp_freeze_algo == 0)
+				do_freeze = old_freeze_logic(buffer, do_freeze,
+											 do_prune, do_hint, hint_bit_fpi);
+			else
+			{
+				XLogRecPtr	page_age;
+				XLogRecPtr	insert_lsn;
 
-			insert_lsn = GetInsertRecPtr();
+				insert_lsn = GetInsertRecPtr();
 
-			if (insert_lsn < page_lsn)
-				do_freeze = false;
+				if (insert_lsn < page_lsn)
+					do_freeze = false;
 
-			page_age = insert_lsn - page_lsn;
+				page_age = insert_lsn - page_lsn;
 
-			Assert(cutoffs);
-			do_freeze = page_age > cutoffs->frz_threshold_min;
+				Assert(cutoffs);
+				do_freeze = page_age > cutoffs->frz_threshold_min;
+			}
 		}
 	}
 

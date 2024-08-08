@@ -264,6 +264,10 @@ pgstat_min_freezable_page_age(Oid tableoid, bool shared)
 		return InvalidXLogRecPtr;
 	}
 
+	/* TODO: could it make sense to check target_frz_duration_lsns and set */
+	/* frz_threshold_min to UINT64_MAX if target_frz_duration_lsns is */
+	/* UINT64_MAX? */
+
 	/*
 	 * Calculate the mean and standard deviation of the distribution of early
 	 * unsets.

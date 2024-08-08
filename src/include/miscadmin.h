@@ -285,6 +285,9 @@ extern PGDLLIMPORT int VacuumCostLimit;
 extern PGDLLIMPORT double VacuumCostDelay;
 extern PGDLLIMPORT int target_freeze_duration;
 
+/* opp_freeze_algo is only used for development */
+extern PGDLLIMPORT int opp_freeze_algo;
+
 extern PGDLLIMPORT int64 VacuumPageHit;
 extern PGDLLIMPORT int64 VacuumPageMiss;
 extern PGDLLIMPORT int64 VacuumPageDirty;
