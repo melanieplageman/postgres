@@ -43,6 +43,17 @@ typedef struct TwoPhasePgStatRecord
 	bool		truncdropped;	/* was the relation truncated/dropped? */
 } TwoPhasePgStatRecord;
 
+/*
+ * The Z-score used to calculate the freeze threshold from the distribution of
+ * early vm_unsets (pages' all-visible durations shorter than
+ * target_freeze_duration). See:
+ *
+ * https://en.wikipedia.org/wiki/Standard_normal_table#Cumulative_(less_than_Z)
+ *
+ * This Z-score has a cumulative probability (from negative infinity) of
+ * approximately 0.94950, or 94.950%.
+ */
+static const double FRZ_THRESHOLD_ZSCORE = 1.64;
 
 static PgStat_TableStatus *pgstat_prep_relation_pending(Oid rel_id, bool isshared);
 static void add_tabstat_xact_level(PgStat_TableStatus *pgstat_info, int nest_level);
@@ -206,6 +217,91 @@ pgstat_drop_relation(Relation rel)
 		pgstat_info->trans->tuples_deleted = 0;
 	}
 }
+
+/*
+ * Calculate the "age" (duration the page was unmodified) of the most recently
+ * modified page we will consider freezing while vacuuming this table. We use
+ * the table-level stats about the all-visible durations of pages in this table
+ * to calculate this threshold.
+ *
+ * Returns InvalidXLogRecPtr if we should freeze all pages that meet any other
+ * eager freeze criteria.
+ */
+LSNInterval
+pgstat_min_freezable_page_age(Oid tableoid, bool shared)
+{
+	PgStat_EntryRef *entry_ref;
+	PgStat_StatTabEntry *tabentry;
+	double		mean,
+				stddev,
+				n;
+	Oid			dboid = (shared ? InvalidOid : MyDatabaseId);
+	LSNInterval frz_threshold_min;
+
+	if (!pgstat_track_counts)
+		return InvalidXLogRecPtr;
+
+	/* Now get the table-level stats */
+	entry_ref = pgstat_get_entry_ref_locked(PGSTAT_KIND_RELATION,
+											dboid, tableoid, false);
+
+	Assert(entry_ref != NULL && entry_ref->shared_stats != NULL);
+
+	tabentry = &((PgStatShared_Relation *) entry_ref->shared_stats)->stats;
+
+	/*
+	 * If the number of entries in the accumulator is small, then the mean and
+	 * standard deviation extracted from it may be unreliable. A widely
+	 * accepted rule of thumb is that a sample size >= 30 is required for the
+	 * central limit theorem to hold. So, before we have 30 vm_unsets, just
+	 * freeze all pages meeting the other eager freeze criteria for the given
+	 * vacuum.
+	 */
+	if (tabentry->vm_unsets.n < 30)
+	{
+		pgstat_unlock_entry(entry_ref);
+		return InvalidXLogRecPtr;
+	}
+
+	/*
+	 * Calculate the mean and standard deviation of the distribution of early
+	 * vm_unsets.
+	 *
+	 * Each time an all-visible page is modified, i.e. its all-visible bit is
+	 * unset, and that modification is considered "early", the duration (in
+	 * LSNs) that that page spent all-visible is entered into the early
+	 * vm_unsets accumulator. Here, the data collected in that accumulator is
+	 * extracted into the parameters of a normal distribution (mean and
+	 * standard deviation).
+	 */
+	accumulator_calculate(&tabentry->vm_unsets, &mean, &stddev);
+
+	/*
+	 * Calculate the age of the youngest page that should be eagerly frozen.
+	 *
+	 * We'll eagerly freeze a page if the probability that it will be modified
+	 * before target_freeze_duration is less than approximately 5%. This
+	 * threshold occurs when the cumulative distribution function of the early
+	 * vm_unsets exceeds 95%. We assume that if a page has survived past the
+	 * age when 95% of early vm_unsets have occurred for this table, then it's
+	 * safe to freeze.
+	 *
+	 * If we couldn't produce a distribution from the accumulator, or the
+	 * standard deviation of that distribution is infinite, then err on the
+	 * side of freezing by setting it to InvalidXLogRecPtr.
+	 */
+	n = mean + FRZ_THRESHOLD_ZSCORE * stddev;
+	if (isnan(n) || isinf(n))
+		frz_threshold_min = InvalidXLogRecPtr;
+	else
+		frz_threshold_min = n;
+
+	pgstat_unlock_entry(entry_ref);
+
+	return frz_threshold_min;
+}
+
+
 
 /*
  * Upon update, delete, or tuple lock, if the page being modified was

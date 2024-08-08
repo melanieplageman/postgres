@@ -1109,6 +1109,10 @@ vacuum_get_cutoffs(Relation rel, const VacuumParams *params,
 
 	Assert(TransactionIdIsNormal(cutoffs->OldestXmin));
 
+	/* Determine the youngest page we should consider eagerly freezing. */
+	cutoffs->frz_threshold_min = pgstat_min_freezable_page_age(RelationGetRelid(rel),
+															   rel->rd_rel->relisshared);
+
 	/* Acquire OldestMxact */
 	cutoffs->OldestMxact = GetOldestMultiXactId();
 	Assert(MultiXactIdIsValid(cutoffs->OldestMxact));
