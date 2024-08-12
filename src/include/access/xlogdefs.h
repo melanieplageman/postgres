@@ -21,6 +21,12 @@
 typedef uint64 XLogRecPtr;
 
 /*
+ * A convenience typedef for expressing the distance between two XLogRecPtrs --
+ * an LSN delta.
+ */
+typedef uint64 LSNInterval;
+
+/*
  * Zero is used indicate an invalid pointer. Bootstrap skips the first possible
  * WAL segment, initializing the first WAL page at WAL segment size, so no XLOG
  * record can begin at zero.
