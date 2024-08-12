@@ -2918,6 +2918,7 @@ TidStore
 TidStoreIter
 TidStoreIterResult
 TimeADT
+TimeInterval
 TimeLineHistoryCmd
 TimeLineHistoryEntry
 TimeLineID
