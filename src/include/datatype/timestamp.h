@@ -29,15 +29,21 @@
  * int64 values with units of microseconds.  (Once upon a time they were
  * double values with units of seconds.)
  *
- * TimeOffset and fsec_t are convenience typedefs for temporary variables.
- * Do not use fsec_t in values stored on-disk.
- * Also, fsec_t is only meant for *fractional* seconds; beware of overflow
- * if the value you need to store could be many seconds.
+ * TimeOffset, TimeInterval, and fsec_t are convenience typedefs for temporary
+ * variables.
+ *
+ * TimeInterval is an overflow-safe unit for representing time deltas in
+ * microseconds. This is useful when subtracting Timestamps or TimestampTzs.
+ *
+ * Do not use fsec_t in values stored on-disk. Also, fsec_t is only meant for
+ * *fractional* seconds; beware of overflow if the value you need to store
+ * could be many seconds.
  */
 
 typedef int64 Timestamp;
 typedef int64 TimestampTz;
 typedef int64 TimeOffset;
+typedef uint64 TimeInterval;
 typedef int32 fsec_t;			/* fractional seconds (in microseconds) */
 
 
