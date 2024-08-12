@@ -1587,6 +1587,7 @@ LogicalTapeSet
 LsnReadQueue
 LsnReadQueueNextFun
 LsnReadQueueNextStatus
+LSNInterval
 LSNTime
 LSNTimeStream
 LtreeGistOptions
