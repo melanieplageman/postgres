@@ -458,6 +458,45 @@ typedef struct PgStat_StatTabEntry
 	PgStat_Counter autoanalyze_count;
 } PgStat_StatTabEntry;
 
+/*
+ * The elements of an LSNTimeStream. For the LSNTimeStream to be meaningful,
+ * the lsn should be drawn from a consistent source. For example, each LSNTime
+ * could be the insert LSN at a point in time.
+ */
+typedef struct LSNTime
+{
+	TimestampTz time;
+	XLogRecPtr	lsn;
+} LSNTime;
+
+/*
+ * Convenience macro returning an LSNTime with the time and LSN set to the
+ * passed in values.
+ */
+#define LSNTIME_INIT(i_lsn, i_time) \
+	((LSNTime) { .lsn = (i_lsn), .time = (i_time) })
+
+#define LSNTIMESTREAM_VOLUME 64
+
+/*
+ * An LSN time stream is an array consisting of LSNTimes from least to most
+ * recent. The array is filled before any element is dropped. Once the
+ * LSNTimeStream length == volume (the array is full), an LSNTime is dropped,
+ * the subsequent LSNTimes are moved down by 1, and the new LSNTime is
+ * inserted at the tail.
+ *
+ * When dropping an LSNTime, we attempt to pick the member which would
+ * introduce the least error into the stream. See lsntime_to_drop() for more
+ * details.
+ *
+ * Use the stream for LSN <-> time conversions.
+ */
+typedef struct LSNTimeStream
+{
+	unsigned char length;
+	LSNTime		data[LSNTIMESTREAM_VOLUME];
+} LSNTimeStream;
+
 typedef struct PgStat_WalStats
 {
 	PgStat_Counter wal_records;

@@ -18,7 +18,10 @@
 #include "postgres.h"
 
 #include "executor/instrument.h"
+#include "math.h"
 #include "utils/pgstat_internal.h"
+#include "utils/timestamp.h"
+#include "inttypes.h"
 
 
 PgStat_PendingWalStats PendingWalStats = {0};
@@ -30,6 +33,27 @@ PgStat_PendingWalStats PendingWalStats = {0};
  * the previous counters from the current ones.
  */
 static WalUsage prevWalUsage;
+
+/*
+ * LSNTimeStream maintenance helper functions
+ */
+static double lsn_ts_calculate_error_area(LSNTime *left,
+										  LSNTime *mid,
+										  LSNTime *right);
+static unsigned char lsntime_to_drop(LSNTimeStream *stream);
+
+pg_attribute_unused()
+static void lsntime_insert(LSNTimeStream *stream, TimestampTz time,
+						   XLogRecPtr lsn);
+
+/*
+ * LSNTimeStream usage helper function
+ */
+pg_attribute_unused()
+static void stream_get_bounds_for_time(const LSNTimeStream *stream,
+									   TimestampTz target_time,
+									   LSNTime *lower,
+									   LSNTime *upper);
 
 
 /*
@@ -191,4 +215,237 @@ pgstat_wal_snapshot_cb(void)
 	memcpy(&pgStatLocal.snapshot.wal, &stats_shmem->stats,
 		   sizeof(pgStatLocal.snapshot.wal));
 	LWLockRelease(&stats_shmem->lock);
+}
+
+/*
+ * Given three LSNTimes, calculate and return the area of the triangle they
+ * form were they plotted with time on the X axis and LSN on the Y axis. An
+ * illustration:
+ *
+ *   LSN
+ *    |
+ *    |                                                         * right
+ *    |
+ *    |
+ *    |
+ *    |                                                * mid    * C
+ *    |
+ *    |
+ *    |
+ *    |  * left                                        * B      * A
+ *    |
+ *    +------------------------------------------------------------------
+ *
+ * The area of the triangle with vertices (left, mid, right) is the error
+ * incurred over the interval [left, right] were we to interpolate with just
+ * [left, right] rather than [left, mid] and [mid, right].
+ */
+static double
+lsn_ts_calculate_error_area(LSNTime *left, LSNTime *mid, LSNTime *right)
+{
+	double		left_time = left->time,
+				left_lsn = left->lsn;
+	double		mid_time = mid->time,
+				mid_lsn = mid->lsn;
+	double		right_time = right->time,
+				right_lsn = right->lsn;
+	double		rectangle_all,
+				triangle1,
+				triangle2,
+				triangle3,
+				rectangle_part,
+				area_to_subtract;
+
+	/* Area of the rectangle with opposing corners left and right */
+	rectangle_all = (right_time - left_time) * (right_lsn - left_lsn);
+
+	/* Area of the right triangle with vertices left, right, and A */
+	triangle1 = rectangle_all / 2;
+
+	/* Area of the right triangle with vertices left, mid, and B */
+	triangle2 = (mid_lsn - left_lsn) * (mid_time - left_time) / 2;
+
+	/* Area of the right triangle with vertices mid, right, and C */
+	triangle3 = (right_lsn - mid_lsn) * (right_time - mid_time) / 2;
+
+	/* Area of the rectangle with vertices mid, A, B, and C */
+	rectangle_part = (right_lsn - mid_lsn) * (mid_time - left_time);
+
+	/* Sum up the area to subtract first to produce a more precise answer */
+	area_to_subtract = triangle2 + triangle3 + rectangle_part;
+
+	/* Area of the triangle with vertices left, mid, and right */
+	return fabs(triangle1 - area_to_subtract);
+}
+
+/*
+ * Determine which LSNTime to drop from a full LSNTimeStream. Returns the index
+ * of the element to drop.
+ *
+ * Drop the LSNTime whose absence would introduce the least error into future
+ * linear interpolation on the stream.
+ *
+ * We determine the error that would be introduced by dropping a point on the
+ * stream by calculating the area of the triangle formed by the LSNTime and
+ * its adjacent LSNTimes. We do this for each LSNTime in the stream (except
+ * for the first and last LSNTimes) and choose the LSNTime with the smallest
+ * error (area).
+ *
+ * We avoid extrapolation by never dropping the first or last points.
+ */
+static unsigned char
+lsntime_to_drop(LSNTimeStream *stream)
+{
+	double		min_area;
+	unsigned char target_point;
+
+	/* Don't drop points if free spots available are available */
+	Assert(stream->length == LSNTIMESTREAM_VOLUME);
+	StaticAssertStmt(LSNTIMESTREAM_VOLUME >= 3, "LSNTIMESTREAM_VOLUME < 3");
+
+	min_area = lsn_ts_calculate_error_area(&stream->data[0],
+										   &stream->data[1],
+										   &stream->data[2]);
+
+	target_point = 1;
+
+	for (size_t i = 2; i < stream->length - 1; i++)
+	{
+		LSNTime    *left = &stream->data[i - 1];
+		LSNTime    *mid = &stream->data[i];
+		LSNTime    *right = &stream->data[i + 1];
+		double		area = lsn_ts_calculate_error_area(left, mid, right);
+
+		if (area < min_area)
+		{
+			min_area = area;
+			target_point = i;
+		}
+	}
+
+	return target_point;
+}
+
+/*
+ * Insert a new LSNTime with the passed-in time and lsn into the LSNTimeStream
+ * in the first available element. If there are no empty elements, drop an
+ * LSNTime from the stream to make room for the new LSNTime.
+ */
+static void
+lsntime_insert(LSNTimeStream *stream, TimestampTz time,
+			   XLogRecPtr lsn)
+{
+	unsigned char drop;
+	LSNTime		entrant = {.lsn = lsn,.time = time};
+
+	if (stream->length < LSNTIMESTREAM_VOLUME)
+	{
+		/*
+		 * Time must move forward on the stream. If the clock moves backwards,
+		 * for example in an NTP correction, we'll just skip inserting this
+		 * LSNTime.
+		 *
+		 * Though time must monotonically increase, it is valid to insert
+		 * multiple LSNTimes with the same LSN. Imagine a period of time in
+		 * which no new WAL records are inserted.
+		 */
+		if (stream->length > 0 &&
+			(time <= stream->data[stream->length - 1].time ||
+			 lsn < stream->data[stream->length - 1].lsn))
+		{
+			ereport(WARNING,
+					errmsg("Won't insert non-monotonic \"%" PRIu64 ", %s\" to LSNTimeStream.",
+						   lsn, timestamptz_to_str(time)));
+			return;
+		}
+
+		stream->data[stream->length++] = entrant;
+		return;
+	}
+
+	drop = lsntime_to_drop(stream);
+
+	memmove(&stream->data[drop],
+			&stream->data[drop + 1],
+			sizeof(LSNTime) * (stream->length - 1 - drop));
+
+	stream->data[stream->length - 1] = entrant;
+}
+
+
+/*
+ * Returns (into *lower and *upper) the narrowest range of LSNTimes on the
+ * stream covering the target_time.
+ *
+ * If target_time is older than all values on the stream, lower will be
+ * invalid. If target_time is newer than all values on the stream, upper will
+ * be invalid. If the stream is empty, both upper and lower will be invalid.
+ * The caller must check if upper and/or lower's lsn member is
+ * InvalidXLogRecPtr to detect whether that bound is valid.
+ */
+static void
+stream_get_bounds_for_time(const LSNTimeStream *stream,
+						   TimestampTz target_time,
+						   LSNTime *lower,
+						   LSNTime *upper)
+{
+	Assert(lower && upper);
+
+	*lower = LSNTIME_INIT(InvalidXLogRecPtr, 0);
+	*upper = LSNTIME_INIT(InvalidXLogRecPtr, 0);
+
+	/*
+	 * If the LSNTimeStream has no members, it provides no information about
+	 * the range.
+	 */
+	if (stream->length == 0)
+	{
+		elog(DEBUG1,
+			 "Attempt to identify LSN bounds for time: \"%s\" using empty LSNTimeStream.",
+			 timestamptz_to_str(target_time));
+		return;
+	}
+
+	/*
+	 * If the target_time is older than the stream, the oldest member in the
+	 * stream is our upper bound.
+	 */
+	if (target_time <= stream->data[0].time)
+	{
+		*upper = stream->data[0];
+		if (target_time == stream->data[0].time)
+			*lower = stream->data[0];
+		return;
+	}
+
+	/*
+	 * Loop through the stream and stop at the first LSNTime newer than or
+	 * equal to our target time. Skip the first LSNTime, as we know it is
+	 * older than our target time.
+	 */
+	for (size_t i = 1; i < stream->length; i++)
+	{
+		if (target_time == stream->data[i].time)
+		{
+			*lower = stream->data[i];
+			*upper = stream->data[i];
+			return;
+		}
+
+		if (target_time < stream->data[i].time)
+		{
+			/* Time must increase monotonically on the stream. */
+			Assert(stream->data[i - 1].time <
+				   stream->data[i].time);
+			*lower = stream->data[i - 1];
+			*upper = stream->data[i];
+			return;
+		}
+	}
+
+	/*
+	 * target_time is newer than the stream, so the newest member in the
+	 * stream is our lower bound.
+	 */
+	*lower = stream->data[stream->length - 1];
 }
