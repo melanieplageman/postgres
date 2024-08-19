@@ -24,6 +24,7 @@ rmgr_desc_sources = files(
   'tblspcdesc.c',
   'xactdesc.c',
   'xlogdesc.c',
+  'lsntimedesc.c',
 )
 
 backend_sources += rmgr_desc_sources

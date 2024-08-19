@@ -17,6 +17,9 @@
 
 #include "postgres.h"
 
+#include "access/xlog.h"
+#include "access/xact.h"
+#include "access/xloginsert.h"
 #include "executor/instrument.h"
 #include "math.h"
 #include "utils/pgstat_internal.h"
@@ -307,9 +310,53 @@ void
 pgstat_wal_update_lsntime_stream(XLogRecPtr lsn, TimestampTz time)
 {
 	PgStatShared_Wal *stats_shmem = &pgStatLocal.shmem->wal;
+	Assert(!RecoveryInProgress());
 
+	log_lsntime(lsn, time);
 	LWLockAcquire(&stats_shmem->lock, LW_EXCLUSIVE);
 	lsntime_insert(&stats_shmem->stats.stream, time, lsn);
+	LWLockRelease(&stats_shmem->lock);
+}
+
+
+/*
+ * Emit a WAL record with the provided LSN and time. When inserting a new
+ * LSNTime to the LSNTimeStream, log it to provide durability and ensure a
+ * newly promoted standby has an accurate stream.
+ */
+void
+log_lsntime(XLogRecPtr lsn, TimestampTz time)
+{
+	xl_lsntime xlrec;
+
+	xlrec.time = time;
+	xlrec.lsn = lsn;
+
+	XLogBeginInsert();
+	XLogRegisterData((char *) (&xlrec), SizeOfLSNTime);
+	(void) XLogInsert(RM_LSNTIME_ID, XLOG_LSNTIME);
+}
+
+/*
+ * Insert a previously logged LSNTime into the LSNTimeStream member of WAL
+ * stats. The LSNTimeStream is logged to provide durability and to ensure a
+ * newly promoted primary has the same LSNTimeStream as the primary that it is
+ * replacing.
+ */
+void
+lsntimestream_redo(XLogReaderState *record)
+{
+	uint8		info PG_USED_FOR_ASSERTS_ONLY;
+	xl_lsntime *lsnt_rec;
+	PgStatShared_Wal *stats_shmem = &pgStatLocal.shmem->wal;
+
+	info = XLogRecGetInfo(record) & ~XLR_INFO_MASK;
+	Assert(info == XLOG_LSNTIME);
+
+	lsnt_rec = (xl_lsntime *) XLogRecGetData(record);
+
+	LWLockAcquire(&stats_shmem->lock, LW_EXCLUSIVE);
+	lsntime_insert(&stats_shmem->stats.stream, lsnt_rec->time, lsnt_rec->lsn);
 	LWLockRelease(&stats_shmem->lock);
 }
 

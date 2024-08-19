@@ -293,6 +293,33 @@ typedef struct xl_xact_stats_items
 } xl_xact_stats_items;
 #define MinSizeOfXactStatsItems offsetof(xl_xact_stats_items, items)
 
+/*
+ * XLOG structure for an LSNTime. There is a global instance of an
+ * LSNTimeStream in PgStat_WalStats. We insert new LSN, time pairs at regular
+ * intervals. The global LSNTimeStream is logged, which provides durability and
+ * also ensures that a newly promoted primary has the same LSNTimeStream as the
+ * node it is replacing.
+ *
+ * This is in xact.h because pgstat.h cannot be included in frontend code, but
+ * the WAL format must be readable by frontend programs.
+ */
+#define XLOG_LSNTIME 0x00
+
+typedef struct xl_lsntime
+{
+	XLogRecPtr lsn;
+	TimestampTz time;
+} xl_lsntime;
+
+#define SizeOfLSNTime (offsetof(xl_lsntime, time) + sizeof(TimestampTz))
+/* defined in pgstat_wal.c */
+extern void log_lsntime(XLogRecPtr lsn, TimestampTz time);
+extern void lsntimestream_redo(XLogReaderState *record);
+/* defined in lsntimedesc.c */
+extern void lsntime_desc(StringInfo buf, XLogReaderState *record);
+extern const char *lsntime_identify(uint8 info);
+
+
 typedef struct xl_xact_invals
 {
 	int			nmsgs;			/* number of shared inval msgs */

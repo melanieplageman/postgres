@@ -4104,6 +4104,7 @@ xl_invalid_page
 xl_invalid_page_key
 xl_invalidations
 xl_logical_message
+xl_lsntime
 xl_multi_insert_tuple
 xl_multixact_create
 xl_multixact_truncate
