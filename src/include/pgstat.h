@@ -573,6 +573,50 @@ typedef struct PgStat_StatTabEntry
 	PgStat_Accumulator vm_unsets;
 } PgStat_StatTabEntry;
 
+typedef struct NormalDistribution
+{
+	double mean;
+	double stddev;
+} NormalDistribution;
+
+/*
+ * These are the cumulative probability values from negative infinity to Z for
+ * Z-scores from 0 -> 4 for the standard normal distribution.
+ * https://en.wikipedia.org/wiki/Standard_normal_table#Cumulative_(less_than_Z)
+ */
+static const double z_probs[] = {
+	0.5,      // z = 0.0
+	0.53983,  // z = 0.1
+	0.57926,  // z = 0.2
+	0.61791,  // z = 0.3
+	0.65542, 0.69146,
+	0.72575, 0.75804, 0.78814, 0.81594, 0.84134,
+	0.86433, 0.88493, 0.9032, 0.91924, 0.93319,
+	0.9452, 0.95543, 0.96407, 0.97128, 0.97725,
+	0.98214, 0.9861, 0.98928, 0.9918, 0.99379,
+	0.99534, 0.99653, 0.99744, 0.99813, 0.99865,
+	0.99903, 0.99931, 0.99952, 0.99966, 0.99977,
+	0.99984, 0.99989, 0.99993, 0.99995, 0.99997};
+
+// TODO?
+static const unsigned int Z_MAXIMUM = sizeof(z_probs) / sizeof(z_probs[0]) / 10;
+static const unsigned int Z_STEP = 10;
+
+static inline double z_area(double z)
+{
+	int i;
+
+	if (z < -Z_MAXIMUM)
+		return 0;
+
+	if (z > Z_MAXIMUM)
+		return 1;
+
+	i = z * Z_STEP;  // TODO: round or truncate
+	return i >= 0 ? z_probs[i] : 1 - z_probs[-i];
+}
+
+
 /*
  * The elements of an LSNTimeStream. For the LSNTimeStream to be meaningful,
  * the lsn should be drawn from a consistent source. For example, each LSNTime
@@ -813,6 +857,13 @@ extern void pgstat_report_vacuum(Oid tableoid, bool shared,
 extern void pgstat_report_analyze(Relation rel,
 								  PgStat_Counter livetuples, PgStat_Counter deadtuples,
 								  bool resetcounter);
+
+extern bool page_will_endure_if_frozen(LSNInterval age,
+		LSNInterval target_freeze_duration,
+		NormalDistribution *normal);
+
+extern void pgstat_tab_unfreeze_distribution(Oid tableoid, bool shared,
+		NormalDistribution *normal);
 
 extern void pgstat_count_vm_unset(Relation relation, XLogRecPtr page_lsn,
 								  XLogRecPtr current_lsn, uint8 old_vmbits);

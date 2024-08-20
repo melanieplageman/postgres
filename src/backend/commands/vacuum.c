@@ -1054,6 +1054,36 @@ get_all_vacuum_rels(MemoryContext vac_context, int options)
 }
 
 /*
+ * Given a page age (LSNInterval between the page LSN and now) and the normal
+ * distribution parameters derived from the page modification pattern for the
+ * table of which this page is a part, what is the likelihood that the page
+ * will remain unmodified for target_freeze_duration.
+ */
+bool page_will_endure_if_frozen(LSNInterval age, LSNInterval target_freeze_duration,
+		NormalDistribution *normal)
+{
+	double z;
+	double future_z;
+
+	/*
+	 * If the accumulator values are insufficient to calculate a mean and
+	 * standard deviation, either due to having too few values or some other
+	 * reason or the standard deviation is infinite, err on the side of
+	 * freezing.
+	 */
+	if (isnan(normal->mean) || isinf(normal->stddev))
+		return true;
+
+	Assert(normal->stddev > 0);
+
+	z = (age - normal->mean) / normal->stddev;
+
+	future_z = z + target_freeze_duration / normal->stddev;
+
+	return z_area(future_z) - z_area(z) <= FREEZE_PROBABILITY_THRESHOLD;
+}
+
+/*
  * vacuum_get_cutoffs() -- compute OldestXmin and freeze cutoff points
  *
  * The target relation and VACUUM parameters are our inputs.
@@ -1109,6 +1139,9 @@ vacuum_get_cutoffs(Relation rel, const VacuumParams *params,
 	/* Acquire OldestMxact */
 	cutoffs->OldestMxact = GetOldestMultiXactId();
 	Assert(MultiXactIdIsValid(cutoffs->OldestMxact));
+
+	pgstat_tab_unfreeze_distribution(RelationGetRelid(rel),
+			rel->rd_rel->relisshared, &cutoffs->early_unfreezes);
 
 	/* Acquire next XID/next MXID values used to apply age-based settings */
 	nextXID = ReadNextTransactionId();

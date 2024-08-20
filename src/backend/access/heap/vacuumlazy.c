@@ -96,6 +96,14 @@
 	((BlockNumber) (((uint64) 4 * 1024 * 1024 * 1024) / BLCKSZ))
 
 /*
+ * Every 2GB of pages vacuumed, refresh our cached values for the mean and
+ * standard deviation of the ages of pages modified sooner than
+ * target_freeze_duration.
+ */
+#define REFRESH_UNFREEZE_STATS_EVERY_PAGES \
+	((BlockNumber) (((uint64) 4 * 1024 * 1024 * 1024) / BLCKSZ))
+
+/*
  * When a table has no indexes, vacuum the FSM after every 8GB, approximately
  * (it won't be exact because we only vacuum FSM after processing a heap page
  * that has some removable tuples).  When there are indexes, this is ignored,
@@ -879,6 +887,14 @@ lazy_scan_heap(LVRelState *vacrel)
 		 */
 		if (vacrel->scanned_pages % FAILSAFE_EVERY_PAGES == 0)
 			lazy_check_wraparound_failsafe(vacrel);
+
+		if (vacrel->scanned_pages % REFRESH_UNFREEZE_STATS_EVERY_PAGES == 0)
+		{
+			PgStat_WalStats *wal_stats = pgstat_fetch_stat_wal();
+			vacrel->cutoffs.lsn_target_freeze_duration = wal_stats->lsn_target_frz_dur;
+			pgstat_tab_unfreeze_distribution(RelationGetRelid(vacrel->rel),
+					vacrel->rel->rd_rel->relisshared, &vacrel->cutoffs.early_unfreezes);
+		}
 
 		/*
 		 * Consider if we definitely have enough space to process TIDs on page

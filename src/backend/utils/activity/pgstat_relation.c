@@ -208,6 +208,64 @@ pgstat_drop_relation(Relation rel)
 }
 
 /*
+ * Calculate the parameters to a normal distribution of the ages of all-visible
+ * pages in table with oid tableoid that were modified before
+ * target_freeze_duration. If the table is
+ */
+void
+pgstat_tab_unfreeze_distribution(Oid tableoid, bool shared,
+		NormalDistribution *normal)
+{
+	PgStat_EntryRef *entry_ref;
+	PgStat_StatTabEntry *tabentry;
+	Oid			dboid = (shared ? InvalidOid : MyDatabaseId);
+
+	normal->mean = NAN;
+	normal->stddev = INFINITY;
+
+	if (!pgstat_track_counts)
+		return;
+
+	/* Now get the table-level stats */
+	entry_ref = pgstat_get_entry_ref_locked(PGSTAT_KIND_RELATION,
+											dboid, tableoid, false);
+
+	Assert(entry_ref != NULL && entry_ref->shared_stats != NULL);
+
+	tabentry = &((PgStatShared_Relation *) entry_ref->shared_stats)->stats;
+
+	/*
+	 * If the number of entries in the accumulator is small, then the mean and
+	 * standard deviation extracted from it may be unreliable. A widely
+	 * accepted rule of thumb is that a sample size >= 30 is required for the
+	 * central limit theorem to hold. So, before we have 30 vm_unsets, just
+	 * freeze all pages meeting the other eager freeze criteria for the given
+	 * vacuum.
+	 */
+	if (tabentry->vm_unsets.n < 30)
+	{
+		pgstat_unlock_entry(entry_ref);
+		return;
+	}
+
+	/*
+	 * Calculate the mean and standard deviation of the distribution of early
+	 * vm_unsets.
+	 *
+	 * Each time an all-visible page is modified, i.e. its all-visible bit is
+	 * unset, and that modification is considered "early", the duration (in
+	 * LSNs) that that page spent all-visible is entered into the early
+	 * vm_unsets accumulator. Here, the data collected in that accumulator is
+	 * extracted into the parameters of a normal distribution (mean and
+	 * standard deviation).
+	 */
+	accumulator_calculate(&tabentry->vm_unsets, &normal->mean, &normal->stddev);
+	pgstat_unlock_entry(entry_ref);
+	return;
+}
+
+
+/*
  * Upon update, delete, or tuple lock, if the page being modified was
  * previously marked all-visible in the visibility map, check and record
  * whether or not the page remained unmodified for longer than
