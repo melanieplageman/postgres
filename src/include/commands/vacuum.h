@@ -22,6 +22,7 @@
 #include "catalog/pg_statistic.h"
 #include "catalog/pg_type.h"
 #include "parser/parse_node.h"
+#include "pgstat.h"
 #include "storage/buf.h"
 #include "storage/lock.h"
 #include "utils/relcache.h"
@@ -240,8 +241,9 @@ typedef struct VacuumParams
 } VacuumParams;
 
 /*
- * VacuumCutoffs is immutable state that describes the cutoffs used by VACUUM.
- * Established at the beginning of each VACUUM operation.
+ * VacuumCutoffs is reference state that describes the cutoffs used by VACUUM.
+ * Established at the beginning of each VACUUM operation. Some parameters are
+ * updated periodically during vacuum to provide fresher values.
  */
 struct VacuumCutoffs
 {
@@ -276,7 +278,32 @@ struct VacuumCutoffs
 	 */
 	TransactionId FreezeLimit;
 	MultiXactId MultiXactCutoff;
+
+	/*
+	 * The distribution of page ages of all-visible pages modified sooner than
+	 * target_freeze_duration. This is calculated using table stats about
+	 * early page modifications and refreshed every
+	 * REFRESH_UNFREEZE_STATS_EVERY_PAGES during vacuum.
+	 */
+	NormalDistribution early_unfreezes;
+
+	/*
+	 * The GUC target_freeze_duration translated from a time duration to an
+	 * LSN duration. This is fetched from WAL stats every
+	 * REFRESH_UNFREEZE_STATS_EVERY_PAGES during vacuum.
+	 */
+	LSNInterval lsn_target_freeze_duration;
 };
+
+/*
+ * We are willing to freeze pages with a 5% or less chance of being unfrozen
+ * before target_freeze_duration.
+ */
+static const double FREEZE_PROBABILITY_THRESHOLD = 0.05;
+extern bool page_will_endure_if_frozen(LSNInterval age,
+									   LSNInterval lsn_target_freeze_duration,
+									   NormalDistribution *normal);
+
 
 /*
  * VacDeadItemsInfo stores supplemental information for dead tuple TID

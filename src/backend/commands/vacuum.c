@@ -1054,6 +1054,66 @@ get_all_vacuum_rels(MemoryContext vac_context, int options)
 }
 
 /*
+ * Given a page age (LSNInterval between the page LSN and now) and the normal
+ * distribution parameters derived from the page modification pattern for the
+ * table of which this page is a part, what is the likelihood that the page
+ * will remain unmodified for target_freeze_duration.
+ */
+bool
+page_will_endure_if_frozen(XLogRecPtr page_lsn,
+						   LSNInterval lsn_target_freeze_duration,
+						   NormalDistribution *normal)
+{
+	LSNInterval page_age;
+	XLogRecPtr	insert_lsn;
+	double		z;
+	double		future_z;
+
+	/*
+	 * We avoid eagerly freezing until the LSNTimeStream contains data from
+	 * before target_freeze_duration ago. This means that after initdb or
+	 * after a standby is promoted (since it will not have stats), there will
+	 * be a period of time in which we may not eagerly freeze. The higher the
+	 * value of target_freeze_duration, the longer this period. MTODO: is this
+	 * the behavior we want?
+	 */
+	if (lsn_target_freeze_duration == 0)
+		return false;
+
+	/*
+	 * We may fail to calculate a mean or standard deviation from the
+	 * accumulator. This is most common if we have too few values. This may
+	 * happen after initially creating a table or after a standby is promoted.
+	 * Because an insert-only table will have an empty accumulator, we want to
+	 * eagerly freeze when there is insufficient data. MTODO: can we do
+	 * better?
+	 */
+	if (isnan(normal->mean) || isnan(normal->stddev))
+		return true;
+
+	insert_lsn = GetInsertRecPtr();
+
+	/*
+	 * The insert LSN is an approximation, so if the page appears newer than
+	 * the insert_lsn, set the page_age to 0.
+	 */
+	page_age = insert_lsn > page_lsn ? insert_lsn - page_lsn : 0;
+
+	/*
+	 * If the standard deviation is 0, freeze the page if it is older than the
+	 * value in the distribution. MTODO: is this the behavior that we want?
+	 */
+	if (normal->stddev == 0)
+		return page_age > normal->mean;
+
+	z = (page_age - normal->mean) / normal->stddev;
+
+	future_z = z + lsn_target_freeze_duration / normal->stddev;
+
+	return z_area(future_z) - z_area(z) <= FREEZE_PROBABILITY_THRESHOLD;
+}
+
+/*
  * vacuum_get_cutoffs() -- compute OldestXmin and freeze cutoff points
  *
  * The target relation and VACUUM parameters are our inputs.
@@ -1109,6 +1169,10 @@ vacuum_get_cutoffs(Relation rel, const VacuumParams *params,
 	/* Acquire OldestMxact */
 	cutoffs->OldestMxact = GetOldestMultiXactId();
 	Assert(MultiXactIdIsValid(cutoffs->OldestMxact));
+
+	pgstat_tab_unfreeze_distribution(RelationGetRelid(rel),
+									 rel->rd_rel->relisshared,
+									 &cutoffs->early_unfreezes);
 
 	/* Acquire next XID/next MXID values used to apply age-based settings */
 	nextXID = ReadNextTransactionId();

@@ -586,6 +586,71 @@ typedef struct PgStat_StatTabEntry
 } PgStat_StatTabEntry;
 
 /*
+ * The parameters of a normal distribution.
+ */
+typedef struct NormalDistribution
+{
+	double		mean;
+	double		stddev;
+} NormalDistribution;
+
+/*
+ * These are the cumulative probability values from negative infinity to Z for
+ * Z-scores from 0 -> 4 for the standard normal distribution.
+ * https://en.wikipedia.org/wiki/Standard_normal_table#Cumulative_(less_than_Z)
+ *
+ * The first element is the cumulative probability for a Z-score of 0. Given
+ * that our chosen Z_STEP is 10, each element that follows is the cumulative
+ * probability for a Z-score 0.1 higher than the one before. Thus, the index of
+ * a given Z-score's probability is the closest integer value to Z-score *
+ * Z_STEP (10).
+ */
+static const double z_probs[] = {
+	0.5, //z = 0.0
+	0.53983, //z = 0.1
+	0.57926, //z = 0.2
+	0.61791, //z = 0.3
+	0.65542, //z = 0.4
+	0.69146, 0.72575, 0.75804, 0.78814,
+	0.81594, 0.84134, 0.86433, 0.88493,
+	0.9032, 0.91924, 0.93319, 0.9452,
+	0.95543, 0.96407, 0.97128, 0.97725,
+	0.98214, 0.9861, 0.98928, 0.9918,
+	0.99379, 0.99534, 0.99653, 0.99744,
+	0.99813, 0.99865, 0.99903, 0.99931,
+	0.99952, 0.99966, 0.99977, 0.99984,
+0.99989, 0.99993, 0.99995, 0.99997};
+
+static const uint64 Z_MAXIMUM = sizeof(z_probs) / sizeof(z_probs[0]) / 10;
+static const uint32 Z_STEP = 10;
+
+/*
+ * Look up and return the cumulative probability value for a given Z-score.
+ */
+static inline double
+z_area(double z)
+{
+	int64		i;
+
+	Assert(z > PG_INT64_MIN / Z_STEP);
+	Assert(z < PG_INT64_MAX / Z_STEP);
+
+	/*
+	 * Handle when the Z-score is not in bounds for our lookup table
+	 */
+	if (z < -Z_MAXIMUM)
+		return 0;
+
+	if (z > Z_MAXIMUM)
+		return 1;
+
+	i = z * Z_STEP;
+
+	return i >= 0 ? z_probs[i] : 1 - z_probs[-i];
+}
+
+
+/*
  * LSNTime are the elements of an LSNTimeStream. For the LSNTimeStream to be
  * meaningful, the lsn should be drawn from a consistent source. For example,
  * each LSNTime could be the insert LSN at a point in time.
@@ -824,6 +889,9 @@ extern void pgstat_report_vacuum(Oid tableoid, bool shared,
 extern void pgstat_report_analyze(Relation rel,
 								  PgStat_Counter livetuples, PgStat_Counter deadtuples,
 								  bool resetcounter);
+
+extern void pgstat_tab_unfreeze_distribution(Oid tableoid, bool shared,
+											 NormalDistribution *normal);
 
 extern void pgstat_count_vm_unset(Relation relation, XLogRecPtr page_lsn,
 								  XLogRecPtr current_lsn, uint8 old_vmbits);
