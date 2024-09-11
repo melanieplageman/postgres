@@ -11,6 +11,7 @@
 #ifndef PGSTAT_H
 #define PGSTAT_H
 
+#include "access/avpagestream.h"
 #include "access/xlogdefs.h"
 #include "datatype/timestamp.h"
 #include "portability/instr_time.h"
@@ -224,6 +225,12 @@ typedef struct PgStat_TableCounts
  * or abort, we propagate tuples_inserted/updated/deleted up to the
  * parent subtransaction level, or out to the parent PgStat_TableStatus,
  * as appropriate.
+ *
+ * avpages is a local copy of the AVPageStream. We use stream_fetched to avoid
+ * fetching it until we need to. unset_page_lsn is an optimization. If we only
+ * modify one all-visible but not all-frozen page during the transaction, we
+ * can store it in unset_page_lsn and avoid using the local copy of avpages at
+ * all.
  * ----------
  */
 typedef struct PgStat_TableStatus
@@ -232,6 +239,9 @@ typedef struct PgStat_TableStatus
 	bool		shared;			/* is it a shared catalog? */
 	struct PgStat_TableXactStatus *trans;	/* lowest subxact's counts */
 	PgStat_TableCounts counts;	/* event counts to be sent */
+	AVPageStream avpages;
+	bool		stream_fetched;
+	XLogRecPtr	unset_page_lsn;
 	Relation	relation;		/* rel that is using this entry */
 } PgStat_TableStatus;
 
@@ -459,6 +469,8 @@ typedef struct PgStat_StatTabEntry
 	PgStat_Counter analyze_count;
 	TimestampTz last_autoanalyze_time;	/* autovacuum initiated */
 	PgStat_Counter autoanalyze_count;
+
+	AVPageStream avstream;
 } PgStat_StatTabEntry;
 
 typedef struct PgStat_WalStats
@@ -628,6 +640,15 @@ extern void pgstat_report_vacuum(Oid tableoid, bool shared,
 extern void pgstat_report_analyze(Relation rel,
 								  PgStat_Counter livetuples, PgStat_Counter deadtuples,
 								  bool resetcounter);
+
+extern void pgstat_relation_start_av_interval(Relation rel,
+											  AVPageStream *local,
+											  XLogRecPtr start_lsn,
+											  TimestampTz start_time);
+extern uint64 pgstat_relation_refresh_vacuum_av(Relation rel, AVPageStream *local);
+
+extern void pgstat_relation_count_un_av(Relation rel, XLogRecPtr page_lsn);
+extern void pgstat_relation_count_av(Relation rel, XLogRecPtr page_lsn);
 
 /*
  * If stats are enabled, but pending data hasn't been prepared yet, call

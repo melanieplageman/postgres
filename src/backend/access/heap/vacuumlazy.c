@@ -33,6 +33,7 @@
 
 #include <math.h>
 
+#include "access/avpagestream.h"
 #include "access/genam.h"
 #include "access/heapam.h"
 #include "access/heapam_xlog.h"
@@ -94,6 +95,9 @@
  */
 #define FAILSAFE_EVERY_PAGES \
 	((BlockNumber) (((uint64) 4 * 1024 * 1024 * 1024) / BLCKSZ))
+
+#define VACUUM_AV_EVERY_PAGES \
+	((BlockNumber) (((uint64) 2 * 1024 * 1024 * 1024) / BLCKSZ))
 
 /*
  * When a table has no indexes, vacuum the FSM after every 8GB, approximately
@@ -210,6 +214,7 @@ typedef struct LVRelState
 	int64		live_tuples;	/* # live tuples remaining */
 	int64		recently_dead_tuples;	/* # dead, but not yet removable */
 	int64		missed_dead_tuples; /* # removable, but not removed */
+	AVPageStream avpages;
 
 	/* State maintained by heap_vac_scan_next_block() */
 	BlockNumber current_block;	/* last block returned */
@@ -305,13 +310,17 @@ heap_vacuum_rel(Relation rel, VacuumParams *params,
 				new_rel_pages,
 				new_rel_allvisible;
 	PGRUsage	ru0;
-	TimestampTz starttime = 0;
+	TimestampTz starttime = 0,
+				endtime = 0;
 	PgStat_Counter startreadtime = 0,
 				startwritetime = 0;
 	WalUsage	startwalusage = pgWalUsage;
 	BufferUsage startbufferusage = pgBufferUsage;
 	ErrorContextCallback errcallback;
 	char	  **indnames = NULL;
+	XLogRecPtr	insert_lsn = GetXLogInsertRecPtr();
+
+	starttime = GetCurrentTimestamp();
 
 	verbose = (params->options & VACOPT_VERBOSE) != 0;
 	instrument = (verbose || (AmAutoVacuumWorkerProcess() &&
@@ -319,7 +328,6 @@ heap_vacuum_rel(Relation rel, VacuumParams *params,
 	if (instrument)
 	{
 		pg_rusage_init(&ru0);
-		starttime = GetCurrentTimestamp();
 		if (track_io_timing)
 		{
 			startreadtime = pgStatBlockReadTime;
@@ -429,6 +437,8 @@ heap_vacuum_rel(Relation rel, VacuumParams *params,
 	vacrel->live_tuples = 0;
 	vacrel->recently_dead_tuples = 0;
 	vacrel->missed_dead_tuples = 0;
+	pgstat_relation_start_av_interval(rel, &vacrel->avpages,
+									  insert_lsn, starttime);
 
 	/*
 	 * Get cutoffs that determine which deleted tuples are considered DEAD,
@@ -591,10 +601,12 @@ heap_vacuum_rel(Relation rel, VacuumParams *params,
 						 vacrel->missed_dead_tuples);
 	pgstat_progress_end_command();
 
+	endtime = GetCurrentTimestamp();
+	insert_lsn = GetXLogInsertRecPtr();
+	pgstat_relation_start_av_interval(rel, &vacrel->avpages, insert_lsn, endtime);
+
 	if (instrument)
 	{
-		TimestampTz endtime = GetCurrentTimestamp();
-
 		if (verbose || params->log_min_duration == 0 ||
 			TimestampDifferenceExceeds(starttime, endtime,
 									   params->log_min_duration))
@@ -879,6 +891,9 @@ lazy_scan_heap(LVRelState *vacrel)
 		 */
 		if (vacrel->scanned_pages % FAILSAFE_EVERY_PAGES == 0)
 			lazy_check_wraparound_failsafe(vacrel);
+
+		if (vacrel->scanned_pages % VACUUM_AV_EVERY_PAGES == 0)
+			pgstat_relation_refresh_vacuum_av(vacrel->rel, &vacrel->avpages);
 
 		/*
 		 * Consider if we definitely have enough space to process TIDs on page
@@ -1424,6 +1439,8 @@ lazy_scan_prune(LVRelState *vacrel,
 	Relation	rel = vacrel->rel;
 	PruneFreezeResult presult;
 	int			prune_options = 0;
+	XLogRecPtr	og_page_lsn = PageGetLSN(page);
+	uint8		old_vmbits = 0;
 
 	Assert(BufferGetBlockNumber(buf) == blkno);
 
@@ -1540,6 +1557,8 @@ lazy_scan_prune(LVRelState *vacrel,
 			Assert(!TransactionIdIsValid(presult.vm_conflict_horizon));
 			flags |= VISIBILITYMAP_ALL_FROZEN;
 		}
+		else
+			vacuum_count_av(&vacrel->avpages, PageGetLSN(page));
 
 		/*
 		 * It should never be the case that the visibility map page is set
@@ -1574,6 +1593,11 @@ lazy_scan_prune(LVRelState *vacrel,
 			 vacrel->relname, blkno);
 		visibilitymap_clear(vacrel->rel, blkno, vmbuffer,
 							VISIBILITYMAP_VALID_BITS);
+
+		/*
+		 * This is due to data corruption, so we will not uncount it in the
+		 * AVPageStream.
+		 */
 	}
 
 	/*
@@ -1596,8 +1620,17 @@ lazy_scan_prune(LVRelState *vacrel,
 			 vacrel->relname, blkno);
 		PageClearAllVisible(page);
 		MarkBufferDirty(buf);
-		visibilitymap_clear(vacrel->rel, blkno, vmbuffer,
-							VISIBILITYMAP_VALID_BITS);
+		old_vmbits = visibilitymap_clear(vacrel->rel, blkno, vmbuffer,
+										 VISIBILITYMAP_VALID_BITS);
+
+		/*
+		 * If the page is marked all-visible but not all-frozen in the VM, it
+		 * may have been counted as such in the AVPageStream. We will count it
+		 * as all-visible again once it is marked as such in the VM.
+		 */
+		if ((old_vmbits & VISIBILITYMAP_ALL_VISIBLE) &&
+			!(old_vmbits & VISIBILITYMAP_ALL_FROZEN))
+			vacuum_count_un_av(&vacrel->avpages, og_page_lsn);
 	}
 
 	/*
@@ -1627,10 +1660,18 @@ lazy_scan_prune(LVRelState *vacrel,
 		 * was logged when the page's tuples were frozen.
 		 */
 		Assert(!TransactionIdIsValid(presult.vm_conflict_horizon));
-		visibilitymap_set(vacrel->rel, blkno, buf, InvalidXLogRecPtr,
-						  vmbuffer, InvalidTransactionId,
-						  VISIBILITYMAP_ALL_VISIBLE |
-						  VISIBILITYMAP_ALL_FROZEN);
+		old_vmbits = visibilitymap_set(vacrel->rel, blkno, buf, InvalidXLogRecPtr,
+									   vmbuffer, InvalidTransactionId,
+									   VISIBILITYMAP_ALL_VISIBLE |
+									   VISIBILITYMAP_ALL_FROZEN);
+
+		/*
+		 * If the page was marked all-visible but not all-frozen, we need to
+		 * account for the fact that we are now freezing it.
+		 */
+		if ((old_vmbits & VISIBILITYMAP_ALL_VISIBLE) &&
+			!(old_vmbits & VISIBILITYMAP_ALL_FROZEN))
+			vacuum_count_un_av(&vacrel->avpages, og_page_lsn);
 	}
 }
 
@@ -2211,6 +2252,7 @@ lazy_vacuum_heap_page(LVRelState *vacrel, BlockNumber blkno, Buffer buffer,
 	TransactionId visibility_cutoff_xid;
 	bool		all_frozen;
 	LVSavedErrInfo saved_err_info;
+	XLogRecPtr	old_page_lsn = PageGetLSN(page);
 
 	Assert(vacrel->do_index_vacuuming);
 
@@ -2276,17 +2318,30 @@ lazy_vacuum_heap_page(LVRelState *vacrel, BlockNumber blkno, Buffer buffer,
 	if (heap_page_is_all_visible(vacrel, buffer, &visibility_cutoff_xid,
 								 &all_frozen))
 	{
+		uint8		old_vmbits = 0;
 		uint8		flags = VISIBILITYMAP_ALL_VISIBLE;
+		XLogRecPtr	page_lsn = PageGetLSN(page);
 
 		if (all_frozen)
 		{
 			Assert(!TransactionIdIsValid(visibility_cutoff_xid));
 			flags |= VISIBILITYMAP_ALL_FROZEN;
 		}
+		else
+			vacuum_count_av(&vacrel->avpages, PageGetLSN(page));
 
 		PageSetAllVisible(page);
-		visibilitymap_set(vacrel->rel, blkno, buffer, InvalidXLogRecPtr,
-						  vmbuffer, visibility_cutoff_xid, flags);
+		old_vmbits = visibilitymap_set(vacrel->rel, blkno, buffer, InvalidXLogRecPtr,
+									   vmbuffer, visibility_cutoff_xid, flags);
+
+		/*
+		 * If the LSN is changing and it was previously marked all-visible and
+		 * not all-frozen we need to account for the old page LSN.
+		 */
+		if ((old_vmbits & VISIBILITYMAP_ALL_VISIBLE) &&
+			!(old_vmbits & VISIBILITYMAP_ALL_FROZEN) &&
+			page_lsn != old_page_lsn)
+			vacuum_count_un_av(&vacrel->avpages, old_page_lsn);
 	}
 
 	/* Revert to the previous phase information for error traceback */

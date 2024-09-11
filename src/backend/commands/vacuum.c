@@ -25,6 +25,7 @@
 
 #include <math.h>
 
+#include "access/avpagestream.h"
 #include "access/clog.h"
 #include "access/commit_ts.h"
 #include "access/genam.h"
@@ -2540,4 +2541,50 @@ vac_tid_reaped(ItemPointer itemptr, void *state)
 	TidStore   *dead_items = (TidStore *) state;
 
 	return TidStoreIsMember(dead_items, itemptr);
+}
+
+/*
+ * During a vacuum, when setting a page all-visible, count it toward the
+ * interval covering page_lsn. This will most likely be the current interval,
+ * but it is possible for the LSN to belong to an earlier interval.
+ *
+ * Vacuum may set it a page all-visible without making any WAL-logged changes
+ * to the page. Thus, the page LSN will be the LSN of the last WAL-logged
+ * modification to the page -- not the insert LSN at the time of vacuuming.
+ */
+void
+vacuum_count_av(AVPageStream *local, XLogRecPtr page_lsn)
+{
+	AVPageInterval *setter;
+
+	local->has_values = true;
+
+	if (page_lsn >= local->data[local->length - 1].start_lsn)
+	{
+		local->data[local->length - 1].new_av_pages++;
+		return;
+	}
+
+	setter = avpagestream_get_setter(local, page_lsn);
+
+	/* Because vacuum starts an interval, we must find one */
+	Assert(setter);
+	setter->new_av_pages++;
+}
+
+/*
+ * During a vacuum, we may freeze an already all-visible page, in which case we
+ * need to account for that in the AVPageStream. Also, if we are making a
+ * WAL-logged modification to the page and it was previously marked all-visible
+ * but not all-frozen, we need to account for that in the AVPageStream.
+ */
+void
+vacuum_count_un_av(AVPageStream *local, XLogRecPtr page_lsn)
+{
+	AVPageInterval *setter = avpagestream_get_setter(local, page_lsn);
+
+	/* Because vacuum starts an interval, we must find one */
+	Assert(setter);
+	setter->new_un_av_pages++;
+	local->has_values = true;
 }

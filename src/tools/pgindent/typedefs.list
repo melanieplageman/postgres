@@ -173,6 +173,8 @@ AutoVacOpts
 AutoVacuumShmemStruct
 AutoVacuumWorkItem
 AutoVacuumWorkItemType
+AVPageInterval
+AVPageStream
 BF_ctx
 BF_key
 BF_word

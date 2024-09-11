@@ -14,6 +14,7 @@ include $(top_builddir)/src/Makefile.global
 
 OBJS = \
 	attmap.o \
+	avpagestream.o \
 	bufmask.o \
 	detoast.o \
 	heaptuple.o \

@@ -14,6 +14,7 @@
 #ifndef VACUUM_H
 #define VACUUM_H
 
+#include "access/avpagestream.h"
 #include "access/htup.h"
 #include "access/genam.h"
 #include "access/parallel.h"
@@ -351,6 +352,9 @@ extern IndexBulkDeleteResult *vac_bulkdel_one_index(IndexVacuumInfo *ivinfo,
 													VacDeadItemsInfo *dead_items_info);
 extern IndexBulkDeleteResult *vac_cleanup_one_index(IndexVacuumInfo *ivinfo,
 													IndexBulkDeleteResult *istat);
+
+extern void vacuum_count_un_av(AVPageStream *local, XLogRecPtr page_lsn);
+extern void vacuum_count_av(AVPageStream *local, XLogRecPtr page_lsn);
 
 /* In postmaster/autovacuum.c */
 extern void AutoVacuumUpdateCostLimit(void);
