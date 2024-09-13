@@ -6,6 +6,7 @@ backend_sources += files(
   'detoast.c',
   'heaptuple.c',
   'indextuple.c',
+  'lsntimestream.c',
   'printsimple.c',
   'printtup.c',
   'relation.c',

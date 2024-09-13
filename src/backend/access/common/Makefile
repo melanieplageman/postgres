@@ -18,6 +18,7 @@ OBJS = \
 	detoast.o \
 	heaptuple.o \
 	indextuple.o \
+	lsntimestream.o \
 	printsimple.o \
 	printtup.o \
 	relation.o \
