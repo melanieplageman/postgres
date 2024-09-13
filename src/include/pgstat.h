@@ -11,6 +11,7 @@
 #ifndef PGSTAT_H
 #define PGSTAT_H
 
+#include "access/avpagestream.h"
 #include "access/xlogdefs.h"
 #include "datatype/timestamp.h"
 #include "portability/instr_time.h"
@@ -169,6 +170,12 @@ typedef struct PgStat_BackendSubEntry
 	PgStat_Counter conflict_count[CONFLICT_NUM_TYPES];
 } PgStat_BackendSubEntry;
 
+#define NUM_LOCAL_AV_PAGES 64
+typedef struct LocalAVPages {
+	XLogRecPtr data[NUM_LOCAL_AV_PAGES];
+	uint32 length;
+} LocalAVPages;
+
 /* ----------
  * PgStat_TableCounts			The actual per-table counts kept by a backend
  *
@@ -209,6 +216,7 @@ typedef struct PgStat_TableCounts
 
 	PgStat_Counter blocks_fetched;
 	PgStat_Counter blocks_hit;
+	LocalAVPages un_av_pages;
 } PgStat_TableCounts;
 
 /* ----------
@@ -459,6 +467,7 @@ typedef struct PgStat_StatTabEntry
 	PgStat_Counter analyze_count;
 	TimestampTz last_autoanalyze_time;	/* autovacuum initiated */
 	PgStat_Counter autoanalyze_count;
+	AVPageStream avstream;
 } PgStat_StatTabEntry;
 
 typedef struct PgStat_WalStats
@@ -628,6 +637,19 @@ extern void pgstat_report_vacuum(Oid tableoid, bool shared,
 extern void pgstat_report_analyze(Relation rel,
 								  PgStat_Counter livetuples, PgStat_Counter deadtuples,
 								  bool resetcounter);
+
+
+extern void pgstat_relation_start_av_interval(Relation rel,
+		LocalAVPages *av_pages,
+											  XLogRecPtr start_lsn,
+											  TimestampTz start_time);
+extern uint64 pgstat_relation_old_av_pages(Relation rel);
+
+extern void pgstat_relation_vacuum_count_un_av(Relation rel, XLogRecPtr page_lsn);
+extern void pgstat_relation_count_un_av(Relation rel, XLogRecPtr page_lsn);
+extern void pgstat_relation_vacuum_count_av(Relation rel, XLogRecPtr page_lsn,
+		LocalAVPages *av_pages);
+extern void pgstat_relation_count_av(Relation rel, XLogRecPtr page_lsn);
 
 /*
  * If stats are enabled, but pending data hasn't been prepared yet, call

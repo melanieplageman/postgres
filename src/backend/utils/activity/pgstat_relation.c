@@ -205,6 +205,280 @@ pgstat_drop_relation(Relation rel)
 }
 
 /*
+ * Start a new AVPageInterval starting with start_lsn and start_time. We end
+ * the previous interval (if any) and flush local stats before adding the new
+ * interval.
+ */
+void
+pgstat_relation_start_av_interval(Relation rel,
+		LocalAVPages *av_pages,
+								  XLogRecPtr start_lsn,
+								  TimestampTz start_time)
+{
+	AVPageInterval *setter;
+	PgStat_EntryRef *ref;
+	AVPageStream *stream;
+
+	ref = pgstat_get_entry_ref_locked(PGSTAT_KIND_RELATION,
+									  rel->rd_rel->relisshared ?
+									  InvalidOid : MyDatabaseId,
+									  RelationGetRelid(rel),
+									  false);
+
+	stream = &((PgStatShared_Relation *) ref->shared_stats)->stats.avstream;
+
+	/* End the last interval */
+	if (stream->length > 0)
+	{
+		stream->data[stream->length - 1].end_lsn = start_lsn;
+		stream->data[stream->length - 1].end_time = start_time;
+	}
+
+	for (size_t i = 0; i < av_pages->length; i++)
+	{
+		setter = avpagestream_get_setter(stream, av_pages->data[i]);
+		if (setter)
+			setter->av_pages++;
+		av_pages->data[i] = InvalidXLogRecPtr;
+	}
+
+	av_pages->length = 0;
+
+	avpagestream_add_new(stream,
+						 start_lsn, start_time);
+
+	pgstat_unlock_entry(ref);
+}
+
+
+/*
+ * During an ongoing vacuum, periodically flush our delta counters to shared
+ * memory. While stats of pages being set all-visible being a bit out-of-date
+ * isn't a huge problem, our not having an up-to-date copy of the all-visible
+ * but not all-frozen pages during a long-running vacuum is a bigger issue. If
+ * previously all-visible pages are being modified during an ongoing vacuum, we
+ * want to know about them. Since we need to read from the shared stats, we
+ * might as well flush our local counters while we are at it.
+ *
+ * Calculates and returns the number of all-visible not all-frozen pages older
+ * than target_freeze_duration in the relation. This is meant to be used to
+ * determine how many extra all-visible not all-frozen pages should be scanned
+ * by vacuum.
+ */
+uint64
+pgstat_relation_old_av_pages(Relation rel)
+{
+	PgStat_EntryRef *ref;
+	AVPageStream *stream;
+	int64		target_freeze_dur_usec;
+	TimestampTz target_time;
+	TimestampTz cur_time = GetCurrentTimestamp();
+
+	target_freeze_dur_usec = target_freeze_duration * USECS_PER_SEC;
+	Assert(target_freeze_dur_usec >= 0);
+	Assert(cur_time >= target_freeze_dur_usec);
+
+	target_time = cur_time - target_freeze_dur_usec;
+
+	ref = pgstat_get_entry_ref_locked(PGSTAT_KIND_RELATION,
+									  rel->rd_rel->relisshared ?
+									  InvalidOid : MyDatabaseId,
+									  RelationGetRelid(rel),
+									  false);
+
+	stream = &((PgStatShared_Relation *) ref->shared_stats)->stats.avstream;
+
+	pgstat_unlock_entry(ref);
+
+	return avpages_older_than_cutoff(stream, target_time);
+}
+
+/*
+ * Vacuum may set it a page all-visible without making any WAL-logged changes
+ * to the page. Thus, the page LSN will be the LSN of the last WAL-logged
+ * modification to the page -- not the insert LSN at the time of vacuuming.
+ */
+void
+pgstat_relation_vacuum_count_av(Relation rel,
+		XLogRecPtr page_lsn, LocalAVPages *av_pages)
+{
+	AVPageInterval *setter;
+	PgStat_EntryRef *ref;
+	AVPageStream *stream;
+
+	if (!pgstat_should_count_relation(rel))
+		return;
+
+	if (av_pages->length < NUM_LOCAL_AV_PAGES)
+	{
+		av_pages->data[av_pages->length++] = page_lsn;
+		return;
+	}
+
+	ref = pgstat_get_entry_ref_locked(PGSTAT_KIND_RELATION,
+									rel->rd_rel->relisshared ?
+									InvalidOid : MyDatabaseId,
+									RelationGetRelid(rel),
+									false);
+
+	stream = &((PgStatShared_Relation *) ref->shared_stats)->stats.avstream;
+
+	if (page_lsn >= stream->data[stream->length - 1].start_lsn)
+	{
+		stream->data[stream->length - 1].av_pages++;
+		pgstat_unlock_entry(ref);
+		return;
+	}
+
+	setter = avpagestream_get_setter(stream, page_lsn);
+	if (setter)
+		setter->av_pages++;
+
+	for (size_t i = 0; i < av_pages->length; i++)
+	{
+		setter = avpagestream_get_setter(stream, av_pages->data[i]);
+		if (setter)
+			setter->av_pages++;
+		av_pages->data[i] = InvalidXLogRecPtr;
+	}
+
+	pgstat_unlock_entry(ref);
+	av_pages->length = 0;
+}
+
+/*
+ * When modifying a previously all-visible but not all-frozen page, update the
+ * counters for the interval covering this page's LSN in the AVPageStream for
+ * the relation.
+ * During a vacuum, when setting a page all-visible, count it toward the
+ * interval covering page_lsn. This will most likely be the current interval,
+ * but it is possible for the LSN to belong to an earlier interval.
+ *
+ * Vacuum may set it a page all-visible without making any WAL-logged changes
+ * to the page. Thus, the page LSN will be the LSN of the last WAL-logged
+ * modification to the page -- not the insert LSN at the time of vacuuming.
+ */
+void
+pgstat_relation_count_av(Relation rel, XLogRecPtr page_lsn)
+{
+	AVPageInterval *setter;
+	PgStat_EntryRef *ref;
+	AVPageStream *stream;
+
+	if (!pgstat_should_count_relation(rel))
+		return;
+
+	ref = pgstat_get_entry_ref_locked(PGSTAT_KIND_RELATION,
+									rel->rd_rel->relisshared ?
+									InvalidOid : MyDatabaseId,
+									RelationGetRelid(rel),
+									false);
+
+	stream = &((PgStatShared_Relation *) ref->shared_stats)->stats.avstream;
+
+	if (stream->version == 0)
+	{
+		pgstat_unlock_entry(ref);
+		return;
+	}
+
+	setter = avpagestream_get_setter(stream, page_lsn);
+	if (setter)
+		setter->av_pages++;
+
+	pgstat_unlock_entry(ref);
+}
+
+/*
+ * During a vacuum, we may freeze an already all-visible page, in which case we
+ * need to account for that in the AVPageStream. Also, if we are making a
+ * WAL-logged modification to the page and it was previously marked all-visible
+ * but not all-frozen, we need to account for that in the AVPageStream.
+ */
+void
+pgstat_relation_vacuum_count_un_av(Relation rel, XLogRecPtr page_lsn)
+{
+	PgStat_EntryRef *ref;
+	AVPageStream *stream;
+	AVPageInterval *setter;
+	ref = pgstat_get_entry_ref_locked(PGSTAT_KIND_RELATION,
+									rel->rd_rel->relisshared ?
+									InvalidOid : MyDatabaseId,
+									RelationGetRelid(rel),
+									false);
+
+	stream = &((PgStatShared_Relation *) ref->shared_stats)->stats.avstream;
+
+	setter = avpagestream_get_setter(stream, page_lsn);
+	if (setter)
+		setter->un_av_pages++;
+
+	pgstat_unlock_entry(ref);
+}
+
+/*
+ * Because we may set a page all-visible without updating its LSN, find the
+ * interval in which the page was last modified (and its LSN changed)
+ *
+ * This may be needed when, for example, a tuple on a previously all-visible
+ * and all-frozen page is locked, causing us to unfreeze the page but not to
+ * unset all-visible. Because such tuple-locks are WAL-logged, we update the
+ * page LSN. When we later modify the all-visible page, the LSN will be that of
+ * the tuple lock. Thus, we must increment a counter for all-visible not
+ * all-frozen page with the LSN of the page lock.
+ */
+void
+pgstat_relation_count_un_av(Relation rel, XLogRecPtr page_lsn)
+{
+	PgStat_EntryRef *ref;
+	AVPageStream *stream;
+	AVPageInterval *setter;
+	LocalAVPages *un_av_pages;
+
+	if (!pgstat_should_count_relation(rel))
+		return;
+
+	un_av_pages = &rel->pgstat_info->counts.un_av_pages;
+
+	if (un_av_pages->length < NUM_LOCAL_AV_PAGES)
+	{
+		un_av_pages->data[un_av_pages->length++] = page_lsn;
+		return;
+	}
+
+	ref = pgstat_get_entry_ref_locked(PGSTAT_KIND_RELATION,
+									rel->rd_rel->relisshared ?
+									InvalidOid : MyDatabaseId,
+									RelationGetRelid(rel),
+									false);
+
+	stream = &((PgStatShared_Relation *) ref->shared_stats)->stats.avstream;
+
+	if (stream->version == 0)
+	{
+		pgstat_unlock_entry(ref);
+		return;
+	}
+
+	setter = avpagestream_get_setter(stream, page_lsn);
+	if (setter)
+		setter->un_av_pages++;
+
+	for (size_t i = 0; i < un_av_pages->length; i++)
+	{
+		setter = avpagestream_get_setter(stream, un_av_pages->data[i]);
+		if (setter)
+			setter->un_av_pages++;
+		un_av_pages->data[i] = InvalidXLogRecPtr;
+	}
+
+	pgstat_unlock_entry(ref);
+	un_av_pages->length = 0;
+}
+
+
+
+/*
  * Report that the table was just vacuumed and flush IO statistics.
  */
 void
@@ -865,6 +1139,21 @@ pgstat_relation_flush_cb(PgStat_EntryRef *entry_ref, bool nowait)
 	tabentry->live_tuples = Max(tabentry->live_tuples, 0);
 	/* Likewise for dead_tuples */
 	tabentry->dead_tuples = Max(tabentry->dead_tuples, 0);
+
+	if (tabentry->avstream.version > 0 &&
+		lstats->counts.un_av_pages.length > 0)
+	{
+		AVPageInterval *setter;
+		for (size_t i = 0; i < lstats->counts.un_av_pages.length; i++)
+		{
+			setter = avpagestream_get_setter(&tabentry->avstream,
+					lstats->counts.un_av_pages.data[i]);
+			if (setter)
+				setter->un_av_pages++;
+			lstats->counts.un_av_pages.data[i] = InvalidXLogRecPtr;
+		}
+		lstats->counts.un_av_pages.length = 0;
+	}
 
 	pgstat_unlock_entry(entry_ref);
 
