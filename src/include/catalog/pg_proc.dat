@@ -5822,6 +5822,15 @@
   proname => 'pg_stat_get_buf_alloc', provolatile => 's', proparallel => 'r',
   prorettype => 'int8', proargtypes => '', prosrc => 'pg_stat_get_buf_alloc' },
 
+{ oid => '970', descr => 'stats',
+  proname => 'pg_stat_relation_get_vacuum_stream', prorows => '17', proretset => 't',
+  provolatile => 'v', proparallel => 'r', prorettype => 'record',
+  proargtypes => 'oid', proisstrict => 't',
+  proallargtypes => '{oid,pg_lsn,timestamptz,pg_lsn,timestamptz,int8,int8,int8}',
+  proargmodes => '{i,o,o,o,o,o,o,o}',
+  proargnames => '{relation,start_lsn,start_time,end_lsn,end_time,av_pages,un_av_pages,members}',
+  prosrc => 'pg_stat_relation_get_vacuum_stream' },
+
 { oid => '6214', descr => 'statistics: per backend type IO statistics',
   proname => 'pg_stat_get_io', prorows => '30', proretset => 't',
   provolatile => 'v', proparallel => 'r', prorettype => 'record',
@@ -5830,6 +5839,12 @@
   proargmodes => '{o,o,o,o,o,o,o,o,o,o,o,o,o,o,o,o,o,o}',
   proargnames => '{backend_type,object,context,reads,read_time,writes,write_time,writebacks,writeback_time,extends,extend_time,op_bytes,hits,evictions,reuses,fsyncs,fsync_time,stats_reset}',
   prosrc => 'pg_stat_get_io' },
+
+{ oid => '1566', descr => 'stats',
+  proname => 'pg_stat_relation_get_old_av_pages', provolatile => 'v',
+  proparallel => 'r', prorettype => 'int8', proargtypes => 'oid',
+  prosrc => 'pg_stat_relation_get_old_av_pages' },
+
 
 { oid => '1136', descr => 'statistics: information about WAL activity',
   proname => 'pg_stat_get_wal', proisstrict => 'f', provolatile => 's',

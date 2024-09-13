@@ -30,6 +30,7 @@
 #include "storage/procarray.h"
 #include "utils/acl.h"
 #include "utils/builtins.h"
+#include "utils/pg_lsn.h"
 #include "utils/timestamp.h"
 
 #define UINT32_ACCESS_ONCE(var)		 ((uint32)(*((volatile uint32 *)&(var))))
@@ -1460,6 +1461,80 @@ pg_stat_get_io(PG_FUNCTION_ARGS)
 	}
 
 	return (Datum) 0;
+}
+
+#define VACSTREAM_NUM_COLUMNS 7
+
+static void
+vacuum_stream_put_tuple(AVPageInterval *cur,
+						ReturnSetInfo *rsinfo)
+{
+	bool		nulls[VACSTREAM_NUM_COLUMNS] = {0};
+	Datum		values[VACSTREAM_NUM_COLUMNS] = {0};
+
+	values[0] = DatumGetLSN(cur->start_lsn);
+	if (cur->start_lsn == InvalidXLogRecPtr)
+		nulls[0] = true;
+	values[1] = DatumGetTimestampTz(cur->start_time);
+	if (cur->start_time == 0)
+		nulls[1] = true;
+	values[2] = DatumGetLSN(cur->end_lsn);
+	if (cur->end_lsn == InvalidXLogRecPtr)
+		nulls[2] = true;
+	values[3] = DatumGetTimestampTz(cur->end_time);
+	if (cur->end_time == 0)
+		nulls[3] = true;
+	values[4] = DatumGetInt64(cur->av_pages);
+	values[5] = DatumGetInt64(cur->un_av_pages);
+	values[6] = DatumGetInt64(cur->members);
+	if (cur->members == 0)
+		nulls[6] = true;
+
+	tuplestore_putvalues(rsinfo->setResult, rsinfo->setDesc,
+						 values, nulls);
+}
+
+Datum
+pg_stat_relation_get_vacuum_stream(PG_FUNCTION_ARGS)
+{
+	ReturnSetInfo *rsinfo;
+	PgStat_StatTabEntry *stats;
+	AVPageStream *stream;
+	Oid			relid = PG_GETARG_OID(0);
+
+	InitMaterializedSRF(fcinfo, 0);
+	rsinfo = (ReturnSetInfo *) fcinfo->resultinfo;
+
+	stats = pgstat_fetch_stat_tabentry(relid);
+	stream = &stats->avstream;
+
+	vacuum_stream_put_tuple(&stream->oldest, rsinfo);
+	for (size_t i = 0; i < stream->length; i++)
+		vacuum_stream_put_tuple(&stream->data[i], rsinfo);
+
+	return (Datum) 0;
+}
+
+
+Datum
+pg_stat_relation_get_old_av_pages(PG_FUNCTION_ARGS)
+{
+	PgStat_StatTabEntry *stats;
+	Oid			relid = PG_GETARG_OID(0);
+	int64		target_freeze_dur_usec;
+	TimestampTz target_time;
+	TimestampTz cur_time = GetCurrentTimestamp();
+	uint64 older_pages;
+
+	stats = pgstat_fetch_stat_tabentry(relid);
+	target_freeze_dur_usec = target_freeze_duration * USECS_PER_SEC;
+	Assert(target_freeze_dur_usec >= 0);
+	Assert(cur_time >= target_freeze_dur_usec);
+
+	target_time = cur_time - target_freeze_dur_usec;
+
+	older_pages = avpages_older_than_cutoff(&stats->avstream, target_time);
+	return DatumGetInt64(older_pages);
 }
 
 /*
