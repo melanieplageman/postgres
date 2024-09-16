@@ -361,7 +361,7 @@ RefreshMatViewByOid(Oid matviewOid, bool is_create, bool skipData,
 		 */
 		pgstat_count_truncate(matviewRel);
 		if (!skipData)
-			pgstat_count_heap_insert(matviewRel, processed);
+			pgstat_count_heap_insert(matviewRel, processed, 0, 0);
 	}
 
 	table_close(matviewRel, NoLock);

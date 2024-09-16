@@ -210,6 +210,10 @@ typedef struct PgStat_TableCounts
 
 	PgStat_Counter blocks_fetched;
 	PgStat_Counter blocks_hit;
+
+	uint64		vm_page_freezes;
+	uint64		page_unfreezes;
+	uint64		early_page_unfreezes;
 } PgStat_TableCounts;
 
 /* ----------
@@ -460,6 +464,10 @@ typedef struct PgStat_StatTabEntry
 	PgStat_Counter analyze_count;
 	TimestampTz last_autoanalyze_time;	/* autovacuum initiated */
 	PgStat_Counter autoanalyze_count;
+
+	uint64		vm_page_freezes;
+	uint64		page_unfreezes;
+	uint64		early_page_unfreezes;
 } PgStat_StatTabEntry;
 
 typedef struct PgStat_WalStats
@@ -686,10 +694,13 @@ extern void pgstat_report_analyze(Relation rel,
 			(rel)->pgstat_info->counts.blocks_hit++;				\
 	} while (0)
 
-extern void pgstat_count_heap_insert(Relation rel, PgStat_Counter n);
+extern void pgstat_count_heap_insert(Relation rel, PgStat_Counter n,
+									 uint64 page_freezes, uint64 page_unfreezes);
 extern void pgstat_count_heap_update(Relation rel, bool hot, bool newpage);
 extern void pgstat_count_heap_delete(Relation rel);
 extern void pgstat_count_truncate(Relation rel);
+extern void pgstat_relation_count_unfreeze(Relation rel,
+										   XLogRecPtr old_page_lsn, XLogRecPtr new_page_lsn);
 extern void pgstat_update_heap_dead_tuples(Relation rel, int delta);
 
 extern void pgstat_twophase_postcommit(TransactionId xid, uint16 info,

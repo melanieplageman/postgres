@@ -357,15 +357,53 @@ pgstat_report_analyze(Relation rel,
  * count a tuple insertion of n tuples
  */
 void
-pgstat_count_heap_insert(Relation rel, PgStat_Counter n)
+pgstat_count_heap_insert(Relation rel, PgStat_Counter tuples_inserted,
+						 uint64 page_freezes, uint64 page_unfreezes)
 {
 	if (pgstat_should_count_relation(rel))
 	{
 		PgStat_TableStatus *pgstat_info = rel->pgstat_info;
 
 		ensure_tabstat_xact_level(pgstat_info);
-		pgstat_info->trans->tuples_inserted += n;
+		pgstat_info->trans->tuples_inserted += tuples_inserted;
+		pgstat_info->counts.page_unfreezes += page_unfreezes;
+		pgstat_info->counts.vm_page_freezes += page_freezes;
 	}
+}
+
+void
+pgstat_relation_count_unfreeze(Relation rel,
+							   XLogRecPtr old_page_lsn, XLogRecPtr new_page_lsn)
+{
+	PgStat_TableCounts *counts;
+	PgStat_WalStats *wal_stats;
+	LSNInterval lsn_target_freeze_duration;
+
+	if (!pgstat_should_count_relation(rel))
+		return;
+
+	Assert(new_page_lsn > old_page_lsn);
+
+	counts = &rel->pgstat_info->counts;
+
+	counts->page_unfreezes++;
+
+	/*
+	 * Without the page LSN, we can't determine whether or not the page was
+	 * unfrozen too early. Because of this, unlogged tables will never record
+	 * early unfreezes.
+	 */
+	if (old_page_lsn == InvalidXLogRecPtr)
+		return;
+
+	wal_stats = pgstat_fetch_stat_wal();
+
+	Assert(wal_stats);
+
+	lsn_target_freeze_duration = wal_stats->lsn_target_freeze_duration;
+
+	if (new_page_lsn - old_page_lsn < lsn_target_freeze_duration)
+		counts->early_page_unfreezes++;
 }
 
 /*
@@ -843,6 +881,10 @@ pgstat_relation_flush_cb(PgStat_EntryRef *entry_ref, bool nowait)
 	tabentry->tuples_deleted += lstats->counts.tuples_deleted;
 	tabentry->tuples_hot_updated += lstats->counts.tuples_hot_updated;
 	tabentry->tuples_newpage_updated += lstats->counts.tuples_newpage_updated;
+
+	tabentry->vm_page_freezes += lstats->counts.vm_page_freezes;
+	tabentry->page_unfreezes += lstats->counts.page_unfreezes;
+	tabentry->early_page_unfreezes += lstats->counts.early_page_unfreezes;
 
 	/*
 	 * If table was truncated/dropped, first reset the live/dead counters.
