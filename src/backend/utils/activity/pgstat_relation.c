@@ -209,7 +209,8 @@ pgstat_drop_relation(Relation rel)
  */
 void
 pgstat_report_vacuum(Oid tableoid, bool shared,
-					 PgStat_Counter livetuples, PgStat_Counter deadtuples)
+					 PgStat_Counter livetuples, PgStat_Counter deadtuples,
+					 BlockNumber vm_page_freezes)
 {
 	PgStat_EntryRef *entry_ref;
 	PgStatShared_Relation *shtabentry;
@@ -255,6 +256,8 @@ pgstat_report_vacuum(Oid tableoid, bool shared,
 		tabentry->last_vacuum_time = ts;
 		tabentry->vacuum_count++;
 	}
+
+	tabentry->vm_page_freezes += vm_page_freezes;
 
 	pgstat_unlock_entry(entry_ref);
 
