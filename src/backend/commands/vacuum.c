@@ -1082,6 +1082,7 @@ vacuum_get_cutoffs(Relation rel, const VacuumParams *params,
 				aggressiveMXIDCutoff;
 	double		xid_progress_to_agg_vac = 0;
 	double		mxid_progress_to_agg_vac = 0;
+	PgStat_StatTabEntry *tabstats = NULL;
 
 	/* Use mutable copies of freeze age parameters */
 	freeze_min_age = params->freeze_min_age;
@@ -1241,6 +1242,16 @@ vacuum_get_cutoffs(Relation rel, const VacuumParams *params,
 
 	cutoffs->progress_to_agg_vac = Max(mxid_progress_to_agg_vac,
 									   xid_progress_to_agg_vac);
+
+	if ((tabstats = pgstat_fetch_stat_tabentry(RelationGetRelid(rel))) == NULL)
+		return false;
+
+	/* MTODO: this should be refreshed periodically */
+	cutoffs->wasted_work = 0;
+	if (tabstats->page_freezes > 0)
+		cutoffs->wasted_work = tabstats->early_page_unfreezes /
+			(double) tabstats->page_freezes;
+	Assert(cutoffs->wasted_work >= 0 && cutoffs->wasted_work <= 1);
 
 	/* Non-aggressive VACUUM */
 	return false;

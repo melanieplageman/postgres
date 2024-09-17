@@ -483,7 +483,6 @@ heap_vacuum_rel(Relation rel, VacuumParams *params,
 		vacrel->av_pages_scanned_max = 0;
 	else
 	{
-		double		wasted_work = 0;
 		BlockNumber all_visible,
 					all_frozen;
 		uint64		to_scan;
@@ -498,15 +497,10 @@ heap_vacuum_rel(Relation rel, VacuumParams *params,
 		 */
 		to_scan = to_scan * vacrel->cutoffs.progress_to_agg_vac;
 
-		if (tabstats->vm_page_freezes > 0)
-			wasted_work = tabstats->early_page_unfreezes /
-				(double) tabstats->vm_page_freezes;
-		Assert(wasted_work >= 0 && wasted_work <= 1);
-
 		/*
 		 * Scan fewer pages if we are wasting the freezing work.
 		 */
-		to_scan = to_scan * (1 - wasted_work);
+		to_scan = to_scan * (1 - vacrel->cutoffs.wasted_work);
 
 		vacrel->av_pages_scanned_max = to_scan;
 	}

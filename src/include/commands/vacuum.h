@@ -278,6 +278,7 @@ struct VacuumCutoffs
 	MultiXactId MultiXactCutoff;
 
 	double		progress_to_agg_vac;
+	double		wasted_work;
 };
 
 /*

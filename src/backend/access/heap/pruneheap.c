@@ -175,6 +175,7 @@ static void heap_prune_record_unchanged_lp_dead(Page page, PruneState *prstate, 
 static void heap_prune_record_unchanged_lp_redirect(PruneState *prstate, OffsetNumber offnum);
 
 static void page_verify_redirects(Page page);
+static bool lsn_older_than_tfd(XLogRecPtr lsn);
 
 
 /*
@@ -293,6 +294,37 @@ heap_page_prune_opt(Relation relation, Buffer buffer)
 	}
 }
 
+/*
+* MTODO: should I cap the total number of pages frozen to the number
+* we considered eagerly scanning
+*/
+static bool
+lsn_older_than_tfd(XLogRecPtr lsn)
+{
+	PgStat_WalStats *walstats;
+	XLogRecPtr	insert_lsn;
+	XLogRecPtr	cutoff;
+
+	Assert(!XLogRecPtrIsInvalid(lsn));
+
+	if (target_freeze_duration == -1)
+		return false;
+
+	/* MTODO: cache the calculated threshold and refresh periodically */
+	insert_lsn = GetInsertRecPtr();
+
+	/* GetInsertRecPtr() returns an approximate result */
+	if (lsn >= insert_lsn)
+		return false;
+
+	walstats = pgstat_fetch_stat_wal();
+	if (!walstats ||
+		insert_lsn <= walstats->lsn_target_freeze_duration)
+		return false;
+
+	cutoff = insert_lsn - walstats->lsn_target_freeze_duration;
+	return lsn < cutoff;
+}
 
 /*
  * Prune and repair fragmentation and potentially freeze tuples on the
@@ -366,8 +398,7 @@ heap_page_prune_and_freeze(Relation relation, Buffer buffer,
 	bool		do_freeze;
 	bool		do_prune;
 	bool		do_hint;
-	bool		hint_bit_fpi;
-	int64		fpi_before = pgWalUsage.wal_fpi;
+	XLogRecPtr	page_lsn = PageGetLSN(page);
 
 	/* Copy parameters to prstate */
 	prstate.vistest = vistest;
@@ -552,12 +583,6 @@ heap_page_prune_and_freeze(Relation relation, Buffer buffer,
 	}
 
 	/*
-	 * If checksums are enabled, heap_prune_satisfies_vacuum() may have caused
-	 * an FPI to be emitted.
-	 */
-	hint_bit_fpi = fpi_before != pgWalUsage.wal_fpi;
-
-	/*
 	 * Process HOT chains.
 	 *
 	 * We added the items to the array starting from 'maxoff', so by
@@ -682,42 +707,38 @@ heap_page_prune_and_freeze(Relation relation, Buffer buffer,
 			 */
 			do_freeze = true;
 		}
-		else
+		else if (prstate.all_visible && prstate.all_frozen && prstate.nfrozen > 0 &&
+				 RelationNeedsWAL(relation))
 		{
 			/*
 			 * Opportunistically freeze the page if we are generating an FPI
 			 * anyway and if doing so means that we can set the page
 			 * all-frozen afterwards (might not happen until VACUUM's final
-			 * heap pass).
-			 *
-			 * XXX: Previously, we knew if pruning emitted an FPI by checking
-			 * pgWalUsage.wal_fpi before and after pruning.  Once the freeze
-			 * and prune records were combined, this heuristic couldn't be
-			 * used anymore.  The opportunistic freeze heuristic must be
-			 * improved; however, for now, try to approximate the old logic.
+			 * heap pass). Freezing would make the page all-frozen.  Have we
+			 * already emitted an FPI or is the page old enough to justify
+			 * eager freezing?
 			 */
-			if (prstate.all_visible && prstate.all_frozen && prstate.nfrozen > 0)
-			{
-				/*
-				 * Freezing would make the page all-frozen.  Have already
-				 * emitted an FPI or will do so anyway?
-				 */
-				if (RelationNeedsWAL(relation))
-				{
-					if (hint_bit_fpi)
-						do_freeze = true;
-					else if (do_prune)
-					{
-						if (XLogCheckBufferNeedsBackup(buffer))
-							do_freeze = true;
-					}
-					else if (do_hint)
-					{
-						if (XLogHintBitIsNeeded() && XLogCheckBufferNeedsBackup(buffer))
-							do_freeze = true;
-					}
-				}
-			}
+			if (do_prune && XLogCheckBufferNeedsBackup(buffer))
+				do_freeze = true;
+			else if (do_hint &&
+					 XLogHintBitIsNeeded() &&
+					 XLogCheckBufferNeedsBackup(buffer))
+				do_freeze = true;
+			/* Not a brand new page */
+			else if (!(XLogRecPtrIsInvalid(page_lsn)) && lsn_older_than_tfd(page_lsn))
+				do_freeze = true;
+			else if (!TransactionIdIsValid(prstate.new_prune_xid) &&
+				!TransactionIdIsValid(((PageHeader) page)->pd_prune_xid) &&
+				cutoffs->wasted_work < 0.5)
+				do_freeze = true;
+
+			/*
+			 * MTODO: should I also freeze pages that are eligible for eager
+			 * freezing + they have no pd_prune_xid and are full?
+			 * Alternatively, I could use the ratio of the total number of
+			 * inserts and updates/deletes to the table to guess if it is
+			 * insert mostly and freeze accordingly.
+			 */
 		}
 	}
 
