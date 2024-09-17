@@ -468,6 +468,14 @@ typedef struct PgStat_StatTabEntry
 	uint64		vm_page_freezes;
 	uint64		page_unfreezes;
 	uint64		early_page_unfreezes;
+
+	/*
+	 * The last all-visible page scanned by vacuum In an aggressive vacuum,
+	 * this will get reset to block 0. If block number is 0, we will always
+	 * scan at least blocks 0 and the next all-visible block, as 0 is the
+	 * initialization value.
+	 */
+	BlockNumber last_av_block_vacuumed;
 } PgStat_StatTabEntry;
 
 typedef struct PgStat_WalStats
@@ -643,7 +651,8 @@ extern void pgstat_unlink_relation(Relation rel);
 
 extern void pgstat_report_vacuum(Oid tableoid, bool shared,
 								 PgStat_Counter livetuples, PgStat_Counter deadtuples,
-								 BlockNumber vm_page_freezes);
+								 BlockNumber vm_page_freezes,
+								 BlockNumber last_av_block_vacuumed);
 extern void pgstat_report_analyze(Relation rel,
 								  PgStat_Counter livetuples, PgStat_Counter deadtuples,
 								  bool resetcounter);

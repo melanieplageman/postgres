@@ -1080,6 +1080,8 @@ vacuum_get_cutoffs(Relation rel, const VacuumParams *params,
 	MultiXactId nextMXID,
 				safeOldestMxact,
 				aggressiveMXIDCutoff;
+	double		xid_progress_to_agg_vac = 0;
+	double		mxid_progress_to_agg_vac = 0;
 
 	/* Use mutable copies of freeze age parameters */
 	freeze_min_age = params->freeze_min_age;
@@ -1181,6 +1183,8 @@ vacuum_get_cutoffs(Relation rel, const VacuumParams *params,
 	if (MultiXactIdPrecedes(cutoffs->OldestMxact, cutoffs->MultiXactCutoff))
 		cutoffs->MultiXactCutoff = cutoffs->OldestMxact;
 
+	cutoffs->progress_to_agg_vac = 1;
+
 	/*
 	 * Finally, figure out if caller needs to do an aggressive VACUUM or not.
 	 *
@@ -1200,6 +1204,13 @@ vacuum_get_cutoffs(Relation rel, const VacuumParams *params,
 	if (TransactionIdPrecedesOrEquals(cutoffs->relfrozenxid,
 									  aggressiveXIDCutoff))
 		return true;
+
+	if (freeze_table_age > 0)
+		xid_progress_to_agg_vac = 1 - ((cutoffs->relfrozenxid - aggressiveXIDCutoff) /
+									   (double) freeze_table_age);
+
+
+	Assert(xid_progress_to_agg_vac >= 0 && xid_progress_to_agg_vac <= 1);
 
 	/*
 	 * Similar to the above, determine the table freeze age to use for
@@ -1221,6 +1232,15 @@ vacuum_get_cutoffs(Relation rel, const VacuumParams *params,
 	if (MultiXactIdPrecedesOrEquals(cutoffs->relminmxid,
 									aggressiveMXIDCutoff))
 		return true;
+
+	if (multixact_freeze_table_age > 0)
+		mxid_progress_to_agg_vac = 1 - ((cutoffs->relminmxid - aggressiveMXIDCutoff) /
+										(double) multixact_freeze_table_age);
+
+	Assert(mxid_progress_to_agg_vac >= 0 && mxid_progress_to_agg_vac <= 1);
+
+	cutoffs->progress_to_agg_vac = Max(mxid_progress_to_agg_vac,
+									   xid_progress_to_agg_vac);
 
 	/* Non-aggressive VACUUM */
 	return false;

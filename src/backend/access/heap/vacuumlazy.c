@@ -217,6 +217,9 @@ typedef struct LVRelState
 	BlockNumber next_unskippable_block; /* next unskippable block */
 	bool		next_unskippable_allvis;	/* its visibility status */
 	Buffer		next_unskippable_vmbuffer;	/* buffer containing its VM bit */
+	BlockNumber last_av_block_vacuumed;
+	BlockNumber	av_pages_scanned;
+	BlockNumber av_pages_scanned_max;
 } LVRelState;
 
 /* Struct for saving and restoring vacuum error information. */
@@ -313,6 +316,7 @@ heap_vacuum_rel(Relation rel, VacuumParams *params,
 	BufferUsage startbufferusage = pgBufferUsage;
 	ErrorContextCallback errcallback;
 	char	  **indnames = NULL;
+	PgStat_StatTabEntry *tabstats = NULL;
 
 	verbose = (params->options & VACOPT_VERBOSE) != 0;
 	instrument = (verbose || (AmAutoVacuumWorkerProcess() &&
@@ -467,6 +471,46 @@ heap_vacuum_rel(Relation rel, VacuumParams *params,
 
 	vacrel->skipwithvm = skipwithvm;
 
+	if ((tabstats = pgstat_fetch_stat_tabentry(RelationGetRelid(rel))) != NULL)
+		vacrel->last_av_block_vacuumed = tabstats->last_av_block_vacuumed;
+
+	vacrel->av_pages_scanned = 0;
+
+	if (vacrel->aggressive ||
+		target_freeze_duration == -1 ||
+		!tabstats ||
+		(tabstats && tabstats->early_page_unfreezes > tabstats->vm_page_freezes))
+		vacrel->av_pages_scanned_max = 0;
+	else
+	{
+		double		wasted_work = 0;
+		BlockNumber all_visible,
+					all_frozen;
+		uint64		to_scan;
+
+		visibilitymap_count(vacrel->rel, &all_visible, &all_frozen);
+		to_scan = all_visible - all_frozen;
+
+		/*
+		 * Scan a portion of avnaf pages equal to our progress toward an
+		 * aggressive vacuum. MTODO: this should probably be something more
+		 * like this value cubed.
+		 */
+		to_scan = to_scan * vacrel->cutoffs.progress_to_agg_vac;
+
+		if (tabstats->vm_page_freezes > 0)
+			wasted_work = tabstats->early_page_unfreezes /
+				(double) tabstats->vm_page_freezes;
+		Assert(wasted_work >= 0 && wasted_work <= 1);
+
+		/*
+		 * Scan fewer pages if we are wasting the freezing work.
+		 */
+		to_scan = to_scan * (1 - wasted_work);
+
+		vacrel->av_pages_scanned_max = to_scan;
+	}
+
 	if (verbose)
 	{
 		if (vacrel->aggressive)
@@ -583,14 +627,19 @@ heap_vacuum_rel(Relation rel, VacuumParams *params,
 	 * ANALYZE will consider the remaining LP_DEAD items to be dead "tuples".
 	 * It seems like a good idea to err on the side of not vacuuming again too
 	 * soon in cases where the failsafe prevented significant amounts of heap
-	 * vacuuming.
+	 * vacuuming. MTODO: reset the number of unfreezes and freezes every agg
+	 * vac MTODO: should I reset the AV cursor (and unfreezes and freezes)
+	 * more often than every agg vac? Like every X vacuums where X is the
+	 * multiplier to have scanned all AVnAF pages.
 	 */
 	pgstat_report_vacuum(RelationGetRelid(rel),
 						 rel->rd_rel->relisshared,
 						 Max(vacrel->new_live_tuples, 0),
 						 vacrel->recently_dead_tuples +
 						 vacrel->missed_dead_tuples,
-						 vacrel->vm_page_freezes);
+						 vacrel->vm_page_freezes,
+						 vacrel->aggressive ? 0 :
+						 vacrel->last_av_block_vacuumed);
 	pgstat_progress_end_command();
 
 	if (instrument)
@@ -1140,12 +1189,21 @@ heap_vac_scan_next_block(LVRelState *vacrel, BlockNumber *blkno,
 		 * then.  Skipping such a range might even discourage sequential
 		 * detection.
 		 *
+		 * Because we want to eagerly freeze pages, we may choose not to skip
+		 * this page if we have not yet scanned our quota of all-visible pages
+		 * for this vacuum and the target block is beyond the all-visible page
+		 * scan cursor. Since last_av_block_vacuumed starts at 0, we'll never
+		 * choose to eagerly scan block 0.
+		 *
 		 * This test also enables more frequent relfrozenxid advancement
 		 * during non-aggressive VACUUMs.  If the range has any all-visible
 		 * pages then skipping makes updating relfrozenxid unsafe, which is a
 		 * real downside.
 		 */
-		if (vacrel->next_unskippable_block - next_block >= SKIP_PAGES_THRESHOLD)
+		if (next_block < vacrel->next_unskippable_block &&
+			(vacrel->next_unskippable_block - next_block >= SKIP_PAGES_THRESHOLD ||
+			 vacrel->av_pages_scanned >= vacrel->av_pages_scanned_max ||
+			 next_block <= vacrel->last_av_block_vacuumed))
 		{
 			next_block = vacrel->next_unskippable_block;
 			if (skipsallvis)
@@ -1161,8 +1219,9 @@ heap_vac_scan_next_block(LVRelState *vacrel, BlockNumber *blkno,
 		 * but chose not to.  We know that they are all-visible in the VM,
 		 * otherwise they would've been unskippable.
 		 */
-		*blkno = vacrel->current_block = next_block;
+		*blkno = vacrel->current_block = vacrel->last_av_block_vacuumed = next_block;
 		*all_visible_according_to_vm = true;
+		vacrel->av_pages_scanned++;
 		return true;
 	}
 	else
