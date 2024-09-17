@@ -459,6 +459,14 @@ typedef struct PgStat_StatTabEntry
 	PgStat_Counter analyze_count;
 	TimestampTz last_autoanalyze_time;	/* autovacuum initiated */
 	PgStat_Counter autoanalyze_count;
+
+	/*
+	 * The last all-visible page eagerly scanned by vacuum. In an aggressive
+	 * vacuum, this is reset to block 0. We will always scan at least block 0
+	 * and the next all-visible block regardless of block's visibility status,
+	 * as 0 is the initialization value.
+	 */
+	BlockNumber last_av_block_scanned;
 } PgStat_StatTabEntry;
 
 typedef struct PgStat_WalStats
@@ -625,7 +633,8 @@ extern void pgstat_unlink_relation(Relation rel);
 
 extern void pgstat_report_vacuum(Oid tableoid, bool shared,
 								 PgStat_Counter livetuples, PgStat_Counter deadtuples,
-								 BlockNumber vm_page_freezes);
+								 BlockNumber vm_page_freezes,
+								 BlockNumber last_av_block_scanned);
 extern void pgstat_report_analyze(Relation rel,
 								  PgStat_Counter livetuples, PgStat_Counter deadtuples,
 								  bool resetcounter);
