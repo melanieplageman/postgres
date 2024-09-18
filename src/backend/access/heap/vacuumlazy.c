@@ -762,6 +762,10 @@ heap_vacuum_rel(Relation rel, VacuumParams *params,
 							 orig_rel_pages == 0 ? 100.0 :
 							 100.0 * vacrel->frozen_pages / orig_rel_pages,
 							 (long long) vacrel->tuples_frozen);
+			appendStringInfo(&buf, _("eagerly scanned %d of max %d all-visible pages. last all-visible block scanned: %d.\n"),
+							 vacrel->av_pages_scanned,
+							 vacrel->av_pages_scanned_max,
+							 vacrel->last_av_block_vacuumed);
 			if (vacrel->do_index_vacuuming)
 			{
 				if (vacrel->nindexes == 0 || vacrel->num_index_scans == 0)
