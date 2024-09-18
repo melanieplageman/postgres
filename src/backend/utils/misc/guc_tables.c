@@ -2620,7 +2620,7 @@ struct config_int ConfigureNamesInt[] =
 			GUC_UNIT_S
 		},
 		&target_freeze_duration,
-		1, 1, 518400,
+		100, 1, 518400,
 		NULL, NULL, NULL
 	},
 

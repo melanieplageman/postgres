@@ -249,6 +249,12 @@ typedef struct PruneFreezeResult
 	bool		all_frozen;
 	TransactionId vm_conflict_horizon;
 
+	BlockNumber fpi_eager_page_freezes; /* full pages eagerly frozen bc fpi */
+	BlockNumber age_eager_page_freezes; /* full pages eagerly frozen bc age */
+	BlockNumber noprune_eager_page_freezes;
+	BlockNumber nofrz_age;
+	BlockNumber nofrz_partial;
+
 	/*
 	 * Whether or not the page makes rel truncation unsafe.  This is set to
 	 * 'true', even if the page contains LP_DEAD items.  VACUUM will remove

@@ -691,7 +691,16 @@ CREATE VIEW pg_stat_all_tables AS
             pg_stat_get_vacuum_count(C.oid) AS vacuum_count,
             pg_stat_get_autovacuum_count(C.oid) AS autovacuum_count,
             pg_stat_get_analyze_count(C.oid) AS analyze_count,
-            pg_stat_get_autoanalyze_count(C.oid) AS autoanalyze_count
+            pg_stat_get_autoanalyze_count(C.oid) AS autoanalyze_count,
+            pg_stat_get_vm_page_freezes(C.oid) AS vm_page_freezes,
+            pg_stat_get_pages_with_tuples_frozen(C.oid) AS pages_with_tuples_frozen,
+            pg_stat_get_age_eager_page_freezes(C.oid) AS age_eager_page_freezes,
+            pg_stat_get_fpi_eager_page_freezes(C.oid) AS fpi_eager_page_freezes,
+            pg_stat_get_noprune_eager_page_freezes(C.oid) AS noprune_eager_page_freezes,
+            pg_stat_get_page_unfreezes(C.oid) AS page_unfreezes,
+            pg_stat_get_early_page_unfreezes(C.oid) AS early_page_unfreezes,
+            pg_stat_get_nofrz_age(C.oid) AS nofrz_age,
+            pg_stat_get_nofrz_partial(C.oid) AS nofrz_partial
     FROM pg_class C LEFT JOIN
          pg_index I ON C.oid = I.indrelid
          LEFT JOIN pg_namespace N ON (N.oid = C.relnamespace)
@@ -1178,6 +1187,7 @@ CREATE VIEW pg_stat_wal AS
         w.wal_sync,
         w.wal_write_time,
         w.wal_sync_time,
+        w.lsn_target_freeze_duration,
         w.stats_reset
     FROM pg_stat_get_wal() w;
 

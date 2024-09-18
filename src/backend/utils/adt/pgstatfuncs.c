@@ -107,6 +107,33 @@ PG_STAT_GET_RELENTRY_INT64(tuples_updated)
 /* pg_stat_get_vacuum_count */
 PG_STAT_GET_RELENTRY_INT64(vacuum_count)
 
+/* pg_stat_get_vm_page_freezes */
+PG_STAT_GET_RELENTRY_INT64(vm_page_freezes)
+
+/* pg_stat_get_pages_with_tuples_frozen */
+PG_STAT_GET_RELENTRY_INT64(pages_with_tuples_frozen)
+
+/* pg_stat_get_ */
+PG_STAT_GET_RELENTRY_INT64(age_eager_page_freezes)
+
+/* pg_stat_get_ */
+PG_STAT_GET_RELENTRY_INT64(fpi_eager_page_freezes)
+
+/* pg_stat_get_page_unfreezes */
+PG_STAT_GET_RELENTRY_INT64(page_unfreezes)
+
+/* pg_stat_get_early_page_unfreezes */
+PG_STAT_GET_RELENTRY_INT64(early_page_unfreezes)
+
+/* pg_stat_get_nofrz_age */
+PG_STAT_GET_RELENTRY_INT64(nofrz_age)
+
+/* pg_stat_get_noprune_eager_page_freezes */
+PG_STAT_GET_RELENTRY_INT64(noprune_eager_page_freezes)
+
+/* pg_stat_get_nofrz_partial */
+PG_STAT_GET_RELENTRY_INT64(nofrz_partial)
+
 #define PG_STAT_GET_RELENTRY_TIMESTAMPTZ(stat)					\
 Datum															\
 CppConcat(pg_stat_get_,stat)(PG_FUNCTION_ARGS)					\
@@ -1469,7 +1496,7 @@ pg_stat_get_io(PG_FUNCTION_ARGS)
 Datum
 pg_stat_get_wal(PG_FUNCTION_ARGS)
 {
-#define PG_STAT_GET_WAL_COLS	9
+#define PG_STAT_GET_WAL_COLS	10
 	TupleDesc	tupdesc;
 	Datum		values[PG_STAT_GET_WAL_COLS] = {0};
 	bool		nulls[PG_STAT_GET_WAL_COLS] = {0};
@@ -1494,7 +1521,9 @@ pg_stat_get_wal(PG_FUNCTION_ARGS)
 					   FLOAT8OID, -1, 0);
 	TupleDescInitEntry(tupdesc, (AttrNumber) 8, "wal_sync_time",
 					   FLOAT8OID, -1, 0);
-	TupleDescInitEntry(tupdesc, (AttrNumber) 9, "stats_reset",
+	TupleDescInitEntry(tupdesc, (AttrNumber) 9, "lsn_target_freeze_duration",
+					   PG_LSNOID, -1, 0);
+	TupleDescInitEntry(tupdesc, (AttrNumber) 10, "stats_reset",
 					   TIMESTAMPTZOID, -1, 0);
 
 	BlessTupleDesc(tupdesc);
@@ -1521,7 +1550,8 @@ pg_stat_get_wal(PG_FUNCTION_ARGS)
 	values[6] = Float8GetDatum(((double) wal_stats->wal_write_time) / 1000.0);
 	values[7] = Float8GetDatum(((double) wal_stats->wal_sync_time) / 1000.0);
 
-	values[8] = TimestampTzGetDatum(wal_stats->stat_reset_timestamp);
+	values[8] = LSNGetDatum(wal_stats->lsn_target_freeze_duration);
+	values[9] = TimestampTzGetDatum(wal_stats->stat_reset_timestamp);
 
 	/* Returns the record as Datum */
 	PG_RETURN_DATUM(HeapTupleGetDatum(heap_form_tuple(tupdesc, values, nulls)));

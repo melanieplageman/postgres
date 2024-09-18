@@ -719,18 +719,32 @@ heap_page_prune_and_freeze(Relation relation, Buffer buffer,
 			 * eager freezing?
 			 */
 			if (do_prune && XLogCheckBufferNeedsBackup(buffer))
+			{
 				do_freeze = true;
+				presult->fpi_eager_page_freezes++;
+			}
 			else if (do_hint &&
 					 XLogHintBitIsNeeded() &&
 					 XLogCheckBufferNeedsBackup(buffer))
+			{
 				do_freeze = true;
+				presult->fpi_eager_page_freezes++;
+			}
 			/* Not a brand new page */
 			else if (!(XLogRecPtrIsInvalid(page_lsn)) && lsn_older_than_tfd(page_lsn))
+			{
 				do_freeze = true;
+				presult->age_eager_page_freezes++;
+			}
 			else if (!TransactionIdIsValid(prstate.new_prune_xid) &&
 				!TransactionIdIsValid(((PageHeader) page)->pd_prune_xid) &&
 				cutoffs->wasted_work < 0.5)
+			{
 				do_freeze = true;
+				presult->noprune_eager_page_freezes++;
+			}
+			else
+				presult->nofrz_age++;
 
 			/*
 			 * MTODO: should I also freeze pages that are eligible for eager
@@ -740,6 +754,8 @@ heap_page_prune_and_freeze(Relation relation, Buffer buffer,
 			 * insert mostly and freeze accordingly.
 			 */
 		}
+		else if (prstate.nfrozen > 0 && RelationNeedsWAL(relation))
+			presult->nofrz_partial++;
 	}
 
 	if (do_freeze)

@@ -1248,9 +1248,9 @@ vacuum_get_cutoffs(Relation rel, const VacuumParams *params,
 
 	/* MTODO: this should be refreshed periodically */
 	cutoffs->wasted_work = 0;
-	if (tabstats->page_freezes > 0)
+	if (tabstats->vm_page_freezes > 0)
 		cutoffs->wasted_work = tabstats->early_page_unfreezes /
-			(double) tabstats->page_freezes;
+			(double) tabstats->vm_page_freezes;
 	Assert(cutoffs->wasted_work >= 0 && cutoffs->wasted_work <= 1);
 
 	/* Non-aggressive VACUUM */

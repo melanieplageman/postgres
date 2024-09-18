@@ -476,6 +476,14 @@ typedef struct PgStat_StatTabEntry
 	 * initialization value.
 	 */
 	BlockNumber last_av_block_vacuumed;
+
+	uint64 pages_with_tuples_frozen;
+	uint64 fpi_eager_page_freezes;
+	uint64 age_eager_page_freezes;
+	uint64 noprune_eager_page_freezes;
+
+	uint64 nofrz_partial;
+	uint64 nofrz_age;
 } PgStat_StatTabEntry;
 
 typedef struct PgStat_WalStats
@@ -494,9 +502,11 @@ typedef struct PgStat_WalStats
 	 * The GUC target_freeze_duration translated from a time duration to a LSN
 	 * duration and cached here for easy access. It is updated by bgwriter and
 	 * used by vacuum when determining whether or not a page is likely to stay
-	 * unmodified for at least target_freeze_duration.
+	 * unmodified for at least target_freeze_duration. This is a signed number
+	 * so that we can use -1 to distinguish between a value of 0 and an invalid
+	 * value.
 	 */
-	LSNInterval lsn_target_freeze_duration;
+	PgStat_Counter lsn_target_freeze_duration;
 	TimestampTz stat_reset_timestamp;
 } PgStat_WalStats;
 
@@ -652,7 +662,13 @@ extern void pgstat_unlink_relation(Relation rel);
 extern void pgstat_report_vacuum(Oid tableoid, bool shared,
 								 PgStat_Counter livetuples, PgStat_Counter deadtuples,
 								 BlockNumber vm_page_freezes,
-								 BlockNumber last_av_block_vacuumed);
+								 BlockNumber last_av_block_vacuumed,
+								 BlockNumber pages_with_frozen_tuples,
+								 BlockNumber fpi_eager_page_freezes,
+								 BlockNumber age_eager_page_freezes,
+								 BlockNumber nofrz_age,
+								 BlockNumber nofrz_partial,
+								 BlockNumber noprune_eager_page_freezes);
 extern void pgstat_report_analyze(Relation rel,
 								  PgStat_Counter livetuples, PgStat_Counter deadtuples,
 								  bool resetcounter);

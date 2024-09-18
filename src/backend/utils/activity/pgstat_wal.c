@@ -274,7 +274,7 @@ pgstat_wal_refresh_target_freeze_duration(TimestampTz cur_time, XLogRecPtr cur_l
 	 * the LSNTimeStream is not at capacity.
 	 */
 	if (lower.lsn == InvalidXLogRecPtr)
-		new_lsn_interval = 0;
+		new_lsn_interval = -1;
 	else
 	{
 		Assert(target_time >= lower.time && target_time < upper.time);

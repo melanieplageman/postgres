@@ -210,7 +210,14 @@ pgstat_drop_relation(Relation rel)
 void
 pgstat_report_vacuum(Oid tableoid, bool shared,
 					 PgStat_Counter livetuples, PgStat_Counter deadtuples,
-					 BlockNumber vm_page_freezes, BlockNumber last_av_block_vacuumed)
+					 BlockNumber vm_page_freezes,
+					 BlockNumber last_av_block_vacuumed,
+					 BlockNumber pages_with_frozen_tuples,
+					 BlockNumber fpi_eager_page_freezes,
+					 BlockNumber age_eager_page_freezes,
+					 BlockNumber nofrz_age,
+					 BlockNumber nofrz_partial,
+					 BlockNumber noprune_eager_page_freezes)
 {
 	PgStat_EntryRef *entry_ref;
 	PgStatShared_Relation *shtabentry;
@@ -233,6 +240,13 @@ pgstat_report_vacuum(Oid tableoid, bool shared,
 
 	tabentry->live_tuples = livetuples;
 	tabentry->dead_tuples = deadtuples;
+
+	tabentry->pages_with_tuples_frozen += pages_with_frozen_tuples;
+	tabentry->fpi_eager_page_freezes += fpi_eager_page_freezes;
+	tabentry->age_eager_page_freezes += age_eager_page_freezes;
+	tabentry->nofrz_age += nofrz_age;
+	tabentry->nofrz_partial += nofrz_partial;
+	tabentry->noprune_eager_page_freezes += noprune_eager_page_freezes;
 
 	/*
 	 * It is quite possible that a non-aggressive VACUUM ended up skipping
@@ -406,7 +420,8 @@ pgstat_relation_count_unfreeze(Relation rel,
 
 	lsn_target_freeze_duration = wal_stats->lsn_target_freeze_duration;
 
-	if (new_page_lsn - old_page_lsn < lsn_target_freeze_duration)
+	if (lsn_target_freeze_duration == -1 ||
+		new_page_lsn - old_page_lsn < lsn_target_freeze_duration)
 		counts->early_page_unfreezes++;
 }
 

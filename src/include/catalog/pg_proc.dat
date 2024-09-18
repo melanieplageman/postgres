@@ -5515,10 +5515,58 @@
   proname => 'pg_stat_get_vacuum_count', provolatile => 's', proparallel => 'r',
   prorettype => 'int8', proargtypes => 'oid',
   prosrc => 'pg_stat_get_vacuum_count' },
+
 { oid => '3055', descr => 'statistics: number of auto vacuums for a table',
   proname => 'pg_stat_get_autovacuum_count', provolatile => 's',
   proparallel => 'r', prorettype => 'int8', proargtypes => 'oid',
   prosrc => 'pg_stat_get_autovacuum_count' },
+
+{ oid => '9480', descr => 'statistics: number of pages set all-frozen in the VM for a table',
+  proname => 'pg_stat_get_vm_page_freezes', provolatile => 's',
+  proparallel => 'r', prorettype => 'int8', proargtypes => 'oid',
+  prosrc => 'pg_stat_get_vm_page_freezes' },
+
+{ oid => '9481', descr => 'statistics: number of page unfreezes of pages in a table',
+  proname => 'pg_stat_get_page_unfreezes', provolatile => 's',
+  proparallel => 'r', prorettype => 'int8', proargtypes => 'oid',
+  prosrc => 'pg_stat_get_page_unfreezes' },
+
+{ oid => '9482', descr => 'statistics: number of early page unfreezes of pages in a table',
+  proname => 'pg_stat_get_early_page_unfreezes', provolatile => 's',
+  proparallel => 'r', prorettype => 'int8', proargtypes => 'oid',
+  prosrc => 'pg_stat_get_early_page_unfreezes' },
+
+{ oid => '9483', descr => 'statistics: number of pages with newly frozen tuples',
+  proname => 'pg_stat_get_pages_with_tuples_frozen', provolatile => 's',
+  proparallel => 'r', prorettype => 'int8', proargtypes => 'oid',
+  prosrc => 'pg_stat_get_pages_with_tuples_frozen' },
+
+{ oid => '9484', descr => 'statistics: number of pages eagerly frozen bc of age',
+  proname => 'pg_stat_get_age_eager_page_freezes', provolatile => 's',
+  proparallel => 'r', prorettype => 'int8', proargtypes => 'oid',
+  prosrc => 'pg_stat_get_age_eager_page_freezes' },
+
+{ oid => '9485', descr => 'statistics: number of pages eagerly frozen bc we were doing an FPI',
+  proname => 'pg_stat_get_fpi_eager_page_freezes', provolatile => 's',
+  proparallel => 'r', prorettype => 'int8', proargtypes => 'oid',
+  prosrc => 'pg_stat_get_fpi_eager_page_freezes' },
+
+{ oid => '9486', descr => 'statistics: number of pages with tuples to freeze not eagerly frozen because too recently modified',
+  proname => 'pg_stat_get_nofrz_age', provolatile => 's',
+  proparallel => 'r', prorettype => 'int8', proargtypes => 'oid',
+  prosrc => 'pg_stat_get_nofrz_age' },
+
+{ oid => '9487', descr => 'statistics: number of pages with tuples to freeze not eagerly frozen because whole page would not be all-visible or all-frozen',
+  proname => 'pg_stat_get_nofrz_partial', provolatile => 's',
+  proparallel => 'r', prorettype => 'int8', proargtypes => 'oid',
+  prosrc => 'pg_stat_get_nofrz_partial' },
+
+{ oid => '9488', descr => 'statistics: number of pages eagerly frozen because they had nothing to prune',
+  proname => 'pg_stat_get_noprune_eager_page_freezes', provolatile => 's',
+  proparallel => 'r', prorettype => 'int8', proargtypes => 'oid',
+  prosrc => 'pg_stat_get_noprune_eager_page_freezes' },
+
+
 { oid => '3056', descr => 'statistics: number of manual analyzes for a table',
   proname => 'pg_stat_get_analyze_count', provolatile => 's',
   proparallel => 'r', prorettype => 'int8', proargtypes => 'oid',
@@ -5883,9 +5931,9 @@
 { oid => '1136', descr => 'statistics: information about WAL activity',
   proname => 'pg_stat_get_wal', proisstrict => 'f', provolatile => 's',
   proparallel => 'r', prorettype => 'record', proargtypes => '',
-  proallargtypes => '{int8,int8,numeric,int8,int8,int8,float8,float8,timestamptz}',
-  proargmodes => '{o,o,o,o,o,o,o,o,o}',
-  proargnames => '{wal_records,wal_fpi,wal_bytes,wal_buffers_full,wal_write,wal_sync,wal_write_time,wal_sync_time,stats_reset}',
+  proallargtypes => '{int8,int8,numeric,int8,int8,int8,float8,float8,pg_lsn,timestamptz}',
+  proargmodes => '{o,o,o,o,o,o,o,o,o,o}',
+  proargnames => '{wal_records,wal_fpi,wal_bytes,wal_buffers_full,wal_write,wal_sync,wal_write_time,wal_sync_time,lsn_target_freeze_duration,stats_reset}',
   prosrc => 'pg_stat_get_wal' },
 { oid => '6248', descr => 'statistics: information about WAL prefetching',
   proname => 'pg_stat_get_recovery_prefetch', prorows => '1', proretset => 't',
