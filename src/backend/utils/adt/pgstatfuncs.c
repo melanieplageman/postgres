@@ -106,6 +106,25 @@ PG_STAT_GET_RELENTRY_INT64(tuples_updated)
 /* pg_stat_get_vacuum_count */
 PG_STAT_GET_RELENTRY_INT64(vacuum_count)
 
+PG_STAT_GET_RELENTRY_INT64(aggressive_vacuum_count)
+
+/* pg_stat_get_vm_page_freezes */
+PG_STAT_GET_RELENTRY_INT64(vm_page_freezes)
+
+/* pg_stat_get_pages_with_tuples_frozen */
+PG_STAT_GET_RELENTRY_INT64(pages_with_tuples_frozen)
+
+/* pg_stat_get_ */
+PG_STAT_GET_RELENTRY_INT64(eager_page_freezes)
+
+/* pg_stat_get_nofrz_nofpi */
+PG_STAT_GET_RELENTRY_INT64(nofrz_nofpi)
+
+PG_STAT_GET_RELENTRY_INT64(nofrz_partial)
+
+/* pg_stat_get_noprune_eager_page_freezes */
+PG_STAT_GET_RELENTRY_INT64(extra_av_pages_scanned)
+
 #define PG_STAT_GET_RELENTRY_TIMESTAMPTZ(stat)					\
 Datum															\
 CppConcat(pg_stat_get_,stat)(PG_FUNCTION_ARGS)					\

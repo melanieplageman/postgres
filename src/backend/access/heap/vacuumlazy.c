@@ -195,6 +195,9 @@ typedef struct LVRelState
 	BlockNumber missed_dead_pages;	/* # pages with missed dead tuples */
 	BlockNumber nonempty_pages; /* actually, last nonempty page + 1 */
 	BlockNumber vm_page_freezes;	/* pages newly set frozen in the VM */
+	BlockNumber eager_page_freezes; /* full pages eagerly frozen bc fpi */
+	BlockNumber nofrz_nofpi;
+	BlockNumber nofrz_partial;
 
 	/* Statistics output by us, for table */
 	double		new_rel_tuples; /* new estimated total # of tuples */
@@ -434,6 +437,10 @@ heap_vacuum_rel(Relation rel, VacuumParams *params,
 	vacrel->live_tuples = 0;
 	vacrel->recently_dead_tuples = 0;
 	vacrel->missed_dead_tuples = 0;
+	vacrel->eager_page_freezes = 0;
+	vacrel->vm_page_freezes = 0;
+	vacrel->nofrz_nofpi = 0;
+	vacrel->nofrz_partial = 0;
 
 	/*
 	 * Get cutoffs that determine which deleted tuples are considered DEAD,
@@ -616,12 +623,18 @@ heap_vacuum_rel(Relation rel, VacuumParams *params,
 	 */
 	pgstat_report_vacuum(RelationGetRelid(rel),
 						 rel->rd_rel->relisshared,
+						 vacrel->aggressive,
 						 Max(vacrel->new_live_tuples, 0),
 						 vacrel->recently_dead_tuples +
 						 vacrel->missed_dead_tuples,
 						 vacrel->vm_page_freezes,
-						 vacrel->aggressive ? 0 :
-						 vacrel->last_av_block_scanned);
+						 vacrel->last_av_block_scanned,
+						 vacrel->av_pages_scanned,
+						 vacrel->frozen_pages,
+						 vacrel->eager_page_freezes,
+						 vacrel->nofrz_nofpi,
+						 vacrel->nofrz_partial);
+
 	pgstat_progress_end_command();
 
 	if (instrument)
@@ -1489,6 +1502,10 @@ lazy_scan_prune(LVRelState *vacrel,
 	if (vacrel->nindexes == 0)
 		prune_options |= HEAP_PAGE_PRUNE_MARK_UNUSED_NOW;
 
+	presult.eager_page_freezes = 0;
+	presult.nofrz_nofpi = 0;
+	presult.nofrz_partial = 0;
+
 	heap_page_prune_and_freeze(rel, buf, vacrel->vistest, prune_options,
 							   &vacrel->cutoffs, &presult, PRUNE_VACUUM_SCAN,
 							   &vacrel->offnum,
@@ -1506,6 +1523,10 @@ lazy_scan_prune(LVRelState *vacrel,
 		 */
 		vacrel->frozen_pages++;
 	}
+
+	vacrel->eager_page_freezes += presult.eager_page_freezes;
+	vacrel->nofrz_partial += presult.nofrz_partial;
+	vacrel->nofrz_nofpi += presult.nofrz_nofpi;
 
 	/*
 	 * VACUUM will call heap_page_is_all_visible() during the second pass over
