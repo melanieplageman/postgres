@@ -494,9 +494,11 @@ heap_vacuum_rel(Relation rel, VacuumParams *params,
 		BlockNumber all_visible,
 					all_frozen;
 		uint64		to_scan;
+		uint64		avnaf;
 
 		visibilitymap_count(vacrel->rel, &all_visible, &all_frozen);
-		to_scan = all_visible - all_frozen;
+		avnaf = all_visible - all_frozen;
+		to_scan = avnaf;
 
 		/*
 		 * Scan a portion of avnaf pages equal to our progress toward an
@@ -511,6 +513,12 @@ heap_vacuum_rel(Relation rel, VacuumParams *params,
 		to_scan = to_scan * (1 - vacrel->cutoffs.wasted_work);
 
 		vacrel->av_pages_scanned_max = to_scan;
+		elog(DEBUG1, "%s: AV: %d. AF: %d. AVnAF: %ld. progress to agg vac: %lf. wasted_work: %lf. max_to_scan: %ld.",
+				RelationGetRelationName(vacrel->rel),
+				all_visible,
+				all_frozen,
+				avnaf, vacrel->cutoffs.progress_to_agg_vac,
+				vacrel->cutoffs.wasted_work, to_scan);
 	}
 
 	if (verbose)
