@@ -292,12 +292,13 @@ heap_bitmap_scan_stream_read_next(ReadStream *stream,
 {
 	TBMIterateResult *tbmres = per_buffer_data;
 	BitmapHeapScanDesc *scan = callback_private_data;
+	HeapScanDesc hscan = &scan->heap;
 
 	for (;;)
 	{
 		CHECK_FOR_INTERRUPTS();
 
-		tbm_iterate(&scan->base.iterator, tbmres);
+		tbm_iterate(&scan->heap.rs_base.iterator, tbmres);
 
 		/* no more entries in the bitmap */
 		if (!BlockNumberIsValid(tbmres->blockno))
@@ -311,7 +312,7 @@ heap_bitmap_scan_stream_read_next(ReadStream *stream,
 		 * isolation though, as we need to examine all invisible tuples
 		 * reachable by the index.
 		 */
-		if (!IsolationIsSerializable() && tbmres->blockno >= scan->nblocks)
+		if (!IsolationIsSerializable() && tbmres->blockno >= hscan->rs_nblocks)
 			continue;
 
 		/*
@@ -319,9 +320,9 @@ heap_bitmap_scan_stream_read_next(ReadStream *stream,
 		 * the heap, the bitmap entries don't need rechecking, and all tuples
 		 * on the page are visible to our transaction.
 		 */
-		if (!(scan->base.flags & SO_NEED_TUPLES) &&
+		if (!(hscan->rs_base.rs_flags & SO_NEED_TUPLES) &&
 			!tbmres->recheck &&
-			VM_ALL_VISIBLE(scan->base.rel, tbmres->blockno, &scan->vmbuffer))
+			VM_ALL_VISIBLE(hscan->rs_base.rs_rd, tbmres->blockno, &scan->vmbuffer))
 		{
 			/* can't be lossy in the skip_fetch case */
 			Assert(tbmres->ntuples >= 0);
@@ -462,6 +463,25 @@ initscan(HeapScanDesc scan, ScanKey key, bool keep_startblock)
 	 */
 	if (scan->rs_base.rs_flags & SO_TYPE_SEQSCAN)
 		pgstat_count_heap_scan(scan->rs_base.rs_rd);
+
+	if (scan->rs_base.rs_flags & SO_TYPE_BITMAPSCAN)
+	{
+		BitmapHeapScanDesc *bscan = (BitmapHeapScanDesc *) scan;
+		/*
+		 * Reset empty_tuples_pending, a field only used by bitmap heap scan,
+		 * to avoid incorrectly emitting NULL-filled tuples from a previous
+		 * scan on rescan.
+		 */
+		bscan->empty_tuples_pending = 0;
+		if (BufferIsValid(bscan->vmbuffer))
+			ReleaseBuffer(bscan->vmbuffer);
+		bscan->vmbuffer = InvalidBuffer;
+		if (BufferIsValid(bscan->pvmbuffer))
+			ReleaseBuffer(bscan->pvmbuffer);
+		bscan->pvmbuffer = InvalidBuffer;
+	}
+	scan->rs_cindex = 0;
+	scan->rs_ntuples = 0;
 }
 
 /*
@@ -1106,7 +1126,17 @@ heap_beginscan(Relation relation, Snapshot snapshot,
 	/*
 	 * allocate and initialize scan descriptor
 	 */
-	scan = (HeapScanDesc) palloc(sizeof(HeapScanDescData));
+	if (flags & SO_TYPE_BITMAPSCAN)
+	{
+		BitmapHeapScanDesc *bscan = palloc(sizeof(BitmapHeapScanDesc));
+		bscan->vmbuffer = InvalidBuffer;
+		bscan->pvmbuffer = InvalidBuffer;
+		bscan->empty_tuples_pending = 0;
+		scan = &bscan->heap;
+	}
+	else
+		scan = palloc(sizeof(HeapScanDescData));
+
 
 	scan->rs_base.rs_rd = relation;
 	scan->rs_base.rs_snapshot = snapshot;
@@ -1192,6 +1222,16 @@ heap_beginscan(Relation relation, Snapshot snapshot,
 														  cb,
 														  scan,
 														  0);
+	}
+	else if (scan->rs_base.rs_flags & SO_TYPE_BITMAPSCAN)
+	{
+		scan->rs_read_stream = read_stream_begin_relation(READ_STREAM_DEFAULT,
+														  NULL,
+														  scan->rs_base.rs_rd,
+														  MAIN_FORKNUM,
+														  heap_bitmap_scan_stream_read_next,
+														  scan,
+														  sizeof(TBMIterateResult));
 	}
 
 
@@ -1279,121 +1319,15 @@ heap_endscan(TableScanDesc sscan)
 	if (scan->rs_base.rs_flags & SO_TEMP_SNAPSHOT)
 		UnregisterSnapshot(scan->rs_base.rs_snapshot);
 
-	pfree(scan);
-}
-
-BitmapTableScanDesc *
-heap_beginscan_bm(Relation relation, Snapshot snapshot, uint32 flags)
-{
-	BitmapHeapScanDesc *scan;
-
-	/*
-	 * increment relation ref count while scanning relation
-	 *
-	 * This is just to make really sure the relcache entry won't go away while
-	 * the scan has a pointer to it.  Caller should be holding the rel open
-	 * anyway, so this is redundant in all normal scenarios...
-	 */
-	RelationIncrementReferenceCount(relation);
-	scan = (BitmapHeapScanDesc *) palloc(sizeof(BitmapHeapScanDesc));
-
-	scan->base.rel = relation;
-	scan->base.snapshot = snapshot;
-	scan->base.flags = flags;
-
-	Assert(snapshot && IsMVCCSnapshot(snapshot));
-
-	/* we only need to set this up once */
-	scan->ctup.t_tableOid = RelationGetRelid(relation);
-
-	scan->nblocks = RelationGetNumberOfBlocks(scan->base.rel);
-
-	scan->ctup.t_data = NULL;
-	ItemPointerSetInvalid(&scan->ctup.t_self);
-	scan->cbuf = InvalidBuffer;
-	scan->cblock = InvalidBlockNumber;
-
-	scan->vis_idx = 0;
-	scan->vis_ntuples = 0;
-
-	scan->vmbuffer = InvalidBuffer;
-	scan->pvmbuffer = InvalidBuffer;
-	scan->empty_tuples_pending = 0;
-
-	scan->read_stream = read_stream_begin_relation(READ_STREAM_DEFAULT,
-												   NULL,
-												   scan->base.rel,
-												   MAIN_FORKNUM,
-												   heap_bitmap_scan_stream_read_next,
-												   scan,
-												   sizeof(TBMIterateResult));
-
-	return (BitmapTableScanDesc *) scan;
-}
-
-void
-heap_rescan_bm(BitmapTableScanDesc *sscan)
-{
-	BitmapHeapScanDesc *scan = (BitmapHeapScanDesc *) sscan;
-
-	/* Reset the read stream on rescan. */
-	if (scan->read_stream)
-		read_stream_reset(scan->read_stream);
-
-	if (BufferIsValid(scan->cbuf))
+	if (scan->rs_base.rs_flags & SO_TYPE_BITMAPSCAN)
 	{
-		ReleaseBuffer(scan->cbuf);
-		scan->cbuf = InvalidBuffer;
+		((BitmapHeapScanDesc *) scan)->empty_tuples_pending = 0;
+		if (BufferIsValid(((BitmapHeapScanDesc *) scan)->vmbuffer))
+		{
+			ReleaseBuffer(((BitmapHeapScanDesc *) scan)->vmbuffer);
+			((BitmapHeapScanDesc *) scan)->vmbuffer = InvalidBuffer;
+		}
 	}
-
-	if (BufferIsValid(scan->vmbuffer))
-	{
-		ReleaseBuffer(scan->vmbuffer);
-		scan->vmbuffer = InvalidBuffer;
-	}
-
-	scan->cblock = InvalidBlockNumber;
-
-	if (BufferIsValid(scan->pvmbuffer))
-	{
-		ReleaseBuffer(scan->pvmbuffer);
-		scan->pvmbuffer = InvalidBuffer;
-	}
-
-	/*
-	 * Reset empty_tuples_pending, a field only used by bitmap heap scan, to
-	 * avoid incorrectly emitting NULL-filled tuples from a previous scan on
-	 * rescan.
-	 */
-	scan->empty_tuples_pending = 0;
-
-	scan->nblocks = RelationGetNumberOfBlocks(scan->base.rel);
-
-	scan->ctup.t_data = NULL;
-	ItemPointerSetInvalid(&scan->ctup.t_self);
-}
-
-void
-heap_endscan_bm(BitmapTableScanDesc *sscan)
-{
-	BitmapHeapScanDesc *scan = (BitmapHeapScanDesc *) sscan;
-
-	if (scan->read_stream)
-		read_stream_end(scan->read_stream);
-
-	if (BufferIsValid(scan->cbuf))
-		ReleaseBuffer(scan->cbuf);
-
-	if (BufferIsValid(scan->vmbuffer))
-		ReleaseBuffer(scan->vmbuffer);
-
-	if (BufferIsValid(scan->pvmbuffer))
-		ReleaseBuffer(scan->pvmbuffer);
-
-	/*
-	 * decrement relation reference count and free scan descriptor storage
-	 */
-	RelationDecrementReferenceCount(scan->base.rel);
 
 	pfree(scan);
 }

@@ -100,21 +100,7 @@ typedef struct HeapScanDescData *HeapScanDesc;
 
 typedef struct BitmapHeapScanDesc
 {
-	BitmapTableScanDesc base;
-
-	BlockNumber nblocks;		/* total number of blocks in rel */
-
-	int			vis_idx;		/* current tuple's index in vis_tuples */
-	int			vis_ntuples;	/* number of visible tuples on page */
-	OffsetNumber vis_tuples[MaxHeapTuplesPerPage];	/* their offsets */
-
-	Buffer		cbuf;			/* current buffer in scan, if any */
-	/* NB: if cbuf is not InvalidBuffer, we hold a pin on that buffer */
-	HeapTupleData ctup;			/* current tuple in scan, if any */
-
-	BlockNumber cblock;			/* current block # in scan, if any */
-
-	ReadStream *read_stream;
+	HeapScanDescData heap;
 
 	/*
 	 * These fields are only used for bitmap scans for the "skip fetch"
@@ -319,11 +305,6 @@ extern void heap_prepare_pagescan(TableScanDesc sscan);
 extern void heap_rescan(TableScanDesc sscan, ScanKey key, bool set_params,
 						bool allow_strat, bool allow_sync, bool allow_pagemode);
 extern void heap_endscan(TableScanDesc sscan);
-
-extern BitmapTableScanDesc *heap_beginscan_bm(Relation relation,
-											  Snapshot snapshot, uint32 flags);
-extern void heap_rescan_bm(BitmapTableScanDesc *sscan);
-void		heap_endscan_bm(BitmapTableScanDesc *sscan);
 
 extern HeapTuple heap_getnext(TableScanDesc sscan, ScanDirection direction);
 extern bool heap_getnextslot(TableScanDesc sscan,

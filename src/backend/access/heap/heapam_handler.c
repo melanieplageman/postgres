@@ -2114,7 +2114,7 @@ heapam_estimate_rel_size(Relation rel, int32 *attr_widths,
 
 /*
  * Prepare to fetch / check / return tuples as part of a bitmap heap scan.
- * `scan` needs to have been started via heap_beginscan_bm(). Returns false if
+ * `scan` needs to have been started via heap_beginscan(). Returns false if
  * there are no more blocks in the bitmap, true otherwise. `lossy_pages` is
  * incremented if the block's representation in the bitmap is lossy; otherwise,
  * `exact_pages` is incremented.
@@ -2134,23 +2134,24 @@ heapam_scan_bitmap_next_block(BitmapHeapScanDesc *scan,
 	int			ntup;
 	TBMIterateResult *tbmres;
 	void	   *per_buffer_data;
+	HeapScanDesc hscan = &scan->heap;
 
-	Assert(scan->read_stream);
+	Assert(hscan->rs_read_stream);
 
-	scan->vis_idx = 0;
-	scan->vis_ntuples = 0;
+	hscan->rs_cindex = 0;
+	hscan->rs_ntuples = 0;
 
 	*recheck = true;
 
-	if (BufferIsValid(scan->cbuf))
+	if (BufferIsValid(hscan->rs_cbuf))
 	{
-		ReleaseBuffer(scan->cbuf);
-		scan->cbuf = InvalidBuffer;
+		ReleaseBuffer(hscan->rs_cbuf);
+		hscan->rs_cbuf = InvalidBuffer;
 	}
 
-	scan->cbuf = read_stream_next_buffer(scan->read_stream, &per_buffer_data);
+	hscan->rs_cbuf = read_stream_next_buffer(hscan->rs_read_stream, &per_buffer_data);
 
-	if (BufferIsInvalid(scan->cbuf))
+	if (BufferIsInvalid(hscan->rs_cbuf))
 	{
 		/*
 		 * Bitmap is exhausted. Time to emit empty tuples if relevant. We emit
@@ -2169,24 +2170,24 @@ heapam_scan_bitmap_next_block(BitmapHeapScanDesc *scan,
 
 	tbmres = per_buffer_data;
 
-	Assert(BufferGetBlockNumber(scan->cbuf) == tbmres->blockno);
+	Assert(BufferGetBlockNumber(hscan->rs_cbuf) == tbmres->blockno);
 
 	/* Got a valid block */
 	block = tbmres->blockno;
 	*recheck = tbmres->recheck;
 
-	scan->cblock = tbmres->blockno;
-	scan->vis_ntuples = tbmres->ntuples;
+	hscan->rs_cblock = tbmres->blockno;
+	hscan->rs_ntuples = tbmres->ntuples;
 
-	buffer = scan->cbuf;
-	snapshot = scan->base.snapshot;
+	buffer = hscan->rs_cbuf;
+	snapshot = hscan->rs_base.rs_snapshot;
 
 	ntup = 0;
 
 	/*
 	 * Prune and repair fragmentation for the whole page, if possible.
 	 */
-	heap_page_prune_opt(scan->base.rel, buffer);
+	heap_page_prune_opt(hscan->rs_base.rs_rd, buffer);
 
 	/*
 	 * We must hold share lock on the buffer content while examining tuple
@@ -2214,9 +2215,9 @@ heapam_scan_bitmap_next_block(BitmapHeapScanDesc *scan,
 			HeapTupleData heapTuple;
 
 			ItemPointerSet(&tid, block, offnum);
-			if (heap_hot_search_buffer(&tid, scan->base.rel, buffer, snapshot,
+			if (heap_hot_search_buffer(&tid, hscan->rs_base.rs_rd, buffer, snapshot,
 									   &heapTuple, NULL, true))
-				scan->vis_tuples[ntup++] = ItemPointerGetOffsetNumber(&tid);
+				hscan->rs_vistuples[ntup++] = ItemPointerGetOffsetNumber(&tid);
 		}
 	}
 	else
@@ -2240,16 +2241,16 @@ heapam_scan_bitmap_next_block(BitmapHeapScanDesc *scan,
 				continue;
 			loctup.t_data = (HeapTupleHeader) PageGetItem(page, lp);
 			loctup.t_len = ItemIdGetLength(lp);
-			loctup.t_tableOid = scan->base.rel->rd_id;
+			loctup.t_tableOid = hscan->rs_base.rs_rd->rd_id;
 			ItemPointerSet(&loctup.t_self, block, offnum);
 			valid = HeapTupleSatisfiesVisibility(&loctup, snapshot, buffer);
 			if (valid)
 			{
-				scan->vis_tuples[ntup++] = offnum;
-				PredicateLockTID(scan->base.rel, &loctup.t_self, snapshot,
+				hscan->rs_vistuples[ntup++] = offnum;
+				PredicateLockTID(hscan->rs_base.rs_rd, &loctup.t_self, snapshot,
 								 HeapTupleHeaderGetXmin(loctup.t_data));
 			}
-			HeapCheckForSerializableConflictOut(valid, scan->base.rel, &loctup,
+			HeapCheckForSerializableConflictOut(valid, hscan->rs_base.rs_rd, &loctup,
 												buffer, snapshot);
 		}
 	}
@@ -2257,7 +2258,7 @@ heapam_scan_bitmap_next_block(BitmapHeapScanDesc *scan,
 	LockBuffer(buffer, BUFFER_LOCK_UNLOCK);
 
 	Assert(ntup <= MaxHeapTuplesPerPage);
-	scan->vis_ntuples = ntup;
+	hscan->rs_ntuples = ntup;
 
 	if (tbmres->ntuples >= 0)
 		(*exact_pages)++;
@@ -2281,11 +2282,12 @@ heapam_scan_bitmap_next_block(BitmapHeapScanDesc *scan,
  */
 
 static bool
-heapam_scan_bitmap_next_tuple(BitmapTableScanDesc *sscan,
+heapam_scan_bitmap_next_tuple(TableScanDesc sscan,
 							  TupleTableSlot *slot, bool *recheck,
 							  long *lossy_pages, long *exact_pages)
 {
-	BitmapHeapScanDesc *scan = (BitmapHeapScanDesc *) sscan;
+	BitmapHeapScanDesc *bscan = (BitmapHeapScanDesc *) sscan;
+	HeapScanDesc scan = &bscan->heap;
 	OffsetNumber targoffset;
 	Page		page;
 	ItemId		lp;
@@ -2293,18 +2295,18 @@ heapam_scan_bitmap_next_tuple(BitmapTableScanDesc *sscan,
 	/*
 	 * Out of range?  If so, nothing more to look at on this page
 	 */
-	while (scan->vis_idx < 0 || scan->vis_idx >= scan->vis_ntuples)
+	while (scan->rs_cindex < 0 || scan->rs_cindex >= scan->rs_ntuples)
 	{
 		/*
 		 * Emit empty tuples before advancing to the next block
 		 */
-		if (scan->empty_tuples_pending > 0)
+		if (bscan->empty_tuples_pending > 0)
 		{
 			/*
 			 * If we don't have to fetch the tuple, just return nulls.
 			 */
 			ExecStoreAllNullTuple(slot);
-			scan->empty_tuples_pending--;
+			bscan->empty_tuples_pending--;
 			return true;
 		}
 
@@ -2312,31 +2314,31 @@ heapam_scan_bitmap_next_tuple(BitmapTableScanDesc *sscan,
 		 * Returns false if the bitmap is exhausted and there are no further
 		 * blocks we need to scan.
 		 */
-		if (!heapam_scan_bitmap_next_block(scan, recheck, lossy_pages, exact_pages))
+		if (!heapam_scan_bitmap_next_block(bscan, recheck, lossy_pages, exact_pages))
 			return false;
 	}
 
-	targoffset = scan->vis_tuples[scan->vis_idx];
-	page = BufferGetPage(scan->cbuf);
+	targoffset = scan->rs_vistuples[scan->rs_cindex];
+	page = BufferGetPage(scan->rs_cbuf);
 	lp = PageGetItemId(page, targoffset);
 	Assert(ItemIdIsNormal(lp));
 
-	scan->ctup.t_data = (HeapTupleHeader) PageGetItem(page, lp);
-	scan->ctup.t_len = ItemIdGetLength(lp);
-	scan->ctup.t_tableOid = sscan->rel->rd_id;
-	ItemPointerSet(&scan->ctup.t_self, scan->cblock, targoffset);
+	scan->rs_ctup.t_data = (HeapTupleHeader) PageGetItem(page, lp);
+	scan->rs_ctup.t_len = ItemIdGetLength(lp);
+	scan->rs_ctup.t_tableOid = sscan->rs_rd->rd_id;
+	ItemPointerSet(&scan->rs_ctup.t_self, scan->rs_cblock, targoffset);
 
-	pgstat_count_heap_fetch(sscan->rel);
+	pgstat_count_heap_fetch(sscan->rs_rd);
 
 	/*
 	 * Set up the result slot to point to this tuple.  Note that the slot
 	 * acquires a pin on the buffer.
 	 */
-	ExecStoreBufferHeapTuple(&scan->ctup,
+	ExecStoreBufferHeapTuple(&scan->rs_ctup,
 							 slot,
-							 scan->cbuf);
+							 scan->rs_cbuf);
 
-	scan->vis_idx++;
+	scan->rs_cindex++;
 
 	return true;
 }
@@ -2637,10 +2639,6 @@ static const TableAmRoutine heapam_methods = {
 	.scan_end = heap_endscan,
 	.scan_rescan = heap_rescan,
 	.scan_getnextslot = heap_getnextslot,
-
-	.scan_begin_bm = heap_beginscan_bm,
-	.scan_rescan_bm = heap_rescan_bm,
-	.scan_end_bm = heap_endscan_bm,
 
 	.scan_set_tidrange = heap_set_tidrange,
 	.scan_getnextslot_tidrange = heap_getnextslot_tidrange,

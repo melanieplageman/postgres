@@ -123,7 +123,7 @@ BitmapTableScanSetup(BitmapHeapScanState *node)
 		Assert(node->scandesc);
 		tbm_end_iterate(&node->scandesc->iterator);
 		/* rescan to release any page pin */
-		table_rescan_bm(node->scandesc);
+		table_rescan(node->scandesc, NULL);
 	}
 
 	tbm_begin_iterate(&node->scandesc->iterator, node->tbm, dsa,
@@ -145,7 +145,7 @@ BitmapHeapNext(BitmapHeapScanState *node)
 {
 	ExprContext *econtext;
 	TupleTableSlot *slot;
-	BitmapTableScanDesc *scan;
+	TableScanDesc scan;
 
 	/*
 	 * If we haven't yet performed the underlying index scan, do it, and begin
@@ -274,7 +274,7 @@ ExecReScanBitmapHeapScan(BitmapHeapScanState *node)
 void
 ExecEndBitmapHeapScan(BitmapHeapScanState *node)
 {
-	BitmapTableScanDesc *scanDesc;
+	TableScanDesc scanDesc;
 
 	/*
 	 * extract information from the node
@@ -296,7 +296,7 @@ ExecEndBitmapHeapScan(BitmapHeapScanState *node)
 		/*
 		 * close table scan
 		 */
-		table_endscan_bm(scanDesc);
+		table_endscan(scanDesc);
 	}
 
 	/*

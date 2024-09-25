@@ -345,23 +345,6 @@ typedef struct TableAmRoutine
 								bool set_params, bool allow_strat,
 								bool allow_sync, bool allow_pagemode);
 
-	/*
-	 * Functions to begin, restart, and end a scan of the underlying table of
-	 * a bitmap table scan.
-	 *
-	 * `rel`, `flags`, and `snapshot` serve the same purposes as in the
-	 * standard relation scan_[begin|rescan|end] functions documented above.
-	 */
-	BitmapTableScanDesc *(*scan_begin_bm) (Relation rel,
-										   Snapshot snapshot,
-										   uint32 flags);
-
-	void		(*scan_rescan_bm) (BitmapTableScanDesc *scan);
-
-	/*
-	 * Release resources and deallocate scan.
-	 */
-	void		(*scan_end_bm) (BitmapTableScanDesc *scan);
 
 	/*
 	 * Return next tuple from `scan`, store in slot.
@@ -819,7 +802,7 @@ typedef struct TableAmRoutine
 	 *
 	 * This is an optional callback.
 	 */
-	bool		(*scan_bitmap_next_tuple) (BitmapTableScanDesc *scan,
+	bool		(*scan_bitmap_next_tuple) (TableScanDesc scan,
 										   TupleTableSlot *slot, bool *recheck,
 										   long *lossy_pages, long *exact_pages);
 
@@ -939,10 +922,10 @@ table_beginscan_strat(Relation rel, Snapshot snapshot,
 }
 
 /*
- * table_beginscan_bm is an entry point for setting up a BitmapTableScanDesc
+ * table_beginscan_bm is an entry point for setting up a TableScanDesc
  * for a bitmap table scan.
  */
-static inline BitmapTableScanDesc *
+static inline TableScanDesc
 table_beginscan_bm(Relation rel, Snapshot snapshot,
 				   bool need_tuple)
 {
@@ -951,25 +934,7 @@ table_beginscan_bm(Relation rel, Snapshot snapshot,
 	if (need_tuple)
 		flags |= SO_NEED_TUPLES;
 
-	return rel->rd_tableam->scan_begin_bm(rel, snapshot, flags);
-}
-
-/*
- * Restart a bitmap table scan.
- */
-static inline void
-table_rescan_bm(BitmapTableScanDesc *scan)
-{
-	scan->rel->rd_tableam->scan_rescan_bm(scan);
-}
-
-/*
- * End a bitmap table scan.
- */
-static inline void
-table_endscan_bm(BitmapTableScanDesc *scan)
-{
-	scan->rel->rd_tableam->scan_end_bm(scan);
+	return rel->rd_tableam->scan_begin(rel, snapshot, 0, NULL, NULL, flags);
 }
 
 
@@ -1975,7 +1940,7 @@ table_relation_estimate_size(Relation rel, int32 *attr_widths,
  * lossy; otherwise, `exact_pages` is incremented.
  */
 static inline bool
-table_scan_bitmap_next_tuple(BitmapTableScanDesc *scan,
+table_scan_bitmap_next_tuple(TableScanDesc scan,
 							 TupleTableSlot *slot,
 							 bool *recheck,
 							 long *lossy_pages,
@@ -1989,9 +1954,9 @@ table_scan_bitmap_next_tuple(BitmapTableScanDesc *scan,
 	if (unlikely(TransactionIdIsValid(CheckXidAlive) && !bsysscan))
 		elog(ERROR, "unexpected table_scan_bitmap_next_tuple call during logical decoding");
 
-	return scan->rel->rd_tableam->scan_bitmap_next_tuple(scan,
-														 slot, recheck,
-														 lossy_pages, exact_pages);
+	return scan->rs_rd->rd_tableam->scan_bitmap_next_tuple(scan,
+														   slot, recheck,
+														   lossy_pages, exact_pages);
 }
 
 /*

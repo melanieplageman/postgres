@@ -1801,7 +1801,7 @@ typedef struct ParallelBitmapHeapState
 typedef struct BitmapHeapScanState
 {
 	ScanState	ss;				/* its first field is NodeTag */
-	struct BitmapTableScanDesc *scandesc;
+	struct TableScanDescData *scandesc;
 	ExprState  *bitmapqualorig;
 	TIDBitmap  *tbm;
 	long		exact_pages;
