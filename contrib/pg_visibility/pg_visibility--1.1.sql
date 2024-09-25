@@ -39,7 +39,7 @@ LANGUAGE C STRICT;
 
 -- Show summary of visibility map bits for a relation.
 CREATE FUNCTION pg_visibility_map_summary(regclass,
-    OUT all_visible bigint, OUT all_frozen bigint)
+    OUT all_visible bigint, OUT all_frozen bigint, OUT nblocks bigint)
 RETURNS record
 AS 'MODULE_PATHNAME', 'pg_visibility_map_summary'
 LANGUAGE C STRICT;
