@@ -1091,6 +1091,9 @@ vacuum_get_cutoffs(Relation rel, const VacuumParams *params,
 	cutoffs->relfrozenxid = rel->rd_rel->relfrozenxid;
 	cutoffs->relminmxid = rel->rd_rel->relminmxid;
 
+	/* False for aggressive vacuum */
+	cutoffs->consider_extra_av = false;
+
 	/*
 	 * Acquire OldestXmin.
 	 *
@@ -1201,6 +1204,11 @@ vacuum_get_cutoffs(Relation rel, const VacuumParams *params,
 									  aggressiveXIDCutoff))
 		return true;
 
+	if (TransactionIdIsNormal(cutoffs->relfrozenxid) &&
+		TransactionIdPrecedesOrEquals(cutoffs->relfrozenxid,
+									cutoffs->FreezeLimit))
+		cutoffs->consider_extra_av = true;
+
 	/*
 	 * Similar to the above, determine the table freeze age to use for
 	 * multixacts: as specified by the caller, or the value of the
@@ -1220,7 +1228,15 @@ vacuum_get_cutoffs(Relation rel, const VacuumParams *params,
 		aggressiveMXIDCutoff = FirstMultiXactId;
 	if (MultiXactIdPrecedesOrEquals(cutoffs->relminmxid,
 									aggressiveMXIDCutoff))
+	{
+		cutoffs->consider_extra_av = false;
 		return true;
+	}
+
+	if (TransactionIdIsNormal(cutoffs->relminmxid) &&
+		TransactionIdPrecedesOrEquals(cutoffs->relminmxid,
+									cutoffs->MultiXactCutoff))
+		cutoffs->consider_extra_av = true;
 
 	/* Non-aggressive VACUUM */
 	return false;
