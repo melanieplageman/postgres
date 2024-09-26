@@ -194,6 +194,11 @@ typedef struct LVRelState
 	BlockNumber lpdead_item_pages;	/* # pages with LP_DEAD items */
 	BlockNumber missed_dead_pages;	/* # pages with missed dead tuples */
 	BlockNumber nonempty_pages; /* actually, last nonempty page + 1 */
+	BlockNumber vm_page_freezes;	/* pages newly set frozen in the VM */
+	BlockNumber eager_page_freezes; /* full pages eagerly frozen bc fpi */
+	BlockNumber nofrz_nofpi;
+	BlockNumber nofrz_partial;
+	BlockNumber nofrz_min_age;
 
 	/* Statistics output by us, for table */
 	double		new_rel_tuples; /* new estimated total # of tuples */
@@ -216,6 +221,7 @@ typedef struct LVRelState
 	BlockNumber next_unskippable_block; /* next unskippable block */
 	bool		next_unskippable_allvis;	/* its visibility status */
 	Buffer		next_unskippable_vmbuffer;	/* buffer containing its VM bit */
+	BlockNumber last_av_block_scanned;
 	BlockNumber eager_scanned;
 	BlockNumber cumulative_eager_scanned;
 	BlockNumber eager_scanned_success_frozen;
@@ -441,6 +447,10 @@ heap_vacuum_rel(Relation rel, VacuumParams *params,
 	vacrel->live_tuples = 0;
 	vacrel->recently_dead_tuples = 0;
 	vacrel->missed_dead_tuples = 0;
+	vacrel->eager_page_freezes = 0;
+	vacrel->vm_page_freezes = 0;
+	vacrel->nofrz_nofpi = 0;
+	vacrel->nofrz_partial = 0;
 
 	vacrel->eager_scanned = 0;
 	vacrel->cumulative_eager_scanned = 0;
@@ -610,9 +620,20 @@ heap_vacuum_rel(Relation rel, VacuumParams *params,
 	 */
 	pgstat_report_vacuum(RelationGetRelid(rel),
 						 rel->rd_rel->relisshared,
+						 vacrel->aggressive,
 						 Max(vacrel->new_live_tuples, 0),
 						 vacrel->recently_dead_tuples +
-						 vacrel->missed_dead_tuples);
+						 vacrel->missed_dead_tuples,
+						 vacrel->vm_page_freezes,
+						 vacrel->last_av_block_scanned,
+						 vacrel->cumulative_eager_scanned,
+						 vacrel->frozen_pages,
+						 vacrel->eager_page_freezes,
+						 vacrel->nofrz_nofpi,
+						 vacrel->nofrz_partial,
+						 vacrel->nofrz_min_age,
+						 vacrel->cutoffs.progress_to_agg_vac);
+
 	pgstat_progress_end_command();
 
 	if (instrument)
@@ -740,7 +761,8 @@ heap_vacuum_rel(Relation rel, VacuumParams *params,
 							 vacrel->cumulative_eager_scanned_failed_frozen,
 							 vacrel->cumulative_eager_scanned <= 0 ? 0 :
 							 ((int) ((double) vacrel->cumulative_eager_scanned_success_frozen /
-							 vacrel->cumulative_eager_scanned) * 100));
+							 vacrel->cumulative_eager_scanned) * 100),
+							 vacrel->last_av_block_scanned);
 			if (vacrel->do_index_vacuuming)
 			{
 				if (vacrel->nindexes == 0 || vacrel->num_index_scans == 0)
@@ -1243,7 +1265,7 @@ heap_vac_scan_next_block(LVRelState *vacrel, BlockNumber *blkno,
 		 * but chose not to.  We know that they are all-visible in the VM,
 		 * otherwise they would've been unskippable.
 		 */
-		*blkno = vacrel->current_block = next_block;
+		*blkno = vacrel->current_block = vacrel->last_av_block_scanned = next_block;
 		*all_visible_according_to_vm = true;
 		if (!vacrel->scanning_av_bc_skip_pages_threshold)
 		{
@@ -1535,6 +1557,11 @@ lazy_scan_prune(LVRelState *vacrel,
 	if (vacrel->nindexes == 0)
 		prune_options |= HEAP_PAGE_PRUNE_MARK_UNUSED_NOW;
 
+	presult.eager_page_freezes = 0;
+	presult.nofrz_nofpi = 0;
+	presult.nofrz_partial = 0;
+	presult.nofrz_min_age = 0;
+
 	heap_page_prune_and_freeze(rel, buf, vacrel->vistest, prune_options,
 							   &vacrel->cutoffs, &presult, PRUNE_VACUUM_SCAN,
 							   &vacrel->offnum,
@@ -1556,6 +1583,11 @@ lazy_scan_prune(LVRelState *vacrel,
 	}
 	else if (vacrel->was_eager_scanned)
 		vacrel->eager_scanned_failed_frozen++;
+
+	vacrel->eager_page_freezes += presult.eager_page_freezes;
+	vacrel->nofrz_partial += presult.nofrz_partial;
+	vacrel->nofrz_nofpi += presult.nofrz_nofpi;
+	vacrel->nofrz_min_age += presult.nofrz_min_age;
 
 	/*
 	 * VACUUM will call heap_page_is_all_visible() during the second pass over
@@ -1632,6 +1664,7 @@ lazy_scan_prune(LVRelState *vacrel,
 		{
 			Assert(!TransactionIdIsValid(presult.vm_conflict_horizon));
 			flags |= VISIBILITYMAP_ALL_FROZEN;
+			vacrel->vm_page_freezes++;
 		}
 
 		/*
@@ -1724,6 +1757,7 @@ lazy_scan_prune(LVRelState *vacrel,
 						  vmbuffer, InvalidTransactionId,
 						  VISIBILITYMAP_ALL_VISIBLE |
 						  VISIBILITYMAP_ALL_FROZEN);
+		vacrel->vm_page_freezes++;
 	}
 }
 
@@ -2375,9 +2409,11 @@ lazy_vacuum_heap_page(LVRelState *vacrel, BlockNumber blkno, Buffer buffer,
 		{
 			Assert(!TransactionIdIsValid(visibility_cutoff_xid));
 			flags |= VISIBILITYMAP_ALL_FROZEN;
+			vacrel->vm_page_freezes++;
 		}
 
 		PageSetAllVisible(page);
+
 		visibilitymap_set(vacrel->rel, blkno, buffer, InvalidXLogRecPtr,
 						  vmbuffer, visibility_cutoff_xid, flags);
 	}

@@ -1080,6 +1080,8 @@ vacuum_get_cutoffs(Relation rel, const VacuumParams *params,
 	MultiXactId nextMXID,
 				safeOldestMxact,
 				aggressiveMXIDCutoff;
+	double		xid_progress_to_agg_vac = 0;
+	double		mxid_progress_to_agg_vac = 0;
 
 	/* Use mutable copies of freeze age parameters */
 	freeze_min_age = params->freeze_min_age;
@@ -1184,6 +1186,8 @@ vacuum_get_cutoffs(Relation rel, const VacuumParams *params,
 	if (MultiXactIdPrecedes(cutoffs->OldestMxact, cutoffs->MultiXactCutoff))
 		cutoffs->MultiXactCutoff = cutoffs->OldestMxact;
 
+	cutoffs->progress_to_agg_vac = 1;
+
 	/*
 	 * Finally, figure out if caller needs to do an aggressive VACUUM or not.
 	 *
@@ -1203,6 +1207,20 @@ vacuum_get_cutoffs(Relation rel, const VacuumParams *params,
 	if (TransactionIdPrecedesOrEquals(cutoffs->relfrozenxid,
 									  aggressiveXIDCutoff))
 		return true;
+
+	if (TransactionIdIsNormal(cutoffs->relfrozenxid) &&
+		TransactionIdPrecedesOrEquals(cutoffs->relfrozenxid,
+									cutoffs->FreezeLimit) &&
+		freeze_table_age > freeze_min_age &&
+		freeze_min_age > 0)
+	{
+		int32 distance_from_agg_vac = (int32) (cutoffs->relfrozenxid - aggressiveXIDCutoff);
+		if (distance_from_agg_vac < freeze_table_age - freeze_min_age)
+			xid_progress_to_agg_vac = 1 - (double) distance_from_agg_vac /
+				(freeze_table_age - freeze_min_age);
+	}
+
+	Assert(xid_progress_to_agg_vac >= 0 && xid_progress_to_agg_vac <= 1);
 
 	if (TransactionIdIsNormal(cutoffs->relfrozenxid) &&
 		TransactionIdPrecedesOrEquals(cutoffs->relfrozenxid,
@@ -1232,6 +1250,24 @@ vacuum_get_cutoffs(Relation rel, const VacuumParams *params,
 		cutoffs->consider_extra_av = false;
 		return true;
 	}
+
+	if (MultiXactIdIsValid(cutoffs->relminmxid) &&
+		MultiXactIdPrecedesOrEquals(cutoffs->relminmxid,
+									cutoffs->MultiXactCutoff) &&
+		multixact_freeze_table_age > multixact_freeze_min_age &&
+		multixact_freeze_min_age > 0)
+	{
+		int32 distance_from_agg_vac = (int32) (cutoffs->relminmxid - aggressiveMXIDCutoff);
+		if (distance_from_agg_vac < multixact_freeze_table_age - multixact_freeze_min_age)
+			mxid_progress_to_agg_vac = 1 - ((double) distance_from_agg_vac /
+											(multixact_freeze_table_age -
+											multixact_freeze_min_age));
+	}
+
+	Assert(mxid_progress_to_agg_vac >= 0 && mxid_progress_to_agg_vac <= 1);
+
+	cutoffs->progress_to_agg_vac = Max(mxid_progress_to_agg_vac,
+									   xid_progress_to_agg_vac);
 
 	if (TransactionIdIsNormal(cutoffs->relminmxid) &&
 		TransactionIdPrecedesOrEquals(cutoffs->relminmxid,

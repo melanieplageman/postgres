@@ -208,8 +208,17 @@ pgstat_drop_relation(Relation rel)
  * Report that the table was just vacuumed and flush IO statistics.
  */
 void
-pgstat_report_vacuum(Oid tableoid, bool shared,
-					 PgStat_Counter livetuples, PgStat_Counter deadtuples)
+pgstat_report_vacuum(Oid tableoid, bool shared, bool aggressive,
+					 PgStat_Counter livetuples, PgStat_Counter deadtuples,
+					 BlockNumber vm_page_freezes,
+					 BlockNumber last_av_block_scanned,
+					 BlockNumber extra_av_pages_scanned,
+					 BlockNumber pages_with_tuples_frozen,
+					 BlockNumber eager_page_freezes,
+					 BlockNumber nofrz_nofpi,
+					 BlockNumber nofrz_partial,
+					 BlockNumber nofrz_min_age,
+					 double progress_to_agg_vac)
 {
 	PgStat_EntryRef *entry_ref;
 	PgStatShared_Relation *shtabentry;
@@ -233,6 +242,17 @@ pgstat_report_vacuum(Oid tableoid, bool shared,
 	tabentry->live_tuples = livetuples;
 	tabentry->dead_tuples = deadtuples;
 
+	tabentry->vm_page_freezes += vm_page_freezes;
+	tabentry->last_av_block_scanned = aggressive ? 0 : last_av_block_scanned;
+	tabentry->extra_av_pages_scanned += extra_av_pages_scanned;
+	tabentry->pages_with_tuples_frozen += pages_with_tuples_frozen;
+	tabentry->eager_page_freezes += eager_page_freezes;
+	tabentry->nofrz_nofpi += nofrz_nofpi;
+	tabentry->nofrz_min_age += nofrz_min_age;
+	tabentry->nofrz_partial += nofrz_partial;
+	if (aggressive)
+		tabentry->aggressive_vacuum_count++;
+
 	/*
 	 * It is quite possible that a non-aggressive VACUUM ended up skipping
 	 * various pages, however, we'll zero the insert counter here regardless.
@@ -255,6 +275,9 @@ pgstat_report_vacuum(Oid tableoid, bool shared,
 		tabentry->last_vacuum_time = ts;
 		tabentry->vacuum_count++;
 	}
+
+	tabentry->vm_page_freezes += vm_page_freezes;
+	tabentry->progress_to_agg_vac = progress_to_agg_vac * 100;
 
 	pgstat_unlock_entry(entry_ref);
 
