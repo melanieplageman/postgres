@@ -199,6 +199,7 @@ typedef struct LVRelState
 	BlockNumber nofrz_nofpi;
 	BlockNumber nofrz_partial;
 	BlockNumber nofrz_min_age;
+	BlockNumber nofrz_eager_scanned_min_age;
 
 	/* Statistics output by us, for table */
 	double		new_rel_tuples; /* new estimated total # of tuples */
@@ -228,7 +229,6 @@ typedef struct LVRelState
 	BlockNumber cumulative_eager_scanned_success_frozen;
 	BlockNumber eager_scanned_failed_frozen;
 	BlockNumber cumulative_eager_scanned_failed_frozen;
-	bool was_eager_scanned;
 	bool eager_scan_enabled;
 	bool scanning_av_bc_skip_pages_threshold;
 } LVRelState;
@@ -451,6 +451,8 @@ heap_vacuum_rel(Relation rel, VacuumParams *params,
 	vacrel->vm_page_freezes = 0;
 	vacrel->nofrz_nofpi = 0;
 	vacrel->nofrz_partial = 0;
+	vacrel->nofrz_eager_scanned_min_age = 0;
+	vacrel->nofrz_min_age = 0;
 
 	vacrel->eager_scanned = 0;
 	vacrel->cumulative_eager_scanned = 0;
@@ -460,7 +462,6 @@ heap_vacuum_rel(Relation rel, VacuumParams *params,
 	vacrel->cumulative_eager_scanned_failed_frozen = 0;
 
 	vacrel->scanning_av_bc_skip_pages_threshold = false;
-	vacrel->was_eager_scanned = false;
 
 	/*
 	 * Get cutoffs that determine which deleted tuples are considered DEAD,
@@ -742,11 +743,12 @@ heap_vacuum_rel(Relation rel, VacuumParams *params,
 								 _("new relminmxid: %u, which is %d MXIDs ahead of previous value\n"),
 								 vacrel->NewRelminMxid, diff);
 			}
-			appendStringInfo(&buf, _("frozen: %u pages from table (%.2f%% of total) had %lld tuples frozen\n"),
+			appendStringInfo(&buf, _("frozen: %u pages from table (%.2f%% of total) had %lld tuples frozen. %d pages contained no tuples older than vacuum_freeze_min_age\n"),
 							 vacrel->frozen_pages,
 							 orig_rel_pages == 0 ? 100.0 :
 							 100.0 * vacrel->frozen_pages / orig_rel_pages,
-							 (long long) vacrel->tuples_frozen);
+							 (long long) vacrel->tuples_frozen,
+							 vacrel->nofrz_min_age);
 			appendStringInfo(&buf, _("vacuum start: all-visible pages: %d, all-frozen pages: %d, pages: %d.\nvacuum end: all-visible pages: %d, all-frozen pages: %d. pages: %d.\n"),
 							 orig_rel_allvisible,
 							 orig_rel_allfrozen,
@@ -754,11 +756,12 @@ heap_vacuum_rel(Relation rel, VacuumParams *params,
 							 new_rel_allvisible,
 							 new_rel_allfrozen,
 							 new_rel_pages);
-			appendStringInfo(&buf, _("eagerly scanned: %d of %d all-visible not all-frozen pages in rel. success freezing: %d. failed freezing: %d. success rate: %d%%. last all-visible block scanned: %d.\n"),
+			appendStringInfo(&buf, _("eagerly scanned: %d of %d all-visible not all-frozen pages in rel. success freezing: %d. failed freezing: %d. eager scanned pages with no tuples older than min age: %d. success rate: %d%%. last all-visible block scanned: %d.\n"),
 							 vacrel->cumulative_eager_scanned,
 							 orig_rel_allvisible - orig_rel_allfrozen,
 							 vacrel->cumulative_eager_scanned_success_frozen,
 							 vacrel->cumulative_eager_scanned_failed_frozen,
+							 vacrel->nofrz_eager_scanned_min_age,
 							 vacrel->cumulative_eager_scanned <= 0 ? 0 :
 							 ((int) ((double) vacrel->cumulative_eager_scanned_success_frozen /
 							 vacrel->cumulative_eager_scanned) * 100),
@@ -1163,7 +1166,7 @@ heap_vac_scan_next_block(LVRelState *vacrel, BlockNumber *blkno,
 
 	/* relies on InvalidBlockNumber + 1 overflowing to 0 on first call */
 	next_block = vacrel->current_block + 1;
-	vacrel->was_eager_scanned = false;
+	vacrel->cutoffs.was_eager_scanned = false;
 
 	/* Have we reached the end of the relation? */
 	if (next_block >= vacrel->rel_pages)
@@ -1270,7 +1273,7 @@ heap_vac_scan_next_block(LVRelState *vacrel, BlockNumber *blkno,
 		if (!vacrel->scanning_av_bc_skip_pages_threshold)
 		{
 			vacrel->eager_scanned++;
-			vacrel->was_eager_scanned = true;
+			vacrel->cutoffs.was_eager_scanned = true;
 		}
 		return true;
 	}
@@ -1561,6 +1564,7 @@ lazy_scan_prune(LVRelState *vacrel,
 	presult.nofrz_nofpi = 0;
 	presult.nofrz_partial = 0;
 	presult.nofrz_min_age = 0;
+	presult.nofrz_eager_scanned_min_age = 0;
 
 	heap_page_prune_and_freeze(rel, buf, vacrel->vistest, prune_options,
 							   &vacrel->cutoffs, &presult, PRUNE_VACUUM_SCAN,
@@ -1578,16 +1582,17 @@ lazy_scan_prune(LVRelState *vacrel,
 		 * (don't confuse that with pages newly set all-frozen in VM).
 		 */
 		vacrel->frozen_pages++;
-		if (vacrel->was_eager_scanned)
+		if (vacrel->cutoffs.was_eager_scanned)
 			vacrel->eager_scanned_success_frozen++;
 	}
-	else if (vacrel->was_eager_scanned)
+	else if (vacrel->cutoffs.was_eager_scanned)
 		vacrel->eager_scanned_failed_frozen++;
 
 	vacrel->eager_page_freezes += presult.eager_page_freezes;
 	vacrel->nofrz_partial += presult.nofrz_partial;
 	vacrel->nofrz_nofpi += presult.nofrz_nofpi;
 	vacrel->nofrz_min_age += presult.nofrz_min_age;
+	vacrel->nofrz_eager_scanned_min_age += presult.nofrz_eager_scanned_min_age;
 
 	/*
 	 * VACUUM will call heap_page_is_all_visible() during the second pass over

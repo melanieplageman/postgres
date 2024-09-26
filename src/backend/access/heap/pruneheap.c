@@ -734,6 +734,8 @@ heap_page_prune_and_freeze(Relation relation, Buffer buffer,
 
 			if (!do_freeze)
 				presult->nofrz_min_age++;
+			if (!do_freeze && cutoffs->was_eager_scanned)
+				presult->nofrz_eager_scanned_min_age++;
 		}
 	}
 

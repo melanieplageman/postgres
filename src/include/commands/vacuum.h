@@ -279,6 +279,7 @@ struct VacuumCutoffs
 
 	double		progress_to_agg_vac;
 	bool consider_extra_av;
+	bool was_eager_scanned;
 };
 
 /*

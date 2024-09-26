@@ -1093,6 +1093,8 @@ vacuum_get_cutoffs(Relation rel, const VacuumParams *params,
 	cutoffs->relfrozenxid = rel->rd_rel->relfrozenxid;
 	cutoffs->relminmxid = rel->rd_rel->relminmxid;
 
+	cutoffs->was_eager_scanned = false;
+
 	/* False for aggressive vacuum */
 	cutoffs->consider_extra_av = false;
 

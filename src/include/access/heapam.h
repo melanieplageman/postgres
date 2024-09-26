@@ -266,6 +266,7 @@ typedef struct PruneFreezeResult
 	 * criteria triggered.
 	 */
 	BlockNumber nofrz_min_age;
+	BlockNumber nofrz_eager_scanned_min_age;
 
 	/*
 	 * Whether or not the page makes rel truncation unsafe.  This is set to
