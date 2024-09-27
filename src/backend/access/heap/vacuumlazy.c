@@ -707,6 +707,11 @@ heap_vacuum_rel(Relation rel, VacuumParams *params,
 							 vacrel->relnamespace,
 							 vacrel->relname,
 							 vacrel->num_index_scans);
+			appendStringInfo(&buf, _("vacuum start: %s. vacuum end: %s. duration: %ld seconds\n"),
+							 timestamptz_to_str(starttime),
+							 timestamptz_to_str(endtime),
+							 secs_dur
+							 );
 			appendStringInfo(&buf, _("pages: %u removed, %u remain, %u scanned (%.2f%% of total)\n"),
 							 vacrel->removed_pages,
 							 new_rel_pages,
