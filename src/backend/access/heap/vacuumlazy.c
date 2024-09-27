@@ -633,6 +633,7 @@ heap_vacuum_rel(Relation rel, VacuumParams *params,
 						 vacrel->nofrz_nofpi,
 						 vacrel->nofrz_partial,
 						 vacrel->nofrz_min_age,
+						 vacrel->nofrz_eager_scanned_min_age,
 						 vacrel->cutoffs.progress_to_agg_vac);
 
 	pgstat_progress_end_command();
@@ -733,6 +734,15 @@ heap_vacuum_rel(Relation rel, VacuumParams *params,
 								vacrel->cutoffs.relfrozenxid);
 				appendStringInfo(&buf,
 								 _("new relfrozenxid: %u, which is %d XIDs ahead of previous value\n"),
+								 vacrel->NewRelfrozenXid, diff);
+			}
+			else
+			{
+				diff = (int32) (vacrel->NewRelfrozenXid -
+								vacrel->cutoffs.relfrozenxid);
+				appendStringInfo(&buf,
+								 _("same relfrozenxid: %u, but oldest unfrozen XID in scanned pages was %u, which is %d XIDs ahead of relfrozenxid\n"),
+								 vacrel->cutoffs.relfrozenxid,
 								 vacrel->NewRelfrozenXid, diff);
 			}
 			if (minmulti_updated)

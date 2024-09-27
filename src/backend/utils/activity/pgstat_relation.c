@@ -218,6 +218,7 @@ pgstat_report_vacuum(Oid tableoid, bool shared, bool aggressive,
 					 BlockNumber nofrz_nofpi,
 					 BlockNumber nofrz_partial,
 					 BlockNumber nofrz_min_age,
+					 BlockNumber nofrz_eager_scanned_min_age,
 					 double progress_to_agg_vac)
 {
 	PgStat_EntryRef *entry_ref;
@@ -249,6 +250,7 @@ pgstat_report_vacuum(Oid tableoid, bool shared, bool aggressive,
 	tabentry->eager_page_freezes += eager_page_freezes;
 	tabentry->nofrz_nofpi += nofrz_nofpi;
 	tabentry->nofrz_min_age += nofrz_min_age;
+	tabentry->nofrz_eager_scanned_min_age += nofrz_eager_scanned_min_age;
 	tabentry->nofrz_partial += nofrz_partial;
 	if (aggressive)
 		tabentry->aggressive_vacuum_count++;
