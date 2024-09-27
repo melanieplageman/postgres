@@ -167,6 +167,7 @@ typedef struct Counters
 	int64		shared_blks_hit;	/* # of shared buffer hits */
 	int64		shared_blks_read;	/* # of shared disk blocks read */
 	int64		shared_blks_dirtied;	/* # of shared disk blocks dirtied */
+	int64		shared_blks_dirtied_at_all;	/* # of shared disk blocks dirtied at all*/
 	int64		shared_blks_written;	/* # of shared disk blocks written */
 	int64		local_blks_hit; /* # of local buffer hits */
 	int64		local_blks_read;	/* # of local disk blocks read */
@@ -1434,6 +1435,7 @@ pgss_store(const char *query, uint64 queryId,
 		entry->counters.shared_blks_hit += bufusage->shared_blks_hit;
 		entry->counters.shared_blks_read += bufusage->shared_blks_read;
 		entry->counters.shared_blks_dirtied += bufusage->shared_blks_dirtied;
+		entry->counters.shared_blks_dirtied_at_all += bufusage->shared_blks_dirtied_at_all;
 		entry->counters.shared_blks_written += bufusage->shared_blks_written;
 		entry->counters.local_blks_hit += bufusage->local_blks_hit;
 		entry->counters.local_blks_read += bufusage->local_blks_read;

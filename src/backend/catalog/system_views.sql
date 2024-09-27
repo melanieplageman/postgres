@@ -700,7 +700,7 @@ CREATE VIEW pg_stat_all_tables AS
             pg_stat_get_nofrz_partial(C.oid) AS nofrz_partial,
             pg_stat_get_nofrz_min_age(C.oid) AS nofrz_min_age,
             pg_stat_get_nofrz_eager_scanned_min_age(C.oid) AS nofrz_eager_scanned_min_age,
-            pg_stat_get_eager_scanned_hit_threshold(C.oid) AS eager_scanned_hit_threshold,
+            pg_stat_get_eager_scan_hit_threshold(C.oid) AS eager_scanned_hit_threshold,
             pg_stat_get_progress_to_agg_vac(C.oid) AS progress_to_agg_vac,
             pg_stat_get_extra_av_pages_scanned(C.oid) AS extra_av_pages_scanned
     FROM pg_class C LEFT JOIN

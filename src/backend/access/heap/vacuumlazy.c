@@ -232,6 +232,8 @@ typedef struct LVRelState
 	bool eager_scan_enabled;
 	bool scanning_av_bc_skip_pages_threshold;
 	BlockNumber eager_scan_hit_threshold;
+
+	TransactionId newest_xmin;
 } LVRelState;
 
 /* Struct for saving and restoring vacuum error information. */
@@ -330,6 +332,7 @@ heap_vacuum_rel(Relation rel, VacuumParams *params,
 	WalUsage	startwalusage = pgWalUsage;
 	BufferUsage startbufferusage = pgBufferUsage;
 	ErrorContextCallback errcallback;
+	TransactionId oldest_unfrozen_xid_seen;
 	char	  **indnames = NULL;
 
 	verbose = (params->options & VACOPT_VERBOSE) != 0;
@@ -424,6 +427,8 @@ heap_vacuum_rel(Relation rel, VacuumParams *params,
 		/* Default/auto, make all decisions dynamically */
 		Assert(params->index_cleanup == VACOPTVALUE_AUTO);
 	}
+
+	pgBufferUsage.vacuum_delay_time_ms = 0;
 
 	/* Initialize page counters explicitly (be tidy) */
 	vacrel->scanned_pages = 0;
@@ -579,6 +584,8 @@ heap_vacuum_rel(Relation rel, VacuumParams *params,
 		   MultiXactIdPrecedesOrEquals(vacrel->aggressive ? vacrel->cutoffs.MultiXactCutoff :
 									   vacrel->cutoffs.relminmxid,
 									   vacrel->NewRelminMxid));
+
+	oldest_unfrozen_xid_seen = vacrel->NewRelfrozenXid;
 	if (vacrel->skippedallvis)
 	{
 		/*
@@ -657,11 +664,13 @@ heap_vacuum_rel(Relation rel, VacuumParams *params,
 			StringInfoData buf;
 			char	   *msgfmt;
 			int32		diff;
+			int32		diff2;
 			double		read_rate = 0,
 						write_rate = 0;
 			int64		total_blks_hit;
 			int64		total_blks_read;
 			int64		total_blks_dirtied;
+			int64		total_blks_dirtied_at_all;
 
 			TimestampDifference(starttime, endtime, &secs_dur, &usecs_dur);
 			memset(&walusage, 0, sizeof(WalUsage));
@@ -675,6 +684,7 @@ heap_vacuum_rel(Relation rel, VacuumParams *params,
 				bufferusage.local_blks_read;
 			total_blks_dirtied = bufferusage.shared_blks_dirtied +
 				bufferusage.local_blks_dirtied;
+			total_blks_dirtied_at_all = bufferusage.shared_blks_dirtied_at_all;
 
 			initStringInfo(&buf);
 			if (verbose)
@@ -747,12 +757,17 @@ heap_vacuum_rel(Relation rel, VacuumParams *params,
 			}
 			else
 			{
-				diff = (int32) (vacrel->NewRelfrozenXid -
+				diff = (int32) (oldest_unfrozen_xid_seen -
 								vacrel->cutoffs.relfrozenxid);
+				diff2 = (int32) (oldest_unfrozen_xid_seen -
+						vacrel->cutoffs.FreezeLimit);
 				appendStringInfo(&buf,
-								 _("same relfrozenxid: %u, but oldest unfrozen XID in scanned pages was %u, which is %d XIDs ahead of relfrozenxid\n"),
+								 _("same relfrozenxid: %u, but oldest unfrozen XID in scanned pages was %u, which is %d XIDs from relfrozenxid and %d XIDs from FreezeLimit (which was %u).\n"),
 								 vacrel->cutoffs.relfrozenxid,
-								 vacrel->NewRelfrozenXid, diff);
+								 oldest_unfrozen_xid_seen,
+								 diff,
+								 diff2,
+								 vacrel->cutoffs.FreezeLimit);
 			}
 			if (minmulti_updated)
 			{
@@ -762,12 +777,17 @@ heap_vacuum_rel(Relation rel, VacuumParams *params,
 								 _("new relminmxid: %u, which is %d MXIDs ahead of previous value\n"),
 								 vacrel->NewRelminMxid, diff);
 			}
-			appendStringInfo(&buf, _("frozen: %u pages from table (%.2f%% of total) had %lld tuples frozen. %d pages contained no tuples older than vacuum_freeze_min_age\n"),
+			appendStringInfo(&buf, _("frozen: %u pages from table (%.2f%% of total) had %lld tuples frozen. %d pages had no tuples < freeze_min_age\n"),
 							 vacrel->frozen_pages,
 							 orig_rel_pages == 0 ? 100.0 :
 							 100.0 * vacrel->frozen_pages / orig_rel_pages,
 							 (long long) vacrel->tuples_frozen,
 							 vacrel->nofrz_min_age);
+
+			diff = (int32) (vacrel->newest_xmin -
+					vacrel->cutoffs.FreezeLimit);
+			appendStringInfo(&buf, _("newest live tuple's xmin: %u. FreezeLimit: %u. distance from FreezeLimit: %d. \n"),
+							 vacrel->newest_xmin, vacrel->cutoffs.FreezeLimit, diff);
 			appendStringInfo(&buf, _("vacuum start: all-visible pages: %d, all-frozen pages: %d, pages: %d.\nvacuum end: all-visible pages: %d, all-frozen pages: %d. pages: %d.\n"),
 							 orig_rel_allvisible,
 							 orig_rel_allfrozen,
@@ -775,7 +795,7 @@ heap_vacuum_rel(Relation rel, VacuumParams *params,
 							 new_rel_allvisible,
 							 new_rel_allfrozen,
 							 new_rel_pages);
-			appendStringInfo(&buf, _("eagerly scanned: %d of %d AVnAF pages in rel. success freezing: %d. failed freezing: %d. eager scanned pages with 0 tuples < min age: %d. success rate: %d%%. # times hit eager scan threshold: %d. last AV block scanned: %d.\n"),
+			appendStringInfo(&buf, _("eagerly scanned: %d of %d AVnAF pages in rel. success freezing: %d. failed freezing: %d.\neager scanned pages with no tuples < min age: %d. success rate: %d%%. # times hit eager scan threshold: %d. last AV block scanned: %d.\n"),
 							 vacrel->cumulative_eager_scanned,
 							 orig_rel_allvisible - orig_rel_allfrozen,
 							 vacrel->cumulative_eager_scanned_success_frozen,
@@ -829,8 +849,8 @@ heap_vacuum_rel(Relation rel, VacuumParams *params,
 				double		read_ms = (double) (pgStatBlockReadTime - startreadtime) / 1000;
 				double		write_ms = (double) (pgStatBlockWriteTime - startwritetime) / 1000;
 
-				appendStringInfo(&buf, _("I/O timings: read: %.3f ms, write: %.3f ms\n"),
-								 read_ms, write_ms);
+				appendStringInfo(&buf, _("I/O timings: read: %.3f ms, write: %.3f ms. approx time spent in vacuum delay: %ld.\n"),
+								 read_ms, write_ms, (int64) pgBufferUsage.vacuum_delay_time_ms);
 			}
 			if (secs_dur > 0 || usecs_dur > 0)
 			{
@@ -842,10 +862,11 @@ heap_vacuum_rel(Relation rel, VacuumParams *params,
 			appendStringInfo(&buf, _("avg read rate: %.3f MB/s, avg write rate: %.3f MB/s\n"),
 							 read_rate, write_rate);
 			appendStringInfo(&buf,
-							 _("buffer usage: %lld hits, %lld reads, %lld dirtied\n"),
+							 _("buffer usage: %lld hits, %lld reads, %lld newly dirtied, %lld dirtied.\n"),
 							 (long long) total_blks_hit,
 							 (long long) total_blks_read,
-							 (long long) total_blks_dirtied);
+							 (long long) total_blks_dirtied,
+							 (long long) total_blks_dirtied_at_all);
 			appendStringInfo(&buf,
 							 _("WAL usage: %lld records, %lld full page images, %llu bytes\n"),
 							 (long long) walusage.wal_records,
@@ -868,6 +889,7 @@ heap_vacuum_rel(Relation rel, VacuumParams *params,
 		if (instrument)
 			pfree(indnames[i]);
 	}
+	pgBufferUsage.vacuum_delay_time_ms = 0;
 }
 
 /*
@@ -1614,6 +1636,11 @@ lazy_scan_prune(LVRelState *vacrel,
 	vacrel->nofrz_nofpi += presult.nofrz_nofpi;
 	vacrel->nofrz_min_age += presult.nofrz_min_age;
 	vacrel->nofrz_eager_scanned_min_age += presult.nofrz_eager_scanned_min_age;
+
+	if (TransactionIdIsValid(presult.vm_conflict_horizon) &&
+		TransactionIdFollows(presult.vm_conflict_horizon,
+			vacrel->newest_xmin))
+		vacrel->newest_xmin = presult.vm_conflict_horizon;
 
 	/*
 	 * VACUUM will call heap_page_is_all_visible() during the second pass over
