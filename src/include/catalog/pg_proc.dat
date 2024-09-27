@@ -5571,6 +5571,11 @@
   prorettype => 'int8', proargtypes => 'oid',
   prosrc => 'pg_stat_get_nofrz_eager_scanned_min_age' },
 
+{ oid => '9492', descr => 'stats',
+  proname => 'pg_stat_get_eager_scan_hit_threshold', provolatile => 's', proparallel => 'r',
+  prorettype => 'int8', proargtypes => 'oid',
+  prosrc => 'pg_stat_get_eager_scan_hit_threshold' },
+
 { oid => '3056', descr => 'statistics: number of manual analyzes for a table',
   proname => 'pg_stat_get_analyze_count', provolatile => 's',
   proparallel => 'r', prorettype => 'int8', proargtypes => 'oid',

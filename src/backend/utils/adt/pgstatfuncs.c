@@ -123,6 +123,7 @@ PG_STAT_GET_RELENTRY_INT64(eager_page_freezes)
 PG_STAT_GET_RELENTRY_INT64(nofrz_nofpi)
 
 PG_STAT_GET_RELENTRY_INT64(nofrz_min_age)
+PG_STAT_GET_RELENTRY_INT64(eager_scan_hit_threshold)
 PG_STAT_GET_RELENTRY_INT64(nofrz_eager_scanned_min_age)
 
 PG_STAT_GET_RELENTRY_INT64(nofrz_partial)

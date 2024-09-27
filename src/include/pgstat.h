@@ -480,6 +480,7 @@ typedef struct PgStat_StatTabEntry
 	uint64 nofrz_min_age;
 	uint64 nofrz_eager_scanned_min_age;
 	PgStat_Counter progress_to_agg_vac;
+	uint64 eager_scan_hit_threshold;
 } PgStat_StatTabEntry;
 
 typedef struct PgStat_WalStats
@@ -655,6 +656,7 @@ extern void pgstat_report_vacuum(Oid tableoid, bool shared, bool aggressive,
 								 BlockNumber nofrz_partial,
 								 BlockNumber nofrz_min_age,
 								 BlockNumber nofrz_eager_scanned_min_age,
+								 BlockNumber eager_scan_hit_threshold,
 								 double progress_to_agg_vac);
 extern void pgstat_report_analyze(Relation rel,
 								  PgStat_Counter livetuples, PgStat_Counter deadtuples,

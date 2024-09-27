@@ -231,6 +231,7 @@ typedef struct LVRelState
 	BlockNumber cumulative_eager_scanned_failed_frozen;
 	bool eager_scan_enabled;
 	bool scanning_av_bc_skip_pages_threshold;
+	BlockNumber eager_scan_hit_threshold;
 } LVRelState;
 
 /* Struct for saving and restoring vacuum error information. */
@@ -454,6 +455,8 @@ heap_vacuum_rel(Relation rel, VacuumParams *params,
 	vacrel->nofrz_eager_scanned_min_age = 0;
 	vacrel->nofrz_min_age = 0;
 
+	vacrel->eager_scan_hit_threshold = 0;
+
 	vacrel->eager_scanned = 0;
 	vacrel->cumulative_eager_scanned = 0;
 	vacrel->eager_scanned_success_frozen = 0;
@@ -634,6 +637,7 @@ heap_vacuum_rel(Relation rel, VacuumParams *params,
 						 vacrel->nofrz_partial,
 						 vacrel->nofrz_min_age,
 						 vacrel->nofrz_eager_scanned_min_age,
+						 vacrel->eager_scan_hit_threshold,
 						 vacrel->cutoffs.progress_to_agg_vac);
 
 	pgstat_progress_end_command();
@@ -707,7 +711,7 @@ heap_vacuum_rel(Relation rel, VacuumParams *params,
 							 vacrel->relnamespace,
 							 vacrel->relname,
 							 vacrel->num_index_scans);
-			appendStringInfo(&buf, _("vacuum start: %s. vacuum end: %s. duration: %ld seconds\n"),
+			appendStringInfo(&buf, _("vacuum start time: %s. vacuum end time: %s. duration: %ld seconds\n"),
 							 timestamptz_to_str(starttime),
 							 timestamptz_to_str(endtime),
 							 secs_dur
@@ -771,7 +775,7 @@ heap_vacuum_rel(Relation rel, VacuumParams *params,
 							 new_rel_allvisible,
 							 new_rel_allfrozen,
 							 new_rel_pages);
-			appendStringInfo(&buf, _("eagerly scanned: %d of %d all-visible not all-frozen pages in rel. success freezing: %d. failed freezing: %d. eager scanned pages with no tuples older than min age: %d. success rate: %d%%. last all-visible block scanned: %d.\n"),
+			appendStringInfo(&buf, _("eagerly scanned: %d of %d AVnAF pages in rel. success freezing: %d. failed freezing: %d. eager scanned pages with 0 tuples < min age: %d. success rate: %d%%. # times hit eager scan threshold: %d. last AV block scanned: %d.\n"),
 							 vacrel->cumulative_eager_scanned,
 							 orig_rel_allvisible - orig_rel_allfrozen,
 							 vacrel->cumulative_eager_scanned_success_frozen,
@@ -780,6 +784,7 @@ heap_vacuum_rel(Relation rel, VacuumParams *params,
 							 vacrel->cumulative_eager_scanned <= 0 ? 0 :
 							 ((int) ((double) vacrel->cumulative_eager_scanned_success_frozen /
 							 vacrel->cumulative_eager_scanned) * 100),
+							 vacrel->eager_scan_hit_threshold,
 							 vacrel->last_av_block_scanned);
 			if (vacrel->do_index_vacuuming)
 			{
@@ -1209,6 +1214,7 @@ heap_vac_scan_next_block(LVRelState *vacrel, BlockNumber *blkno,
 		{
 			vacrel->eager_scan_enabled = false;
 			vacrel->next_unskippable_block = vacrel->current_block;
+			vacrel->eager_scan_hit_threshold++;
 		}
 	}
 
