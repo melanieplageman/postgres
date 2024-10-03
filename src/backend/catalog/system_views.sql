@@ -690,8 +690,22 @@ CREATE VIEW pg_stat_all_tables AS
             pg_stat_get_last_autoanalyze_time(C.oid) as last_autoanalyze,
             pg_stat_get_vacuum_count(C.oid) AS vacuum_count,
             pg_stat_get_autovacuum_count(C.oid) AS autovacuum_count,
+            pg_stat_get_aggressive_vacuum_count(C.oid) AS aggressive_vacuum_count,
             pg_stat_get_analyze_count(C.oid) AS analyze_count,
-            pg_stat_get_autoanalyze_count(C.oid) AS autoanalyze_count
+            pg_stat_get_autoanalyze_count(C.oid) AS autoanalyze_count,
+            pg_stat_get_vm_page_freezes(C.oid) AS vm_page_freezes,
+            pg_stat_get_pages_with_tuples_frozen(C.oid) AS pages_with_tuples_frozen,
+            pg_stat_get_eager_page_freezes(C.oid) AS eager_page_freezes,
+            pg_stat_get_nofrz_nofpi(C.oid) AS nofrz_nofpi,
+            pg_stat_get_nofrz_partial(C.oid) AS nofrz_partial,
+            pg_stat_get_nofrz_min_age(C.oid) AS nofrz_min_age,
+            pg_stat_get_nofrz_eager_scanned_min_age(C.oid) AS nofrz_eager_scanned_min_age,
+            pg_stat_get_eager_scan_hit_threshold(C.oid) AS eager_scanned_hit_threshold,
+            pg_stat_get_progress_to_agg_vac(C.oid) AS progress_to_agg_vac,
+            pg_stat_get_extra_av_pages_scanned(C.oid) AS extra_av_pages_scanned,
+            pg_stat_get_msecs_vacuuming(C.oid) AS time_vacuuming_ms,
+            pg_stat_get_msecs_vacuum_delaying(C.oid) AS time_vacuum_delaying_ms,
+            pg_stat_get_pages_scanned_by_vacuum(C.oid) AS pages_scanned_by_vacuum
     FROM pg_class C LEFT JOIN
          pg_index I ON C.oid = I.indrelid
          LEFT JOIN pg_namespace N ON (N.oid = C.relnamespace)
