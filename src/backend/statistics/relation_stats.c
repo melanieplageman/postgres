@@ -160,6 +160,15 @@ relation_statistics_update(FunctionCallInfo fcinfo, int elevel)
 			replaces[ncols] = Anum_pg_class_relallvisible;
 			values[ncols] = Int32GetDatum(relallvisible);
 			ncols++;
+
+			/*
+			 * If we are modifying relallvisible manually, it is not clear
+			 * what value of relallfrozen would make sense. Set it to NULL
+			 * instead. It will be updated the next time these fields are
+			 * updated.
+			 */
+			replaces[ncols] = Anum_pg_class_relallfrozen;
+			nulls[ncols] = true;
 		}
 	}
 
