@@ -2922,6 +2922,8 @@ relation_needs_vacanalyze(Oid relid,
 	bool		force_vacuum;
 	bool		av_enabled;
 	float4		reltuples;		/* pg_class.reltuples */
+	int32 relpages;
+	int32 relallfrozen;
 
 	/* constants from reloptions or GUC variables */
 	int			vac_base_thresh,
@@ -3029,7 +3031,10 @@ relation_needs_vacanalyze(Oid relid,
 	 */
 	if (PointerIsValid(tabentry) && AutoVacuumingActive())
 	{
+		float4 pcnt_unfrozen = 0;
 		reltuples = classForm->reltuples;
+		relpages = classForm->relpages;
+		relallfrozen = classForm->relallfrozen;
 		vactuples = tabentry->dead_tuples;
 		instuples = tabentry->ins_since_vacuum;
 		anltuples = tabentry->mod_since_analyze;
@@ -3038,8 +3043,19 @@ relation_needs_vacanalyze(Oid relid,
 		if (reltuples < 0)
 			reltuples = 0;
 
+		if (relallfrozen > relpages)
+			relallfrozen = relpages;
+
+		if (reltuples == 0 || relpages < 0)
+			relpages = 0;
+
+		if (relpages == 0)
+			pcnt_unfrozen = 1;
+		else
+			pcnt_unfrozen = (float4) (1 - ((float4) relallfrozen / (float4) relpages));
+
 		vacthresh = (float4) vac_base_thresh + vac_scale_factor * reltuples;
-		vacinsthresh = (float4) vac_ins_base_thresh + vac_ins_scale_factor * reltuples;
+		vacinsthresh = (float4) vac_ins_base_thresh + vac_ins_scale_factor * reltuples * pcnt_unfrozen;
 		anlthresh = (float4) anl_base_thresh + anl_scale_factor * reltuples;
 
 		/*
