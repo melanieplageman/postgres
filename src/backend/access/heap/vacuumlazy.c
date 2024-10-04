@@ -609,6 +609,7 @@ heap_vacuum_rel(Relation rel, VacuumParams *params,
 	 */
 	new_rel_pages = vacrel->rel_pages;	/* After possible rel truncation */
 	visibilitymap_count(rel, &new_rel_allvisible, &new_rel_allfrozen);
+
 	new_real_rel_allvisible = new_rel_allvisible;
 	new_real_rel_allfrozen = new_rel_allfrozen;
 	if (new_rel_allvisible > new_rel_pages)
@@ -626,7 +627,8 @@ heap_vacuum_rel(Relation rel, VacuumParams *params,
 	 * scan every page that isn't skipped using the visibility map.
 	 */
 	vac_update_relstats(rel, new_rel_pages, vacrel->new_live_tuples,
-						new_rel_allvisible, vacrel->nindexes > 0,
+						new_rel_allvisible, new_rel_allfrozen,
+						vacrel->nindexes > 0,
 						vacrel->NewRelfrozenXid, vacrel->NewRelminMxid,
 						&frozenxid_updated, &minmulti_updated, false);
 
@@ -3331,7 +3333,7 @@ update_relstats_all_indexes(LVRelState *vacrel)
 		vac_update_relstats(indrel,
 							istat->num_pages,
 							istat->num_index_tuples,
-							0,
+							0, 0,
 							false,
 							InvalidTransactionId,
 							InvalidMultiXactId,

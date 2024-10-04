@@ -2886,12 +2886,12 @@ index_update_stats(Relation rel,
 	if (reltuples >= 0 && !IsBinaryUpgrade)
 	{
 		BlockNumber relpages = RelationGetNumberOfBlocks(rel);
-		BlockNumber relallvisible;
+		BlockNumber relallvisible = 0;
+		BlockNumber relallfrozen = 0;
 
+		/* don't bother for indexes */
 		if (rd_rel->relkind != RELKIND_INDEX)
-			visibilitymap_count(rel, &relallvisible, NULL);
-		else					/* don't bother for indexes */
-			relallvisible = 0;
+			visibilitymap_count(rel, &relallvisible, &relallfrozen);
 
 		if (rd_rel->relpages != (int32) relpages)
 		{
@@ -2906,6 +2906,11 @@ index_update_stats(Relation rel,
 		if (rd_rel->relallvisible != (int32) relallvisible)
 		{
 			rd_rel->relallvisible = (int32) relallvisible;
+			dirty = true;
+		}
+		if (rd_rel->relallfrozen != (int32) relallfrozen)
+		{
+			rd_rel->relallfrozen = (int32) relallfrozen;
 			dirty = true;
 		}
 	}
