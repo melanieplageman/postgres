@@ -2929,7 +2929,12 @@ relation_needs_vacanalyze(Oid relid,
 {
 	bool		force_vacuum;
 	bool		av_enabled;
-	float4		reltuples;		/* pg_class.reltuples */
+
+	/* From pg_class */
+	float4		reltuples;
+	int32		relpages;
+	int32		relallfrozen;
+	int32		relallvisible;
 
 	/* constants from reloptions or GUC variables */
 	int			vac_base_thresh,
@@ -3037,6 +3042,10 @@ relation_needs_vacanalyze(Oid relid,
 	 */
 	if (PointerIsValid(tabentry) && AutoVacuumingActive())
 	{
+		float4		pcnt_unfrozen = 1;
+
+		relpages = classForm->relpages;
+		relallfrozen = classForm->relallfrozen;
 		reltuples = classForm->reltuples;
 		vactuples = tabentry->dead_tuples;
 		instuples = tabentry->ins_since_vacuum;
@@ -3046,8 +3055,32 @@ relation_needs_vacanalyze(Oid relid,
 		if (reltuples < 0)
 			reltuples = 0;
 
+		/*
+		 * If the table has been vacuumed and we have reliable data for
+		 * relallfrozen and relallvisible, calculate the unfrozen percentage
+		 * of the table to modify insert scale factor. This helps us decide
+		 * whether or not to vacuum an insert-heavy table based on the number
+		 * of inserts to the "active" part of the table.
+		 *
+		 * If relallfrozen is -1, that means relallvisible was updated
+		 * manually and we can't rely on relallfrozen.
+		 */
+		if (relpages > 0 && reltuples > 0 && relallfrozen > -1)
+		{
+			relallvisible = classForm->relallvisible;
+
+			if (relallvisible > relpages)
+				relallvisible = relpages;
+
+			if (relallfrozen > relallvisible)
+				relallfrozen = relallvisible;
+
+			pcnt_unfrozen = 1 - ((float4) relallfrozen / relpages);
+		}
+
 		vacthresh = (float4) vac_base_thresh + vac_scale_factor * reltuples;
-		vacinsthresh = (float4) vac_ins_base_thresh + vac_ins_scale_factor * reltuples;
+		vacinsthresh = (float4) vac_ins_base_thresh +
+			vac_ins_scale_factor * reltuples * pcnt_unfrozen;
 		anlthresh = (float4) anl_base_thresh + anl_scale_factor * reltuples;
 
 		/*
