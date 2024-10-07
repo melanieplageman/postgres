@@ -3062,7 +3062,11 @@ relation_needs_vacanalyze(Oid relid,
 			pcnt_unfrozen = (float4) (1 - ((float4) relallfrozen / (float4) relpages));
 
 		vacthresh = (float4) vac_base_thresh + vac_scale_factor * reltuples;
-		vacinsthresh = (float4) vac_ins_base_thresh + vac_ins_scale_factor * reltuples * pcnt_unfrozen;
+		if (pgversion == 2 || pgversion == 3 || pgversion == 4 ||
+				pgversion == 5 || pgversion == 6 || pgversion == 7)
+			vacinsthresh = (float4) vac_ins_base_thresh + vac_ins_scale_factor * reltuples * pcnt_unfrozen;
+		else
+			vacinsthresh = (float4) vac_ins_base_thresh + vac_ins_scale_factor * reltuples;
 		anlthresh = (float4) anl_base_thresh + anl_scale_factor * reltuples;
 
 		/*

@@ -5582,9 +5582,9 @@
   prosrc => 'pg_stat_get_nofrz_eager_scanned_min_age' },
 
 { oid => '9492', descr => 'stats',
-  proname => 'pg_stat_get_eager_scan_hit_threshold', provolatile => 's', proparallel => 'r',
+  proname => 'pg_stat_get_eager_scan_hit_fail_threshold', provolatile => 's', proparallel => 'r',
   prorettype => 'int8', proargtypes => 'oid',
-  prosrc => 'pg_stat_get_eager_scan_hit_threshold' },
+  prosrc => 'pg_stat_get_eager_scan_hit_fail_threshold' },
 
 { oid => '9493', descr => 'stats',
   proname => 'pg_stat_get_msecs_vacuuming', provolatile => 's', proparallel => 'r',
@@ -5600,6 +5600,16 @@
   proname => 'pg_stat_get_pages_scanned_by_vacuum', provolatile => 's', proparallel => 'r',
   prorettype => 'int8', proargtypes => 'oid',
   prosrc => 'pg_stat_get_pages_scanned_by_vacuum' },
+
+{ oid => '9496', descr => 'stats',
+  proname => 'pg_stat_get_oldest_unfrozen_xid_last_vacuum', provolatile => 's', proparallel => 'r',
+  prorettype => 'int8', proargtypes => 'oid',
+  prosrc => 'pg_stat_get_oldest_unfrozen_xid_last_vacuum' },
+
+{ oid => '9497', descr => 'stats',
+  proname => 'pg_stat_get_eager_scan_hit_success_threshold', provolatile => 's', proparallel => 'r',
+  prorettype => 'int8', proargtypes => 'oid',
+  prosrc => 'pg_stat_get_eager_scan_hit_success_threshold' },
 
 { oid => '3056', descr => 'statistics: number of manual analyzes for a table',
   proname => 'pg_stat_get_analyze_count', provolatile => 's',

@@ -112,6 +112,7 @@ PG_STAT_GET_RELENTRY_INT64(progress_to_agg_vac)
 PG_STAT_GET_RELENTRY_INT64(msecs_vacuuming)
 PG_STAT_GET_RELENTRY_INT64(msecs_vacuum_delaying)
 PG_STAT_GET_RELENTRY_INT64(pages_scanned_by_vacuum)
+PG_STAT_GET_RELENTRY_INT64(oldest_unfrozen_xid_last_vacuum)
 
 /* pg_stat_get_vm_page_freezes */
 PG_STAT_GET_RELENTRY_INT64(vm_page_freezes)
@@ -126,7 +127,8 @@ PG_STAT_GET_RELENTRY_INT64(eager_page_freezes)
 PG_STAT_GET_RELENTRY_INT64(nofrz_nofpi)
 
 PG_STAT_GET_RELENTRY_INT64(nofrz_min_age)
-PG_STAT_GET_RELENTRY_INT64(eager_scan_hit_threshold)
+PG_STAT_GET_RELENTRY_INT64(eager_scan_hit_success_threshold)
+PG_STAT_GET_RELENTRY_INT64(eager_scan_hit_fail_threshold)
 PG_STAT_GET_RELENTRY_INT64(nofrz_eager_scanned_min_age)
 
 PG_STAT_GET_RELENTRY_INT64(nofrz_partial)

@@ -1083,7 +1083,9 @@ get_all_vacuum_rels(MemoryContext vac_context, int options)
 bool
 vacuum_get_cutoffs(Relation rel, const VacuumParams *params,
 				   struct VacuumCutoffs *cutoffs,
-				   VacEagerScanState *eager_scan_state)
+				   VacEagerScanState *eager_scan_state,
+				   TransactionId oldest_unfrozen_xid_last_vacuum,
+				   bool *bc_oldest_unfrozen_last_vac)
 {
 	int			freeze_min_age,
 				multixact_freeze_min_age,
@@ -1175,6 +1177,8 @@ vacuum_get_cutoffs(Relation rel, const VacuumParams *params,
 	freeze_min_age = Min(freeze_min_age, autovacuum_freeze_max_age / 2);
 	Assert(freeze_min_age >= 0);
 
+	cutoffs->computed_freeze_min_age = freeze_min_age;
+
 	/* Compute FreezeLimit, being careful to generate a normal XID */
 	cutoffs->FreezeLimit = nextXID - freeze_min_age;
 	if (!TransactionIdIsNormal(cutoffs->FreezeLimit))
@@ -1182,6 +1186,8 @@ vacuum_get_cutoffs(Relation rel, const VacuumParams *params,
 	/* FreezeLimit must always be <= OldestXmin */
 	if (TransactionIdPrecedes(cutoffs->OldestXmin, cutoffs->FreezeLimit))
 		cutoffs->FreezeLimit = cutoffs->OldestXmin;
+
+	cutoffs->UpdatedFreezeLimit = cutoffs->FreezeLimit;
 
 	/*
 	 * Determine the minimum multixact freeze age to use: as specified by
@@ -1284,7 +1290,7 @@ vacuum_get_cutoffs(Relation rel, const VacuumParams *params,
 		MultiXactIdPrecedesOrEquals(cutoffs->relminmxid, cutoffs->MultiXactCutoff)))
 		*eager_scan_state = VAC_EAGER_SCAN_ENABLED;
 
-	if (pgversion == 0)
+	if (pgversion == 0 || pgversion == 2 || pgversion == 7 || pgversion == 8)
 		*eager_scan_state = VAC_EAGER_SCAN_DISABLED_PERM;
 
 	/* Non-aggressive VACUUM */

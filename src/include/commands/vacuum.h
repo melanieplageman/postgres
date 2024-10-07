@@ -275,7 +275,10 @@ struct VacuumCutoffs
 	 * definitely removed from Xmax in pages VACUUM scans and cleanup locks.
 	 */
 	TransactionId FreezeLimit;
+	TransactionId UpdatedFreezeLimit;
 	MultiXactId MultiXactCutoff;
+
+	TransactionId computed_freeze_min_age;
 
 	double		progress_to_agg_vac;
 	bool was_eager_scanned;
@@ -348,7 +351,9 @@ extern void vac_update_relstats(Relation relation,
 								bool in_outer_xact);
 extern bool vacuum_get_cutoffs(Relation rel, const VacuumParams *params,
 							   struct VacuumCutoffs *cutoffs,
-							   VacEagerScanState *eager_scan_state);
+							   VacEagerScanState *eager_scan_state,
+							   TransactionId oldest_unfrozen_xid_last_vacuum,
+							   bool *bc_oldest_unfrozen_last_vac);
 extern bool vacuum_xid_failsafe_check(const struct VacuumCutoffs *cutoffs);
 extern void vac_update_datfrozenxid(void);
 extern void vacuum_delay_point(void);

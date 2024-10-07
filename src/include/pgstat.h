@@ -482,12 +482,14 @@ typedef struct PgStat_StatTabEntry
 	uint64 nofrz_min_age;
 	uint64 nofrz_eager_scanned_min_age;
 	PgStat_Counter progress_to_agg_vac;
-	uint64 eager_scan_hit_threshold;
+	uint64 eager_scan_hit_fail_threshold;
+	uint64 eager_scan_hit_success_threshold;
 
 	uint64 msecs_vacuuming;
 	uint64 msecs_vacuum_delaying;
 
 	uint64 pages_scanned_by_vacuum;
+	TransactionId oldest_unfrozen_xid_last_vacuum;
 } PgStat_StatTabEntry;
 
 typedef struct PgStat_WalStats
@@ -663,11 +665,14 @@ extern void pgstat_report_vacuum(Oid tableoid, bool shared, bool aggressive,
 								 BlockNumber nofrz_partial,
 								 BlockNumber nofrz_min_age,
 								 BlockNumber nofrz_eager_scanned_min_age,
-								 BlockNumber eager_scan_hit_threshold,
+								 BlockNumber eager_scan_hit_fail_threshold,
+								 BlockNumber eager_scan_hit_success_threshold,
 								 double progress_to_agg_vac,
 								 uint64 msecs_vacuuming,
 								 uint64 msecs_vacuum_delaying,
-								 BlockNumber scanned_pages);
+								 BlockNumber scanned_pages,
+								 TransactionId oldest_unfrozen_xid_seen,
+								 int64 *ins_since_vacuum_after);
 extern void pgstat_report_analyze(Relation rel,
 								  PgStat_Counter livetuples, PgStat_Counter deadtuples,
 								  bool resetcounter);

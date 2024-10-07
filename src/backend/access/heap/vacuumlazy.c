@@ -95,6 +95,10 @@
 #define FAILSAFE_EVERY_PAGES \
 	((BlockNumber) (((uint64) 4 * 1024 * 1024 * 1024) / BLCKSZ))
 
+/* Re-evaluate every 1 GB */
+#define REEVALUATE_FREEZELIMIT_EVERY_PAGES \
+	((BlockNumber) (((uint64) 1024 * 1024 * 1024) / BLCKSZ))
+
 /*
  * When a table has no indexes, vacuum the FSM after every 8GB, approximately
  * (it won't be exact because we only vacuum FSM after processing a heap page
@@ -233,6 +237,8 @@ typedef struct LVRelState
 	BlockNumber eager_scan_hit_fail_threshold;
 	BlockNumber next_seg_start;
 
+	BlockNumber would_have_frozen;
+
 	TransactionId newest_xmin;
 } LVRelState;
 
@@ -336,10 +342,18 @@ heap_vacuum_rel(Relation rel, VacuumParams *params,
 	BufferUsage startbufferusage = pgBufferUsage;
 	ErrorContextCallback errcallback;
 	TransactionId oldest_unfrozen_xid_seen;
+	TransactionId oldest_unfrozen_xid_last_vacuum = InvalidTransactionId;
 	char	  **indnames = NULL;
-	int hit_threshold = 0;
 	int64 msecs_dur = 0;
 	bool eager_scan_disabled_from_start_due_to_relfrozenxid_age = false;
+	PgStat_StatTabEntry *tabstats;
+	bool bc_oldest_unfrozen_last_vac = false;
+	double es_success_pcnt = 0.2;
+	int64 ins_since_vacuum_before = 0;
+	int64 ins_since_vacuum_after = 0;
+	PgStat_PendingWalStats wal_stats_before = PendingWalStats;
+	int64 delta_wal_write_time;
+	int64 delta_wal_sync_time;
 
 	verbose = (params->options & VACOPT_VERBOSE) != 0;
 	instrument = (verbose || (AmAutoVacuumWorkerProcess() &&
@@ -473,6 +487,8 @@ heap_vacuum_rel(Relation rel, VacuumParams *params,
 	vacrel->eager_scanned_failed_frozen = 0;
 	vacrel->cumulative_eager_scanned_failed_frozen = 0;
 
+	vacrel->would_have_frozen = 0;
+
 	/*
 	 * Get cutoffs that determine which deleted tuples are considered DEAD,
 	 * not just RECENTLY_DEAD, and which XIDs/MXIDs to freeze.  Then determine
@@ -489,8 +505,18 @@ heap_vacuum_rel(Relation rel, VacuumParams *params,
 	 * want to teach lazy_scan_prune to recompute vistest from time to time,
 	 * to increase the number of dead tuples it can prune away.)
 	 */
+	if ((tabstats = pgstat_fetch_stat_tabentry(RelationGetRelid(rel))) != NULL)
+	{
+		if (tabstats->autovacuum_count > 0 || tabstats->vacuum_count > 0)
+			oldest_unfrozen_xid_last_vacuum = tabstats->oldest_unfrozen_xid_last_vacuum;
+
+		ins_since_vacuum_before = tabstats->ins_since_vacuum;
+	}
+
 	vacrel->aggressive = vacuum_get_cutoffs(rel, params, &vacrel->cutoffs,
-			&vacrel->eager_scan_state);
+			&vacrel->eager_scan_state, oldest_unfrozen_xid_last_vacuum,
+			&bc_oldest_unfrozen_last_vac);
+
 	if (!vacrel->aggressive && vacrel->eager_scan_state == VAC_EAGER_SCAN_DISABLED_PERM)
 		eager_scan_disabled_from_start_due_to_relfrozenxid_age = true;
 	vacrel->rel_pages = orig_rel_pages = RelationGetNumberOfBlocks(rel);
@@ -512,7 +538,11 @@ heap_vacuum_rel(Relation rel, VacuumParams *params,
 
 	vacrel->skipwithvm = skipwithvm;
 	visibilitymap_count(rel, &orig_rel_allvisible, &orig_rel_allfrozen);
-	vacrel->max_eager_scan_success = (BlockNumber) ((double) (0.2 * (orig_rel_allvisible - orig_rel_allfrozen)));
+
+	{
+		BlockNumber orig_avnaf = orig_rel_allvisible - orig_rel_allfrozen;
+		vacrel->max_eager_scan_success = (BlockNumber) (es_success_pcnt * orig_avnaf);
+	}
 
 	if (verbose)
 	{
@@ -635,11 +665,6 @@ heap_vacuum_rel(Relation rel, VacuumParams *params,
 						vacrel->NewRelfrozenXid, vacrel->NewRelminMxid,
 						&frozenxid_updated, &minmulti_updated, false);
 
-	hit_threshold = vacrel->eager_scan_hit_fail_threshold;
-	if (vacrel->eager_scanned_success_frozen >= vacrel->max_eager_scan_success)
-		hit_threshold++;
-
-
 	if (instrument)
 	{
 		TimestampTz endtime = GetCurrentTimestamp();
@@ -681,11 +706,14 @@ heap_vacuum_rel(Relation rel, VacuumParams *params,
 						 vacrel->nofrz_partial,
 						 vacrel->nofrz_min_age,
 						 vacrel->nofrz_eager_scanned_min_age,
-						 hit_threshold,
+						vacrel->eager_scan_hit_fail_threshold,
+						vacrel->eager_scanned_success_frozen >= vacrel->max_eager_scan_success,
 						 vacrel->cutoffs.progress_to_agg_vac,
 						 msecs_dur,
 						 pgBufferUsage.vacuum_delay_time_ms,
-						 vacrel->scanned_pages);
+						 vacrel->scanned_pages,
+						 oldest_unfrozen_xid_seen,
+						 &ins_since_vacuum_after);
 
 	pgstat_progress_end_command();
 
@@ -768,7 +796,7 @@ heap_vacuum_rel(Relation rel, VacuumParams *params,
 							 secs_dur,
 							 msecs_dur
 							 );
-			appendStringInfo(&buf, _("pages: %u, removed %u, remain %u (pages at vac start - truncated pages), scanned (%.2f%% of total).\n"),
+			appendStringInfo(&buf, _("pages: %u removed, %u remain (pages at start of vac - truncated), %u scanned (%.2f%% of total).\n"),
 							 vacrel->removed_pages,
 							 new_rel_pages,
 							 vacrel->scanned_pages,
@@ -821,24 +849,34 @@ heap_vacuum_rel(Relation rel, VacuumParams *params,
 								 _("new relminmxid: %u, which is %d MXIDs ahead of previous value\n"),
 								 vacrel->NewRelminMxid, diff);
 			}
-			appendStringInfo(&buf, _("frozen: %u pages from table (%.2f%% of total) had %lld tuples frozen. %d pages had no tuples < freeze_min_age\n"),
+			appendStringInfo(&buf, _("frozen: %u pages from table (%.2f%% of total) had %lld tuples frozen. %d pages had no tuples < freeze_min_age.\nwould have been required to freeze %d pages, which is %d more than were frozen. UpdatedFreezeLimit: %u, which is %u xids newer than FreezeLimit.\n"),
 							 vacrel->frozen_pages,
 							 orig_rel_pages == 0 ? 100.0 :
 							 100.0 * vacrel->frozen_pages / orig_rel_pages,
 							 (long long) vacrel->tuples_frozen,
-							 vacrel->nofrz_min_age);
+							 vacrel->nofrz_min_age,
+							 vacrel->would_have_frozen,
+							 vacrel->would_have_frozen - vacrel->frozen_pages,
+							 vacrel->cutoffs.UpdatedFreezeLimit,
+							 (int32) (vacrel->cutoffs.UpdatedFreezeLimit -
+								 vacrel->cutoffs.FreezeLimit));
 
 			diff = (int32) (vacrel->newest_xmin -
 					vacrel->cutoffs.FreezeLimit);
 			appendStringInfo(&buf, _("newest live tuple's xmin: %u. FreezeLimit: %u. distance from FreezeLimit: %d.\n"),
 							 vacrel->newest_xmin, vacrel->cutoffs.FreezeLimit, diff);
-			appendStringInfo(&buf, _("vacuum start: all-visible pages: %d, all-frozen pages: %d, pages: %d.\nvacuum end: all-visible pages: %d, all-frozen pages: %d, pages: %d.\n"),
+			appendStringInfo(&buf, _("vacuum start: all-visible pages: %d, all-frozen pages: %d, pages: %d. AVnAF: %d.\nvacuum end: all-visible pages: %d, all-frozen pages: %d, pages: %d. AVnAF: %d.\nins_since_vacuum_before: %ld. ins_since_vacuum_after: %ld. diff: %ld.\n"),
 							 orig_rel_allvisible,
 							 orig_rel_allfrozen,
 							 orig_rel_pages,
+							 orig_rel_allvisible - orig_rel_allfrozen,
 							 new_real_rel_allvisible,
 							 new_real_rel_allfrozen,
-							 new_real_rel_pages);
+							 new_real_rel_pages,
+							 new_real_rel_allvisible - new_real_rel_allfrozen,
+							 ins_since_vacuum_before,
+							 ins_since_vacuum_after,
+							 ins_since_vacuum_after - ins_since_vacuum_before);
 			appendStringInfo(&buf, _("eagerly scanned: %d of %d AVnAF pages in rel. success freezing: %d. failed freezing: %d.\neager scanned pages with no tuples < min age: %d. success rate: %d%%. hit eager scan fail limit: %d, success limit: %d.\nlast AV block scanned: %d."),
 							 vacrel->eager_scanned,
 							 orig_rel_allvisible - orig_rel_allfrozen,
@@ -854,7 +892,12 @@ heap_vacuum_rel(Relation rel, VacuumParams *params,
 							 vacrel->max_eager_scan_success,
 							 vacrel->last_av_block_scanned);
 			if (eager_scan_disabled_from_start_due_to_relfrozenxid_age)
-				appendStringInfo(&buf, _(" no eager scan bc relfrozenxid newer than FreezeLimit.\n"));
+			{
+				if (bc_oldest_unfrozen_last_vac)
+					appendStringInfo(&buf, _(" no eager scan bc last vacuum's oldest unfrozen xid newer than FreezeLimit.\n"));
+				else
+					appendStringInfo(&buf, _(" no eager scan bc relfrozenxid newer than FreezeLimit.\n"));
+			}
 			else
 				appendStringInfo(&buf, _("\n"));
 			if (vacrel->do_index_vacuuming)
@@ -918,11 +961,20 @@ heap_vacuum_rel(Relation rel, VacuumParams *params,
 							 (long long) total_blks_read,
 							 (long long) total_blks_dirtied,
 							 (long long) total_blks_dirtied_at_all);
+			delta_wal_write_time = INSTR_TIME_GET_MILLISEC(PendingWalStats.wal_write_time) -
+				INSTR_TIME_GET_MILLISEC(wal_stats_before.wal_write_time);
+			delta_wal_sync_time = INSTR_TIME_GET_MILLISEC(PendingWalStats.wal_sync_time) -
+				INSTR_TIME_GET_MILLISEC(wal_stats_before.wal_sync_time);
 			appendStringInfo(&buf,
-							 _("WAL usage: %lld records, %lld full page images, %llu bytes\n"),
+							 _("WAL usage: %lld records, %lld full page images, %llu bytes.\nwal_buffers_full: %ld. wal writes: %ld. wal write time ms: %ld. wal syncs: %ld. wal sync time ms: %ld.\n"),
 							 (long long) walusage.wal_records,
 							 (long long) walusage.wal_fpi,
-							 (unsigned long long) walusage.wal_bytes);
+							 (unsigned long long) walusage.wal_bytes,
+							 PendingWalStats.wal_buffers_full - wal_stats_before.wal_buffers_full,
+							 PendingWalStats.wal_write - wal_stats_before.wal_write,
+							 delta_wal_write_time,
+							 PendingWalStats.wal_sync - wal_stats_before.wal_sync,
+							 delta_wal_sync_time);
 			appendStringInfo(&buf, _("system usage: %s"), pg_rusage_show(&ru0));
 
 			ereport(verbose ? INFO : LOG,
@@ -1040,6 +1092,20 @@ lazy_scan_heap(LVRelState *vacrel)
 		 */
 		if (vacrel->scanned_pages % FAILSAFE_EVERY_PAGES == 0)
 			lazy_check_wraparound_failsafe(vacrel);
+
+		if (vacrel->scanned_pages % REEVALUATE_FREEZELIMIT_EVERY_PAGES == 0)
+		{
+			TransactionId nextXID = ReadNextTransactionId();
+			vacrel->cutoffs.UpdatedFreezeLimit = nextXID -
+				vacrel->cutoffs.computed_freeze_min_age;
+
+			if (!TransactionIdIsNormal(vacrel->cutoffs.UpdatedFreezeLimit))
+				vacrel->cutoffs.UpdatedFreezeLimit = FirstNormalTransactionId;
+			/* UpdatedFreezeLimit must always be <= OldestXmin */
+			if (TransactionIdPrecedes(vacrel->cutoffs.OldestXmin,
+						vacrel->cutoffs.UpdatedFreezeLimit))
+				vacrel->cutoffs.UpdatedFreezeLimit = vacrel->cutoffs.OldestXmin;
+		}
 
 		/*
 		 * Consider if we definitely have enough space to process TIDs on page
@@ -1444,23 +1510,23 @@ find_next_unskippable_block(LVRelState *vacrel, bool *skipsallvis)
 				break;
 
 			/*
+			* Because we want to eagerly freeze pages, we may choose not to skip
+			* this page if we have not yet scanned our quota of all-visible pages
+			* for this vacuum and we have not yet failed to freeze too many
+			* blocks.
+			*/
+			if (vacrel->eager_scan_state == VAC_EAGER_SCAN_ENABLED)
+			{
+				vacrel->eager_scanned++;
+				vacrel->cutoffs.was_eager_scanned = true;
+				break;
+			}
+
+			/*
 			 * All-visible block is safe to skip in non-aggressive case.  But
 			 * remember that the final range contains such a block for later.
 			 */
 			*skipsallvis = true;
-		}
-
-		/*
-		 * Because we want to eagerly freeze pages, we may choose not to skip
-		 * this page if we have not yet scanned our quota of all-visible pages
-		 * for this vacuum and we have not yet failed to freeze too many
-		 * blocks.
-		 */
-		if (vacrel->eager_scan_state == VAC_EAGER_SCAN_ENABLED)
-		{
-			vacrel->eager_scanned++;
-			vacrel->cutoffs.was_eager_scanned = true;
-			break;
 		}
 
 		next_unskippable_block++;
@@ -1662,6 +1728,7 @@ lazy_scan_prune(LVRelState *vacrel,
 	presult.nofrz_partial = 0;
 	presult.nofrz_min_age = 0;
 	presult.nofrz_eager_scanned_min_age = 0;
+	presult.would_have_required_freeze = false;
 
 	heap_page_prune_and_freeze(rel, buf, vacrel->vistest, prune_options,
 							   &vacrel->cutoffs, &presult, PRUNE_VACUUM_SCAN,
@@ -1684,6 +1751,9 @@ lazy_scan_prune(LVRelState *vacrel,
 	}
 	else if (vacrel->cutoffs.was_eager_scanned)
 		vacrel->eager_scanned_failed_frozen++;
+
+	if (presult.would_have_required_freeze)
+		vacrel->would_have_frozen++;
 
 	vacrel->eager_page_freezes += presult.eager_page_freezes;
 	vacrel->nofrz_partial += presult.nofrz_partial;
@@ -1902,6 +1972,7 @@ lazy_scan_noprune(LVRelState *vacrel,
 				recently_dead_tuples,
 				missed_dead_tuples;
 	bool		hastup;
+	bool		would_have_required_freeze;
 	HeapTupleHeader tupleheader;
 	TransactionId NoFreezePageRelfrozenXid = vacrel->NewRelfrozenXid;
 	MultiXactId NoFreezePageRelminMxid = vacrel->NewRelminMxid;
@@ -1950,7 +2021,8 @@ lazy_scan_noprune(LVRelState *vacrel,
 		tupleheader = (HeapTupleHeader) PageGetItem(page, itemid);
 		if (heap_tuple_should_freeze(tupleheader, &vacrel->cutoffs,
 									 &NoFreezePageRelfrozenXid,
-									 &NoFreezePageRelminMxid))
+									 &NoFreezePageRelminMxid,
+									 &would_have_required_freeze))
 		{
 			/* Tuple with XID < FreezeLimit (or MXID < MultiXactCutoff) */
 			if (vacrel->aggressive)

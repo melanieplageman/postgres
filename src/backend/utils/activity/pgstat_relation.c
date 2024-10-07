@@ -219,11 +219,14 @@ pgstat_report_vacuum(Oid tableoid, bool shared, bool aggressive,
 					 BlockNumber nofrz_partial,
 					 BlockNumber nofrz_min_age,
 					 BlockNumber nofrz_eager_scanned_min_age,
-					 BlockNumber eager_scan_hit_threshold,
+					 BlockNumber eager_scan_hit_fail_threshold,
+					 BlockNumber eager_scan_hit_success_threshold,
 					 double progress_to_agg_vac,
 					 uint64 msecs_vacuuming,
 					 uint64 msecs_vacuum_delaying,
-					 BlockNumber scanned_pages)
+					 BlockNumber scanned_pages,
+					 TransactionId oldest_unfrozen_xid_seen,
+					 int64 *ins_since_vacuum_after)
 {
 	PgStat_EntryRef *entry_ref;
 	PgStatShared_Relation *shtabentry;
@@ -255,11 +258,13 @@ pgstat_report_vacuum(Oid tableoid, bool shared, bool aggressive,
 	tabentry->nofrz_nofpi += nofrz_nofpi;
 	tabentry->nofrz_min_age += nofrz_min_age;
 	tabentry->nofrz_eager_scanned_min_age += nofrz_eager_scanned_min_age;
-	tabentry->eager_scan_hit_threshold += eager_scan_hit_threshold;
+	tabentry->eager_scan_hit_success_threshold += eager_scan_hit_success_threshold;
+	tabentry->eager_scan_hit_fail_threshold += eager_scan_hit_fail_threshold;
 	tabentry->nofrz_partial += nofrz_partial;
 	if (aggressive)
 		tabentry->aggressive_vacuum_count++;
 
+	*ins_since_vacuum_after = tabentry->ins_since_vacuum;
 	/*
 	 * It is quite possible that a non-aggressive VACUUM ended up skipping
 	 * various pages, however, we'll zero the insert counter here regardless.
@@ -289,6 +294,8 @@ pgstat_report_vacuum(Oid tableoid, bool shared, bool aggressive,
 	tabentry->msecs_vacuuming += msecs_vacuuming;
 	tabentry->msecs_vacuum_delaying += msecs_vacuum_delaying;
 	tabentry->pages_scanned_by_vacuum += scanned_pages;
+
+	tabentry->oldest_unfrozen_xid_last_vacuum = oldest_unfrozen_xid_seen;
 
 	pgstat_unlock_entry(entry_ref);
 

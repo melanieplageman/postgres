@@ -914,7 +914,8 @@ copy_table_data(Oid OIDNewHeap, Oid OIDOldHeap, Oid OIDOldIndex, bool verbose,
 	 * not to be aggressive about this.
 	 */
 	memset(&params, 0, sizeof(VacuumParams));
-	vacuum_get_cutoffs(OldHeap, &params, &cutoffs, &dummy_eager_scan_state);
+	vacuum_get_cutoffs(OldHeap, &params, &cutoffs, &dummy_eager_scan_state,
+			InvalidTransactionId, NULL);
 
 	/*
 	 * FreezeXid will become the table's new relfrozenxid, and that mustn't go

@@ -6810,7 +6810,8 @@ bool
 heap_prepare_freeze_tuple(HeapTupleHeader tuple,
 						  const struct VacuumCutoffs *cutoffs,
 						  HeapPageFreeze *pagefrz,
-						  HeapTupleFreeze *frz, bool *totally_frozen)
+						  HeapTupleFreeze *frz, bool *totally_frozen,
+						  bool *would_have_frozen)
 {
 	bool		xmin_already_frozen = false,
 				xmax_already_frozen = false;
@@ -7064,7 +7065,8 @@ heap_prepare_freeze_tuple(HeapTupleHeader tuple,
 		pagefrz->freeze_required =
 			heap_tuple_should_freeze(tuple, cutoffs,
 									 &pagefrz->NoFreezePageRelfrozenXid,
-									 &pagefrz->NoFreezePageRelminMxid);
+									 &pagefrz->NoFreezePageRelminMxid,
+									 &pagefrz->would_have_required_freeze);
 	}
 
 	/* Tell caller if this tuple has a usable freeze plan set in *frz */
@@ -7162,6 +7164,7 @@ heap_freeze_tuple(HeapTupleHeader tuple,
 	HeapTupleFreeze frz;
 	bool		do_freeze;
 	bool		totally_frozen;
+	bool		would_have_frozen;
 	struct VacuumCutoffs cutoffs;
 	HeapPageFreeze pagefrz;
 
@@ -7170,6 +7173,7 @@ heap_freeze_tuple(HeapTupleHeader tuple,
 	cutoffs.OldestXmin = FreezeLimit;
 	cutoffs.OldestMxact = MultiXactCutoff;
 	cutoffs.FreezeLimit = FreezeLimit;
+	cutoffs.UpdatedFreezeLimit = FreezeLimit;
 	cutoffs.MultiXactCutoff = MultiXactCutoff;
 
 	pagefrz.freeze_required = true;
@@ -7179,7 +7183,8 @@ heap_freeze_tuple(HeapTupleHeader tuple,
 	pagefrz.NoFreezePageRelminMxid = MultiXactCutoff;
 
 	do_freeze = heap_prepare_freeze_tuple(tuple, &cutoffs,
-										  &pagefrz, &frz, &totally_frozen);
+										  &pagefrz, &frz, &totally_frozen,
+										  &would_have_frozen);
 
 	/*
 	 * Note that because this is not a WAL-logged operation, we don't need to
@@ -7619,7 +7624,8 @@ bool
 heap_tuple_should_freeze(HeapTupleHeader tuple,
 						 const struct VacuumCutoffs *cutoffs,
 						 TransactionId *NoFreezePageRelfrozenXid,
-						 MultiXactId *NoFreezePageRelminMxid)
+						 MultiXactId *NoFreezePageRelminMxid,
+						 bool *would_have_required_freeze)
 {
 	TransactionId xid;
 	MultiXactId multi;
@@ -7632,6 +7638,11 @@ heap_tuple_should_freeze(HeapTupleHeader tuple,
 		Assert(TransactionIdPrecedesOrEquals(cutoffs->relfrozenxid, xid));
 		if (TransactionIdPrecedes(xid, *NoFreezePageRelfrozenXid))
 			*NoFreezePageRelfrozenXid = xid;
+		if (TransactionIdPrecedes(xid, cutoffs->UpdatedFreezeLimit))
+			*would_have_required_freeze = true;
+		if (TransactionIdPrecedes(xid, cutoffs->UpdatedFreezeLimit) &&
+				(pgversion == 6 || pgversion == 7 || pgversion == 8))
+			freeze = true;
 		if (TransactionIdPrecedes(xid, cutoffs->FreezeLimit))
 			freeze = true;
 	}
@@ -7651,6 +7662,11 @@ heap_tuple_should_freeze(HeapTupleHeader tuple,
 		if (TransactionIdPrecedes(xid, *NoFreezePageRelfrozenXid))
 			*NoFreezePageRelfrozenXid = xid;
 		if (TransactionIdPrecedes(xid, cutoffs->FreezeLimit))
+			freeze = true;
+		if (TransactionIdPrecedes(xid, cutoffs->UpdatedFreezeLimit))
+			*would_have_required_freeze = true;
+		if (TransactionIdPrecedes(xid, cutoffs->UpdatedFreezeLimit) &&
+				(pgversion == 6 || pgversion == 7 || pgversion == 8))
 			freeze = true;
 	}
 	else if (!MultiXactIdIsValid(multi))
