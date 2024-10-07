@@ -65,6 +65,7 @@
 #include "utils/snapmgr.h"
 #include "utils/syscache.h"
 #include "utils/timeout.h"
+#include "pg_trace.h"
 
 static HeapTuple GetDatabaseTuple(const char *dbname);
 static HeapTuple GetDatabaseTupleByOid(Oid dboid);
@@ -249,6 +250,8 @@ PerformAuthentication(Port *port)
 	 * Done with authentication.  Disable the timeout, and log if needed.
 	 */
 	disable_timeout(STATEMENT_TIMEOUT, false);
+	/* 5. done with authentication here */
+	TRACE_POSTGRESQL_AUTHENTICATION_COMPLETED();
 
 	if (Log_connections)
 	{
@@ -882,6 +885,8 @@ InitPostgres(const char *in_dbname, Oid dboid,
 	{
 		/* normal multiuser case */
 		Assert(MyProcPort != NULL);
+		/* 4. authentication is started */
+		TRACE_POSTGRESQL_AUTHENTICATION_STARTED();
 		PerformAuthentication(MyProcPort);
 		InitializeSessionUserId(username, useroid, false);
 		/* ensure that auth_method is actually valid, aka authn_id is not NULL */

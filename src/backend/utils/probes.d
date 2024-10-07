@@ -69,6 +69,13 @@ provider postgresql {
 	probe buffer__sync__written(int);
 	probe buffer__sync__done(int, int, int);
 
+	probe postmaster__start__fork(int);
+	probe backend__fork__completed(int);
+	probe postmaster__socket__created();
+	probe backend__ready__for__query();
+	probe authentication__completed();
+	probe authentication__started();
+
 	probe deadlock__found();
 
 	probe checkpoint__start(int);

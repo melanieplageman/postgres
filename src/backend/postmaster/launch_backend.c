@@ -68,6 +68,7 @@
 #include "utils/injection_point.h"
 #include "utils/memutils.h"
 #include "utils/timestamp.h"
+#include "pg_trace.h"
 
 #ifdef EXEC_BACKEND
 #include "nodes/queryjumble.h"
@@ -213,6 +214,8 @@ PostmasterChildName(BackendType child_type)
 	return child_process_kinds[child_type].name;
 }
 
+static uint64 fork_sequence_num = 0;
+
 /*
  * Start a new postmaster child process.
  *
@@ -238,9 +241,15 @@ postmaster_child_launch(BackendType child_type,
 							startup_data, startup_data_len, client_sock);
 	/* the child process will arrive in SubPostmasterMain */
 #else							/* !EXEC_BACKEND */
+
+	/* 2. Postmaster starts fork */
+	TRACE_POSTGRESQL_POSTMASTER_START_FORK(++fork_sequence_num);
 	pid = fork_process();
 	if (pid == 0)				/* child */
 	{
+		/* 3. fork is completed in a backend */
+		TRACE_POSTGRESQL_BACKEND_FORK_COMPLETED(fork_sequence_num);
+
 		/* Close the postmaster's sockets */
 		ClosePostmasterPorts(child_type == B_LOGGER);
 

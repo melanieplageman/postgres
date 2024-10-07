@@ -76,6 +76,7 @@
 #include <sys/param.h>
 #include <netdb.h>
 #include <limits.h>
+#include "pg_trace.h"
 
 #ifdef USE_BONJOUR
 #include <dns_sd.h>
@@ -1650,7 +1651,11 @@ ServerLoop(void)
 				ClientSocket s;
 
 				if (AcceptConnection(events[i].fd, &s) == STATUS_OK)
+				{
+					/* 1. Postmaster got a socket from accept */
+					TRACE_POSTGRESQL_POSTMASTER_SOCKET_CREATED();
 					BackendStartup(&s);
+				}
 
 				/* We no longer need the open socket in this process */
 				if (s.sock != PGINVALID_SOCKET)

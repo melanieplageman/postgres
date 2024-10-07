@@ -4707,6 +4707,8 @@ PostgresMain(const char *dbname, const char *username)
 			/* Report any recently-changed GUC options */
 			ReportChangedGUCOptions();
 
+			/* 6. ready for query */
+			TRACE_POSTGRESQL_BACKEND_READY_FOR_QUERY();
 			ReadyForQuery(whereToSendOutput);
 			send_ready_for_query = false;
 		}
