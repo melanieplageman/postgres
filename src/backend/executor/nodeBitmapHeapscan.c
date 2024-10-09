@@ -182,51 +182,34 @@ BitmapHeapNext(BitmapHeapScanState *node)
 	 * a scan that stops after a few tuples because of a LIMIT.
 	 */
 	if (!node->initialized)
-	{
-		/* BitmapTableScanSetup sets node->ss.ss_currentScanDesc */
 		scan = BitmapTableScanSetup(node);
-		goto new_page;
-	}
 
-	for (;;)
+	while (table_scan_bitmap_next_tuple(scan, slot, &node->recheck,
+										&node->stats.lossy_pages, &node->stats.exact_pages))
 	{
-		while (table_scan_bitmap_next_tuple(scan, slot))
-		{
-			/*
-			 * Continuing in previously obtained page.
-			 */
-
-			CHECK_FOR_INTERRUPTS();
-
-			/*
-			 * If we are using lossy info, we have to recheck the qual
-			 * conditions at every tuple.
-			 */
-			if (node->recheck)
-			{
-				econtext->ecxt_scantuple = slot;
-				if (!ExecQualAndReset(node->bitmapqualorig, econtext))
-				{
-					/* Fails recheck, so drop it and loop back for another */
-					InstrCountFiltered2(node, 1);
-					ExecClearTuple(slot);
-					continue;
-				}
-			}
-
-			/* OK to return this tuple */
-			return slot;
-		}
-
-new_page:
+		/*
+		 * Continuing in previously obtained page.
+		 */
+		CHECK_FOR_INTERRUPTS();
 
 		/*
-		 * Returns false if the bitmap is exhausted and there are no further
-		 * blocks we need to scan.
+		 * If we are using lossy info, we have to recheck the qual conditions
+		 * at every tuple.
 		 */
-		if (!table_scan_bitmap_next_block(scan, &node->recheck,
-										  &node->stats.lossy_pages, &node->stats.exact_pages))
-			break;
+		if (node->recheck)
+		{
+			econtext->ecxt_scantuple = slot;
+			if (!ExecQualAndReset(node->bitmapqualorig, econtext))
+			{
+				/* Fails recheck, so drop it and loop back for another */
+				InstrCountFiltered2(node, 1);
+				ExecClearTuple(slot);
+				continue;
+			}
+		}
+
+		/* OK to return this tuple */
+		return slot;
 	}
 
 	/*
