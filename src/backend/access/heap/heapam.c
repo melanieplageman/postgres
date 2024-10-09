@@ -73,10 +73,10 @@ static Bitmapset *HeapDetermineColumnsInfo(Relation relation,
 static bool heap_acquire_tuplock(Relation relation, ItemPointer tid,
 								 LockTupleMode mode, LockWaitPolicy wait_policy,
 								 bool *have_tuple_lock);
-static inline BlockNumber heapgettup_advance_block(HeapScanDesc scan,
+static inline BlockNumber heapgettup_advance_block(HeapScanDesc *scan,
 												   BlockNumber block,
 												   ScanDirection dir);
-static pg_noinline BlockNumber heapgettup_initial_block(HeapScanDesc scan,
+static pg_noinline BlockNumber heapgettup_initial_block(HeapScanDesc *scan,
 														ScanDirection dir);
 static void compute_new_xmax_infomask(TransactionId xmax, uint16 old_infomask,
 									  uint16 old_infomask2, TransactionId add_to_xmax,
@@ -224,7 +224,7 @@ heap_scan_stream_read_next_parallel(ReadStream *stream,
 									void *callback_private_data,
 									void *per_buffer_data)
 {
-	HeapScanDesc scan = (HeapScanDesc) callback_private_data;
+	HeapScanDesc *scan = (HeapScanDesc *) callback_private_data;
 
 	Assert(ScanDirectionIsForward(scan->rs_dir));
 	Assert(scan->rs_base.rs_parallel);
@@ -262,7 +262,7 @@ heap_scan_stream_read_next_serial(ReadStream *stream,
 								  void *callback_private_data,
 								  void *per_buffer_data)
 {
-	HeapScanDesc scan = (HeapScanDesc) callback_private_data;
+	HeapScanDesc *scan = (HeapScanDesc *) callback_private_data;
 
 	if (unlikely(!scan->rs_inited))
 	{
@@ -282,7 +282,7 @@ heap_scan_stream_read_next_serial(ReadStream *stream,
  * ----------------
  */
 static void
-initscan(HeapScanDesc scan, ScanKey key, bool keep_startblock)
+initscan(HeapScanDesc *scan, ScanKey key, bool keep_startblock)
 {
 	ParallelBlockTableScanDesc bpscan = NULL;
 	bool		allow_strat;
@@ -412,7 +412,7 @@ initscan(HeapScanDesc scan, ScanKey key, bool keep_startblock)
 void
 heap_setscanlimits(TableScanDesc sscan, BlockNumber startBlk, BlockNumber numBlks)
 {
-	HeapScanDesc scan = (HeapScanDesc) sscan;
+	HeapScanDesc *scan = (HeapScanDesc *) sscan;
 
 	Assert(!scan->rs_inited);	/* else too late to change */
 	/* else rs_startblock is significant */
@@ -432,7 +432,7 @@ heap_setscanlimits(TableScanDesc sscan, BlockNumber startBlk, BlockNumber numBlk
  */
 pg_attribute_always_inline
 static int
-page_collect_tuples(HeapScanDesc scan, Snapshot snapshot,
+page_collect_tuples(HeapScanDesc *scan, Snapshot snapshot,
 					Page page, Buffer buffer,
 					BlockNumber block, int lines,
 					bool all_visible, bool check_serializable)
@@ -484,7 +484,7 @@ page_collect_tuples(HeapScanDesc scan, Snapshot snapshot,
 void
 heap_prepare_pagescan(TableScanDesc sscan)
 {
-	HeapScanDesc scan = (HeapScanDesc) sscan;
+	HeapScanDesc *scan = (HeapScanDesc *) sscan;
 	Buffer		buffer = scan->rs_cbuf;
 	BlockNumber block = scan->rs_cblock;
 	Snapshot	snapshot;
@@ -573,7 +573,7 @@ heap_prepare_pagescan(TableScanDesc sscan)
  * in the scan descriptor.  It is already pinned.
  */
 static inline void
-heap_fetch_next_buffer(HeapScanDesc scan, ScanDirection dir)
+heap_fetch_next_buffer(HeapScanDesc *scan, ScanDirection dir)
 {
 	Assert(scan->rs_read_stream);
 
@@ -618,7 +618,7 @@ heap_fetch_next_buffer(HeapScanDesc scan, ScanDirection dir)
  * of the pages before we can get a chance to get our first page.
  */
 static pg_noinline BlockNumber
-heapgettup_initial_block(HeapScanDesc scan, ScanDirection dir)
+heapgettup_initial_block(HeapScanDesc *scan, ScanDirection dir)
 {
 	Assert(!scan->rs_inited);
 	Assert(scan->rs_base.rs_parallel == NULL);
@@ -665,7 +665,7 @@ heapgettup_initial_block(HeapScanDesc scan, ScanDirection dir)
  * getting the final offset on the page.
  */
 static Page
-heapgettup_start_page(HeapScanDesc scan, ScanDirection dir, int *linesleft,
+heapgettup_start_page(HeapScanDesc *scan, ScanDirection dir, int *linesleft,
 					  OffsetNumber *lineoff)
 {
 	Page		page;
@@ -696,7 +696,7 @@ heapgettup_start_page(HeapScanDesc scan, ScanDirection dir, int *linesleft,
  * the next offset to scan according to the ScanDirection in 'dir'.
  */
 static inline Page
-heapgettup_continue_page(HeapScanDesc scan, ScanDirection dir, int *linesleft,
+heapgettup_continue_page(HeapScanDesc *scan, ScanDirection dir, int *linesleft,
 						 OffsetNumber *lineoff)
 {
 	Page		page;
@@ -742,7 +742,7 @@ heapgettup_continue_page(HeapScanDesc scan, ScanDirection dir, int *linesleft,
  * heap_setscanlimits().
  */
 static inline BlockNumber
-heapgettup_advance_block(HeapScanDesc scan, BlockNumber block, ScanDirection dir)
+heapgettup_advance_block(HeapScanDesc *scan, BlockNumber block, ScanDirection dir)
 {
 	Assert(scan->rs_base.rs_parallel == NULL);
 
@@ -826,7 +826,7 @@ heapgettup_advance_block(HeapScanDesc scan, BlockNumber block, ScanDirection dir
  * ----------------
  */
 static void
-heapgettup(HeapScanDesc scan,
+heapgettup(HeapScanDesc *scan,
 		   ScanDirection dir,
 		   int nkeys,
 		   ScanKey key)
@@ -936,7 +936,7 @@ continue_page:
  * ----------------
  */
 static void
-heapgettup_pagemode(HeapScanDesc scan,
+heapgettup_pagemode(HeapScanDesc *scan,
 					ScanDirection dir,
 					int nkeys,
 					ScanKey key)
@@ -1031,7 +1031,7 @@ heap_beginscan(Relation relation, Snapshot snapshot,
 			   ParallelTableScanDesc parallel_scan,
 			   uint32 flags)
 {
-	HeapScanDesc scan;
+	HeapScanDesc *scan;
 
 	/*
 	 * increment relation ref count while scanning relation
@@ -1045,7 +1045,7 @@ heap_beginscan(Relation relation, Snapshot snapshot,
 	/*
 	 * allocate and initialize scan descriptor
 	 */
-	scan = (HeapScanDesc) palloc(sizeof(HeapScanDescData));
+	scan = (HeapScanDesc *) palloc(sizeof(HeapScanDesc));
 
 	scan->rs_base.rs_rd = relation;
 	scan->rs_base.rs_snapshot = snapshot;
@@ -1143,7 +1143,7 @@ void
 heap_rescan(TableScanDesc sscan, ScanKey key, bool set_params,
 			bool allow_strat, bool allow_sync, bool allow_pagemode)
 {
-	HeapScanDesc scan = (HeapScanDesc) sscan;
+	HeapScanDesc *scan = (HeapScanDesc *) sscan;
 
 	if (set_params)
 	{
@@ -1200,7 +1200,7 @@ heap_rescan(TableScanDesc sscan, ScanKey key, bool set_params,
 void
 heap_endscan(TableScanDesc sscan)
 {
-	HeapScanDesc scan = (HeapScanDesc) sscan;
+	HeapScanDesc *scan = (HeapScanDesc *) sscan;
 
 	/* Note: no locking manipulations needed */
 
@@ -1242,7 +1242,7 @@ heap_endscan(TableScanDesc sscan)
 HeapTuple
 heap_getnext(TableScanDesc sscan, ScanDirection direction)
 {
-	HeapScanDesc scan = (HeapScanDesc) sscan;
+	HeapScanDesc *scan = (HeapScanDesc *) sscan;
 
 	/*
 	 * This is still widely used directly, without going through table AM, so
@@ -1291,7 +1291,7 @@ heap_getnext(TableScanDesc sscan, ScanDirection direction)
 bool
 heap_getnextslot(TableScanDesc sscan, ScanDirection direction, TupleTableSlot *slot)
 {
-	HeapScanDesc scan = (HeapScanDesc) sscan;
+	HeapScanDesc *scan = (HeapScanDesc *) sscan;
 
 	/* Note: no locking manipulations needed */
 
@@ -1322,7 +1322,7 @@ void
 heap_set_tidrange(TableScanDesc sscan, ItemPointer mintid,
 				  ItemPointer maxtid)
 {
-	HeapScanDesc scan = (HeapScanDesc) sscan;
+	HeapScanDesc *scan = (HeapScanDesc *) sscan;
 	BlockNumber startBlk;
 	BlockNumber numBlks;
 	ItemPointerData highestItem;
@@ -1395,7 +1395,7 @@ bool
 heap_getnextslot_tidrange(TableScanDesc sscan, ScanDirection direction,
 						  TupleTableSlot *slot)
 {
-	HeapScanDesc scan = (HeapScanDesc) sscan;
+	HeapScanDesc *scan = (HeapScanDesc *) sscan;
 	ItemPointer mintid = &sscan->rs_mintid;
 	ItemPointer maxtid = &sscan->rs_maxtid;
 
