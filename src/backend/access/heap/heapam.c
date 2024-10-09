@@ -410,7 +410,7 @@ initscan(HeapScanDesc *scan, ScanKey key, bool keep_startblock)
  * numBlks is number of pages to scan (InvalidBlockNumber means "all")
  */
 void
-heap_setscanlimits(TableScanDesc sscan, BlockNumber startBlk, BlockNumber numBlks)
+heap_setscanlimits(TableScanDesc *sscan, BlockNumber startBlk, BlockNumber numBlks)
 {
 	HeapScanDesc *scan = (HeapScanDesc *) sscan;
 
@@ -482,7 +482,7 @@ page_collect_tuples(HeapScanDesc *scan, Snapshot snapshot,
  * fill the rs_vistuples[] array with the OffsetNumbers of visible tuples.
  */
 void
-heap_prepare_pagescan(TableScanDesc sscan)
+heap_prepare_pagescan(TableScanDesc *sscan)
 {
 	HeapScanDesc *scan = (HeapScanDesc *) sscan;
 	Buffer		buffer = scan->rs_cbuf;
@@ -976,7 +976,7 @@ heapgettup_pagemode(HeapScanDesc *scan,
 		Assert(BufferGetBlockNumber(scan->rs_cbuf) == scan->rs_cblock);
 
 		/* prune the page and determine visible tuple offsets */
-		heap_prepare_pagescan((TableScanDesc) scan);
+		heap_prepare_pagescan((TableScanDesc *) scan);
 		page = BufferGetPage(scan->rs_cbuf);
 		linesleft = scan->rs_ntuples;
 		lineindex = ScanDirectionIsForward(dir) ? 0 : linesleft - 1;
@@ -1025,7 +1025,7 @@ continue_page:
  */
 
 
-TableScanDesc
+TableScanDesc *
 heap_beginscan(Relation relation, Snapshot snapshot,
 			   int nkeys, ScanKey key,
 			   ParallelTableScanDesc parallel_scan,
@@ -1136,11 +1136,11 @@ heap_beginscan(Relation relation, Snapshot snapshot,
 	}
 
 
-	return (TableScanDesc) scan;
+	return (TableScanDesc *) scan;
 }
 
 void
-heap_rescan(TableScanDesc sscan, ScanKey key, bool set_params,
+heap_rescan(TableScanDesc *sscan, ScanKey key, bool set_params,
 			bool allow_strat, bool allow_sync, bool allow_pagemode)
 {
 	HeapScanDesc *scan = (HeapScanDesc *) sscan;
@@ -1198,7 +1198,7 @@ heap_rescan(TableScanDesc sscan, ScanKey key, bool set_params,
 }
 
 void
-heap_endscan(TableScanDesc sscan)
+heap_endscan(TableScanDesc *sscan)
 {
 	HeapScanDesc *scan = (HeapScanDesc *) sscan;
 
@@ -1240,7 +1240,7 @@ heap_endscan(TableScanDesc sscan)
 }
 
 HeapTuple
-heap_getnext(TableScanDesc sscan, ScanDirection direction)
+heap_getnext(TableScanDesc *sscan, ScanDirection direction)
 {
 	HeapScanDesc *scan = (HeapScanDesc *) sscan;
 
@@ -1289,7 +1289,7 @@ heap_getnext(TableScanDesc sscan, ScanDirection direction)
 }
 
 bool
-heap_getnextslot(TableScanDesc sscan, ScanDirection direction, TupleTableSlot *slot)
+heap_getnextslot(TableScanDesc *sscan, ScanDirection direction, TupleTableSlot *slot)
 {
 	HeapScanDesc *scan = (HeapScanDesc *) sscan;
 
@@ -1319,7 +1319,7 @@ heap_getnextslot(TableScanDesc sscan, ScanDirection direction, TupleTableSlot *s
 }
 
 void
-heap_set_tidrange(TableScanDesc sscan, ItemPointer mintid,
+heap_set_tidrange(TableScanDesc *sscan, ItemPointer mintid,
 				  ItemPointer maxtid)
 {
 	HeapScanDesc *scan = (HeapScanDesc *) sscan;
@@ -1392,7 +1392,7 @@ heap_set_tidrange(TableScanDesc sscan, ItemPointer mintid,
 }
 
 bool
-heap_getnextslot_tidrange(TableScanDesc sscan, ScanDirection direction,
+heap_getnextslot_tidrange(TableScanDesc *sscan, ScanDirection direction,
 						  TupleTableSlot *slot)
 {
 	HeapScanDesc *scan = (HeapScanDesc *) sscan;
@@ -1771,7 +1771,7 @@ heap_hot_search_buffer(ItemPointer tid, Relation relation, Buffer buffer,
  * if no version of the row passes the snapshot test.
  */
 void
-heap_get_latest_tid(TableScanDesc sscan,
+heap_get_latest_tid(TableScanDesc *sscan,
 					ItemPointer tid)
 {
 	Relation	relation = sscan->rs_rd;

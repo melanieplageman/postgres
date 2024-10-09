@@ -108,7 +108,7 @@ table_slot_create(Relation relation, List **reglist)
  * ----------------------------------------------------------------------------
  */
 
-TableScanDesc
+TableScanDesc *
 table_beginscan_catalog(Relation relation, int nkeys, struct ScanKeyData *key)
 {
 	uint32		flags = SO_TYPE_SEQSCAN |
@@ -161,7 +161,7 @@ table_parallelscan_initialize(Relation rel, ParallelTableScanDesc pscan,
 	}
 }
 
-TableScanDesc
+TableScanDesc *
 table_beginscan_parallel(Relation relation, ParallelTableScanDesc pscan)
 {
 	Snapshot	snapshot;
@@ -232,7 +232,7 @@ table_index_fetch_tuple_check(Relation rel,
  */
 
 void
-table_tuple_get_latest_tid(TableScanDesc scan, ItemPointer tid)
+table_tuple_get_latest_tid(TableScanDesc *scan, ItemPointer tid)
 {
 	Relation	rel = scan->rs_rd;
 	const TableAmRoutine *tableam = rel->rd_tableam;

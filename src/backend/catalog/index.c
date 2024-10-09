@@ -3147,7 +3147,7 @@ IndexCheckExclusion(Relation heapRelation,
 					Relation indexRelation,
 					IndexInfo *indexInfo)
 {
-	TableScanDesc scan;
+	TableScanDesc *scan;
 	Datum		values[INDEX_MAX_KEYS];
 	bool		isnull[INDEX_MAX_KEYS];
 	ExprState  *predicate;

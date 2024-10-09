@@ -3149,7 +3149,7 @@ validateDomainNotNullConstraint(Oid domainoid)
 		Relation	testrel = rtc->rel;
 		TupleDesc	tupdesc = RelationGetDescr(testrel);
 		TupleTableSlot *slot;
-		TableScanDesc scan;
+		TableScanDesc *scan;
 		Snapshot	snapshot;
 
 		/* Scan all tuples in this relation */
@@ -3225,7 +3225,7 @@ validateDomainCheckConstraint(Oid domainoid, const char *ccbin)
 		Relation	testrel = rtc->rel;
 		TupleDesc	tupdesc = RelationGetDescr(testrel);
 		TupleTableSlot *slot;
-		TableScanDesc scan;
+		TableScanDesc *scan;
 		Snapshot	snapshot;
 
 		/* Scan all tuples in this relation */

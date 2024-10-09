@@ -783,7 +783,7 @@ GetAllTablesPublicationRelations(bool pubviaroot)
 {
 	Relation	classRel;
 	ScanKeyData key[1];
-	TableScanDesc scan;
+	TableScanDesc *scan;
 	HeapTuple	tuple;
 	List	   *result = NIL;
 
@@ -908,7 +908,7 @@ GetSchemaPublicationRelations(Oid schemaid, PublicationPartOpt pub_partopt)
 {
 	Relation	classRel;
 	ScanKeyData key[1];
-	TableScanDesc scan;
+	TableScanDesc *scan;
 	HeapTuple	tuple;
 	List	   *result = NIL;
 

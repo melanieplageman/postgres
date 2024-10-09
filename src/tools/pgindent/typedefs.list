@@ -2874,7 +2874,6 @@ TableInfo
 TableLikeClause
 TableSampleClause
 TableScanDesc
-TableScanDescData
 TableSpaceCacheEntry
 TableSpaceOpts
 TablespaceList

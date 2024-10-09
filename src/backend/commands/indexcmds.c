@@ -3081,7 +3081,7 @@ ReindexMultipleTables(const ReindexStmt *stmt, const ReindexParams *params)
 
 	Oid			objectOid;
 	Relation	relationRelation;
-	TableScanDesc scan;
+	TableScanDesc *scan;
 	ScanKeyData scan_keys[1];
 	HeapTuple	tuple;
 	MemoryContext private_context;

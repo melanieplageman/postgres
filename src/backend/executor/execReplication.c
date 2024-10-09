@@ -399,7 +399,7 @@ RelationFindReplTupleSeq(Relation rel, LockTupleMode lockmode,
 						 TupleTableSlot *searchslot, TupleTableSlot *outslot)
 {
 	TupleTableSlot *scanslot;
-	TableScanDesc scan;
+	TableScanDesc *scan;
 	SnapshotData snap;
 	TypeCacheEntry **eq;
 	TransactionId xwait;

@@ -3302,7 +3302,7 @@ check_default_partition_contents(Relation parent, Relation default_rel,
 		ExprState  *partqualstate = NULL;
 		Snapshot	snapshot;
 		ExprContext *econtext;
-		TableScanDesc scan;
+		TableScanDesc *scan;
 		MemoryContext oldCxt;
 		TupleTableSlot *tupslot;
 

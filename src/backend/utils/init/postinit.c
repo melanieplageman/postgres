@@ -1413,7 +1413,7 @@ static bool
 ThereIsAtLeastOneRole(void)
 {
 	Relation	pg_authid_rel;
-	TableScanDesc scan;
+	TableScanDesc *scan;
 	bool		result;
 
 	pg_authid_rel = table_open(AuthIdRelationId, AccessShareLock);

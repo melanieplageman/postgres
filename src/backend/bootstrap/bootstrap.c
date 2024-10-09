@@ -696,7 +696,7 @@ static void
 populate_typ_list(void)
 {
 	Relation	rel;
-	TableScanDesc scan;
+	TableScanDesc *scan;
 	HeapTuple	tup;
 	MemoryContext old;
 

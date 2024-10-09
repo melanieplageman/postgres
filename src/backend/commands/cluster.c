@@ -1636,7 +1636,7 @@ static List *
 get_tables_to_cluster(MemoryContext cluster_context)
 {
 	Relation	indRelation;
-	TableScanDesc scan;
+	TableScanDesc *scan;
 	ScanKeyData entry;
 	HeapTuple	indexTuple;
 	Form_pg_index index;

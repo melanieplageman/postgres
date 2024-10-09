@@ -1197,7 +1197,7 @@ acquire_sample_rows(Relation onerel, int elevel,
 	BlockSamplerData bs;
 	ReservoirStateData rstate;
 	TupleTableSlot *slot;
-	TableScanDesc scan;
+	TableScanDesc *scan;
 	BlockNumber nblocks;
 	BlockNumber blksdone = 0;
 	ReadStream *stream;

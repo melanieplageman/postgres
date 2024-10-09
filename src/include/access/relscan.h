@@ -30,7 +30,7 @@ struct ParallelTableScanDescData;
  * Generic descriptor for table scans. This is the base-class for table scans,
  * which needs to be embedded in the scans of individual AMs.
  */
-typedef struct TableScanDescData
+typedef struct TableScanDesc
 {
 	/* scan parameters */
 	Relation	rs_rd;			/* heap relation descriptor */
@@ -62,8 +62,7 @@ typedef struct TableScanDescData
 
 	struct ParallelTableScanDescData *rs_parallel;	/* parallel scan
 													 * information */
-} TableScanDescData;
-typedef struct TableScanDescData *TableScanDesc;
+} TableScanDesc;
 
 /*
  * Shared state for parallel table scan.
@@ -196,7 +195,7 @@ typedef struct SysScanDescData
 {
 	Relation	heap_rel;		/* catalog being scanned */
 	Relation	irel;			/* NULL if doing heap scan */
-	struct TableScanDescData *scan; /* only valid in storage-scan case */
+	struct TableScanDesc *scan; /* only valid in storage-scan case */
 	struct IndexScanDescData *iscan;	/* only valid in index-scan case */
 	struct SnapshotData *snapshot;	/* snapshot to unregister at end of scan */
 	struct TupleTableSlot *slot;

@@ -319,7 +319,7 @@ tablesample_init(SampleScanState *scanstate)
 static TupleTableSlot *
 tablesample_getnext(SampleScanState *scanstate)
 {
-	TableScanDesc scan = scanstate->ss.ss_currentScanDesc;
+	TableScanDesc *scan = scanstate->ss.ss_currentScanDesc;
 	TupleTableSlot *slot = scanstate->ss.ss_ScanTupleSlot;
 
 	ExecClearTuple(slot);

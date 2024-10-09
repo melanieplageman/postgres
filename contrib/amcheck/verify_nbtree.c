@@ -676,7 +676,7 @@ bt_check_every_level(Relation rel, Relation heaprel, bool heapkeyspace,
 	if (state->heapallindexed)
 	{
 		IndexInfo  *indexinfo = BuildIndexInfo(state->rel);
-		TableScanDesc scan;
+		TableScanDesc *scan;
 
 		/*
 		 * Create our own scan for table_index_build_scan(), rather than
