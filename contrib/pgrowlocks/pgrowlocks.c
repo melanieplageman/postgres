@@ -70,7 +70,7 @@ pgrowlocks(PG_FUNCTION_ARGS)
 	Relation	rel;
 	RangeVar   *relrv;
 	TableScanDesc scan;
-	HeapScanDesc hscan;
+	HeapScanDesc *hscan;
 	HeapTuple	tuple;
 	AclResult	aclresult;
 	char	  **values;
@@ -112,7 +112,7 @@ pgrowlocks(PG_FUNCTION_ARGS)
 
 	/* Scan the relation */
 	scan = table_beginscan(rel, GetActiveSnapshot(), 0, NULL);
-	hscan = (HeapScanDesc) scan;
+	hscan = (HeapScanDesc *) scan;
 
 	attinmeta = TupleDescGetAttInMetadata(rsinfo->setDesc);
 

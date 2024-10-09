@@ -314,7 +314,7 @@ static Datum
 pgstat_heap(Relation rel, FunctionCallInfo fcinfo)
 {
 	TableScanDesc scan;
-	HeapScanDesc hscan;
+	HeapScanDesc *hscan;
 	HeapTuple	tuple;
 	BlockNumber nblocks;
 	BlockNumber block = 0;		/* next block to count free space in */
@@ -334,7 +334,7 @@ pgstat_heap(Relation rel, FunctionCallInfo fcinfo)
 
 	/* Disable syncscan because we assume we scan from block zero upwards */
 	scan = table_beginscan_strat(rel, SnapshotAny, 0, NULL, true, false);
-	hscan = (HeapScanDesc) scan;
+	hscan = (HeapScanDesc *) scan;
 
 	InitDirtySnapshot(SnapshotDirty);
 

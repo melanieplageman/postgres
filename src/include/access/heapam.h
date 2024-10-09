@@ -51,7 +51,7 @@ struct VacuumCutoffs;
 /*
  * Descriptor for heap table scans.
  */
-typedef struct HeapScanDescData
+typedef struct HeapScanDesc
 {
 	TableScanDescData rs_base;	/* AM independent part of the descriptor */
 
@@ -106,8 +106,7 @@ typedef struct HeapScanDescData
 	int			rs_cindex;		/* current tuple's index in vistuples */
 	int			rs_ntuples;		/* number of visible tuples on page */
 	OffsetNumber rs_vistuples[MaxHeapTuplesPerPage];	/* their offsets */
-}			HeapScanDescData;
-typedef struct HeapScanDescData *HeapScanDesc;
+} HeapScanDesc;
 
 /*
  * Descriptor for fetches from heap via an index.
