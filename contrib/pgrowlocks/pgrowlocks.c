@@ -69,7 +69,7 @@ pgrowlocks(PG_FUNCTION_ARGS)
 	AttInMetadata *attinmeta;
 	Relation	rel;
 	RangeVar   *relrv;
-	TableScanDesc scan;
+	TableScanDesc *scan;
 	HeapScanDesc *hscan;
 	HeapTuple	tuple;
 	AclResult	aclresult;

@@ -53,7 +53,7 @@ struct VacuumCutoffs;
  */
 typedef struct HeapScanDesc
 {
-	TableScanDescData rs_base;	/* AM independent part of the descriptor */
+	TableScanDesc rs_base;		/* AM independent part of the descriptor */
 
 	/* state set up at initscan time */
 	BlockNumber rs_nblocks;		/* total number of blocks in rel */
@@ -286,22 +286,22 @@ typedef enum
  */
 #define HeapScanIsValid(scan) PointerIsValid(scan)
 
-extern TableScanDesc heap_beginscan(Relation relation, Snapshot snapshot,
-									int nkeys, ScanKey key,
-									ParallelTableScanDesc parallel_scan,
-									uint32 flags);
-extern void heap_setscanlimits(TableScanDesc sscan, BlockNumber startBlk,
+extern TableScanDesc *heap_beginscan(Relation relation, Snapshot snapshot,
+									 int nkeys, ScanKey key,
+									 ParallelTableScanDesc parallel_scan,
+									 uint32 flags);
+extern void heap_setscanlimits(TableScanDesc *sscan, BlockNumber startBlk,
 							   BlockNumber numBlks);
-extern void heap_prepare_pagescan(TableScanDesc sscan);
-extern void heap_rescan(TableScanDesc sscan, ScanKey key, bool set_params,
+extern void heap_prepare_pagescan(TableScanDesc *sscan);
+extern void heap_rescan(TableScanDesc *sscan, ScanKey key, bool set_params,
 						bool allow_strat, bool allow_sync, bool allow_pagemode);
-extern void heap_endscan(TableScanDesc sscan);
-extern HeapTuple heap_getnext(TableScanDesc sscan, ScanDirection direction);
-extern bool heap_getnextslot(TableScanDesc sscan,
+extern void heap_endscan(TableScanDesc *sscan);
+extern HeapTuple heap_getnext(TableScanDesc *sscan, ScanDirection direction);
+extern bool heap_getnextslot(TableScanDesc *sscan,
 							 ScanDirection direction, struct TupleTableSlot *slot);
-extern void heap_set_tidrange(TableScanDesc sscan, ItemPointer mintid,
+extern void heap_set_tidrange(TableScanDesc *sscan, ItemPointer mintid,
 							  ItemPointer maxtid);
-extern bool heap_getnextslot_tidrange(TableScanDesc sscan,
+extern bool heap_getnextslot_tidrange(TableScanDesc *sscan,
 									  ScanDirection direction,
 									  TupleTableSlot *slot);
 extern bool heap_fetch(Relation relation, Snapshot snapshot,
@@ -310,7 +310,7 @@ extern bool heap_hot_search_buffer(ItemPointer tid, Relation relation,
 								   Buffer buffer, Snapshot snapshot, HeapTuple heapTuple,
 								   bool *all_dead, bool first_call);
 
-extern void heap_get_latest_tid(TableScanDesc sscan, ItemPointer tid);
+extern void heap_get_latest_tid(TableScanDesc *sscan, ItemPointer tid);
 
 extern BulkInsertState GetBulkInsertState(void);
 extern void FreeBulkInsertState(BulkInsertState);

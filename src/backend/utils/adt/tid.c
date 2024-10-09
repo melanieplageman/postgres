@@ -298,7 +298,7 @@ currtid_internal(Relation rel, ItemPointer tid)
 	ItemPointer result;
 	AclResult	aclresult;
 	Snapshot	snapshot;
-	TableScanDesc scan;
+	TableScanDesc *scan;
 
 	result = (ItemPointer) palloc(sizeof(ItemPointerData));
 

@@ -395,7 +395,7 @@ void
 DropTableSpace(DropTableSpaceStmt *stmt)
 {
 	char	   *tablespacename = stmt->tablespacename;
-	TableScanDesc scandesc;
+	TableScanDesc *scandesc;
 	Relation	rel;
 	HeapTuple	tuple;
 	Form_pg_tablespace spcform;
@@ -932,7 +932,7 @@ RenameTableSpace(const char *oldname, const char *newname)
 	Oid			tspId;
 	Relation	rel;
 	ScanKeyData entry[1];
-	TableScanDesc scan;
+	TableScanDesc *scan;
 	HeapTuple	tup;
 	HeapTuple	newtuple;
 	Form_pg_tablespace newform;
@@ -1016,7 +1016,7 @@ AlterTableSpaceOptions(AlterTableSpaceOptionsStmt *stmt)
 {
 	Relation	rel;
 	ScanKeyData entry[1];
-	TableScanDesc scandesc;
+	TableScanDesc *scandesc;
 	HeapTuple	tup;
 	Oid			tablespaceoid;
 	Datum		datum;
@@ -1427,7 +1427,7 @@ get_tablespace_oid(const char *tablespacename, bool missing_ok)
 {
 	Oid			result;
 	Relation	rel;
-	TableScanDesc scandesc;
+	TableScanDesc *scandesc;
 	HeapTuple	tuple;
 	ScanKeyData entry[1];
 
@@ -1473,7 +1473,7 @@ get_tablespace_name(Oid spc_oid)
 {
 	char	   *result;
 	Relation	rel;
-	TableScanDesc scandesc;
+	TableScanDesc *scandesc;
 	HeapTuple	tuple;
 	ScanKeyData entry[1];
 

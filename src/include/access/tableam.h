@@ -325,30 +325,30 @@ typedef struct TableAmRoutine
 	 * specified, an AM may ignore unsupported ones) and whether the snapshot
 	 * needs to be deallocated at scan_end (ScanOptions's SO_TEMP_SNAPSHOT).
 	 */
-	TableScanDesc (*scan_begin) (Relation rel,
-								 Snapshot snapshot,
-								 int nkeys, struct ScanKeyData *key,
-								 ParallelTableScanDesc pscan,
-								 uint32 flags);
+	TableScanDesc *(*scan_begin) (Relation rel,
+								  Snapshot snapshot,
+								  int nkeys, struct ScanKeyData *key,
+								  ParallelTableScanDesc pscan,
+								  uint32 flags);
 
 	/*
 	 * Release resources and deallocate scan. If TableScanDesc.temp_snap,
 	 * TableScanDesc.rs_snapshot needs to be unregistered.
 	 */
-	void		(*scan_end) (TableScanDesc scan);
+	void		(*scan_end) (TableScanDesc *scan);
 
 	/*
 	 * Restart relation scan.  If set_params is set to true, allow_{strat,
 	 * sync, pagemode} (see scan_begin) changes should be taken into account.
 	 */
-	void		(*scan_rescan) (TableScanDesc scan, struct ScanKeyData *key,
+	void		(*scan_rescan) (TableScanDesc *scan, struct ScanKeyData *key,
 								bool set_params, bool allow_strat,
 								bool allow_sync, bool allow_pagemode);
 
 	/*
 	 * Return next tuple from `scan`, store in slot.
 	 */
-	bool		(*scan_getnextslot) (TableScanDesc scan,
+	bool		(*scan_getnextslot) (TableScanDesc *scan,
 									 ScanDirection direction,
 									 TupleTableSlot *slot);
 
@@ -369,7 +369,7 @@ typedef struct TableAmRoutine
 	 * before scan_getnextslot_tidrange or after scan_rescan and before any
 	 * further calls to scan_getnextslot_tidrange.
 	 */
-	void		(*scan_set_tidrange) (TableScanDesc scan,
+	void		(*scan_set_tidrange) (TableScanDesc *scan,
 									  ItemPointer mintid,
 									  ItemPointer maxtid);
 
@@ -377,7 +377,7 @@ typedef struct TableAmRoutine
 	 * Return next tuple from `scan` that's in the range of TIDs defined by
 	 * scan_set_tidrange.
 	 */
-	bool		(*scan_getnextslot_tidrange) (TableScanDesc scan,
+	bool		(*scan_getnextslot_tidrange) (TableScanDesc *scan,
 											  ScanDirection direction,
 											  TupleTableSlot *slot);
 
@@ -479,14 +479,14 @@ typedef struct TableAmRoutine
 	/*
 	 * Is tid valid for a scan of this relation.
 	 */
-	bool		(*tuple_tid_valid) (TableScanDesc scan,
+	bool		(*tuple_tid_valid) (TableScanDesc *scan,
 									ItemPointer tid);
 
 	/*
 	 * Return the latest version of the tuple at `tid`, by updating `tid` to
 	 * point at the newest version.
 	 */
-	void		(*tuple_get_latest_tid) (TableScanDesc scan,
+	void		(*tuple_get_latest_tid) (TableScanDesc *scan,
 										 ItemPointer tid);
 
 	/*
@@ -672,7 +672,7 @@ typedef struct TableAmRoutine
 	 * clear what a good interface for non block based AMs would be, so there
 	 * isn't one yet.
 	 */
-	bool		(*scan_analyze_next_block) (TableScanDesc scan,
+	bool		(*scan_analyze_next_block) (TableScanDesc *scan,
 											ReadStream *stream);
 
 	/*
@@ -683,7 +683,7 @@ typedef struct TableAmRoutine
 	 * influence autovacuum scheduling (see comment for relation_vacuum
 	 * callback).
 	 */
-	bool		(*scan_analyze_next_tuple) (TableScanDesc scan,
+	bool		(*scan_analyze_next_tuple) (TableScanDesc *scan,
 											TransactionId OldestXmin,
 											double *liverows,
 											double *deadrows,
@@ -700,7 +700,7 @@ typedef struct TableAmRoutine
 										   BlockNumber numblocks,
 										   IndexBuildCallback callback,
 										   void *callback_state,
-										   TableScanDesc scan);
+										   TableScanDesc *scan);
 
 	/* see table_index_validate_scan for reference about parameters */
 	void		(*index_validate_scan) (Relation table_rel,
@@ -805,7 +805,7 @@ typedef struct TableAmRoutine
 	 * Optional callback, but either both scan_bitmap_next_block and
 	 * scan_bitmap_next_tuple need to exist, or neither.
 	 */
-	bool		(*scan_bitmap_next_block) (TableScanDesc scan,
+	bool		(*scan_bitmap_next_block) (TableScanDesc *scan,
 										   BlockNumber *blockno, bool *recheck,
 										   uint64 *lossy_pages, uint64 *exact_pages);
 
@@ -816,7 +816,7 @@ typedef struct TableAmRoutine
 	 * Optional callback, but either both scan_bitmap_next_block and
 	 * scan_bitmap_next_tuple need to exist, or neither.
 	 */
-	bool		(*scan_bitmap_next_tuple) (TableScanDesc scan,
+	bool		(*scan_bitmap_next_tuple) (TableScanDesc *scan,
 										   TupleTableSlot *slot);
 
 	/*
@@ -844,7 +844,7 @@ typedef struct TableAmRoutine
 	 * alternative way (contrary e.g. to bitmap scans) to implement sample
 	 * scans. If infeasible to implement, the AM may raise an error.
 	 */
-	bool		(*scan_sample_next_block) (TableScanDesc scan,
+	bool		(*scan_sample_next_block) (TableScanDesc *scan,
 										   struct SampleScanState *scanstate);
 
 	/*
@@ -860,7 +860,7 @@ typedef struct TableAmRoutine
 	 * given page, so if that doesn't apply to an AM, it needs to emulate that
 	 * assumption somehow.
 	 */
-	bool		(*scan_sample_next_tuple) (TableScanDesc scan,
+	bool		(*scan_sample_next_tuple) (TableScanDesc *scan,
 										   struct SampleScanState *scanstate,
 										   TupleTableSlot *slot);
 
@@ -895,7 +895,7 @@ extern TupleTableSlot *table_slot_create(Relation relation, List **reglist);
  * Start a scan of `rel`. Returned tuples pass a visibility test of
  * `snapshot`, and if nkeys != 0, the results are filtered by those scan keys.
  */
-static inline TableScanDesc
+static inline TableScanDesc *
 table_beginscan(Relation rel, Snapshot snapshot,
 				int nkeys, struct ScanKeyData *key)
 {
@@ -909,8 +909,8 @@ table_beginscan(Relation rel, Snapshot snapshot,
  * Like table_beginscan(), but for scanning catalog. It'll automatically use a
  * snapshot appropriate for scanning catalog relations.
  */
-extern TableScanDesc table_beginscan_catalog(Relation relation, int nkeys,
-											 struct ScanKeyData *key);
+extern TableScanDesc *table_beginscan_catalog(Relation relation, int nkeys,
+											  struct ScanKeyData *key);
 
 /*
  * Like table_beginscan(), but table_beginscan_strat() offers an extended API
@@ -919,7 +919,7 @@ extern TableScanDesc table_beginscan_catalog(Relation relation, int nkeys,
  * scan not starting from block zero).  Both of these default to true with
  * plain table_beginscan.
  */
-static inline TableScanDesc
+static inline TableScanDesc *
 table_beginscan_strat(Relation rel, Snapshot snapshot,
 					  int nkeys, struct ScanKeyData *key,
 					  bool allow_strat, bool allow_sync)
@@ -940,7 +940,7 @@ table_beginscan_strat(Relation rel, Snapshot snapshot,
  * really quite unlike a standard seqscan, there is just enough commonality to
  * make it worth using the same data structure.
  */
-static inline TableScanDesc
+static inline TableScanDesc *
 table_beginscan_bm(Relation rel, Snapshot snapshot,
 				   int nkeys, struct ScanKeyData *key, bool need_tuple)
 {
@@ -959,7 +959,7 @@ table_beginscan_bm(Relation rel, Snapshot snapshot,
  * In addition to the options offered by table_beginscan_strat, this call
  * also allows control of whether page-mode visibility checking is used.
  */
-static inline TableScanDesc
+static inline TableScanDesc *
 table_beginscan_sampling(Relation rel, Snapshot snapshot,
 						 int nkeys, struct ScanKeyData *key,
 						 bool allow_strat, bool allow_sync,
@@ -982,7 +982,7 @@ table_beginscan_sampling(Relation rel, Snapshot snapshot,
  * TableScanDesc for a Tid scan. As with bitmap scans, it's worth using
  * the same data structure although the behavior is rather different.
  */
-static inline TableScanDesc
+static inline TableScanDesc *
 table_beginscan_tid(Relation rel, Snapshot snapshot)
 {
 	uint32		flags = SO_TYPE_TIDSCAN;
@@ -995,7 +995,7 @@ table_beginscan_tid(Relation rel, Snapshot snapshot)
  * TableScanDesc for an ANALYZE scan.  As with bitmap scans, it's worth using
  * the same data structure although the behavior is rather different.
  */
-static inline TableScanDesc
+static inline TableScanDesc *
 table_beginscan_analyze(Relation rel)
 {
 	uint32		flags = SO_TYPE_ANALYZE;
@@ -1007,7 +1007,7 @@ table_beginscan_analyze(Relation rel)
  * End relation scan.
  */
 static inline void
-table_endscan(TableScanDesc scan)
+table_endscan(TableScanDesc *scan)
 {
 	scan->rs_rd->rd_tableam->scan_end(scan);
 }
@@ -1016,7 +1016,7 @@ table_endscan(TableScanDesc scan)
  * Restart a relation scan.
  */
 static inline void
-table_rescan(TableScanDesc scan,
+table_rescan(TableScanDesc *scan,
 			 struct ScanKeyData *key)
 {
 	scan->rs_rd->rd_tableam->scan_rescan(scan, key, false, false, false, false);
@@ -1031,7 +1031,7 @@ table_rescan(TableScanDesc scan,
  * previously selected startblock will be kept.
  */
 static inline void
-table_rescan_set_params(TableScanDesc scan, struct ScanKeyData *key,
+table_rescan_set_params(TableScanDesc *scan, struct ScanKeyData *key,
 						bool allow_strat, bool allow_sync, bool allow_pagemode)
 {
 	scan->rs_rd->rd_tableam->scan_rescan(scan, key, true,
@@ -1043,7 +1043,7 @@ table_rescan_set_params(TableScanDesc scan, struct ScanKeyData *key,
  * Return next tuple from `scan`, store in slot.
  */
 static inline bool
-table_scan_getnextslot(TableScanDesc sscan, ScanDirection direction, TupleTableSlot *slot)
+table_scan_getnextslot(TableScanDesc *sscan, ScanDirection direction, TupleTableSlot *slot)
 {
 	slot->tts_tableOid = RelationGetRelid(sscan->rs_rd);
 
@@ -1071,12 +1071,12 @@ table_scan_getnextslot(TableScanDesc sscan, ScanDirection direction, TupleTableS
  * table_beginscan_tidrange is the entry point for setting up a TableScanDesc
  * for a TID range scan.
  */
-static inline TableScanDesc
+static inline TableScanDesc *
 table_beginscan_tidrange(Relation rel, Snapshot snapshot,
 						 ItemPointer mintid,
 						 ItemPointer maxtid)
 {
-	TableScanDesc sscan;
+	TableScanDesc *sscan;
 	uint32		flags = SO_TYPE_TIDRANGESCAN | SO_ALLOW_PAGEMODE;
 
 	sscan = rel->rd_tableam->scan_begin(rel, snapshot, 0, NULL, NULL, flags);
@@ -1093,7 +1093,7 @@ table_beginscan_tidrange(Relation rel, Snapshot snapshot,
  * table_beginscan_tidrange.
  */
 static inline void
-table_rescan_tidrange(TableScanDesc sscan, ItemPointer mintid,
+table_rescan_tidrange(TableScanDesc *sscan, ItemPointer mintid,
 					  ItemPointer maxtid)
 {
 	/* Ensure table_beginscan_tidrange() was used. */
@@ -1109,7 +1109,7 @@ table_rescan_tidrange(TableScanDesc sscan, ItemPointer mintid,
  * or returns false if no more tuples exist in the range.
  */
 static inline bool
-table_scan_getnextslot_tidrange(TableScanDesc sscan, ScanDirection direction,
+table_scan_getnextslot_tidrange(TableScanDesc *sscan, ScanDirection direction,
 								TupleTableSlot *slot)
 {
 	/* Ensure table_beginscan_tidrange() was used. */
@@ -1153,8 +1153,8 @@ extern void table_parallelscan_initialize(Relation rel,
  *
  * Caller must hold a suitable lock on the relation.
  */
-extern TableScanDesc table_beginscan_parallel(Relation relation,
-											  ParallelTableScanDesc pscan);
+extern TableScanDesc *table_beginscan_parallel(Relation relation,
+											   ParallelTableScanDesc pscan);
 
 /*
  * Restart a parallel scan.  Call this in the leader process.  Caller is
@@ -1302,7 +1302,7 @@ table_tuple_fetch_row_version(Relation rel,
  * `scan` needs to have been started via table_beginscan().
  */
 static inline bool
-table_tuple_tid_valid(TableScanDesc scan, ItemPointer tid)
+table_tuple_tid_valid(TableScanDesc *scan, ItemPointer tid)
 {
 	return scan->rs_rd->rd_tableam->tuple_tid_valid(scan, tid);
 }
@@ -1311,7 +1311,7 @@ table_tuple_tid_valid(TableScanDesc scan, ItemPointer tid)
  * Return the latest version of the tuple at `tid`, by updating `tid` to
  * point at the newest version.
  */
-extern void table_tuple_get_latest_tid(TableScanDesc scan, ItemPointer tid);
+extern void table_tuple_get_latest_tid(TableScanDesc *scan, ItemPointer tid);
 
 /*
  * Return true iff tuple in slot satisfies the snapshot.
@@ -1710,7 +1710,7 @@ table_relation_vacuum(Relation rel, struct VacuumParams *params,
  * Returns false if block is unsuitable for sampling, true otherwise.
  */
 static inline bool
-table_scan_analyze_next_block(TableScanDesc scan, ReadStream *stream)
+table_scan_analyze_next_block(TableScanDesc *scan, ReadStream *stream)
 {
 	return scan->rs_rd->rd_tableam->scan_analyze_next_block(scan, stream);
 }
@@ -1726,7 +1726,7 @@ table_scan_analyze_next_block(TableScanDesc scan, ReadStream *stream)
  * tuples.
  */
 static inline bool
-table_scan_analyze_next_tuple(TableScanDesc scan, TransactionId OldestXmin,
+table_scan_analyze_next_tuple(TableScanDesc *scan, TransactionId OldestXmin,
 							  double *liverows, double *deadrows,
 							  TupleTableSlot *slot)
 {
@@ -1770,7 +1770,7 @@ table_index_build_scan(Relation table_rel,
 					   bool progress,
 					   IndexBuildCallback callback,
 					   void *callback_state,
-					   TableScanDesc scan)
+					   TableScanDesc *scan)
 {
 	return table_rel->rd_tableam->index_build_range_scan(table_rel,
 														 index_rel,
@@ -1806,7 +1806,7 @@ table_index_build_range_scan(Relation table_rel,
 							 BlockNumber numblocks,
 							 IndexBuildCallback callback,
 							 void *callback_state,
-							 TableScanDesc scan)
+							 TableScanDesc *scan)
 {
 	return table_rel->rd_tableam->index_build_range_scan(table_rel,
 														 index_rel,
@@ -1958,7 +1958,7 @@ table_relation_estimate_size(Relation rel, int32 *attr_widths,
  * used after verifying the presence (at plan time or such).
  */
 static inline bool
-table_scan_bitmap_next_block(TableScanDesc scan,
+table_scan_bitmap_next_block(TableScanDesc *scan,
 							 BlockNumber *blockno, bool *recheck,
 							 uint64 *lossy_pages,
 							 uint64 *exact_pages)
@@ -1985,7 +1985,7 @@ table_scan_bitmap_next_block(TableScanDesc scan,
  * returned false.
  */
 static inline bool
-table_scan_bitmap_next_tuple(TableScanDesc scan,
+table_scan_bitmap_next_tuple(TableScanDesc *scan,
 							 TupleTableSlot *slot)
 {
 	/*
@@ -2010,7 +2010,7 @@ table_scan_bitmap_next_tuple(TableScanDesc scan,
  * underlying relation.
  */
 static inline bool
-table_scan_sample_next_block(TableScanDesc scan,
+table_scan_sample_next_block(TableScanDesc *scan,
 							 struct SampleScanState *scanstate)
 {
 	/*
@@ -2032,7 +2032,7 @@ table_scan_sample_next_block(TableScanDesc scan,
  * This will call the TsmRoutine's NextSampleTuple() callback.
  */
 static inline bool
-table_scan_sample_next_tuple(TableScanDesc scan,
+table_scan_sample_next_tuple(TableScanDesc *scan,
 							 struct SampleScanState *scanstate,
 							 TupleTableSlot *slot)
 {

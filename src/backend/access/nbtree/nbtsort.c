@@ -1872,7 +1872,7 @@ _bt_parallel_scan_and_sort(BTSpool *btspool, BTSpool *btspool2,
 {
 	SortCoordinate coordinate;
 	BTBuildState buildstate;
-	TableScanDesc scan;
+	TableScanDesc *scan;
 	double		reltuples;
 	IndexInfo  *indexInfo;
 

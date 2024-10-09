@@ -219,7 +219,7 @@ TidRangeEval(TidRangeScanState *node)
 static TupleTableSlot *
 TidRangeNext(TidRangeScanState *node)
 {
-	TableScanDesc scandesc;
+	TableScanDesc *scandesc;
 	EState	   *estate;
 	ScanDirection direction;
 	TupleTableSlot *slot;
@@ -326,7 +326,7 @@ ExecReScanTidRangeScan(TidRangeScanState *node)
 void
 ExecEndTidRangeScan(TidRangeScanState *node)
 {
-	TableScanDesc scan = node->ss.ss_currentScanDesc;
+	TableScanDesc *scan = node->ss.ss_currentScanDesc;
 
 	if (scan != NULL)
 		table_endscan(scan);

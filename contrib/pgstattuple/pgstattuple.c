@@ -313,7 +313,7 @@ pgstat_relation(Relation rel, FunctionCallInfo fcinfo)
 static Datum
 pgstat_heap(Relation rel, FunctionCallInfo fcinfo)
 {
-	TableScanDesc scan;
+	TableScanDesc *scan;
 	HeapScanDesc *hscan;
 	HeapTuple	tuple;
 	BlockNumber nblocks;
