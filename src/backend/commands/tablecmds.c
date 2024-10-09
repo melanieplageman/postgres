@@ -6094,7 +6094,7 @@ ATRewriteTable(AlteredTableInfo *tab, Oid OIDNewHeap, LOCKMODE lockmode)
 		ExprContext *econtext;
 		TupleTableSlot *oldslot;
 		TupleTableSlot *newslot;
-		TableScanDesc scan;
+		TableScanDesc *scan;
 		MemoryContext oldCxt;
 		List	   *dropped_attrs = NIL;
 		ListCell   *lc;
@@ -6895,7 +6895,7 @@ find_typed_table_dependencies(Oid typeOid, const char *typeName, DropBehavior be
 {
 	Relation	classRel;
 	ScanKeyData key[1];
-	TableScanDesc scan;
+	TableScanDesc *scan;
 	HeapTuple	tuple;
 	List	   *result = NIL;
 
@@ -12253,7 +12253,7 @@ validateForeignKeyConstraint(char *conname,
 							 bool hasperiod)
 {
 	TupleTableSlot *slot;
-	TableScanDesc scan;
+	TableScanDesc *scan;
 	Trigger		trig = {0};
 	Snapshot	snapshot;
 	MemoryContext oldcxt;
@@ -15367,7 +15367,7 @@ AlterTableMoveAll(AlterTableMoveAllStmt *stmt)
 	ListCell   *l;
 	ScanKeyData key[1];
 	Relation	rel;
-	TableScanDesc scan;
+	TableScanDesc *scan;
 	HeapTuple	tuple;
 	Oid			orig_tablespaceoid;
 	Oid			new_tablespaceoid;

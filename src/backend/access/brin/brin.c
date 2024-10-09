@@ -2801,7 +2801,7 @@ _brin_parallel_scan_and_build(BrinBuildState *state,
 							  int sortmem, bool progress)
 {
 	SortCoordinate coordinate;
-	TableScanDesc scan;
+	TableScanDesc *scan;
 	double		reltuples;
 	IndexInfo  *indexInfo;
 

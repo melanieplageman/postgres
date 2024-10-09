@@ -54,7 +54,7 @@ static inline void BitmapDoneInitializingSharedState(ParallelBitmapHeapState *ps
 static inline void BitmapAdjustPrefetchIterator(BitmapHeapScanState *node);
 static inline void BitmapAdjustPrefetchTarget(BitmapHeapScanState *node);
 static inline void BitmapPrefetch(BitmapHeapScanState *node,
-								  TableScanDesc scan);
+								  TableScanDesc *scan);
 static bool BitmapShouldInitializeSharedState(ParallelBitmapHeapState *pstate);
 
 
@@ -68,7 +68,7 @@ static TupleTableSlot *
 BitmapHeapNext(BitmapHeapScanState *node)
 {
 	ExprContext *econtext;
-	TableScanDesc scan;
+	TableScanDesc *scan;
 	TIDBitmap  *tbm;
 	TupleTableSlot *slot;
 	ParallelBitmapHeapState *pstate = node->pstate;
@@ -423,7 +423,7 @@ BitmapAdjustPrefetchTarget(BitmapHeapScanState *node)
  * BitmapPrefetch - Prefetch, if prefetch_pages are behind prefetch_target
  */
 static inline void
-BitmapPrefetch(BitmapHeapScanState *node, TableScanDesc scan)
+BitmapPrefetch(BitmapHeapScanState *node, TableScanDesc *scan)
 {
 #ifdef USE_PREFETCH
 	ParallelBitmapHeapState *pstate = node->pstate;
@@ -561,7 +561,7 @@ ExecReScanBitmapHeapScan(BitmapHeapScanState *node)
 {
 	PlanState  *outerPlan = outerPlanState(node);
 
-	TableScanDesc scan = node->ss.ss_currentScanDesc;
+	TableScanDesc *scan = node->ss.ss_currentScanDesc;
 
 	if (scan)
 	{
@@ -610,7 +610,7 @@ ExecReScanBitmapHeapScan(BitmapHeapScanState *node)
 void
 ExecEndBitmapHeapScan(BitmapHeapScanState *node)
 {
-	TableScanDesc scanDesc;
+	TableScanDesc *scanDesc;
 
 	/*
 	 * When ending a parallel worker, copy the statistics gathered by the

@@ -846,7 +846,7 @@ DoCopyTo(CopyToState cstate)
 	if (cstate->rel)
 	{
 		TupleTableSlot *slot;
-		TableScanDesc scandesc;
+		TableScanDesc *scandesc;
 
 		scandesc = table_beginscan(cstate->rel, GetActiveSnapshot(), 0, NULL);
 		slot = table_slot_create(cstate->rel, NULL);

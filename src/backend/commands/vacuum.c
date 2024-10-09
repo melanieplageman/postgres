@@ -1023,7 +1023,7 @@ get_all_vacuum_rels(MemoryContext vac_context, int options)
 {
 	List	   *vacrels = NIL;
 	Relation	pgclass;
-	TableScanDesc scan;
+	TableScanDesc *scan;
 	HeapTuple	tuple;
 
 	pgclass = table_open(RelationRelationId, AccessShareLock);
@@ -1809,7 +1809,7 @@ vac_truncate_clog(TransactionId frozenXID,
 {
 	TransactionId nextXID = ReadNextTransactionId();
 	Relation	relation;
-	TableScanDesc scan;
+	TableScanDesc *scan;
 	HeapTuple	tuple;
 	Oid			oldestxid_datoid;
 	Oid			minmulti_datoid;

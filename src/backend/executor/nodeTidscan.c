@@ -134,7 +134,7 @@ static void
 TidListEval(TidScanState *tidstate)
 {
 	ExprContext *econtext = tidstate->ss.ps.ps_ExprContext;
-	TableScanDesc scan;
+	TableScanDesc *scan;
 	ItemPointerData *tidList;
 	int			numAllocTids;
 	int			numTids;
@@ -314,7 +314,7 @@ TidNext(TidScanState *node)
 	EState	   *estate;
 	ScanDirection direction;
 	Snapshot	snapshot;
-	TableScanDesc scan;
+	TableScanDesc *scan;
 	Relation	heapRelation;
 	TupleTableSlot *slot;
 	ItemPointerData *tidList;

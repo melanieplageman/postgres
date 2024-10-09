@@ -49,7 +49,7 @@ static TupleTableSlot *SeqNext(SeqScanState *node);
 static TupleTableSlot *
 SeqNext(SeqScanState *node)
 {
-	TableScanDesc scandesc;
+	TableScanDesc *scandesc;
 	EState	   *estate;
 	ScanDirection direction;
 	TupleTableSlot *slot;
@@ -183,7 +183,7 @@ ExecInitSeqScan(SeqScan *node, EState *estate, int eflags)
 void
 ExecEndSeqScan(SeqScanState *node)
 {
-	TableScanDesc scanDesc;
+	TableScanDesc *scanDesc;
 
 	/*
 	 * get information from node
@@ -211,7 +211,7 @@ ExecEndSeqScan(SeqScanState *node)
 void
 ExecReScanSeqScan(SeqScanState *node)
 {
-	TableScanDesc scan;
+	TableScanDesc *scan;
 
 	scan = node->ss.ss_currentScanDesc;
 

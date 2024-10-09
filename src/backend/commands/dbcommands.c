@@ -550,7 +550,7 @@ static void
 CreateDatabaseUsingFileCopy(Oid src_dboid, Oid dst_dboid, Oid src_tsid,
 							Oid dst_tsid)
 {
-	TableScanDesc scan;
+	TableScanDesc *scan;
 	Relation	rel;
 	HeapTuple	tuple;
 
@@ -2977,7 +2977,7 @@ static void
 remove_dbtablespaces(Oid db_id)
 {
 	Relation	rel;
-	TableScanDesc scan;
+	TableScanDesc *scan;
 	HeapTuple	tuple;
 	List	   *ltblspc = NIL;
 	ListCell   *cell;
@@ -3068,7 +3068,7 @@ check_db_file_conflict(Oid db_id)
 {
 	bool		result = false;
 	Relation	rel;
-	TableScanDesc scan;
+	TableScanDesc *scan;
 	HeapTuple	tuple;
 
 	rel = table_open(TableSpaceRelationId, AccessShareLock);
