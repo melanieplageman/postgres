@@ -54,7 +54,7 @@ static bool SampleHeapTupleVisible(TableScanDesc scan, Buffer buffer,
 								   HeapTuple tuple,
 								   OffsetNumber tupoffset);
 
-static BlockNumber heapam_scan_get_blocks_done(HeapScanDesc hscan);
+static BlockNumber heapam_scan_get_blocks_done(HeapScanDesc *hscan);
 
 
 /* ------------------------------------------------------------------------
@@ -202,7 +202,7 @@ heapam_fetch_row_version(Relation relation,
 static bool
 heapam_tuple_tid_valid(TableScanDesc scan, ItemPointer tid)
 {
-	HeapScanDesc hscan = (HeapScanDesc) scan;
+	HeapScanDesc *hscan = (HeapScanDesc *) scan;
 
 	return ItemPointerIsValid(tid) &&
 		ItemPointerGetBlockNumber(tid) < hscan->rs_nblocks;
@@ -691,7 +691,7 @@ heapam_relation_copy_for_cluster(Relation OldHeap, Relation NewHeap,
 	RewriteState rwstate;
 	IndexScanDesc indexScan;
 	TableScanDesc tableScan;
-	HeapScanDesc heapScan;
+	HeapScanDesc *heapScan;
 	bool		is_system_catalog;
 	Tuplesortstate *tuplesort;
 	TupleDesc	oldTupDesc = RelationGetDescr(OldHeap);
@@ -760,7 +760,7 @@ heapam_relation_copy_for_cluster(Relation OldHeap, Relation NewHeap,
 									 PROGRESS_CLUSTER_PHASE_SEQ_SCAN_HEAP);
 
 		tableScan = table_beginscan(OldHeap, SnapshotAny, 0, (ScanKey) NULL);
-		heapScan = (HeapScanDesc) tableScan;
+		heapScan = (HeapScanDesc *) tableScan;
 		indexScan = NULL;
 
 		/* Set total heap blocks */
@@ -1001,7 +1001,7 @@ heapam_relation_copy_for_cluster(Relation OldHeap, Relation NewHeap,
 static bool
 heapam_scan_analyze_next_block(TableScanDesc scan, ReadStream *stream)
 {
-	HeapScanDesc hscan = (HeapScanDesc) scan;
+	HeapScanDesc *hscan = (HeapScanDesc *) scan;
 
 	/*
 	 * We must maintain a pin on the target page's buffer to ensure that
@@ -1027,7 +1027,7 @@ heapam_scan_analyze_next_tuple(TableScanDesc scan, TransactionId OldestXmin,
 							   double *liverows, double *deadrows,
 							   TupleTableSlot *slot)
 {
-	HeapScanDesc hscan = (HeapScanDesc) scan;
+	HeapScanDesc *hscan = (HeapScanDesc *) scan;
 	Page		targpage;
 	OffsetNumber maxoffset;
 	BufferHeapTupleTableSlot *hslot;
@@ -1178,7 +1178,7 @@ heapam_index_build_range_scan(Relation heapRelation,
 							  void *callback_state,
 							  TableScanDesc scan)
 {
-	HeapScanDesc hscan;
+	HeapScanDesc *hscan;
 	bool		is_system_catalog;
 	bool		checking_uniqueness;
 	HeapTuple	heapTuple;
@@ -1278,7 +1278,7 @@ heapam_index_build_range_scan(Relation heapRelation,
 		snapshot = scan->rs_snapshot;
 	}
 
-	hscan = (HeapScanDesc) scan;
+	hscan = (HeapScanDesc *) scan;
 
 	/*
 	 * Must have called GetOldestNonRemovableTransactionId() if using
@@ -1748,7 +1748,7 @@ heapam_index_validate_scan(Relation heapRelation,
 						   ValidateIndexState *state)
 {
 	TableScanDesc scan;
-	HeapScanDesc hscan;
+	HeapScanDesc *hscan;
 	HeapTuple	heapTuple;
 	Datum		values[INDEX_MAX_KEYS];
 	bool		isnull[INDEX_MAX_KEYS];
@@ -1798,7 +1798,7 @@ heapam_index_validate_scan(Relation heapRelation,
 								 NULL,	/* scan key */
 								 true,	/* buffer access strategy OK */
 								 false);	/* syncscan not OK */
-	hscan = (HeapScanDesc) scan;
+	hscan = (HeapScanDesc *) scan;
 
 	pgstat_progress_update_param(PROGRESS_SCAN_BLOCKS_TOTAL,
 								 hscan->rs_nblocks);
@@ -1988,7 +1988,7 @@ heapam_index_validate_scan(Relation heapRelation,
  * further ahead than what we report.
  */
 static BlockNumber
-heapam_scan_get_blocks_done(HeapScanDesc hscan)
+heapam_scan_get_blocks_done(HeapScanDesc *hscan)
 {
 	ParallelBlockTableScanDesc bpscan = NULL;
 	BlockNumber startblock;
@@ -2119,7 +2119,7 @@ heapam_scan_bitmap_next_block(TableScanDesc scan,
 							  BlockNumber *blockno, bool *recheck,
 							  uint64 *lossy_pages, uint64 *exact_pages)
 {
-	HeapScanDesc hscan = (HeapScanDesc) scan;
+	HeapScanDesc *hscan = (HeapScanDesc *) scan;
 	BlockNumber block;
 	Buffer		buffer;
 	Snapshot	snapshot;
@@ -2282,7 +2282,7 @@ static bool
 heapam_scan_bitmap_next_tuple(TableScanDesc scan,
 							  TupleTableSlot *slot)
 {
-	HeapScanDesc hscan = (HeapScanDesc) scan;
+	HeapScanDesc *hscan = (HeapScanDesc *) scan;
 	OffsetNumber targoffset;
 	Page		page;
 	ItemId		lp;
@@ -2331,7 +2331,7 @@ heapam_scan_bitmap_next_tuple(TableScanDesc scan,
 static bool
 heapam_scan_sample_next_block(TableScanDesc scan, SampleScanState *scanstate)
 {
-	HeapScanDesc hscan = (HeapScanDesc) scan;
+	HeapScanDesc *hscan = (HeapScanDesc *) scan;
 	TsmRoutine *tsm = scanstate->tsmroutine;
 	BlockNumber blockno;
 
@@ -2422,7 +2422,7 @@ static bool
 heapam_scan_sample_next_tuple(TableScanDesc scan, SampleScanState *scanstate,
 							  TupleTableSlot *slot)
 {
-	HeapScanDesc hscan = (HeapScanDesc) scan;
+	HeapScanDesc *hscan = (HeapScanDesc *) scan;
 	TsmRoutine *tsm = scanstate->tsmroutine;
 	BlockNumber blockno = hscan->rs_cblock;
 	bool		pagemode = (scan->rs_flags & SO_ALLOW_PAGEMODE) != 0;
@@ -2570,7 +2570,7 @@ SampleHeapTupleVisible(TableScanDesc scan, Buffer buffer,
 					   HeapTuple tuple,
 					   OffsetNumber tupoffset)
 {
-	HeapScanDesc hscan = (HeapScanDesc) scan;
+	HeapScanDesc *hscan = (HeapScanDesc *) scan;
 
 	if (scan->rs_flags & SO_ALLOW_PAGEMODE)
 	{
