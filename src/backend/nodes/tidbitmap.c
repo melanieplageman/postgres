@@ -172,7 +172,6 @@ struct TBMPrivateIterator
 	int			spageptr;		/* next spages index */
 	int			schunkptr;		/* next schunks index */
 	int			schunkbit;		/* next bit to check in current schunk */
-	TBMIterateResult output;
 };
 
 /*
@@ -213,7 +212,6 @@ struct TBMSharedIterator
 	PTEntryArray *ptbase;		/* pagetable element array */
 	PTIterationArray *ptpages;	/* sorted exact page index list */
 	PTIterationArray *ptchunks; /* sorted lossy page index list */
-	TBMIterateResult output;
 };
 
 /* Local function prototypes */
@@ -948,22 +946,22 @@ tbm_advance_schunkbit(PagetableEntry *chunk, int *schunkbitp)
 /*
  * tbm_private_iterate - scan through next page of a TIDBitmap
  *
- * Returns a TBMIterateResult representing one page, or NULL if there are
- * no more pages to scan.  Pages are guaranteed to be delivered in numerical
- * order.  If result->ntuples < 0, then the bitmap is "lossy" and failed to
- * remember the exact tuples to look at on this page --- the caller must
- * examine all tuples on the page and check if they meet the intended
- * condition.  If result->recheck is true, only the indicated tuples need
- * be examined, but the condition must be rechecked anyway.  (For ease of
- * testing, recheck is always set true when ntuples < 0.)
+ * Caller must pass in a TBMIterateResult to be filled.
+ *
+ * Pages are guaranteed to be delivered in numerical order.  If result->ntuples
+ * < 0, then the bitmap is "lossy" and failed to remember the exact tuples to
+ * look at on this page --- the caller must examine all tuples on the page and
+ * check if they meet the intended condition.  If result->recheck is true, only
+ * the indicated tuples need be examined, but the condition must be rechecked
+ * anyway.  (For ease of testing, recheck is always set true when ntuples < 0.)
  */
-TBMIterateResult *
-tbm_private_iterate(TBMPrivateIterator *iterator)
+void
+tbm_private_iterate(TBMPrivateIterator *iterator, TBMIterateResult *tbmres)
 {
 	TIDBitmap  *tbm = iterator->tbm;
-	TBMIterateResult *output = &(iterator->output);
 
 	Assert(tbm->iterating == TBM_ITERATING_PRIVATE);
+	Assert(tbmres);
 
 	/*
 	 * If lossy chunk pages remain, make sure we've advanced schunkptr/
@@ -999,11 +997,11 @@ tbm_private_iterate(TBMPrivateIterator *iterator)
 			chunk_blockno < tbm->spages[iterator->spageptr]->blockno)
 		{
 			/* Return a lossy page indicator from the chunk */
-			output->blockno = chunk_blockno;
-			output->ntuples = -1;
-			output->recheck = true;
+			tbmres->blockno = chunk_blockno;
+			tbmres->ntuples = -1;
+			tbmres->recheck = true;
 			iterator->schunkbit++;
-			return output;
+			return;
 		}
 	}
 
@@ -1019,16 +1017,16 @@ tbm_private_iterate(TBMPrivateIterator *iterator)
 			page = tbm->spages[iterator->spageptr];
 
 		/* scan bitmap to extract individual offset numbers */
-		ntuples = tbm_extract_page_tuple(page, output);
-		output->blockno = page->blockno;
-		output->ntuples = ntuples;
-		output->recheck = page->recheck;
+		ntuples = tbm_extract_page_tuple(page, tbmres);
+		tbmres->blockno = page->blockno;
+		tbmres->ntuples = ntuples;
+		tbmres->recheck = page->recheck;
 		iterator->spageptr++;
-		return output;
+		return;
 	}
 
 	/* Nothing more in the bitmap */
-	return NULL;
+	tbmres->blockno = InvalidBlockNumber;
 }
 
 /*
@@ -1038,10 +1036,9 @@ tbm_private_iterate(TBMPrivateIterator *iterator)
  *	across multiple processes.  We need to acquire the iterator LWLock,
  *	before accessing the shared members.
  */
-TBMIterateResult *
-tbm_shared_iterate(TBMSharedIterator *iterator)
+void
+tbm_shared_iterate(TBMSharedIterator *iterator, TBMIterateResult *tbmres)
 {
-	TBMIterateResult *output = &iterator->output;
 	TBMSharedIteratorState *istate = iterator->state;
 	PagetableEntry *ptbase = NULL;
 	int		   *idxpages = NULL;
@@ -1092,13 +1089,13 @@ tbm_shared_iterate(TBMSharedIterator *iterator)
 			chunk_blockno < ptbase[idxpages[istate->spageptr]].blockno)
 		{
 			/* Return a lossy page indicator from the chunk */
-			output->blockno = chunk_blockno;
-			output->ntuples = -1;
-			output->recheck = true;
+			tbmres->blockno = chunk_blockno;
+			tbmres->ntuples = -1;
+			tbmres->recheck = true;
 			istate->schunkbit++;
 
 			LWLockRelease(&istate->lock);
-			return output;
+			return;
 		}
 	}
 
@@ -1108,21 +1105,21 @@ tbm_shared_iterate(TBMSharedIterator *iterator)
 		int			ntuples;
 
 		/* scan bitmap to extract individual offset numbers */
-		ntuples = tbm_extract_page_tuple(page, output);
-		output->blockno = page->blockno;
-		output->ntuples = ntuples;
-		output->recheck = page->recheck;
+		ntuples = tbm_extract_page_tuple(page, tbmres);
+		tbmres->blockno = page->blockno;
+		tbmres->ntuples = ntuples;
+		tbmres->recheck = page->recheck;
 		istate->spageptr++;
 
 		LWLockRelease(&istate->lock);
 
-		return output;
+		return;
 	}
 
 	LWLockRelease(&istate->lock);
 
 	/* Nothing more in the bitmap */
-	return NULL;
+	tbmres->blockno = InvalidBlockNumber;
 }
 
 /*
@@ -1592,14 +1589,14 @@ tbm_end_iterate(TBMIterator *iterator)
 /*
  * Get the next TBMIterateResult from the shared or non-shared bitmap iterator.
  */
-TBMIterateResult *
-tbm_iterate(TBMIterator *iterator)
+void
+tbm_iterate(TBMIterator *iterator, TBMIterateResult *tbmres)
 {
 	Assert(iterator);
 	Assert(!iterator->exhausted);
 
 	if (iterator->private_iterator)
-		return tbm_private_iterate(iterator->private_iterator);
+		tbm_private_iterate(iterator->private_iterator, tbmres);
 	else
-		return tbm_shared_iterate(iterator->shared_iterator);
+		tbm_shared_iterate(iterator->shared_iterator, tbmres);
 }
