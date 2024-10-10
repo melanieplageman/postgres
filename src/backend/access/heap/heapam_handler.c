@@ -54,9 +54,6 @@ static bool SampleHeapTupleVisible(TableScanDesc scan, Buffer buffer,
 								   HeapTuple tuple,
 								   OffsetNumber tupoffset);
 
-static void BitmapAdjustPrefetchIterator(BitmapHeapScanDesc *bscan);
-static void BitmapAdjustPrefetchTarget(BitmapHeapScanDesc *bscan);
-static void BitmapPrefetch(BitmapHeapScanDesc *bscan);
 static bool BitmapHeapScanNextBlock(TableScanDesc scan,
 									bool *recheck,
 									uint64 *lossy_pages, uint64 *exact_pages);
@@ -2133,9 +2130,6 @@ heapam_scan_bitmap_next_tuple(TableScanDesc scan,
 	OffsetNumber targoffset;
 	Page		page;
 	ItemId		lp;
-#ifdef USE_PREFETCH
-	ParallelBitmapHeapState *pstate = scan->st.bts.pstate;
-#endif							/* USE_PREFETCH */
 
 	/*
 	 * Out of range?  If so, nothing more to look at on this page
@@ -2152,7 +2146,6 @@ heapam_scan_bitmap_next_tuple(TableScanDesc scan,
 			 */
 			ExecStoreAllNullTuple(slot);
 			bscan->rs_empty_tuples_pending--;
-			BitmapPrefetch(bscan);
 			return true;
 		}
 
@@ -2163,36 +2156,6 @@ heapam_scan_bitmap_next_tuple(TableScanDesc scan,
 		if (!BitmapHeapScanNextBlock(scan, recheck, lossy_pages, exact_pages))
 			return false;
 	}
-
-#ifdef USE_PREFETCH
-
-	/*
-	 * Try to prefetch at least a few pages even before we get to the second
-	 * page if we don't stop reading after the first tuple.
-	 */
-	if (!pstate)
-	{
-		if (bscan->rs_prefetch_target < bscan->rs_prefetch_maximum)
-			bscan->rs_prefetch_target++;
-	}
-	else if (pstate->prefetch_target < bscan->rs_prefetch_maximum)
-	{
-		/* take spinlock while updating shared state */
-		SpinLockAcquire(&pstate->mutex);
-		if (pstate->prefetch_target < bscan->rs_prefetch_maximum)
-			pstate->prefetch_target++;
-		SpinLockRelease(&pstate->mutex);
-	}
-#endif							/* USE_PREFETCH */
-
-	/*
-	 * We issue prefetch requests *after* fetching the current page to try to
-	 * avoid having prefetching interfere with the main I/O. Also, this should
-	 * happen only when we have determined there is still something to do on
-	 * the current page, else we may uselessly prefetch the same page we are
-	 * just about to request for real.
-	 */
-	BitmapPrefetch(bscan);
 
 	targoffset = hscan->rs_vistuples[hscan->rs_cindex];
 	page = BufferGetPage(hscan->rs_cbuf);
@@ -2500,235 +2463,6 @@ SampleHeapTupleVisible(TableScanDesc scan, Buffer buffer,
 	}
 }
 
-/*
- *	BitmapAdjustPrefetchIterator - Adjust the prefetch iterator
- *
- *	We keep track of how far the prefetch iterator is ahead of the main
- *	iterator in prefetch_pages. For each block the main iterator returns, we
- *	decrement prefetch_pages.
- */
-static void
-BitmapAdjustPrefetchIterator(BitmapHeapScanDesc *bscan)
-{
-#ifdef USE_PREFETCH
-	TableScanDesc scan = &(&bscan->rs_heap_base)->rs_base;
-	ParallelBitmapHeapState *pstate = scan->st.bts.pstate;
-	TBMIterateResult tbmpre;
-
-	if (pstate == NULL)
-	{
-		TBMIterator *prefetch_iterator = &scan->st.bts.prefetch_iterator;
-
-		if (bscan->rs_prefetch_pages > 0)
-		{
-			/* The main iterator has closed the distance by one page */
-			bscan->rs_prefetch_pages--;
-		}
-		else if (!tbm_exhausted(prefetch_iterator))
-		{
-			/* Do not let the prefetch iterator get behind the main one */
-			tbm_iterate(prefetch_iterator, &tbmpre);
-			bscan->rs_pfblockno = tbmpre.blockno;
-		}
-		return;
-	}
-
-	/*
-	 * XXX: There is a known issue with keeping the prefetch and current block
-	 * iterators in sync for parallel bitmap table scans. This can lead to
-	 * prefetching blocks that have already been read. See the discussion
-	 * here:
-	 * https://postgr.es/m/20240315211449.en2jcmdqxv5o6tlz%40alap3.anarazel.de
-	 * Note that moving the call site of BitmapAdjustPrefetchIterator()
-	 * exacerbates the effects of this bug.
-	 */
-	if (bscan->rs_prefetch_maximum > 0)
-	{
-		TBMIterator *prefetch_iterator = &scan->st.bts.prefetch_iterator;
-
-		SpinLockAcquire(&pstate->mutex);
-		if (pstate->prefetch_pages > 0)
-		{
-			pstate->prefetch_pages--;
-			SpinLockRelease(&pstate->mutex);
-		}
-		else
-		{
-			/* Release the mutex before iterating */
-			SpinLockRelease(&pstate->mutex);
-
-			/*
-			 * In case of shared mode, we can not ensure that the current
-			 * blockno of the main iterator and that of the prefetch iterator
-			 * are same.  It's possible that whatever blockno we are
-			 * prefetching will be processed by another process.  Therefore,
-			 * we don't validate the blockno here as we do in non-parallel
-			 * case.
-			 */
-			if (!tbm_exhausted(prefetch_iterator))
-			{
-				tbm_iterate(prefetch_iterator, &tbmpre);
-				bscan->rs_pfblockno = tbmpre.blockno;
-			}
-		}
-	}
-#endif							/* USE_PREFETCH */
-}
-
-/*
- * BitmapAdjustPrefetchTarget - Adjust the prefetch target
- *
- * Increase prefetch target if it's not yet at the max.  Note that
- * we will increase it to zero after fetching the very first
- * page/tuple, then to one after the second tuple is fetched, then
- * it doubles as later pages are fetched.
- */
-static void
-BitmapAdjustPrefetchTarget(BitmapHeapScanDesc *bscan)
-{
-#ifdef USE_PREFETCH
-	TableScanDesc scan = &(&bscan->rs_heap_base)->rs_base;
-	ParallelBitmapHeapState *pstate = scan->st.bts.pstate;
-
-	if (pstate == NULL)
-	{
-		if (bscan->rs_prefetch_target >= bscan->rs_prefetch_maximum)
-			 /* don't increase any further */ ;
-		else if (bscan->rs_prefetch_target >= bscan->rs_prefetch_maximum / 2)
-			bscan->rs_prefetch_target = bscan->rs_prefetch_maximum;
-		else if (bscan->rs_prefetch_target > 0)
-			bscan->rs_prefetch_target *= 2;
-		else
-			bscan->rs_prefetch_target++;
-		return;
-	}
-
-	/* Do an unlocked check first to save spinlock acquisitions. */
-	if (pstate->prefetch_target < bscan->rs_prefetch_maximum)
-	{
-		SpinLockAcquire(&pstate->mutex);
-		if (pstate->prefetch_target >= bscan->rs_prefetch_maximum)
-			 /* don't increase any further */ ;
-		else if (pstate->prefetch_target >= bscan->rs_prefetch_maximum / 2)
-			pstate->prefetch_target = bscan->rs_prefetch_maximum;
-		else if (pstate->prefetch_target > 0)
-			pstate->prefetch_target *= 2;
-		else
-			pstate->prefetch_target++;
-		SpinLockRelease(&pstate->mutex);
-	}
-#endif							/* USE_PREFETCH */
-}
-
-/*
- * BitmapPrefetch - Prefetch, if prefetch_pages are behind prefetch_target
- */
-static void
-BitmapPrefetch(BitmapHeapScanDesc *bscan)
-{
-#ifdef USE_PREFETCH
-	TableScanDesc scan = &(&bscan->rs_heap_base)->rs_base;
-	ParallelBitmapHeapState *pstate = scan->st.bts.pstate;
-
-	if (pstate == NULL)
-	{
-		TBMIterator *prefetch_iterator = &scan->st.bts.prefetch_iterator;
-
-		if (!tbm_exhausted(prefetch_iterator))
-		{
-			while (bscan->rs_prefetch_pages < bscan->rs_prefetch_target)
-			{
-				TBMIterateResult tbmpre;
-				bool		skip_fetch;
-
-				tbm_iterate(prefetch_iterator, &tbmpre);
-				if (!BlockNumberIsValid(tbmpre.blockno))
-				{
-					/* No more pages to prefetch */
-					tbm_end_iterate(prefetch_iterator);
-					break;
-				}
-
-				bscan->rs_prefetch_pages++;
-				bscan->rs_pfblockno = tbmpre.blockno;
-
-				/*
-				 * If we expect not to have to actually read this heap page,
-				 * skip this prefetch call, but continue to run the prefetch
-				 * logic normally.  (Would it be better not to increment
-				 * prefetch_pages?)
-				 */
-				skip_fetch = (!(scan->rs_flags & SO_NEED_TUPLES) &&
-							  !tbmpre.recheck &&
-							  VM_ALL_VISIBLE(scan->rs_rd,
-											 tbmpre.blockno,
-											 &bscan->rs_pvmbuffer));
-
-				if (!skip_fetch)
-					PrefetchBuffer(scan->rs_rd, MAIN_FORKNUM, tbmpre.blockno);
-			}
-		}
-
-		return;
-	}
-
-	if (pstate->prefetch_pages < pstate->prefetch_target)
-	{
-		TBMIterator *prefetch_iterator = &scan->st.bts.prefetch_iterator;
-
-		if (!tbm_exhausted(prefetch_iterator))
-		{
-			while (1)
-			{
-				TBMIterateResult tbmpre;
-				bool		do_prefetch = false;
-				bool		skip_fetch;
-
-				/*
-				 * Recheck under the mutex. If some other process has already
-				 * done enough prefetching then we need not to do anything.
-				 */
-				SpinLockAcquire(&pstate->mutex);
-				if (pstate->prefetch_pages < pstate->prefetch_target)
-				{
-					pstate->prefetch_pages++;
-					do_prefetch = true;
-				}
-				SpinLockRelease(&pstate->mutex);
-
-				if (!do_prefetch)
-					return;
-
-				tbm_iterate(prefetch_iterator, &tbmpre);
-				if (!BlockNumberIsValid(tbmpre.blockno))
-				{
-					/* No more pages to prefetch */
-					tbm_end_iterate(prefetch_iterator);
-					break;
-				}
-
-				bscan->rs_pfblockno = tbmpre.blockno;
-
-				/* As above, skip prefetch if we expect not to need page */
-				skip_fetch = (!(scan->rs_flags & SO_NEED_TUPLES) &&
-							  !tbmpre.recheck &&
-							  VM_ALL_VISIBLE(scan->rs_rd,
-											 tbmpre.blockno,
-											 &bscan->rs_pvmbuffer));
-
-				if (!skip_fetch)
-					PrefetchBuffer(scan->rs_rd, MAIN_FORKNUM, tbmpre.blockno);
-			}
-		}
-	}
-#endif							/* USE_PREFETCH */
-}
-
-/*
- * Helper function get the next block of a bitmap heap scan. Returns true when
- * it got the next block and saved it in the scan descriptor and false when the
- * bitmap and or relation are exhausted.
- */
 static bool
 BitmapHeapScanNextBlock(TableScanDesc scan,
 						bool *recheck,
@@ -2740,65 +2474,54 @@ BitmapHeapScanNextBlock(TableScanDesc scan,
 	Buffer		buffer;
 	Snapshot	snapshot;
 	int			ntup;
-	TBMIterateResult tbmres;
+	TBMIterateResult *tbmres;
+	void	   *per_buffer_data;
+
+	Assert(hscan->rs_read_stream);
 
 	hscan->rs_cindex = 0;
 	hscan->rs_ntuples = 0;
 
 	*recheck = true;
 
-	BitmapAdjustPrefetchIterator(bscan);
-
-	do
+	if (BufferIsValid(hscan->rs_cbuf))
 	{
-		CHECK_FOR_INTERRUPTS();
-
-		tbm_iterate(&scan->st.bts.tbmiterator, &tbmres);
-
-		if (!BlockNumberIsValid(tbmres.blockno))
-			return false;
-
-		/*
-		 * Ignore any claimed entries past what we think is the end of the
-		 * relation. It may have been extended after the start of our scan (we
-		 * only hold an AccessShareLock, and it could be inserts from this
-		 * backend).  We don't take this optimization in SERIALIZABLE
-		 * isolation though, as we need to examine all invisible tuples
-		 * reachable by the index.
-		 */
-	} while (!IsolationIsSerializable() && tbmres.blockno >= hscan->rs_nblocks);
-
-	/* Got a valid block */
-	block = tbmres.blockno;
-	*recheck = tbmres.recheck;
-
-	/*
-	 * We can skip fetching the heap page if we don't need any fields from the
-	 * heap, the bitmap entries don't need rechecking, and all tuples on the
-	 * page are visible to our transaction.
-	 */
-	if (!(scan->rs_flags & SO_NEED_TUPLES) &&
-		!tbmres.recheck &&
-		VM_ALL_VISIBLE(scan->rs_rd, tbmres.blockno, &bscan->rs_vmbuffer))
-	{
-		/* can't be lossy in the skip_fetch case */
-		Assert(tbmres.ntuples >= 0);
-		Assert(bscan->rs_empty_tuples_pending >= 0);
-
-		bscan->rs_empty_tuples_pending += tbmres.ntuples;
-
-		return true;
+		ReleaseBuffer(hscan->rs_cbuf);
+		hscan->rs_cbuf = InvalidBuffer;
 	}
 
-	/*
-	 * Acquire pin on the target heap page, trading in any pin we held before.
-	 */
-	hscan->rs_cbuf = ReleaseAndReadBuffer(hscan->rs_cbuf,
-										  scan->rs_rd,
-										  block);
-	hscan->rs_cblock = block;
+	hscan->rs_cbuf = read_stream_next_buffer(hscan->rs_read_stream, &per_buffer_data);
+
+	if (BufferIsInvalid(hscan->rs_cbuf))
+	{
+		/*
+		 * Bitmap is exhausted. Time to emit empty tuples if relevant. We emit
+		 * all empty tuples at the end instead of emitting them per block we
+		 * skip fetching. This is necessary because the streaming read API
+		 * will only return TBMIterateResults for blocks actually fetched.
+		 * When we skip fetching a block, we keep track of how many empty
+		 * tuples to emit at the end of the BitmapHeapScan. We do not recheck
+		 * all NULL tuples.
+		 */
+		*recheck = false;
+		return bscan->rs_empty_tuples_pending > 0;
+	}
+
+	Assert(per_buffer_data);
+
+	tbmres = per_buffer_data;
+
+	Assert(BufferGetBlockNumber(hscan->rs_cbuf) == tbmres->blockno);
+
+	/* Got a valid block */
+	block = tbmres->blockno;
+	*recheck = tbmres->recheck;
+
+	hscan->rs_cblock = tbmres->blockno;
+	hscan->rs_ntuples = tbmres->ntuples;
+
 	buffer = hscan->rs_cbuf;
-	snapshot = scan->rs_snapshot;
+	snapshot = hscan->rs_base.rs_snapshot;
 
 	ntup = 0;
 
@@ -2817,7 +2540,7 @@ BitmapHeapScanNextBlock(TableScanDesc scan,
 	/*
 	 * We need two separate strategies for lossy and non-lossy cases.
 	 */
-	if (tbmres.ntuples >= 0)
+	if (tbmres->ntuples >= 0)
 	{
 		/*
 		 * Bitmap is non-lossy, so we just look through the offsets listed in
@@ -2826,9 +2549,9 @@ BitmapHeapScanNextBlock(TableScanDesc scan,
 		 */
 		int			curslot;
 
-		for (curslot = 0; curslot < tbmres.ntuples; curslot++)
+		for (curslot = 0; curslot < tbmres->ntuples; curslot++)
 		{
-			OffsetNumber offnum = tbmres.offsets[curslot];
+			OffsetNumber offnum = tbmres->offsets[curslot];
 			ItemPointerData tid;
 			HeapTupleData heapTuple;
 
@@ -2878,22 +2601,10 @@ BitmapHeapScanNextBlock(TableScanDesc scan,
 	Assert(ntup <= MaxHeapTuplesPerPage);
 	hscan->rs_ntuples = ntup;
 
-	if (tbmres.ntuples >= 0)
+	if (tbmres->ntuples >= 0)
 		(*exact_pages)++;
 	else
 		(*lossy_pages)++;
-
-	/*
-	 * If private, we can error out if the the prefetch block doesn't stay
-	 * ahead of the current block.
-	 */
-	if (scan->st.bts.pstate == NULL &&
-		!tbm_exhausted(&scan->st.bts.prefetch_iterator) &&
-		bscan->rs_pfblockno < block)
-		elog(ERROR, "prefetch and main iterators are out of sync. pfblockno: %d. block: %d", bscan->rs_pfblockno, block);
-
-	/* Adjust the prefetch target */
-	BitmapAdjustPrefetchTarget(bscan);
 
 	/*
 	 * Return true to indicate that a valid block was found and the bitmap is
@@ -2903,7 +2614,6 @@ BitmapHeapScanNextBlock(TableScanDesc scan,
 	 */
 	return true;
 }
-
 
 /* ------------------------------------------------------------------------
  * Definition of the heap table access method.

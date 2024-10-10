@@ -43,13 +43,8 @@ typedef struct TableScanDescData
 	 */
 	union
 	{
-		/* State for Bitmap Table Scans */
-		struct
-		{
-			struct ParallelBitmapHeapState *pstate;
-			TBMIterator tbmiterator;
-			TBMIterator prefetch_iterator;
-		}			bts;
+		/* Iterator for Bitmap Table Scans */
+		TBMIterator tbmiterator;
 
 		/*
 		 * Range of ItemPointers for table_scan_getnextslot_tidrange() to

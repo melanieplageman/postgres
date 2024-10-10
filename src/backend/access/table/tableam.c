@@ -117,7 +117,7 @@ table_beginscan_catalog(Relation relation, int nkeys, struct ScanKeyData *key)
 	Snapshot	snapshot = RegisterSnapshot(GetCatalogSnapshot(relid));
 
 	return relation->rd_tableam->scan_begin(relation, snapshot, nkeys, key,
-											NULL, flags, 0);
+											NULL, flags);
 }
 
 
@@ -184,7 +184,7 @@ table_beginscan_parallel(Relation relation, ParallelTableScanDesc pscan)
 	}
 
 	return relation->rd_tableam->scan_begin(relation, snapshot, 0, NULL,
-											pscan, flags, 0);
+											pscan, flags);
 }
 
 
