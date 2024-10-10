@@ -102,15 +102,6 @@ typedef struct BitmapHeapScanDesc
 {
 	HeapScanDesc rs_heap_base;
 
-	/* used to validate pf stays ahead of current block */
-	BlockNumber pfblockno;
-	/* maximum value for prefetch_target */
-	int			prefetch_maximum;
-	/* Current target for prefetch distance */
-	int			prefetch_target;
-	/* # pages prefetch iterator is ahead of current */
-	int			prefetch_pages;
-
 	/*
 	 * These fields are only used for bitmap scans for the "skip fetch"
 	 * optimization. Bitmap scans needing no fields from the heap may skip
@@ -121,8 +112,6 @@ typedef struct BitmapHeapScanDesc
 
 	/* page of VM containing info for current block */
 	Buffer		rs_vmbuffer;
-	/* page of VM containing info for prefetch block */
-	Buffer		rs_pvmbuffer;
 	int			rs_empty_tuples_pending;
 } BitmapHeapScanDesc;
 
@@ -307,8 +296,7 @@ typedef enum
 extern TableScanDesc *heap_beginscan(Relation relation, Snapshot snapshot,
 									 int nkeys, ScanKey key,
 									 ParallelTableScanDesc parallel_scan,
-									 uint32 flags,
-									 int prefetch_maximum);
+									 uint32 flags);
 extern void heap_setscanlimits(TableScanDesc *sscan, BlockNumber startBlk,
 							   BlockNumber numBlks);
 extern void heap_prepare_pagescan(TableScanDesc *sscan);

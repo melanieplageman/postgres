@@ -277,6 +277,60 @@ heap_scan_stream_read_next_serial(ReadStream *stream,
 	return scan->rs_prefetch_block;
 }
 
+static BlockNumber
+heap_bitmap_scan_stream_read_next(ReadStream *stream,
+								  void *callback_private_data,
+								  void *per_buffer_data)
+{
+	TBMIterateResult *tbmres = per_buffer_data;
+	BitmapHeapScanDesc *bscan = callback_private_data;
+	HeapScanDesc *hscan = &bscan->rs_heap_base;
+
+	for (;;)
+	{
+		CHECK_FOR_INTERRUPTS();
+
+		tbm_iterate(&hscan->rs_base.tbmiterator, tbmres);
+
+		/* no more entries in the bitmap */
+		if (!BlockNumberIsValid(tbmres->blockno))
+			return InvalidBlockNumber;
+
+		/*
+		 * Ignore any claimed entries past what we think is the end of the
+		 * relation. It may have been extended after the start of our scan (we
+		 * only hold an AccessShareLock, and it could be inserts from this
+		 * backend).  We don't take this optimization in SERIALIZABLE
+		 * isolation though, as we need to examine all invisible tuples
+		 * reachable by the index.
+		 */
+		if (!IsolationIsSerializable() && tbmres->blockno >= hscan->rs_nblocks)
+			continue;
+
+		/*
+		 * We can skip fetching the heap page if we don't need any fields from
+		 * the heap, the bitmap entries don't need rechecking, and all tuples
+		 * on the page are visible to our transaction.
+		 */
+		if (!(hscan->rs_base.rs_flags & SO_NEED_TUPLES) &&
+			!tbmres->recheck &&
+			VM_ALL_VISIBLE(hscan->rs_base.rs_rd, tbmres->blockno, &bscan->rs_vmbuffer))
+		{
+			/* can't be lossy in the skip_fetch case */
+			Assert(tbmres->ntuples >= 0);
+			Assert(bscan->rs_empty_tuples_pending >= 0);
+
+			bscan->rs_empty_tuples_pending += tbmres->ntuples;
+			continue;
+		}
+
+		return tbmres->blockno;
+	}
+
+	/* not reachable */
+	Assert(false);
+}
+
 /* ----------------
  *		initscan - scan code common to heap_beginscan and heap_rescan
  * ----------------
@@ -1032,8 +1086,7 @@ TableScanDesc *
 heap_beginscan(Relation relation, Snapshot snapshot,
 			   int nkeys, ScanKey key,
 			   ParallelTableScanDesc parallel_scan,
-			   uint32 flags,
-			   int prefetch_maximum)
+			   uint32 flags)
 {
 	HeapScanDesc *scan;
 
@@ -1053,17 +1106,8 @@ heap_beginscan(Relation relation, Snapshot snapshot,
 	{
 		BitmapHeapScanDesc *bscan = palloc(sizeof(BitmapHeapScanDesc));
 
-		bscan->pfblockno = InvalidBlockNumber;
 		bscan->rs_vmbuffer = InvalidBuffer;
-		bscan->rs_pvmbuffer = InvalidBuffer;
 		bscan->rs_empty_tuples_pending = 0;
-
-		/* Only used for serial BHS */
-		bscan->prefetch_pages = 0;
-		bscan->prefetch_target = -1;
-
-		bscan->prefetch_maximum = prefetch_maximum;
-
 		scan = &bscan->rs_heap_base;
 	}
 	else
@@ -1155,7 +1199,14 @@ heap_beginscan(Relation relation, Snapshot snapshot,
 														  scan,
 														  0);
 	}
-
+	else if (scan->rs_base.rs_flags & SO_TYPE_BITMAPSCAN)
+		scan->rs_read_stream = read_stream_begin_relation(READ_STREAM_DEFAULT,
+														  NULL,
+														  scan->rs_base.rs_rd,
+														  MAIN_FORKNUM,
+														  heap_bitmap_scan_stream_read_next,
+														  scan,
+														  sizeof(TBMIterateResult));
 
 	return (TableScanDesc *) scan;
 }
@@ -1198,12 +1249,6 @@ heap_rescan(TableScanDesc *sscan, ScanKey key, bool set_params,
 	{
 		BitmapHeapScanDesc *bscan = (BitmapHeapScanDesc *) scan;
 
-		bscan->pfblockno = InvalidBlockNumber;
-
-		/* Only used for serial BHS */
-		bscan->prefetch_pages = 0;
-		bscan->prefetch_target = -1;
-
 		/*
 		 * Reset empty_tuples_pending, a field only used by bitmap heap scan,
 		 * to avoid incorrectly emitting NULL-filled tuples from a previous
@@ -1216,17 +1261,12 @@ heap_rescan(TableScanDesc *sscan, ScanKey key, bool set_params,
 			ReleaseBuffer(bscan->rs_vmbuffer);
 			bscan->rs_vmbuffer = InvalidBuffer;
 		}
-		if (BufferIsValid(bscan->rs_pvmbuffer))
-		{
-			ReleaseBuffer(bscan->rs_pvmbuffer);
-			bscan->rs_pvmbuffer = InvalidBuffer;
-		}
 	}
 
 	/*
-	 * The read stream is reset on rescan. This must be done before
-	 * initscan(), as some state referred to by read_stream_reset() is reset
-	 * in initscan().
+	 * The read stream is reset on rescan. This must be done before initscan()
+	 * for sequential and TID range scans, as some state referred to by
+	 * read_stream_reset() is reset in initscan().
 	 */
 	if (scan->rs_read_stream)
 		read_stream_reset(scan->rs_read_stream);
@@ -1251,7 +1291,8 @@ heap_endscan(TableScanDesc *sscan)
 		ReleaseBuffer(scan->rs_cbuf);
 
 	/*
-	 * Must free the read stream before freeing the BufferAccessStrategy.
+	 * For sequential and TID range scans, must free the read stream before
+	 * freeing the BufferAccessStrategy.
 	 */
 	if (scan->rs_read_stream)
 		read_stream_end(scan->rs_read_stream);
@@ -1282,11 +1323,6 @@ heap_endscan(TableScanDesc *sscan)
 		{
 			ReleaseBuffer(bscan->rs_vmbuffer);
 			bscan->rs_vmbuffer = InvalidBuffer;
-		}
-		if (BufferIsValid(bscan->rs_pvmbuffer))
-		{
-			ReleaseBuffer(bscan->rs_pvmbuffer);
-			bscan->rs_pvmbuffer = InvalidBuffer;
 		}
 	}
 
