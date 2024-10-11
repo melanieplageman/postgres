@@ -1551,21 +1551,25 @@ tbm_calculate_entries(double maxbytes)
  * the TBMSharedIteratorState. The TBMIterator is passed by reference to
  * accommodate callers who would like to allocate it inside an existing struct.
  */
-void
-tbm_begin_iterate(TBMIterator *iterator, TIDBitmap *tbm,
+TBMIterator
+tbm_begin_iterate(TIDBitmap *tbm,
 				  dsa_area *dsa, dsa_pointer dsp)
 {
-	Assert(iterator);
-
-	iterator->private_iterator = NULL;
-	iterator->shared_iterator = NULL;
-	iterator->exhausted = false;
+	TBMIterator iterator;
 
 	/* Allocate a private iterator and attach the shared state to it */
 	if (DsaPointerIsValid(dsp))
-		iterator->shared_iterator = tbm_attach_shared_iterate(dsa, dsp);
+	{
+		iterator.parallel = true;
+		iterator.shared_iterator = tbm_attach_shared_iterate(dsa, dsp);
+	}
 	else
-		iterator->private_iterator = tbm_begin_private_iterate(tbm);
+	{
+		iterator.parallel = false;
+		iterator.private_iterator = tbm_begin_private_iterate(tbm);
+	}
+
+	return iterator;
 }
 
 /*
@@ -1576,14 +1580,12 @@ tbm_end_iterate(TBMIterator *iterator)
 {
 	Assert(iterator);
 
-	if (iterator->private_iterator)
-		tbm_end_private_iterate(iterator->private_iterator);
-	else if (iterator->shared_iterator)
+	if (iterator->parallel)
 		tbm_end_shared_iterate(iterator->shared_iterator);
+	else
+		tbm_end_private_iterate(iterator->private_iterator);
 
-	iterator->private_iterator = NULL;
-	iterator->shared_iterator = NULL;
-	iterator->exhausted = true;
+	*iterator = (TBMIterator) {0};
 }
 
 /*
@@ -1593,10 +1595,9 @@ void
 tbm_iterate(TBMIterator *iterator, TBMIterateResult *tbmres)
 {
 	Assert(iterator);
-	Assert(!iterator->exhausted);
 
-	if (iterator->private_iterator)
-		tbm_private_iterate(iterator->private_iterator, tbmres);
-	else
+	if (iterator->parallel)
 		tbm_shared_iterate(iterator->shared_iterator, tbmres);
+	else
+		tbm_private_iterate(iterator->private_iterator, tbmres);
 }

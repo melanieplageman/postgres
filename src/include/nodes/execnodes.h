@@ -1824,7 +1824,6 @@ typedef struct SharedBitmapHeapInstrumentation
  *		tbm				   bitmap obtained from child index scan(s)
  *		stats			   execution statistics
  *		initialized		   is node is ready to iterate
- *		scan_in_progress   is this a rescan
  *		pstate			   shared state for parallel bitmap scan
  *		sinstrument		   statistics for parallel workers
  *		recheck			   do current page's tuples need recheck
@@ -1837,7 +1836,6 @@ typedef struct BitmapHeapScanState
 	TIDBitmap  *tbm;
 	BitmapHeapScanInstrumentation stats;
 	bool		initialized;
-	bool		scan_in_progress;
 	ParallelBitmapHeapState *pstate;
 	SharedBitmapHeapInstrumentation *sinstrument;
 	bool		recheck;

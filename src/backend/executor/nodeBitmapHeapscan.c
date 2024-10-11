@@ -59,12 +59,12 @@ static bool BitmapShouldInitializeSharedState(ParallelBitmapHeapState *pstate);
  * needed for parallel workers to iterate through the bitmap, and set up the
  * underlying table scan descriptor.
  */
-static TableScanDesc *
+static void
 BitmapTableScanSetup(BitmapHeapScanState *node)
 {
-	TableScanDesc *scan = node->ss.ss_currentScanDesc;
 	ParallelBitmapHeapState *pstate = node->pstate;
 	dsa_area   *dsa = node->ss.ps.state->es_query_dsa;
+	TBMIterator iterator;
 
 	if (!pstate)
 	{
@@ -93,14 +93,17 @@ BitmapTableScanSetup(BitmapHeapScanState *node)
 		BitmapDoneInitializingSharedState(pstate);
 	}
 
+	iterator = tbm_begin_iterate(node->tbm, dsa,
+					  pstate ?
+					  pstate->tbmiterator :
+					  InvalidDsaPointer);
+
 	/*
 	 * If this is the first scan of the underlying table, create the table
 	 * scan descriptor and begin the scan.
 	 */
-	if (!node->scan_in_progress)
+	if (!node->ss.ss_currentScanDesc)
 	{
-		bool		need_tuples = false;
-
 		/*
 		 * We can potentially skip fetching heap pages if we do not need any
 		 * columns of the table, either for checking non-indexable quals or
@@ -108,28 +111,18 @@ BitmapTableScanSetup(BitmapHeapScanState *node)
 		 * the stronger condition that there's no qual or return tlist at all.
 		 * But in most cases it's probably not worth working harder than that.
 		 */
-		need_tuples = (node->ss.ps.plan->qual != NIL ||
+		bool need_tuples = (node->ss.ps.plan->qual != NIL ||
 					   node->ss.ps.plan->targetlist != NIL);
 
-		scan = table_beginscan_bm(node->ss.ss_currentRelation,
+		node->ss.ss_currentScanDesc = table_beginscan_bm(node->ss.ss_currentRelation,
 								  node->ss.ps.state->es_snapshot,
 								  0,
 								  NULL,
 								  need_tuples);
-
-		node->ss.ss_currentScanDesc = scan;
-		node->scan_in_progress = true;
 	}
 
-	Assert(scan);
-	tbm_begin_iterate(&scan->tbmiterator, node->tbm, dsa,
-					  pstate ?
-					  pstate->tbmiterator :
-					  InvalidDsaPointer);
-
-
+	node->ss.ss_currentScanDesc->tbmiterator = iterator;
 	node->initialized = true;
-	return scan;
 }
 
 /* ----------------------------------------------------------------
@@ -143,7 +136,6 @@ BitmapHeapNext(BitmapHeapScanState *node)
 {
 	ExprContext *econtext = node->ss.ps.ps_ExprContext;
 	TupleTableSlot *slot = node->ss.ss_ScanTupleSlot;
-	TableScanDesc *scan = node->ss.ss_currentScanDesc;
 
 	/*
 	 * If we haven't yet performed the underlying index scan, do it, and begin
@@ -158,9 +150,9 @@ BitmapHeapNext(BitmapHeapScanState *node)
 	 * a scan that stops after a few tuples because of a LIMIT.
 	 */
 	if (!node->initialized)
-		scan = BitmapTableScanSetup(node);
+		BitmapTableScanSetup(node);
 
-	while (table_scan_bitmap_next_tuple(scan, slot, &node->recheck,
+	while (table_scan_bitmap_next_tuple(node->ss.ss_currentScanDesc, slot, &node->recheck,
 										&node->stats.lossy_pages, &node->stats.exact_pages))
 	{
 		/*
@@ -380,7 +372,6 @@ ExecInitBitmapHeapScan(BitmapHeapScan *node, EState *estate, int eflags)
 	memset(&scanstate->stats, 0, sizeof(BitmapHeapScanInstrumentation));
 
 	scanstate->initialized = false;
-	scanstate->scan_in_progress = false;
 	scanstate->pstate = NULL;
 	scanstate->recheck = true;
 

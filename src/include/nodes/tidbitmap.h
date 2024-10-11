@@ -50,9 +50,11 @@ typedef struct TBMSharedIterator TBMSharedIterator;
  */
 typedef struct TBMIterator
 {
-	TBMPrivateIterator *private_iterator;
-	TBMSharedIterator *shared_iterator;
-	bool		exhausted;
+	union {
+		TBMPrivateIterator *private_iterator;
+		TBMSharedIterator *shared_iterator;
+	};
+	bool		parallel;
 } TBMIterator;
 
 /* Result structure for tbm_iterate */
@@ -91,16 +93,10 @@ extern TBMSharedIterator *tbm_attach_shared_iterate(dsa_area *dsa,
 													dsa_pointer dp);
 extern long tbm_calculate_entries(double maxbytes);
 
-extern void tbm_begin_iterate(TBMIterator *iterator, TIDBitmap *tbm,
+extern TBMIterator tbm_begin_iterate(TIDBitmap *tbm,
 							  dsa_area *dsa, dsa_pointer dsp);
 extern void tbm_end_iterate(TBMIterator *iterator);
 
 extern void tbm_iterate(TBMIterator *iterator, TBMIterateResult *tbmres);
-
-static inline bool
-tbm_exhausted(TBMIterator *iterator)
-{
-	return iterator->exhausted;
-}
 
 #endif							/* TIDBITMAP_H */
