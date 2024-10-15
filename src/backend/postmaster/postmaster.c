@@ -100,6 +100,7 @@
 #include "libpq/pqsignal.h"
 #include "pg_getopt.h"
 #include "pgstat.h"
+#include "pg_trace.h"
 #include "port/pg_bswap.h"
 #include "postmaster/autovacuum.h"
 #include "postmaster/auxprocess.h"
@@ -1650,7 +1651,16 @@ ServerLoop(void)
 				ClientSocket s;
 
 				if (AcceptConnection(events[i].fd, &s) == STATUS_OK)
+				{
+					/* 1. Postmaster got a socket from accept */
+					if (Log_connections && IsPostmasterEnvironment)
+					{
+						connection_latency_sequence_num++;
+						TRACE_POSTGRESQL_CLIENT_CONNECTION_POSTMASTER_SOCKET_CREATED(
+								connection_latency_sequence_num);
+					}
 					BackendStartup(&s);
+				}
 
 				/* We no longer need the open socket in this process */
 				if (s.sock != PGINVALID_SOCKET)

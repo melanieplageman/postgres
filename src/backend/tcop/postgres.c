@@ -4253,6 +4253,7 @@ PostgresMain(const char *dbname, const char *username)
 	volatile bool send_ready_for_query = true;
 	volatile bool idle_in_transaction_timeout_enabled = false;
 	volatile bool idle_session_timeout_enabled = false;
+	bool reported_first_ready_for_query = false;
 
 	Assert(dbname != NULL);
 	Assert(username != NULL);
@@ -4706,6 +4707,15 @@ PostgresMain(const char *dbname, const char *username)
 
 			/* Report any recently-changed GUC options */
 			ReportChangedGUCOptions();
+
+			/* 6. ready for query */
+			if (Log_connections && !reported_first_ready_for_query &&
+					AmClientBackendProcess())
+			{
+				reported_first_ready_for_query = true;
+				TRACE_POSTGRESQL_CLIENT_CONNECTION_BACKEND_READY_FOR_QUERY(
+						connection_latency_sequence_num);
+			}
 
 			ReadyForQuery(whereToSendOutput);
 			send_ready_for_query = false;

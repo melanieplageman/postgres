@@ -39,6 +39,7 @@
 #include "libpq/pqsignal.h"
 #include "miscadmin.h"
 #include "nodes/queryjumble.h"
+#include "pg_trace.h"
 #include "port.h"
 #include "postmaster/autovacuum.h"
 #include "postmaster/auxprocess.h"
@@ -238,9 +239,23 @@ postmaster_child_launch(BackendType child_type,
 							startup_data, startup_data_len, client_sock);
 	/* the child process will arrive in SubPostmasterMain */
 #else							/* !EXEC_BACKEND */
+
+	/* 2. Postmaster starts fork */
+	if (Log_connections && child_type == B_BACKEND)
+	{
+		TRACE_POSTGRESQL_CLIENT_CONNECTION_POSTMASTER_FORK_STARTED(
+				connection_latency_sequence_num);
+	}
 	pid = fork_process();
 	if (pid == 0)				/* child */
 	{
+		/* 3. fork is completed in a backend */
+		if (Log_connections && child_type == B_BACKEND)
+		{
+			TRACE_POSTGRESQL_CLIENT_CONNECTION_BACKEND_FORK_COMPLETED(
+				connection_latency_sequence_num);
+		}
+
 		/* Close the postmaster's sockets */
 		ClosePostmasterPorts(child_type == B_LOGGER);
 

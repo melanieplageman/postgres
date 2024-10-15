@@ -38,6 +38,7 @@
 #include "mb/pg_wchar.h"
 #include "miscadmin.h"
 #include "pgstat.h"
+#include "pg_trace.h"
 #include "postmaster/autovacuum.h"
 #include "postmaster/postmaster.h"
 #include "replication/slot.h"
@@ -249,17 +250,25 @@ PerformAuthentication(Port *port)
 	 * Done with authentication.  Disable the timeout, and log if needed.
 	 */
 	disable_timeout(STATEMENT_TIMEOUT, false);
+	/* 5. done with authentication here */
 
 	if (Log_connections)
 	{
 		StringInfoData logmsg;
 
 		initStringInfo(&logmsg);
+
+		if (AmClientBackendProcess())
+		{
+			TRACE_POSTGRESQL_CLIENT_CONNECTION_AUTHENTICATION_COMPLETED(
+					connection_latency_sequence_num);
+		}
+
 		if (am_walsender)
-			appendStringInfo(&logmsg, _("replication connection authorized: user=%s"),
+			appendStringInfo(&logmsg, _(" replication connection authorized: user=%s"),
 							 port->user_name);
 		else
-			appendStringInfo(&logmsg, _("connection authorized: user=%s"),
+			appendStringInfo(&logmsg, _(" connection authorized: user=%s"),
 							 port->user_name);
 		if (!am_walsender)
 			appendStringInfo(&logmsg, _(" database=%s"), port->database_name);
@@ -882,6 +891,12 @@ InitPostgres(const char *in_dbname, Oid dboid,
 	{
 		/* normal multiuser case */
 		Assert(MyProcPort != NULL);
+		/* 4. authentication is started */
+		if (Log_connections && (am_walsender || AmClientBackendProcess()))
+		{
+			TRACE_POSTGRESQL_CLIENT_CONNECTION_AUTHENTICATION_STARTED(
+					connection_latency_sequence_num);
+		}
 		PerformAuthentication(MyProcPort);
 		InitializeSessionUserId(username, useroid, false);
 		/* ensure that auth_method is actually valid, aka authn_id is not NULL */
