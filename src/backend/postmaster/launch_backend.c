@@ -238,9 +238,17 @@ postmaster_child_launch(BackendType child_type,
 							startup_data, startup_data_len, client_sock);
 	/* the child process will arrive in SubPostmasterMain */
 #else							/* !EXEC_BACKEND */
+
+	/* 2. Postmaster starts fork */
+	if (Log_connections && child_type == B_BACKEND)
+		conn_timing.fork_initiated = GetCurrentTimestamp();
 	pid = fork_process();
 	if (pid == 0)				/* child */
 	{
+		/* 3. fork is completed in a backend */
+		if (Log_connections && child_type == B_BACKEND)
+			conn_timing.fork_completed = GetCurrentTimestamp();
+
 		/* Close the postmaster's sockets */
 		ClosePostmasterPorts(child_type == B_LOGGER);
 
@@ -274,6 +282,10 @@ postmaster_child_launch(BackendType child_type,
 		child_process_kinds[child_type].main_fn(startup_data, startup_data_len);
 		pg_unreachable();		/* main_fn never returns */
 	}
+
+	conn_timing.fork_initiated = 0;
+	conn_timing.child_socket_acquired = 0;
+
 #endif							/* EXEC_BACKEND */
 	return pid;
 }

@@ -1650,7 +1650,12 @@ ServerLoop(void)
 				ClientSocket s;
 
 				if (AcceptConnection(events[i].fd, &s) == STATUS_OK)
+				{
+					/* 1. Postmaster got a socket from accept */
+					if (Log_connections)
+						conn_timing.child_socket_acquired = GetCurrentTimestamp();
 					BackendStartup(&s);
+				}
 
 				/* We no longer need the open socket in this process */
 				if (s.sock != PGINVALID_SOCKET)

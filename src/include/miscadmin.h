@@ -105,6 +105,8 @@ extern PGDLLIMPORT volatile uint32 InterruptHoldoffCount;
 extern PGDLLIMPORT volatile uint32 QueryCancelHoldoffCount;
 extern PGDLLIMPORT volatile uint32 CritSectionCount;
 
+extern PGDLLIMPORT struct ConnectionTiming conn_timing;
+
 /* in tcop/postgres.c */
 extern void ProcessInterrupts(void);
 
@@ -370,6 +372,7 @@ extern PGDLLIMPORT BackendType MyBackendType;
 
 #define AmAutoVacuumLauncherProcess() (MyBackendType == B_AUTOVAC_LAUNCHER)
 #define AmAutoVacuumWorkerProcess()	(MyBackendType == B_AUTOVAC_WORKER)
+#define AmClientBackendProcess() (MyBackendType == B_BACKEND)
 #define AmBackgroundWorkerProcess() (MyBackendType == B_BG_WORKER)
 #define AmWalSenderProcess()        (MyBackendType == B_WAL_SENDER)
 #define AmLogicalSlotSyncWorkerProcess() (MyBackendType == B_SLOTSYNC_WORKER)

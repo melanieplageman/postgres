@@ -4253,6 +4253,7 @@ PostgresMain(const char *dbname, const char *username)
 	volatile bool send_ready_for_query = true;
 	volatile bool idle_in_transaction_timeout_enabled = false;
 	volatile bool idle_session_timeout_enabled = false;
+	bool reported_first_ready_for_query = false;
 
 	Assert(dbname != NULL);
 	Assert(username != NULL);
@@ -4707,6 +4708,61 @@ PostgresMain(const char *dbname, const char *username)
 			/* Report any recently-changed GUC options */
 			ReportChangedGUCOptions();
 
+			/* 6. ready for query */
+			if (!reported_first_ready_for_query &&
+					Log_connections && AmClientBackendProcess())
+			{
+				long auth_us, auth_ms = 0;
+				long fork_us, fork_ms = 0;
+				long conn_establish_us, conn_establish_ms = 0;
+				TimestampTz diff;
+
+				conn_timing.backend_ready_for_query = GetCurrentTimestamp();
+
+				if (conn_timing.child_socket_acquired > 0 &&
+					conn_timing.backend_ready_for_query > 0 &&
+					(conn_timing.child_socket_acquired <
+					conn_timing.backend_ready_for_query))
+				{
+					diff = conn_timing.backend_ready_for_query -
+							conn_timing.child_socket_acquired;
+
+					conn_establish_ms = (long) (diff / 1000);
+					conn_establish_us = (long) (diff % 1000);
+				}
+
+				if (conn_timing.auth_started > 0 &&
+					conn_timing.auth_completed > 0 &&
+					(conn_timing.auth_started <
+					conn_timing.auth_completed))
+				{
+					diff = conn_timing.auth_completed -
+							conn_timing.auth_started;
+
+					auth_ms = (long) (diff / 1000);
+					auth_us = (long) (diff % 1000);
+				}
+
+				if (conn_timing.fork_initiated > 0 &&
+					conn_timing.fork_completed > 0 &&
+					(conn_timing.fork_initiated <
+					conn_timing.fork_completed))
+				{
+					diff = conn_timing.fork_completed -
+							conn_timing.fork_initiated;
+
+					fork_ms = (long) (diff / 1000);
+					fork_us = (long) (diff % 1000);
+				}
+
+				reported_first_ready_for_query = true;
+				ereport(LOG,
+						errmsg("backend ready for query. connection establishment times (ms:us): (%ld:%ld) total, (%ld:%ld) auth, (%ld:%ld) fork.",
+							conn_establish_ms,
+							conn_establish_us,
+							auth_ms, auth_us,
+							fork_ms, fork_us));
+			}
 			ReadyForQuery(whereToSendOutput);
 			send_ready_for_query = false;
 		}

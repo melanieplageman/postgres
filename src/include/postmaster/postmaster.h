@@ -40,6 +40,15 @@ extern PGDLLIMPORT bool send_abort_for_kill;
 extern PGDLLIMPORT HANDLE PostmasterHandle;
 #else
 extern PGDLLIMPORT int postmaster_alive_fds[2];
+typedef struct ConnectionTiming {
+	TimestampTz child_socket_acquired;
+	TimestampTz fork_initiated;
+	TimestampTz fork_completed;
+	TimestampTz auth_started;
+	TimestampTz auth_completed;
+	TimestampTz backend_ready_for_query;
+} ConnectionTiming;
+
 
 /*
  * Constants that represent which of postmaster_alive_fds is held by
