@@ -3063,7 +3063,8 @@ relation_needs_vacanalyze(Oid relid,
 
 		vacthresh = (float4) vac_base_thresh + vac_scale_factor * reltuples;
 		if (pgversion == 2 || pgversion == 3 || pgversion == 4 ||
-				pgversion == 5 || pgversion == 6 || pgversion == 7)
+				pgversion == 5 || pgversion == 6 || pgversion == 7 ||
+				pgversion == 9)
 			vacinsthresh = (float4) vac_ins_base_thresh + vac_ins_scale_factor * reltuples * pcnt_unfrozen;
 		else
 			vacinsthresh = (float4) vac_ins_base_thresh + vac_ins_scale_factor * reltuples;

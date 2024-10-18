@@ -1425,6 +1425,8 @@ heap_vac_scan_next_block(LVRelState *vacrel, BlockNumber *blkno,
 		 */
 		*blkno = vacrel->current_block = vacrel->last_av_block_scanned = next_block;
 		*all_visible_according_to_vm = true;
+		vacrel->eager_scanned++;
+		vacrel->cutoffs.was_eager_scanned = true;
 		return true;
 	}
 	else
@@ -1516,11 +1518,7 @@ find_next_unskippable_block(LVRelState *vacrel, bool *skipsallvis)
 			* blocks.
 			*/
 			if (vacrel->eager_scan_state == VAC_EAGER_SCAN_ENABLED)
-			{
-				vacrel->eager_scanned++;
-				vacrel->cutoffs.was_eager_scanned = true;
 				break;
-			}
 
 			/*
 			 * All-visible block is safe to skip in non-aggressive case.  But
