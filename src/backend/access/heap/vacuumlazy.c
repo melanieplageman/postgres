@@ -137,6 +137,7 @@ typedef enum
 	VACUUM_ERRCB_PHASE_TRUNCATE,
 } VacErrPhase;
 
+#define MAX_SUCCESSIVE_EAGER_SCAN_FAILS 128
 typedef struct LVRelState
 {
 	/* Target heap relation and its indexes */
@@ -236,6 +237,7 @@ typedef struct LVRelState
 	BlockNumber cumulative_eager_scanned_failed_frozen;
 	BlockNumber eager_scan_hit_fail_threshold;
 	BlockNumber next_seg_start;
+	BlockNumber fail_seg_size;
 
 	BlockNumber would_have_frozen;
 
@@ -538,10 +540,23 @@ heap_vacuum_rel(Relation rel, VacuumParams *params,
 
 	vacrel->skipwithvm = skipwithvm;
 	visibilitymap_count(rel, &orig_rel_allvisible, &orig_rel_allfrozen);
+	vacrel->max_eager_scan_success = (BlockNumber) (es_success_pcnt * (orig_rel_allvisible - orig_rel_allfrozen));
+	// TODO: don't do this if we reconsider success threshold partway through
+	if (vacrel->max_eager_scan_success <= 0)
+		vacrel->eager_scan_state = VAC_EAGER_SCAN_DISABLED_PERM;
 
+	if (vacrel->eager_scan_state == VAC_EAGER_SCAN_DISABLED_PERM)
 	{
-		BlockNumber orig_avnaf = orig_rel_allvisible - orig_rel_allfrozen;
-		vacrel->max_eager_scan_success = (BlockNumber) (es_success_pcnt * orig_avnaf);
+		vacrel->max_eager_scan_success = 0;
+		vacrel->fail_seg_size = 0;
+		vacrel->next_seg_start = 0;
+	}
+	else
+	{
+		int max_fail_seg_size = 125000;
+		int table_part = orig_rel_pages / 4;
+		vacrel->fail_seg_size = Min(max_fail_seg_size, table_part);
+		vacrel->next_seg_start = vacrel->fail_seg_size;
 	}
 
 	if (verbose)
@@ -995,7 +1010,6 @@ heap_vacuum_rel(Relation rel, VacuumParams *params,
 	pgBufferUsage.vacuum_delay_time_ms = 0;
 }
 
-#define VAC_EAGER_SCAN_SEG_NBLOCKS 125000
 
 
 /*
@@ -1063,7 +1077,6 @@ lazy_scan_heap(LVRelState *vacrel)
 	vacrel->next_unskippable_block = InvalidBlockNumber;
 	vacrel->next_unskippable_allvis = false;
 	vacrel->next_unskippable_vmbuffer = InvalidBuffer;
-	vacrel->next_seg_start = VAC_EAGER_SCAN_SEG_NBLOCKS;
 
 	while (heap_vac_scan_next_block(vacrel, &blkno, &all_visible_according_to_vm))
 	{
@@ -1351,8 +1364,8 @@ heap_vac_scan_next_block(LVRelState *vacrel, BlockNumber *blkno,
 			Assert(vacrel->eager_scanned > 0);
 			vacrel->eager_scan_state = VAC_EAGER_SCAN_DISABLED_PERM;
 		}
-		else if (((double) vacrel->eager_scanned_failed_frozen /
-			VAC_EAGER_SCAN_SEG_NBLOCKS) > 0.05)
+		else if (vacrel->eager_scanned_failed_frozen >=
+				MAX_SUCCESSIVE_EAGER_SCAN_FAILS)
 		{
 			Assert(vacrel->eager_scanned > 0);
 			vacrel->eager_scan_state = VAC_EAGER_SCAN_DISABLED_TEMP;
@@ -1399,8 +1412,6 @@ heap_vac_scan_next_block(LVRelState *vacrel, BlockNumber *blkno,
 			vacrel->next_unskippable_block = vacrel->next_seg_start;
 			/* We know if we were allowed to skip this block that it is all visible */
 			vacrel->next_unskippable_allvis = true;
-			vacrel->next_seg_start = vacrel->next_unskippable_block +
-				VAC_EAGER_SCAN_SEG_NBLOCKS;
 			vacrel->cumulative_eager_scanned_failed_frozen +=
 				vacrel->eager_scanned_failed_frozen;
 			vacrel->eager_scanned_failed_frozen = 0;
@@ -1748,7 +1759,15 @@ lazy_scan_prune(LVRelState *vacrel,
 			vacrel->eager_scanned_success_frozen++;
 	}
 	else if (vacrel->cutoffs.was_eager_scanned)
+	{
+		/*
+		 * The first time we fail, calculate when the next segment should
+		 * start
+		 */
+		if (vacrel->eager_scanned_failed_frozen == 0)
+			vacrel->next_seg_start = blkno + vacrel->fail_seg_size;
 		vacrel->eager_scanned_failed_frozen++;
+	}
 
 	if (presult.would_have_required_freeze)
 		vacrel->would_have_frozen++;
