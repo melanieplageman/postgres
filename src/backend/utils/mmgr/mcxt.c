@@ -285,6 +285,7 @@ MemoryContextTraverseNext(MemoryContext curr, MemoryContext top)
 static void
 BogusFree(void *pointer)
 {
+	Assert(false);
 	elog(ERROR, "pfree called with invalid pointer %p (header 0x%016llx)",
 		 pointer, (unsigned long long) GetMemoryChunkHeader(pointer));
 }

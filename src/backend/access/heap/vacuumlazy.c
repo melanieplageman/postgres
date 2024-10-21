@@ -722,7 +722,7 @@ heap_vacuum_rel(Relation rel, VacuumParams *params,
 						 vacrel->nofrz_min_age,
 						 vacrel->nofrz_eager_scanned_min_age,
 						vacrel->eager_scan_hit_fail_threshold,
-						vacrel->eager_scanned_success_frozen >= vacrel->max_eager_scan_success,
+						vacrel->eager_scanned_success_frozen > vacrel->max_eager_scan_success,
 						 vacrel->cutoffs.progress_to_agg_vac,
 						 msecs_dur,
 						 pgBufferUsage.vacuum_delay_time_ms,
@@ -848,7 +848,7 @@ heap_vacuum_rel(Relation rel, VacuumParams *params,
 				diff2 = (int32) (oldest_unfrozen_xid_seen -
 						vacrel->cutoffs.FreezeLimit);
 				appendStringInfo(&buf,
-								 _("same relfrozenxid: %u, but oldest unfrozen XID in scanned pages was %u, which is %d XIDs from relfrozenxid and %d XIDs from FreezeLimit (which was %u).\nprogress to agg vac at vac start: %d%%.\n"),
+								 _("same relfrozenxid: %u, but oldest unfrozen XID in scanned pages was %u,\n which is %d XIDs from relfrozenxid and %d XIDs from FreezeLimit (which was %u).\nprogress to agg vac at vac start: %d%%.\n"),
 								 vacrel->cutoffs.relfrozenxid,
 								 oldest_unfrozen_xid_seen,
 								 diff,
@@ -864,7 +864,7 @@ heap_vacuum_rel(Relation rel, VacuumParams *params,
 								 _("new relminmxid: %u, which is %d MXIDs ahead of previous value\n"),
 								 vacrel->NewRelminMxid, diff);
 			}
-			appendStringInfo(&buf, _("frozen: %u pages from table (%.2f%% of total) had %lld tuples frozen. %d pages had no tuples < freeze_min_age.\nwould have been required to freeze %d pages, which is %d more than were frozen. UpdatedFreezeLimit: %u, which is %u xids newer than FreezeLimit.\n"),
+			appendStringInfo(&buf, _("frozen: %u pages from table (%.2f%% of total) had %lld tuples frozen. %d pages had no tuples < freeze_min_age.\nwould have been required to freeze %d pages, which is %d more than were frozen.\nUpdatedFreezeLimit: %u, which is %u xids newer than FreezeLimit.\n"),
 							 vacrel->frozen_pages,
 							 orig_rel_pages == 0 ? 100.0 :
 							 100.0 * vacrel->frozen_pages / orig_rel_pages,
@@ -892,7 +892,7 @@ heap_vacuum_rel(Relation rel, VacuumParams *params,
 							 ins_since_vacuum_before,
 							 ins_since_vacuum_after,
 							 ins_since_vacuum_after - ins_since_vacuum_before);
-			appendStringInfo(&buf, _("eagerly scanned: %d of %d AVnAF pages in rel. success freezing: %d. failed freezing: %d.\neager scanned pages with no tuples < min age: %d. success rate: %d%%. hit eager scan fail limit: %d, success limit: %d.\nlast AV block scanned: %d."),
+			appendStringInfo(&buf, _("eagerly scanned: %d of %d AVnAF pages in rel. success freezing: %d. failed freezing: %d.\neager scanned pages with no tuples < min age: %d. success rate: %d%%. hit eager scan fail limit: %d, success limit: %d.\nlast AV block scanned: %d.\nmax eager scan success: %d. eager scan fail seg size: %d\n"),
 							 vacrel->eager_scanned,
 							 orig_rel_allvisible - orig_rel_allfrozen,
 							 vacrel->eager_scanned_success_frozen,
@@ -903,9 +903,11 @@ heap_vacuum_rel(Relation rel, VacuumParams *params,
 							 ((int) (((double) vacrel->eager_scanned_success_frozen /
 							 vacrel->eager_scanned) * 100)),
 							 vacrel->eager_scan_hit_fail_threshold,
-							 vacrel->eager_scanned_success_frozen >=
+							 vacrel->eager_scanned_success_frozen >
 							 vacrel->max_eager_scan_success,
-							 vacrel->last_av_block_scanned);
+							 vacrel->last_av_block_scanned,
+							 vacrel->max_eager_scan_success,
+							 vacrel->fail_seg_size);
 			if (eager_scan_disabled_from_start_due_to_relfrozenxid_age)
 			{
 				if (bc_oldest_unfrozen_last_vac)
@@ -1359,7 +1361,7 @@ heap_vac_scan_next_block(LVRelState *vacrel, BlockNumber *blkno,
 	 */
 	if (vacrel->eager_scan_state == VAC_EAGER_SCAN_ENABLED)
 	{
-		if (vacrel->eager_scanned_success_frozen >= vacrel->max_eager_scan_success)
+		if (vacrel->eager_scanned_success_frozen > vacrel->max_eager_scan_success)
 		{
 			Assert(vacrel->eager_scanned > 0);
 			vacrel->eager_scan_state = VAC_EAGER_SCAN_DISABLED_PERM;
