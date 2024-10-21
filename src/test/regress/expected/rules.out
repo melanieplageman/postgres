@@ -1813,12 +1813,14 @@ pg_stat_all_tables| SELECT c.oid AS relid,
     pg_stat_get_nofrz_partial(c.oid) AS nofrz_partial,
     pg_stat_get_nofrz_min_age(c.oid) AS nofrz_min_age,
     pg_stat_get_nofrz_eager_scanned_min_age(c.oid) AS nofrz_eager_scanned_min_age,
-    pg_stat_get_eager_scan_hit_threshold(c.oid) AS eager_scanned_hit_threshold,
+    pg_stat_get_eager_scan_hit_fail_threshold(c.oid) AS eager_scanned_hit_fail_threshold,
+    pg_stat_get_eager_scan_hit_success_threshold(c.oid) AS eager_scanned_hit_success_threshold,
     pg_stat_get_progress_to_agg_vac(c.oid) AS progress_to_agg_vac,
     pg_stat_get_extra_av_pages_scanned(c.oid) AS extra_av_pages_scanned,
     pg_stat_get_msecs_vacuuming(c.oid) AS time_vacuuming_ms,
     pg_stat_get_msecs_vacuum_delaying(c.oid) AS time_vacuum_delaying_ms,
-    pg_stat_get_pages_scanned_by_vacuum(c.oid) AS pages_scanned_by_vacuum
+    pg_stat_get_pages_scanned_by_vacuum(c.oid) AS pages_scanned_by_vacuum,
+    pg_stat_get_oldest_unfrozen_xid_last_vacuum(c.oid) AS oldest_unfrozen_xid_last_vacuum
    FROM ((pg_class c
      LEFT JOIN pg_index i ON ((c.oid = i.indrelid)))
      LEFT JOIN pg_namespace n ON ((n.oid = c.relnamespace)))
@@ -2209,12 +2211,14 @@ pg_stat_sys_tables| SELECT relid,
     nofrz_partial,
     nofrz_min_age,
     nofrz_eager_scanned_min_age,
-    eager_scanned_hit_threshold,
+    eager_scanned_hit_fail_threshold,
+    eager_scanned_hit_success_threshold,
     progress_to_agg_vac,
     extra_av_pages_scanned,
     time_vacuuming_ms,
     time_vacuum_delaying_ms,
-    pages_scanned_by_vacuum
+    pages_scanned_by_vacuum,
+    oldest_unfrozen_xid_last_vacuum
    FROM pg_stat_all_tables
   WHERE ((schemaname = ANY (ARRAY['pg_catalog'::name, 'information_schema'::name])) OR (schemaname ~ '^pg_toast'::text));
 pg_stat_user_functions| SELECT p.oid AS funcid,
@@ -2271,12 +2275,14 @@ pg_stat_user_tables| SELECT relid,
     nofrz_partial,
     nofrz_min_age,
     nofrz_eager_scanned_min_age,
-    eager_scanned_hit_threshold,
+    eager_scanned_hit_fail_threshold,
+    eager_scanned_hit_success_threshold,
     progress_to_agg_vac,
     extra_av_pages_scanned,
     time_vacuuming_ms,
     time_vacuum_delaying_ms,
-    pages_scanned_by_vacuum
+    pages_scanned_by_vacuum,
+    oldest_unfrozen_xid_last_vacuum
    FROM pg_stat_all_tables
   WHERE ((schemaname <> ALL (ARRAY['pg_catalog'::name, 'information_schema'::name])) AND (schemaname !~ '^pg_toast'::text));
 pg_stat_wal| SELECT wal_records,
