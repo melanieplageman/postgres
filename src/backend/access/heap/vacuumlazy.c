@@ -473,7 +473,16 @@ heap_vacuum_rel(Relation rel, VacuumParams *params,
 	 * want to teach lazy_scan_prune to recompute vistest from time to time,
 	 * to increase the number of dead tuples it can prune away.)
 	 */
-	vacrel->aggressive = vacuum_get_cutoffs(rel, params, &vacrel->cutoffs);
+	if ((tabstats = pgstat_fetch_stat_tabentry(RelationGetRelid(rel))) != NULL)
+	{
+		if (tabstats->autovacuum_count > 0 || tabstats->vacuum_count > 0)
+			oldest_unfrozen_xid_last_vacuum = tabstats->oldest_unfrozen_xid_last_vacuum;
+
+		ins_since_vacuum_before = tabstats->ins_since_vacuum;
+	}
+
+	if (!vacrel->aggressive && vacrel->eager_scan_state == VAC_EAGER_SCAN_DISABLED_PERM)
+		eager_scan_disabled_from_start_due_to_relfrozenxid_age = true;
 	vacrel->rel_pages = orig_rel_pages = RelationGetNumberOfBlocks(rel);
 	vacrel->vistest = GlobalVisTestFor(rel);
 	/* Initialize state used to track oldest extant XID/MXID */
