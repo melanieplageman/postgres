@@ -1098,6 +1098,8 @@ vacuum_get_cutoffs(Relation rel, const VacuumParams *params,
 	MultiXactId nextMXID,
 				safeOldestMxact,
 				aggressiveMXIDCutoff;
+	double		xid_progress_to_agg_vac = 0;
+	double		mxid_progress_to_agg_vac = 0;
 
 	/* Use mutable copies of freeze age parameters */
 	freeze_min_age = params->freeze_min_age;
