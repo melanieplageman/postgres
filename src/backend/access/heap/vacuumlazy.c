@@ -137,6 +137,7 @@ typedef enum
 	VACUUM_ERRCB_PHASE_TRUNCATE,
 } VacErrPhase;
 
+#define MAX_SUCCESSIVE_EAGER_SCAN_FAILS 128
 typedef struct LVRelState
 {
 	/* Target heap relation and its indexes */
@@ -227,6 +228,14 @@ typedef struct LVRelState
 	bool		next_unskippable_allvis;	/* its visibility status */
 	Buffer		next_unskippable_vmbuffer;	/* buffer containing its VM bit */
 	BlockNumber last_av_block_scanned;
+
+	VacEagerScanState eager_scan_state;
+	BlockNumber eager_scanned;
+	BlockNumber eager_scanned_success_frozen;
+	BlockNumber max_eager_scan_success;
+	BlockNumber eager_scanned_failed_frozen;
+	BlockNumber next_seg_start;
+	BlockNumber fail_seg_size;
 
 	BlockNumber cumulative_eager_scanned_failed_frozen;
 	BlockNumber eager_scan_hit_fail_threshold;
