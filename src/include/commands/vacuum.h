@@ -350,7 +350,10 @@ extern void vac_update_relstats(Relation relation,
 								bool *minmulti_updated,
 								bool in_outer_xact);
 extern bool vacuum_get_cutoffs(Relation rel, const VacuumParams *params,
-							   struct VacuumCutoffs *cutoffs);
+							   struct VacuumCutoffs *cutoffs,
+							   VacEagerScanState *eager_scan_state,
+							   TransactionId oldest_unfrozen_xid_last_vacuum,
+							   bool *bc_oldest_unfrozen_last_vac);
 extern bool vacuum_xid_failsafe_check(const struct VacuumCutoffs *cutoffs);
 extern void vac_update_datfrozenxid(void);
 extern void vacuum_delay_point(void);
