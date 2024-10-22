@@ -1352,6 +1352,7 @@ heap_vac_scan_next_block(LVRelState *vacrel, BlockNumber *blkno,
 
 	/* relies on InvalidBlockNumber + 1 overflowing to 0 on first call */
 	next_block = vacrel->current_block + 1;
+	vacrel->cutoffs.was_eager_scanned = false;
 
 	/* Have we reached the end of the relation? */
 	if (next_block >= vacrel->rel_pages)
@@ -1363,6 +1364,25 @@ heap_vac_scan_next_block(LVRelState *vacrel, BlockNumber *blkno,
 		}
 		*blkno = vacrel->rel_pages;
 		return false;
+	}
+
+	/*
+	 * Figure out if we should disable eager scan going forward
+	 */
+	if (vacrel->eager_scan_state == VAC_EAGER_SCAN_ENABLED)
+	{
+		if (vacrel->eager_scanned_success_frozen > vacrel->max_eager_scan_success)
+		{
+			Assert(vacrel->eager_scanned > 0);
+			vacrel->eager_scan_state = VAC_EAGER_SCAN_DISABLED_PERM;
+		}
+		else if (vacrel->eager_scanned_failed_frozen >=
+				MAX_SUCCESSIVE_EAGER_SCAN_FAILS)
+		{
+			Assert(vacrel->eager_scanned > 0);
+			vacrel->eager_scan_state = VAC_EAGER_SCAN_DISABLED_TEMP;
+			vacrel->eager_scan_hit_fail_threshold++;
+		}
 	}
 
 	/*
@@ -1390,12 +1410,28 @@ heap_vac_scan_next_block(LVRelState *vacrel, BlockNumber *blkno,
 		 * then.  Skipping such a range might even discourage sequential
 		 * detection.
 		 *
+		 * We also don't skip ahead of the beginning of the next segment so
+		 * that we have a chance to eagerly scan all-visible pages.
+		 *
 		 * This test also enables more frequent relfrozenxid advancement
 		 * during non-aggressive VACUUMs.  If the range has any all-visible
 		 * pages then skipping makes updating relfrozenxid unsafe, which is a
 		 * real downside.
 		 */
-		if (vacrel->next_unskippable_block - next_block >= SKIP_PAGES_THRESHOLD)
+		if (vacrel->eager_scan_state != VAC_EAGER_SCAN_DISABLED_PERM &&
+			vacrel->next_unskippable_block > vacrel->next_seg_start)
+		{
+			vacrel->next_unskippable_block = vacrel->next_seg_start;
+			/* We know if we were allowed to skip this block that it is all visible */
+			vacrel->next_unskippable_allvis = true;
+			vacrel->cumulative_eager_scanned_failed_frozen +=
+				vacrel->eager_scanned_failed_frozen;
+			vacrel->eager_scanned_failed_frozen = 0;
+			vacrel->eager_scan_state = VAC_EAGER_SCAN_ENABLED;
+		}
+
+		if (vacrel->next_unskippable_block >= next_block &&
+			vacrel->next_unskippable_block - next_block >= SKIP_PAGES_THRESHOLD)
 		{
 			next_block = vacrel->next_unskippable_block;
 			if (skipsallvis)
@@ -1411,8 +1447,10 @@ heap_vac_scan_next_block(LVRelState *vacrel, BlockNumber *blkno,
 		 * but chose not to.  We know that they are all-visible in the VM,
 		 * otherwise they would've been unskippable.
 		 */
-		*blkno = vacrel->current_block = next_block;
+		*blkno = vacrel->current_block = vacrel->last_av_block_scanned = next_block;
 		*all_visible_according_to_vm = true;
+		vacrel->eager_scanned++;
+		vacrel->cutoffs.was_eager_scanned = true;
 		return true;
 	}
 	else
@@ -1495,6 +1533,15 @@ find_next_unskippable_block(LVRelState *vacrel, bool *skipsallvis)
 		if ((mapbits & VISIBILITYMAP_ALL_FROZEN) == 0)
 		{
 			if (vacrel->aggressive)
+				break;
+
+			/*
+			* Because we want to eagerly freeze pages, we may choose not to skip
+			* this page if we have not yet scanned our quota of all-visible pages
+			* for this vacuum and we have not yet failed to freeze too many
+			* blocks.
+			*/
+			if (vacrel->eager_scan_state == VAC_EAGER_SCAN_ENABLED)
 				break;
 
 			/*
