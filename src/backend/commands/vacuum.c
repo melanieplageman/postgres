@@ -1082,7 +1082,10 @@ get_all_vacuum_rels(MemoryContext vac_context, int options)
  */
 bool
 vacuum_get_cutoffs(Relation rel, const VacuumParams *params,
-				   struct VacuumCutoffs *cutoffs)
+				   struct VacuumCutoffs *cutoffs,
+				   VacEagerScanState *eager_scan_state,
+				   TransactionId oldest_unfrozen_xid_last_vacuum,
+				   bool *bc_oldest_unfrozen_last_vac)
 {
 	int			freeze_min_age,
 				multixact_freeze_min_age,
