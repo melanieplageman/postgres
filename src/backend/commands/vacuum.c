@@ -1231,6 +1231,20 @@ vacuum_get_cutoffs(Relation rel, const VacuumParams *params,
 									  aggressiveXIDCutoff))
 		return true;
 
+	if (TransactionIdIsNormal(cutoffs->relfrozenxid) &&
+		TransactionIdPrecedesOrEquals(cutoffs->relfrozenxid,
+									cutoffs->FreezeLimit) &&
+		freeze_table_age > freeze_min_age &&
+		freeze_min_age > 0)
+	{
+		int32 distance_from_agg_vac = (int32) (cutoffs->relfrozenxid - aggressiveXIDCutoff);
+		if (distance_from_agg_vac < freeze_table_age - freeze_min_age)
+			xid_progress_to_agg_vac = 1 - (double) distance_from_agg_vac /
+				(freeze_table_age - freeze_min_age);
+	}
+
+	Assert(xid_progress_to_agg_vac >= 0 && xid_progress_to_agg_vac <= 1);
+
 	/*
 	 * Similar to the above, determine the table freeze age to use for
 	 * multixacts: as specified by the caller, or the value of the
@@ -1251,6 +1265,27 @@ vacuum_get_cutoffs(Relation rel, const VacuumParams *params,
 	if (MultiXactIdPrecedesOrEquals(cutoffs->relminmxid,
 									aggressiveMXIDCutoff))
 		return true;
+
+	if (MultiXactIdIsValid(cutoffs->relminmxid) &&
+		MultiXactIdPrecedesOrEquals(cutoffs->relminmxid,
+									cutoffs->MultiXactCutoff) &&
+		multixact_freeze_table_age > multixact_freeze_min_age &&
+		multixact_freeze_min_age > 0)
+	{
+		int32 distance_from_agg_vac = (int32) (cutoffs->relminmxid - aggressiveMXIDCutoff);
+		if (distance_from_agg_vac < multixact_freeze_table_age - multixact_freeze_min_age)
+			mxid_progress_to_agg_vac = 1 - ((double) distance_from_agg_vac /
+											(multixact_freeze_table_age -
+											multixact_freeze_min_age));
+	}
+
+	Assert(mxid_progress_to_agg_vac >= 0 && mxid_progress_to_agg_vac <= 1);
+
+	cutoffs->progress_to_agg_vac = Max(mxid_progress_to_agg_vac,
+									   xid_progress_to_agg_vac);
+
+	if (pgversion == 0 || pgversion == 2 || pgversion == 7 || pgversion == 8)
+		*eager_scan_state = VAC_EAGER_SCAN_DISABLED_PERM;
 
 	/* Non-aggressive VACUUM */
 	return false;
