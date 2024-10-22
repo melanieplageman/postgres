@@ -1768,7 +1768,22 @@ lazy_scan_prune(LVRelState *vacrel,
 		 * (don't confuse that with pages newly set all-frozen in VM).
 		 */
 		vacrel->frozen_pages++;
+		if (vacrel->cutoffs.was_eager_scanned)
+			vacrel->eager_scanned_success_frozen++;
 	}
+	else if (vacrel->cutoffs.was_eager_scanned)
+	{
+		/*
+		 * The first time we fail, calculate when the next segment should
+		 * start
+		 */
+		if (vacrel->eager_scanned_failed_frozen == 0)
+			vacrel->next_seg_start = blkno + vacrel->fail_seg_size;
+		vacrel->eager_scanned_failed_frozen++;
+	}
+
+	if (presult.would_have_required_freeze)
+		vacrel->would_have_frozen++;
 
 	/*
 	 * VACUUM will call heap_page_is_all_visible() during the second pass over
