@@ -1745,6 +1745,13 @@ lazy_scan_prune(LVRelState *vacrel,
 	if (vacrel->nindexes == 0)
 		prune_options |= HEAP_PAGE_PRUNE_MARK_UNUSED_NOW;
 
+	presult.eager_page_freezes = 0;
+	presult.nofrz_nofpi = 0;
+	presult.nofrz_partial = 0;
+	presult.nofrz_min_age = 0;
+	presult.nofrz_eager_scanned_min_age = 0;
+	presult.would_have_required_freeze = false;
+
 	heap_page_prune_and_freeze(rel, buf, vacrel->vistest, prune_options,
 							   &vacrel->cutoffs, &presult, PRUNE_VACUUM_SCAN,
 							   &vacrel->offnum,
