@@ -294,6 +294,13 @@ typedef struct VacDeadItemsInfo
 	int64		num_items;		/* current # of entries */
 } VacDeadItemsInfo;
 
+typedef enum
+{
+	VAC_EAGER_SCAN_DISABLED_PERM,
+	VAC_EAGER_SCAN_DISABLED_TEMP,
+	VAC_EAGER_SCAN_ENABLED,
+} VacEagerScanState;
+
 /* GUC parameters */
 extern PGDLLIMPORT int default_statistics_target;	/* PGDLLIMPORT for PostGIS */
 extern PGDLLIMPORT int vacuum_freeze_min_age;
