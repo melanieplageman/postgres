@@ -95,6 +95,10 @@
 #define FAILSAFE_EVERY_PAGES \
 	((BlockNumber) (((uint64) 4 * 1024 * 1024 * 1024) / BLCKSZ))
 
+/* Re-evaluate every 1 GB */
+#define REEVALUATE_FREEZELIMIT_EVERY_PAGES \
+	((BlockNumber) (((uint64) 1024 * 1024 * 1024) / BLCKSZ))
+
 /*
  * When a table has no indexes, vacuum the FSM after every 8GB, approximately
  * (it won't be exact because we only vacuum FSM after processing a heap page
@@ -194,6 +198,12 @@ typedef struct LVRelState
 	BlockNumber lpdead_item_pages;	/* # pages with LP_DEAD items */
 	BlockNumber missed_dead_pages;	/* # pages with missed dead tuples */
 	BlockNumber nonempty_pages; /* actually, last nonempty page + 1 */
+	BlockNumber vm_page_freezes;	/* pages newly set frozen in the VM */
+	BlockNumber eager_page_freezes; /* full pages eagerly frozen bc fpi */
+	BlockNumber nofrz_nofpi;
+	BlockNumber nofrz_partial;
+	BlockNumber nofrz_min_age;
+	BlockNumber nofrz_eager_scanned_min_age;
 
 	/* Statistics output by us, for table */
 	double		new_rel_tuples; /* new estimated total # of tuples */
@@ -216,6 +226,14 @@ typedef struct LVRelState
 	BlockNumber next_unskippable_block; /* next unskippable block */
 	bool		next_unskippable_allvis;	/* its visibility status */
 	Buffer		next_unskippable_vmbuffer;	/* buffer containing its VM bit */
+	BlockNumber last_av_block_scanned;
+
+	BlockNumber cumulative_eager_scanned_failed_frozen;
+	BlockNumber eager_scan_hit_fail_threshold;
+
+	BlockNumber would_have_frozen;
+
+	TransactionId newest_xmin;
 } LVRelState;
 
 /* Struct for saving and restoring vacuum error information. */

@@ -394,6 +394,7 @@ heap_page_prune_and_freeze(Relation relation, Buffer buffer,
 
 	/* initialize page freezing working state */
 	prstate.pagefrz.freeze_required = false;
+	prstate.pagefrz.would_have_required_freeze = false;
 	if (prstate.freeze)
 	{
 		Assert(new_relfrozen_xid && new_relmin_mxid);
@@ -705,19 +706,37 @@ heap_page_prune_and_freeze(Relation relation, Buffer buffer,
 				if (RelationNeedsWAL(relation))
 				{
 					if (hint_bit_fpi)
+					{
 						do_freeze = true;
+						presult->eager_page_freezes++;
+					}
 					else if (do_prune)
 					{
 						if (XLogCheckBufferNeedsBackup(buffer))
+						{
 							do_freeze = true;
+							presult->eager_page_freezes++;
+						}
 					}
 					else if (do_hint)
 					{
 						if (XLogHintBitIsNeeded() && XLogCheckBufferNeedsBackup(buffer))
+						{
 							do_freeze = true;
+							presult->eager_page_freezes++;
+						}
 					}
+					else
+						presult->nofrz_nofpi++;
 				}
 			}
+			else if (prstate.nfrozen > 0 && RelationNeedsWAL(relation))
+				presult->nofrz_partial++;
+
+			if (!do_freeze)
+				presult->nofrz_min_age++;
+			if (!do_freeze && cutoffs->was_eager_scanned)
+				presult->nofrz_eager_scanned_min_age++;
 		}
 	}
 
@@ -907,6 +926,8 @@ heap_page_prune_and_freeze(Relation relation, Buffer buffer,
 			*new_relmin_mxid = prstate.pagefrz.NoFreezePageRelminMxid;
 		}
 	}
+
+	presult->would_have_required_freeze = prstate.pagefrz.would_have_required_freeze;
 }
 
 
@@ -1484,7 +1505,8 @@ heap_prune_record_unchanged_lp_normal(Page page, PruneState *prstate, OffsetNumb
 									   prstate->cutoffs,
 									   &prstate->pagefrz,
 									   &prstate->frozen[prstate->nfrozen],
-									   &totally_frozen)))
+									   &totally_frozen,
+									   &prstate->pagefrz.would_have_required_freeze)))
 		{
 			/* Save prepared freeze plan for later */
 			prstate->frozen[prstate->nfrozen++].offset = offnum;
