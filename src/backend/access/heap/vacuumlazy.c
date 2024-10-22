@@ -1785,6 +1785,17 @@ lazy_scan_prune(LVRelState *vacrel,
 	if (presult.would_have_required_freeze)
 		vacrel->would_have_frozen++;
 
+	vacrel->eager_page_freezes += presult.eager_page_freezes;
+	vacrel->nofrz_partial += presult.nofrz_partial;
+	vacrel->nofrz_nofpi += presult.nofrz_nofpi;
+	vacrel->nofrz_min_age += presult.nofrz_min_age;
+	vacrel->nofrz_eager_scanned_min_age += presult.nofrz_eager_scanned_min_age;
+
+	if (TransactionIdIsValid(presult.vm_conflict_horizon) &&
+		TransactionIdFollows(presult.vm_conflict_horizon,
+			vacrel->newest_xmin))
+		vacrel->newest_xmin = presult.vm_conflict_horizon;
+
 	/*
 	 * VACUUM will call heap_page_is_all_visible() during the second pass over
 	 * the heap to determine all_visible and all_frozen for the page -- this
@@ -1860,6 +1871,7 @@ lazy_scan_prune(LVRelState *vacrel,
 		{
 			Assert(!TransactionIdIsValid(presult.vm_conflict_horizon));
 			flags |= VISIBILITYMAP_ALL_FROZEN;
+			vacrel->vm_page_freezes++;
 		}
 
 		/*
@@ -1952,6 +1964,7 @@ lazy_scan_prune(LVRelState *vacrel,
 						  vmbuffer, InvalidTransactionId,
 						  VISIBILITYMAP_ALL_VISIBLE |
 						  VISIBILITYMAP_ALL_FROZEN);
+		vacrel->vm_page_freezes++;
 	}
 }
 
@@ -1989,6 +2002,7 @@ lazy_scan_noprune(LVRelState *vacrel,
 				recently_dead_tuples,
 				missed_dead_tuples;
 	bool		hastup;
+	bool		would_have_required_freeze;
 	HeapTupleHeader tupleheader;
 	TransactionId NoFreezePageRelfrozenXid = vacrel->NewRelfrozenXid;
 	MultiXactId NoFreezePageRelminMxid = vacrel->NewRelminMxid;
@@ -2037,7 +2051,8 @@ lazy_scan_noprune(LVRelState *vacrel,
 		tupleheader = (HeapTupleHeader) PageGetItem(page, itemid);
 		if (heap_tuple_should_freeze(tupleheader, &vacrel->cutoffs,
 									 &NoFreezePageRelfrozenXid,
-									 &NoFreezePageRelminMxid))
+									 &NoFreezePageRelminMxid,
+									 &would_have_required_freeze))
 		{
 			/* Tuple with XID < FreezeLimit (or MXID < MultiXactCutoff) */
 			if (vacrel->aggressive)
@@ -2603,9 +2618,11 @@ lazy_vacuum_heap_page(LVRelState *vacrel, BlockNumber blkno, Buffer buffer,
 		{
 			Assert(!TransactionIdIsValid(visibility_cutoff_xid));
 			flags |= VISIBILITYMAP_ALL_FROZEN;
+			vacrel->vm_page_freezes++;
 		}
 
 		PageSetAllVisible(page);
+
 		visibilitymap_set(vacrel->rel, blkno, buffer, InvalidXLogRecPtr,
 						  vmbuffer, visibility_cutoff_xid, flags);
 	}
