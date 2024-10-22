@@ -1420,7 +1420,8 @@ heap_vac_scan_next_block(LVRelState *vacrel, BlockNumber *blkno,
 			vacrel->eager_scan_state = VAC_EAGER_SCAN_ENABLED;
 		}
 
-		if (vacrel->next_unskippable_block - next_block >= SKIP_PAGES_THRESHOLD)
+		if (vacrel->next_unskippable_block >= next_block &&
+			vacrel->next_unskippable_block - next_block >= SKIP_PAGES_THRESHOLD)
 		{
 			next_block = vacrel->next_unskippable_block;
 			if (skipsallvis)
