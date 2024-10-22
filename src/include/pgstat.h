@@ -461,6 +461,35 @@ typedef struct PgStat_StatTabEntry
 	PgStat_Counter analyze_count;
 	TimestampTz last_autoanalyze_time;	/* autovacuum initiated */
 	PgStat_Counter autoanalyze_count;
+
+	PgStat_Counter aggressive_vacuum_count;
+	/*
+	 * The last all-visible page eagerly scanned by vacuum. In an aggressive
+	 * vacuum, this is reset to block 0. We will always scan at least block 0
+	 * and the next all-visible block regardless of block's visibility status,
+	 * as 0 is the initialization value.
+	 */
+	BlockNumber last_av_block_scanned;
+
+	uint64 extra_av_pages_scanned;
+
+	uint64 vm_page_freezes;
+	uint64 pages_with_tuples_frozen;
+	uint64 eager_page_freezes;
+
+	uint64 nofrz_partial;
+	uint64 nofrz_nofpi;
+	uint64 nofrz_min_age;
+	uint64 nofrz_eager_scanned_min_age;
+	PgStat_Counter progress_to_agg_vac;
+	uint64 eager_scan_hit_fail_threshold;
+	uint64 eager_scan_hit_success_threshold;
+
+	uint64 msecs_vacuuming;
+	uint64 msecs_vacuum_delaying;
+
+	uint64 pages_scanned_by_vacuum;
+	TransactionId oldest_unfrozen_xid_last_vacuum;
 } PgStat_StatTabEntry;
 
 typedef struct PgStat_WalStats
@@ -625,8 +654,25 @@ extern void pgstat_init_relation(Relation rel);
 extern void pgstat_assoc_relation(Relation rel);
 extern void pgstat_unlink_relation(Relation rel);
 
-extern void pgstat_report_vacuum(Oid tableoid, bool shared,
-								 PgStat_Counter livetuples, PgStat_Counter deadtuples);
+extern void pgstat_report_vacuum(Oid tableoid, bool shared, bool aggressive,
+								 PgStat_Counter livetuples, PgStat_Counter deadtuples,
+								 BlockNumber vm_page_freezes,
+								 BlockNumber last_av_block_scanned,
+								 BlockNumber extra_av_pages_scanned,
+								 BlockNumber pages_with_tuples_frozen,
+								 BlockNumber eager_page_freezes,
+								 BlockNumber nofrz_nofpi,
+								 BlockNumber nofrz_partial,
+								 BlockNumber nofrz_min_age,
+								 BlockNumber nofrz_eager_scanned_min_age,
+								 BlockNumber eager_scan_hit_fail_threshold,
+								 BlockNumber eager_scan_hit_success_threshold,
+								 double progress_to_agg_vac,
+								 uint64 msecs_vacuuming,
+								 uint64 msecs_vacuum_delaying,
+								 BlockNumber scanned_pages,
+								 TransactionId oldest_unfrozen_xid_seen,
+								 int64 *ins_since_vacuum_after);
 extern void pgstat_report_analyze(Relation rel,
 								  PgStat_Counter livetuples, PgStat_Counter deadtuples,
 								  bool resetcounter);

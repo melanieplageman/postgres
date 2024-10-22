@@ -180,6 +180,7 @@ typedef struct HeapPageFreeze
 {
 	/* Is heap_prepare_freeze_tuple caller required to freeze page? */
 	bool		freeze_required;
+	bool		would_have_required_freeze;
 
 	/*
 	 * "Freeze" NewRelfrozenXid/NewRelminMxid trackers.
@@ -248,6 +249,26 @@ typedef struct PruneFreezeResult
 	bool		all_visible;
 	bool		all_frozen;
 	TransactionId vm_conflict_horizon;
+	bool would_have_required_freeze;
+
+	BlockNumber eager_page_freezes;
+
+	/*
+	 * Both of these are also counted as nofrz_min_age. We did not force
+	 * freezing because no tuples were older than vacuum_freeze_min_age and we
+	 * did not eagerly freeze because either the page would not be entirely
+	 * frozen or because even though it would be, we wouldn't be otherwise
+	 * doing an FPI.
+	 */
+	BlockNumber nofrz_partial;
+	BlockNumber nofrz_nofpi;
+
+	/*
+	 * vacuum_freeze_min_age did not force a freeze and no eager freeze
+	 * criteria triggered.
+	 */
+	BlockNumber nofrz_min_age;
+	BlockNumber nofrz_eager_scanned_min_age;
 
 	/*
 	 * Whether or not the page makes rel truncation unsafe.  This is set to
@@ -347,7 +368,8 @@ extern void heap_inplace_unlock(Relation relation,
 extern bool heap_prepare_freeze_tuple(HeapTupleHeader tuple,
 									  const struct VacuumCutoffs *cutoffs,
 									  HeapPageFreeze *pagefrz,
-									  HeapTupleFreeze *frz, bool *totally_frozen);
+									  HeapTupleFreeze *frz, bool *totally_frozen,
+									  bool *would_have_frozen);
 
 extern void heap_pre_freeze_checks(Buffer buffer,
 								   HeapTupleFreeze *tuples, int ntuples);
@@ -359,7 +381,8 @@ extern bool heap_freeze_tuple(HeapTupleHeader tuple,
 extern bool heap_tuple_should_freeze(HeapTupleHeader tuple,
 									 const struct VacuumCutoffs *cutoffs,
 									 TransactionId *NoFreezePageRelfrozenXid,
-									 MultiXactId *NoFreezePageRelminMxid);
+									 MultiXactId *NoFreezePageRelminMxid,
+									 bool *would_have_required_freeze);
 extern bool heap_tuple_needs_eventual_freeze(HeapTupleHeader tuple);
 
 extern void simple_heap_insert(Relation relation, HeapTuple tup);

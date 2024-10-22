@@ -275,7 +275,13 @@ struct VacuumCutoffs
 	 * definitely removed from Xmax in pages VACUUM scans and cleanup locks.
 	 */
 	TransactionId FreezeLimit;
+	TransactionId UpdatedFreezeLimit;
 	MultiXactId MultiXactCutoff;
+
+	TransactionId computed_freeze_min_age;
+
+	double		progress_to_agg_vac;
+	bool was_eager_scanned;
 };
 
 /*
