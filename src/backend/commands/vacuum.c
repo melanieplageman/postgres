@@ -1177,6 +1177,8 @@ vacuum_get_cutoffs(Relation rel, const VacuumParams *params,
 	freeze_min_age = Min(freeze_min_age, autovacuum_freeze_max_age / 2);
 	Assert(freeze_min_age >= 0);
 
+	cutoffs->computed_freeze_min_age = freeze_min_age;
+
 	/* Compute FreezeLimit, being careful to generate a normal XID */
 	cutoffs->FreezeLimit = nextXID - freeze_min_age;
 	if (!TransactionIdIsNormal(cutoffs->FreezeLimit))
@@ -1184,6 +1186,8 @@ vacuum_get_cutoffs(Relation rel, const VacuumParams *params,
 	/* FreezeLimit must always be <= OldestXmin */
 	if (TransactionIdPrecedes(cutoffs->OldestXmin, cutoffs->FreezeLimit))
 		cutoffs->FreezeLimit = cutoffs->OldestXmin;
+
+	cutoffs->UpdatedFreezeLimit = cutoffs->FreezeLimit;
 
 	/*
 	 * Determine the minimum multixact freeze age to use: as specified by
@@ -1204,6 +1208,8 @@ vacuum_get_cutoffs(Relation rel, const VacuumParams *params,
 	/* MultiXactCutoff must always be <= OldestMxact */
 	if (MultiXactIdPrecedes(cutoffs->OldestMxact, cutoffs->MultiXactCutoff))
 		cutoffs->MultiXactCutoff = cutoffs->OldestMxact;
+
+	cutoffs->progress_to_agg_vac = 1;
 
 	/*
 	 * Finally, figure out if caller needs to do an aggressive VACUUM or not.
