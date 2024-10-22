@@ -138,6 +138,7 @@ typedef enum
 } VacErrPhase;
 
 #define MAX_SUCCESSIVE_EAGER_SCAN_FAILS 128
+#define MAX_FAIL_SEG_SIZE 125000
 typedef struct LVRelState
 {
 	/* Target heap relation and its indexes */
@@ -481,6 +482,10 @@ heap_vacuum_rel(Relation rel, VacuumParams *params,
 		ins_since_vacuum_before = tabstats->ins_since_vacuum;
 	}
 
+	vacrel->aggressive = vacuum_get_cutoffs(rel, params, &vacrel->cutoffs,
+			&vacrel->eager_scan_state, oldest_unfrozen_xid_last_vacuum,
+			&bc_oldest_unfrozen_last_vac);
+
 	if (!vacrel->aggressive && vacrel->eager_scan_state == VAC_EAGER_SCAN_DISABLED_PERM)
 		eager_scan_disabled_from_start_due_to_relfrozenxid_age = true;
 	vacrel->rel_pages = orig_rel_pages = RelationGetNumberOfBlocks(rel);
@@ -501,6 +506,29 @@ heap_vacuum_rel(Relation rel, VacuumParams *params,
 	}
 
 	vacrel->skipwithvm = skipwithvm;
+
+	visibilitymap_count(rel, &orig_rel_allvisible, &orig_rel_allfrozen);
+	vacrel->max_eager_scan_success = (BlockNumber) (es_success_pcnt *
+			(orig_rel_allvisible - orig_rel_allfrozen));
+
+	/*
+	 * TODO: don't do this if we reconsider success threshold partway through
+	 */
+	if (vacrel->max_eager_scan_success <= 0)
+		vacrel->eager_scan_state = VAC_EAGER_SCAN_DISABLED_PERM;
+
+	if (vacrel->eager_scan_state == VAC_EAGER_SCAN_DISABLED_PERM)
+	{
+		vacrel->max_eager_scan_success = 0;
+		vacrel->fail_seg_size = 0;
+		vacrel->next_seg_start = 0;
+	}
+	else
+	{
+		int table_part = orig_rel_pages / 4;
+		vacrel->fail_seg_size = Min(MAX_FAIL_SEG_SIZE, table_part);
+		vacrel->next_seg_start = vacrel->fail_seg_size;
+	}
 
 	if (verbose)
 	{
