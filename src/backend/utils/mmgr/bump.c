@@ -617,6 +617,7 @@ void
 BumpFree(void *pointer)
 {
 	Assert(false);
+	abort();
 	elog(ERROR, "%s is not supported by the bump memory allocator", "pfree");
 }
 
