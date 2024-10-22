@@ -1284,6 +1284,12 @@ vacuum_get_cutoffs(Relation rel, const VacuumParams *params,
 	cutoffs->progress_to_agg_vac = Max(mxid_progress_to_agg_vac,
 									   xid_progress_to_agg_vac);
 
+	if ((TransactionIdIsNormal(cutoffs->relfrozenxid) &&
+		TransactionIdPrecedesOrEquals(cutoffs->relfrozenxid, cutoffs->FreezeLimit)) ||
+		(MultiXactIdIsValid(cutoffs->relminmxid) &&
+		MultiXactIdPrecedesOrEquals(cutoffs->relminmxid, cutoffs->MultiXactCutoff)))
+		*eager_scan_state = VAC_EAGER_SCAN_ENABLED;
+
 	if (pgversion == 0 || pgversion == 2 || pgversion == 7 || pgversion == 8)
 		*eager_scan_state = VAC_EAGER_SCAN_DISABLED_PERM;
 
