@@ -288,6 +288,13 @@ typedef struct VacDeadItemsInfo
 	int64		num_items;		/* current # of entries */
 } VacDeadItemsInfo;
 
+typedef enum
+{
+	VAC_EAGER_SCAN_DISABLED_PERM,
+	VAC_EAGER_SCAN_DISABLED_TEMP,
+	VAC_EAGER_SCAN_ENABLED,
+} VacEagerScanState;
+
 /* GUC parameters */
 extern PGDLLIMPORT int default_statistics_target;	/* PGDLLIMPORT for PostGIS */
 extern PGDLLIMPORT int vacuum_freeze_min_age;
@@ -337,7 +344,8 @@ extern void vac_update_relstats(Relation relation,
 								bool *minmulti_updated,
 								bool in_outer_xact);
 extern bool vacuum_get_cutoffs(Relation rel, const VacuumParams *params,
-							   struct VacuumCutoffs *cutoffs);
+							   struct VacuumCutoffs *cutoffs,
+							   VacEagerScanState *eager_scan_state);
 extern bool vacuum_xid_failsafe_check(const struct VacuumCutoffs *cutoffs);
 extern void vac_update_datfrozenxid(void);
 extern void vacuum_delay_point(void);

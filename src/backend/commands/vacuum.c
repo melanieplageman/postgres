@@ -1082,7 +1082,8 @@ get_all_vacuum_rels(MemoryContext vac_context, int options)
  */
 bool
 vacuum_get_cutoffs(Relation rel, const VacuumParams *params,
-				   struct VacuumCutoffs *cutoffs)
+				   struct VacuumCutoffs *cutoffs,
+				   VacEagerScanState *eager_scan_state)
 {
 	int			freeze_min_age,
 				multixact_freeze_min_age,
@@ -1105,6 +1106,8 @@ vacuum_get_cutoffs(Relation rel, const VacuumParams *params,
 	/* Set pg_class fields in cutoffs */
 	cutoffs->relfrozenxid = rel->rd_rel->relfrozenxid;
 	cutoffs->relminmxid = rel->rd_rel->relminmxid;
+
+	*eager_scan_state = VAC_EAGER_SCAN_DISABLED_PERM;
 
 	/*
 	 * Acquire OldestXmin.
@@ -1236,6 +1239,16 @@ vacuum_get_cutoffs(Relation rel, const VacuumParams *params,
 	if (MultiXactIdPrecedesOrEquals(cutoffs->relminmxid,
 									aggressiveMXIDCutoff))
 		return true;
+
+	/*
+	 * If it is not an aggressive vacuum and relfrozenxid precedes the freeze
+	 * limit, enable eager scanning
+	 */
+	if ((TransactionIdIsNormal(cutoffs->relfrozenxid) &&
+		TransactionIdPrecedesOrEquals(cutoffs->relfrozenxid, cutoffs->FreezeLimit)) ||
+		(MultiXactIdIsValid(cutoffs->relminmxid) &&
+		MultiXactIdPrecedesOrEquals(cutoffs->relminmxid, cutoffs->MultiXactCutoff)))
+		*eager_scan_state = VAC_EAGER_SCAN_ENABLED;
 
 	/* Non-aggressive VACUUM */
 	return false;
