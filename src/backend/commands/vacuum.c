@@ -1080,7 +1080,7 @@ get_all_vacuum_rels(MemoryContext vac_context, int options)
  * FreezeLimit (at a minimum), and relminmxid up to MultiXactCutoff (at a
  * minimum).
  */
-bool
+VacAggressive
 vacuum_get_cutoffs(Relation rel, const VacuumParams *params,
 				   struct VacuumCutoffs *cutoffs)
 {
@@ -1214,7 +1214,7 @@ vacuum_get_cutoffs(Relation rel, const VacuumParams *params,
 		aggressiveXIDCutoff = FirstNormalTransactionId;
 	if (TransactionIdPrecedesOrEquals(cutoffs->relfrozenxid,
 									  aggressiveXIDCutoff))
-		return true;
+		return VAC_AGGRESSIVE;
 
 	/*
 	 * Similar to the above, determine the table freeze age to use for
@@ -1235,10 +1235,20 @@ vacuum_get_cutoffs(Relation rel, const VacuumParams *params,
 		aggressiveMXIDCutoff = FirstMultiXactId;
 	if (MultiXactIdPrecedesOrEquals(cutoffs->relminmxid,
 									aggressiveMXIDCutoff))
-		return true;
+		return VAC_AGGRESSIVE;
+
+	/*
+	 * If it is not an aggressive vacuum and relfrozenxid precedes the freeze
+	 * limit, enable eager scanning
+	 */
+	if ((TransactionIdIsNormal(cutoffs->relfrozenxid) &&
+		TransactionIdPrecedesOrEquals(cutoffs->relfrozenxid, cutoffs->FreezeLimit)) ||
+		(MultiXactIdIsValid(cutoffs->relminmxid) &&
+		MultiXactIdPrecedesOrEquals(cutoffs->relminmxid, cutoffs->MultiXactCutoff)))
+		return VAC_SEMIAGGRESSIVE;
 
 	/* Non-aggressive VACUUM */
-	return false;
+	return VAC_UNAGGRESSIVE;
 }
 
 /*
