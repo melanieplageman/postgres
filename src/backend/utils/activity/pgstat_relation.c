@@ -208,8 +208,20 @@ pgstat_drop_relation(Relation rel)
  * Report that the table was just vacuumed and flush IO statistics.
  */
 void
-pgstat_report_vacuum(Oid tableoid, bool shared,
-					 PgStat_Counter livetuples, PgStat_Counter deadtuples)
+pgstat_report_vacuum(Oid tableoid, bool shared, bool aggressive,
+					 PgStat_Counter livetuples, PgStat_Counter deadtuples,
+					 BlockNumber vm_page_freezes,
+					 BlockNumber extra_av_pages_scanned,
+					 BlockNumber pages_with_tuples_frozen,
+					 BlockNumber eager_page_freezes,
+					 BlockNumber nofrz_nofpi,
+					 BlockNumber nofrz_partial,
+					 BlockNumber nofrz_min_age,
+					 BlockNumber nofrz_eager_scanned_min_age,
+					 uint64 msecs_vacuuming,
+					 uint64 msecs_vacuum_delaying,
+					 BlockNumber scanned_pages,
+					 int64 *ins_since_vacuum_after)
 {
 	PgStat_EntryRef *entry_ref;
 	PgStatShared_Relation *shtabentry;
@@ -232,6 +244,23 @@ pgstat_report_vacuum(Oid tableoid, bool shared,
 
 	tabentry->live_tuples = livetuples;
 	tabentry->dead_tuples = deadtuples;
+
+	tabentry->vm_page_freezes += vm_page_freezes;
+	tabentry->extra_av_pages_scanned += extra_av_pages_scanned;
+	tabentry->pages_with_tuples_frozen += pages_with_tuples_frozen;
+	tabentry->eager_page_freezes += eager_page_freezes;
+	tabentry->nofrz_nofpi += nofrz_nofpi;
+	tabentry->nofrz_min_age += nofrz_min_age;
+	tabentry->nofrz_eager_scanned_min_age += nofrz_eager_scanned_min_age;
+	tabentry->nofrz_partial += nofrz_partial;
+	if (aggressive)
+		tabentry->aggressive_vacuum_count++;
+	tabentry->vm_page_freezes += vm_page_freezes;
+	tabentry->msecs_vacuuming += msecs_vacuuming;
+	tabentry->msecs_vacuum_delaying += msecs_vacuum_delaying;
+	tabentry->pages_scanned_by_vacuum += scanned_pages;
+
+	*ins_since_vacuum_after = tabentry->ins_since_vacuum;
 
 	/*
 	 * It is quite possible that a non-aggressive VACUUM ended up skipping

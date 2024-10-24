@@ -250,6 +250,25 @@ typedef struct PruneFreezeResult
 	TransactionId vm_conflict_horizon;
 
 	/*
+	 * Both of these are also counted as nofrz_min_age. We did not force
+	 * freezing because no tuples were older than vacuum_freeze_min_age and we
+	 * did not eagerly freeze because either the page would not be entirely
+	 * frozen or because even though it would be, we wouldn't be otherwise
+	 * doing an FPI.
+	 */
+	BlockNumber nofrz_partial;
+	BlockNumber nofrz_nofpi;
+
+	/*
+	 * vacuum_freeze_min_age did not force a freeze and no eager freeze
+	 * criteria triggered.
+	 */
+	BlockNumber nofrz_min_age;
+	BlockNumber nofrz_eager_scanned_min_age;
+
+	BlockNumber eager_page_freezes;
+
+	/*
 	 * Whether or not the page makes rel truncation unsafe.  This is set to
 	 * 'true', even if the page contains LP_DEAD items.  VACUUM will remove
 	 * them before attempting to truncate.

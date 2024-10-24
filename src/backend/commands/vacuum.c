@@ -2424,6 +2424,7 @@ vacuum_delay_point(void)
 		pgstat_report_wait_start(WAIT_EVENT_VACUUM_DELAY);
 		pg_usleep(msec * 1000);
 		pgstat_report_wait_end();
+		pgBufferUsage.vacuum_delay_time_ms += msec;
 
 		/*
 		 * We don't want to ignore postmaster death during very long vacuums

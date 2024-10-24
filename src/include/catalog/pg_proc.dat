@@ -5529,6 +5529,68 @@
   proname => 'pg_stat_get_autovacuum_count', provolatile => 's',
   proparallel => 'r', prorettype => 'int8', proargtypes => 'oid',
   prosrc => 'pg_stat_get_autovacuum_count' },
+
+{ oid => '9488', descr => 'statistics: number of aggressive vacuums of a table',
+  proname => 'pg_stat_get_aggressive_vacuum_count', provolatile => 's', proparallel => 'r',
+  prorettype => 'int8', proargtypes => 'oid',
+  prosrc => 'pg_stat_get_aggressive_vacuum_count' },
+
+{ oid => '9493', descr => 'stats',
+  proname => 'pg_stat_get_msecs_vacuuming', provolatile => 's', proparallel => 'r',
+  prorettype => 'int8', proargtypes => 'oid',
+  prosrc => 'pg_stat_get_msecs_vacuuming' },
+
+{ oid => '9494', descr => 'stats',
+  proname => 'pg_stat_get_msecs_vacuum_delaying', provolatile => 's', proparallel => 'r',
+  prorettype => 'int8', proargtypes => 'oid',
+  prosrc => 'pg_stat_get_msecs_vacuum_delaying' },
+
+{ oid => '9495', descr => 'stats',
+  proname => 'pg_stat_get_pages_scanned_by_vacuum', provolatile => 's', proparallel => 'r',
+  prorettype => 'int8', proargtypes => 'oid',
+  prosrc => 'pg_stat_get_pages_scanned_by_vacuum' },
+
+{ oid => '9480', descr => 'statistics: number of pages set all-frozen in the VM for a table',
+  proname => 'pg_stat_get_vm_page_freezes', provolatile => 's',
+  proparallel => 'r', prorettype => 'int8', proargtypes => 'oid',
+  prosrc => 'pg_stat_get_vm_page_freezes' },
+
+{ oid => '9483', descr => 'statistics: number of pages with newly frozen tuples',
+  proname => 'pg_stat_get_pages_with_tuples_frozen', provolatile => 's',
+  proparallel => 'r', prorettype => 'int8', proargtypes => 'oid',
+  prosrc => 'pg_stat_get_pages_with_tuples_frozen' },
+
+{ oid => '9485', descr => 'statistics: number of pages eagerly frozen bc we were doing an FPI',
+  proname => 'pg_stat_get_eager_page_freezes', provolatile => 's',
+  proparallel => 'r', prorettype => 'int8', proargtypes => 'oid',
+  prosrc => 'pg_stat_get_eager_page_freezes' },
+
+{ oid => '9486', descr => 'statistics: number of pages with tuples to freeze not eagerly frozen because not emitting an FPI',
+  proname => 'pg_stat_get_nofrz_nofpi', provolatile => 's',
+  proparallel => 'r', prorettype => 'int8', proargtypes => 'oid',
+  prosrc => 'pg_stat_get_nofrz_nofpi' },
+
+{ oid => '9490', descr => 'nofrz_min_age',
+  proname => 'pg_stat_get_nofrz_min_age', provolatile => 's', proparallel => 'r',
+  prorettype => 'int8', proargtypes => 'oid',
+  prosrc => 'pg_stat_get_nofrz_min_age' },
+
+{ oid => '9491', descr => 'stats',
+  proname => 'pg_stat_get_nofrz_eager_scanned_min_age', provolatile => 's', proparallel => 'r',
+  prorettype => 'int8', proargtypes => 'oid',
+  prosrc => 'pg_stat_get_nofrz_eager_scanned_min_age' },
+
+{ oid => '9487', descr => 'statistics: number of pages with tuples to freeze not eagerly frozen because whole page would not be all-visible or all-frozen',
+  proname => 'pg_stat_get_nofrz_partial', provolatile => 's',
+  proparallel => 'r', prorettype => 'int8', proargtypes => 'oid',
+  prosrc => 'pg_stat_get_nofrz_partial' },
+
+{ oid => '9484', descr => 'statistics: ',
+  proname => 'pg_stat_get_extra_av_pages_scanned', provolatile => 's',
+  proparallel => 'r', prorettype => 'int8', proargtypes => 'oid',
+  prosrc => 'pg_stat_get_extra_av_pages_scanned' },
+
+
 { oid => '3056', descr => 'statistics: number of manual analyzes for a table',
   proname => 'pg_stat_get_analyze_count', provolatile => 's',
   proparallel => 'r', prorettype => 'int8', proargtypes => 'oid',

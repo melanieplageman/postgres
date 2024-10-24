@@ -276,6 +276,8 @@ struct VacuumCutoffs
 	 */
 	TransactionId FreezeLimit;
 	MultiXactId MultiXactCutoff;
+
+	bool was_eager_scanned;
 };
 
 /*

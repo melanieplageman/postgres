@@ -461,6 +461,23 @@ typedef struct PgStat_StatTabEntry
 	PgStat_Counter analyze_count;
 	TimestampTz last_autoanalyze_time;	/* autovacuum initiated */
 	PgStat_Counter autoanalyze_count;
+
+	PgStat_Counter aggressive_vacuum_count;
+
+	uint64 extra_av_pages_scanned;
+	uint64 pages_scanned_by_vacuum;
+
+	uint64 vm_page_freezes;
+	uint64 pages_with_tuples_frozen;
+	uint64 eager_page_freezes;
+
+	uint64 nofrz_partial;
+	uint64 nofrz_nofpi;
+	uint64 nofrz_min_age;
+	uint64 nofrz_eager_scanned_min_age;
+
+	uint64 msecs_vacuuming;
+	uint64 msecs_vacuum_delaying;
 } PgStat_StatTabEntry;
 
 typedef struct PgStat_WalStats
@@ -625,8 +642,20 @@ extern void pgstat_init_relation(Relation rel);
 extern void pgstat_assoc_relation(Relation rel);
 extern void pgstat_unlink_relation(Relation rel);
 
-extern void pgstat_report_vacuum(Oid tableoid, bool shared,
-								 PgStat_Counter livetuples, PgStat_Counter deadtuples);
+extern void pgstat_report_vacuum(Oid tableoid, bool shared, bool aggressive,
+					 PgStat_Counter livetuples, PgStat_Counter deadtuples,
+					 BlockNumber vm_page_freezes,
+					 BlockNumber extra_av_pages_scanned,
+					 BlockNumber pages_with_tuples_frozen,
+					 BlockNumber eager_page_freezes,
+					 BlockNumber nofrz_nofpi,
+					 BlockNumber nofrz_partial,
+					 BlockNumber nofrz_min_age,
+					 BlockNumber nofrz_eager_scanned_min_age,
+					 uint64 msecs_vacuuming,
+					 uint64 msecs_vacuum_delaying,
+					 BlockNumber scanned_pages,
+					 int64 *ins_since_vacuum_after);
 extern void pgstat_report_analyze(Relation rel,
 								  PgStat_Counter livetuples, PgStat_Counter deadtuples,
 								  bool resetcounter);
