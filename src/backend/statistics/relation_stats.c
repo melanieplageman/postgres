@@ -56,6 +56,10 @@ static bool relation_statistics_update(FunctionCallInfo fcinfo, int elevel,
 
 /*
  * Internal function for modifying statistics for a relation.
+ *
+ * Up to four pg_class columns may be updated even though only three relation
+ * statistics may be modified; relallfrozen is always set to -1 when
+ * relallvisible is updated manually.
  */
 static bool
 relation_statistics_update(FunctionCallInfo fcinfo, int elevel, bool inplace)
@@ -216,6 +220,16 @@ relation_statistics_update(FunctionCallInfo fcinfo, int elevel, bool inplace)
 		{
 			replaces[nreplaces] = Anum_pg_class_relallvisible;
 			values[nreplaces] = Int32GetDatum(relallvisible);
+			nreplaces++;
+
+			/*
+			 * If we are modifying relallvisible manually, it is not clear
+			 * what relallfrozen value would make sense. Therefore, set it to
+			 * -1, or unknown. It will be updated the next time these fields
+			 *  are updated.
+			 */
+			replaces[nreplaces] = Anum_pg_class_relallfrozen;
+			values[nreplaces] = Int32GetDatum(-1);
 			nreplaces++;
 		}
 
