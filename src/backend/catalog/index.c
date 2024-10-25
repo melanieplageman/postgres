@@ -2792,8 +2792,8 @@ FormIndexDatum(IndexInfo *indexInfo,
  * hasindex: set relhasindex to this value
  * reltuples: if >= 0, set reltuples to this value; else no change
  *
- * If reltuples >= 0, relpages and relallvisible are also updated (using
- * RelationGetNumberOfBlocks() and visibilitymap_count()).
+ * If reltuples >= 0, relpages, relallvisible, and relallfrozen are also
+ * updated (using RelationGetNumberOfBlocks() and visibilitymap_count()).
  *
  * NOTE: an important side-effect of this operation is that an SI invalidation
  * message is sent out to all backends --- including me --- causing relcache
@@ -2875,8 +2875,8 @@ index_update_stats(Relation rel,
 	 * transaction could still fail before committing.  Setting relhasindex
 	 * true is safe even if there are no indexes (VACUUM will eventually fix
 	 * it).  And of course the new relpages and reltuples counts are correct
-	 * regardless.  However, we don't want to change relpages (or
-	 * relallvisible) if the caller isn't providing an updated reltuples
+	 * regardless. However, we don't want to change relpages (or relallvisible
+	 * and relallfrozen) if the caller isn't providing an updated reltuples
 	 * count, because that would bollix the reltuples/relpages ratio which is
 	 * what's really important.
 	 */
@@ -2908,6 +2908,20 @@ index_update_stats(Relation rel,
 
 	if (update_stats)
 	{
+		BlockNumber relallfrozen = 0;
+		relallvisible = 0;
+		relpages = RelationGetNumberOfBlocks(rel);
+
+		/* don't bother for indexes */
+		if (rd_rel->relkind != RELKIND_INDEX)
+		{
+			visibilitymap_count(rel, &relallvisible, &relallfrozen);
+
+			/* Every all-frozen page must also be set all-visible in the VM */
+			if (relallfrozen > relallvisible)
+				relallfrozen = relallvisible;
+		}
+
 		if (rd_rel->relpages != (int32) relpages)
 		{
 			rd_rel->relpages = (int32) relpages;
@@ -2921,6 +2935,11 @@ index_update_stats(Relation rel,
 		if (rd_rel->relallvisible != (int32) relallvisible)
 		{
 			rd_rel->relallvisible = (int32) relallvisible;
+			dirty = true;
+		}
+		if (rd_rel->relallfrozen != (int32) relallfrozen)
+		{
+			rd_rel->relallfrozen = (int32) relallfrozen;
 			dirty = true;
 		}
 	}
