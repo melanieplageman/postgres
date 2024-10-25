@@ -2634,7 +2634,7 @@ struct config_int ConfigureNamesInt[] =
 	},
 
 	{
-		{"pgversion", PGC_USERSET, AUTOVACUUM,
+		{"pgversion", PGC_USERSET, VACUUM_FREEZING,
 			gettext_noop("minimum amount of time in seconds that a page should stay frozen."),
 			NULL,
 			GUC_UNIT_S
