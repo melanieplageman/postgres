@@ -189,6 +189,7 @@ typedef struct LVRelState
 	BlockNumber scanned_pages;	/* # pages examined (not skipped via VM) */
 	BlockNumber removed_pages;	/* # pages removed by relation truncation */
 	BlockNumber tuple_freeze_pages; /* # pages with newly frozen tuples */
+	BlockNumber vm_page_freezes;	/* # pages newly set all-frozen in VM */
 	BlockNumber lpdead_item_pages;	/* # pages with LP_DEAD items */
 	BlockNumber missed_dead_pages;	/* # pages with missed dead tuples */
 	BlockNumber nonempty_pages; /* actually, last nonempty page + 1 */
@@ -696,12 +697,13 @@ heap_vacuum_rel(Relation rel, VacuumParams *params,
 								 _("new relminmxid: %u, which is %d MXIDs ahead of previous value\n"),
 								 vacrel->NewRelminMxid, diff);
 			}
-			appendStringInfo(&buf, _("frozen: %u pages from table (%.2f%% of total) had %lld tuples frozen\n"),
+			appendStringInfo(&buf, _("frozen: %u pages from table (%.2f%% of total) had %lld tuples frozen. %u pages set all-frozen in the VM\n"),
 							 vacrel->tuple_freeze_pages,
 							 orig_rel_pages == 0 ? 100.0 :
 							 100.0 * vacrel->tuple_freeze_pages /
 							 orig_rel_pages,
-							 (long long) vacrel->tuples_frozen);
+							 (long long) vacrel->tuples_frozen,
+							 vacrel->vm_page_freezes);
 			if (vacrel->do_index_vacuuming)
 			{
 				if (vacrel->nindexes == 0 || vacrel->num_index_scans == 0)
@@ -1357,6 +1359,8 @@ lazy_scan_new_or_empty(LVRelState *vacrel, Buffer buf, BlockNumber blkno,
 		 */
 		if (!PageIsAllVisible(page))
 		{
+			uint8		vmbits;
+
 			START_CRIT_SECTION();
 
 			/* mark buffer dirty before writing a WAL record */
@@ -1376,10 +1380,16 @@ lazy_scan_new_or_empty(LVRelState *vacrel, Buffer buf, BlockNumber blkno,
 				log_newpage_buffer(buf, true);
 
 			PageSetAllVisible(page);
-			visibilitymap_set(vacrel->rel, blkno, buf, InvalidXLogRecPtr,
-							  vmbuffer, InvalidTransactionId,
-							  VISIBILITYMAP_ALL_VISIBLE | VISIBILITYMAP_ALL_FROZEN);
+			vmbits = visibilitymap_set(vacrel->rel, blkno, buf,
+									   InvalidXLogRecPtr,
+									   vmbuffer, InvalidTransactionId,
+									   VISIBILITYMAP_ALL_VISIBLE |
+									   VISIBILITYMAP_ALL_FROZEN);
 			END_CRIT_SECTION();
+
+			/* If it wasn't all-frozen before, count it */
+			if (!(vmbits & VISIBILITYMAP_ALL_FROZEN))
+				vacrel->vm_page_freezes++;
 		}
 
 		freespace = PageGetHeapFreeSpace(page);
@@ -1533,6 +1543,7 @@ lazy_scan_prune(LVRelState *vacrel,
 	 */
 	if (!all_visible_according_to_vm && presult.all_visible)
 	{
+		uint8		vmbits;
 		uint8		flags = VISIBILITYMAP_ALL_VISIBLE;
 
 		if (presult.all_frozen)
@@ -1556,9 +1567,12 @@ lazy_scan_prune(LVRelState *vacrel,
 		 */
 		PageSetAllVisible(page);
 		MarkBufferDirty(buf);
-		visibilitymap_set(vacrel->rel, blkno, buf, InvalidXLogRecPtr,
-						  vmbuffer, presult.vm_conflict_horizon,
-						  flags);
+		vmbits = visibilitymap_set(vacrel->rel, blkno, buf, InvalidXLogRecPtr,
+								   vmbuffer, presult.vm_conflict_horizon,
+								   flags);
+
+		if (!(vmbits & VISIBILITYMAP_ALL_FROZEN) && presult.all_frozen)
+			vacrel->vm_page_freezes++;
 	}
 
 	/*
@@ -1631,6 +1645,7 @@ lazy_scan_prune(LVRelState *vacrel,
 						  vmbuffer, InvalidTransactionId,
 						  VISIBILITYMAP_ALL_VISIBLE |
 						  VISIBILITYMAP_ALL_FROZEN);
+		vacrel->vm_page_freezes++;
 	}
 }
 
@@ -2276,6 +2291,7 @@ lazy_vacuum_heap_page(LVRelState *vacrel, BlockNumber blkno, Buffer buffer,
 	if (heap_page_is_all_visible(vacrel, buffer, &visibility_cutoff_xid,
 								 &all_frozen))
 	{
+		uint8		vmbits;
 		uint8		flags = VISIBILITYMAP_ALL_VISIBLE;
 
 		if (all_frozen)
@@ -2285,8 +2301,12 @@ lazy_vacuum_heap_page(LVRelState *vacrel, BlockNumber blkno, Buffer buffer,
 		}
 
 		PageSetAllVisible(page);
-		visibilitymap_set(vacrel->rel, blkno, buffer, InvalidXLogRecPtr,
-						  vmbuffer, visibility_cutoff_xid, flags);
+		vmbits = visibilitymap_set(vacrel->rel, blkno, buffer,
+								   InvalidXLogRecPtr,
+								   vmbuffer, visibility_cutoff_xid, flags);
+
+		if (!(vmbits & VISIBILITYMAP_ALL_FROZEN) && all_frozen)
+			vacrel->vm_page_freezes++;
 	}
 
 	/* Revert to the previous phase information for error traceback */
