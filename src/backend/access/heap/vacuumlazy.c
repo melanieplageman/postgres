@@ -242,8 +242,8 @@ typedef struct LVSavedErrInfo
 
 /* non-export function prototypes */
 static void lazy_scan_heap(LVRelState *vacrel);
-static bool heap_vac_scan_next_block(LVRelState *vacrel, BlockNumber *blkno,
-									 bool *all_visible_according_to_vm);
+static BlockNumber heap_vac_scan_next_block(LVRelState *vacrel,
+											bool *all_visible_according_to_vm);
 static void find_next_unskippable_block(LVRelState *vacrel, bool *skipsallvis);
 static bool lazy_scan_new_or_empty(LVRelState *vacrel, Buffer buf,
 								   BlockNumber blkno, Page page,
@@ -849,7 +849,6 @@ static void
 lazy_scan_heap(LVRelState *vacrel)
 {
 	BlockNumber rel_pages = vacrel->rel_pages,
-				blkno,
 				next_fsm_block_to_vacuum = 0;
 	bool		all_visible_according_to_vm;
 
@@ -873,12 +872,19 @@ lazy_scan_heap(LVRelState *vacrel)
 	vacrel->next_unskippable_allvis = false;
 	vacrel->next_unskippable_vmbuffer = InvalidBuffer;
 
-	while (heap_vac_scan_next_block(vacrel, &blkno, &all_visible_according_to_vm))
+	while (true)
 	{
 		Buffer		buf;
+		BlockNumber blkno;
 		Page		page;
 		bool		has_lpdead_items;
 		bool		got_cleanup_lock = false;
+
+		blkno = heap_vac_scan_next_block(vacrel,
+										 &all_visible_according_to_vm);
+
+		if (!BlockNumberIsValid(blkno))
+			break;
 
 		vacrel->scanned_pages++;
 
@@ -1066,7 +1072,8 @@ lazy_scan_heap(LVRelState *vacrel)
 		ReleaseBuffer(vmbuffer);
 
 	/* report that everything is now scanned */
-	pgstat_progress_update_param(PROGRESS_VACUUM_HEAP_BLKS_SCANNED, blkno);
+	pgstat_progress_update_param(PROGRESS_VACUUM_HEAP_BLKS_SCANNED,
+								 rel_pages);
 
 	/* now we can compute the new value for pg_class.reltuples */
 	vacrel->new_live_tuples = vac_estimate_reltuples(vacrel->rel, rel_pages,
@@ -1092,11 +1099,13 @@ lazy_scan_heap(LVRelState *vacrel)
 	 * Vacuum the remainder of the Free Space Map.  We must do this whether or
 	 * not there were indexes, and whether or not we bypassed index vacuuming.
 	 */
-	if (blkno > next_fsm_block_to_vacuum)
-		FreeSpaceMapVacuumRange(vacrel->rel, next_fsm_block_to_vacuum, blkno);
+	if (rel_pages > next_fsm_block_to_vacuum)
+		FreeSpaceMapVacuumRange(vacrel->rel, next_fsm_block_to_vacuum,
+								rel_pages);
 
 	/* report all blocks vacuumed */
-	pgstat_progress_update_param(PROGRESS_VACUUM_HEAP_BLKS_VACUUMED, blkno);
+	pgstat_progress_update_param(PROGRESS_VACUUM_HEAP_BLKS_VACUUMED,
+								 rel_pages);
 
 	/* Do final index cleanup (call each index's amvacuumcleanup routine) */
 	if (vacrel->nindexes > 0 && vacrel->do_index_cleanup)
@@ -1109,11 +1118,11 @@ lazy_scan_heap(LVRelState *vacrel)
  * lazy_scan_heap() calls here every time it needs to get the next block to
  * prune and vacuum.  The function uses the visibility map, vacuum options,
  * and various thresholds to skip blocks which do not need to be processed and
- * sets blkno to the next block to process.
+ * returns the next block to process.
  *
- * The block number and visibility status of the next block to process are set
- * in *blkno and *all_visible_according_to_vm.  The return value is false if
- * there are no further blocks to process.
+ * The block number and visibility status of the next block to process are
+ * returned and set in *all_visible_according_to_vm.  The return value is
+ * InvalidBlockNumber if there are no further blocks to process.
  *
  * vacrel is an in/out parameter here.  Vacuum options and information about
  * the relation are read.  vacrel->skippedallvis is set if we skip a block
@@ -1121,8 +1130,8 @@ lazy_scan_heap(LVRelState *vacrel)
  * relfrozenxid in that case.  vacrel also holds information about the next
  * unskippable block, as bookkeeping for this function.
  */
-static bool
-heap_vac_scan_next_block(LVRelState *vacrel, BlockNumber *blkno,
+static BlockNumber
+heap_vac_scan_next_block(LVRelState *vacrel,
 						 bool *all_visible_according_to_vm)
 {
 	/* relies on InvalidBlockNumber + 1 overflowing to 0 on first call */
@@ -1130,10 +1139,7 @@ heap_vac_scan_next_block(LVRelState *vacrel, BlockNumber *blkno,
 
 	/* Have we reached the end of the relation? */
 	if (vacrel->current_block >= vacrel->rel_pages)
-	{
-		*blkno = vacrel->rel_pages;
-		return false;
-	}
+		return InvalidBlockNumber;
 
 	/*
 	 * We must be in one of the three following states:
@@ -1182,9 +1188,8 @@ heap_vac_scan_next_block(LVRelState *vacrel, BlockNumber *blkno,
 		 * but chose not to.  We know that they are all-visible in the VM,
 		 * otherwise they would've been unskippable.
 		 */
-		*blkno = vacrel->current_block;
 		*all_visible_according_to_vm = true;
-		return true;
+		return vacrel->current_block;
 	}
 	else
 	{
@@ -1194,9 +1199,8 @@ heap_vac_scan_next_block(LVRelState *vacrel, BlockNumber *blkno,
 		 */
 		Assert(vacrel->current_block == vacrel->next_unskippable_block);
 
-		*blkno = vacrel->current_block;
 		*all_visible_according_to_vm = vacrel->next_unskippable_allvis;
-		return true;
+		return vacrel->current_block;
 	}
 }
 
