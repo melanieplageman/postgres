@@ -1056,6 +1056,14 @@ lazy_scan_heap(LVRelState *vacrel)
 	}
 
 	vacrel->blkno = InvalidBlockNumber;
+
+	/* Release VM buffers */
+	if (BufferIsValid(vacrel->next_unskippable_vmbuffer))
+	{
+		ReleaseBuffer(vacrel->next_unskippable_vmbuffer);
+		vacrel->next_unskippable_vmbuffer = InvalidBuffer;
+	}
+
 	if (BufferIsValid(vmbuffer))
 		ReleaseBuffer(vmbuffer);
 
@@ -1127,11 +1135,6 @@ heap_vac_scan_next_block(LVRelState *vacrel, BlockNumber *blkno,
 	/* Have we reached the end of the relation? */
 	if (next_block >= vacrel->rel_pages)
 	{
-		if (BufferIsValid(vacrel->next_unskippable_vmbuffer))
-		{
-			ReleaseBuffer(vacrel->next_unskippable_vmbuffer);
-			vacrel->next_unskippable_vmbuffer = InvalidBuffer;
-		}
 		*blkno = vacrel->rel_pages;
 		return false;
 	}
