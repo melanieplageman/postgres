@@ -1039,7 +1039,8 @@ lazy_scan_heap(LVRelState *vacrel)
 		ReleaseBuffer(vmbuffer);
 
 	/* report that everything is now scanned */
-	pgstat_progress_update_param(PROGRESS_VACUUM_HEAP_BLKS_SCANNED, blkno);
+	pgstat_progress_update_param(PROGRESS_VACUUM_HEAP_BLKS_SCANNED,
+								 rel_pages);
 
 	/* now we can compute the new value for pg_class.reltuples */
 	vacrel->new_live_tuples = vac_estimate_reltuples(vacrel->rel, rel_pages,
@@ -1065,11 +1066,13 @@ lazy_scan_heap(LVRelState *vacrel)
 	 * Vacuum the remainder of the Free Space Map.  We must do this whether or
 	 * not there were indexes, and whether or not we bypassed index vacuuming.
 	 */
-	if (blkno > next_fsm_block_to_vacuum)
-		FreeSpaceMapVacuumRange(vacrel->rel, next_fsm_block_to_vacuum, blkno);
+	if (rel_pages > next_fsm_block_to_vacuum)
+		FreeSpaceMapVacuumRange(vacrel->rel, next_fsm_block_to_vacuum,
+								rel_pages);
 
 	/* report all blocks vacuumed */
-	pgstat_progress_update_param(PROGRESS_VACUUM_HEAP_BLKS_VACUUMED, blkno);
+	pgstat_progress_update_param(PROGRESS_VACUUM_HEAP_BLKS_VACUUMED,
+								 rel_pages);
 
 	/* Do final index cleanup (call each index's amvacuumcleanup routine) */
 	if (vacrel->nindexes > 0 && vacrel->do_index_cleanup)
@@ -1111,7 +1114,6 @@ heap_vac_scan_next_block(LVRelState *vacrel, BlockNumber *blkno,
 			ReleaseBuffer(vacrel->next_unskippable_vmbuffer);
 			vacrel->next_unskippable_vmbuffer = InvalidBuffer;
 		}
-		*blkno = vacrel->rel_pages;
 		return false;
 	}
 
