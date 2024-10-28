@@ -215,6 +215,9 @@ typedef struct LVRelState
 	BlockNumber next_unskippable_block; /* next unskippable block */
 	bool		next_unskippable_allvis;	/* its visibility status */
 	Buffer		next_unskippable_vmbuffer;	/* buffer containing its VM bit */
+
+	/* Count of skippable pages eagerly scanned due to SKIP_PAGES_THRESHOLD */
+	BlockNumber eager_scanned;
 } LVRelState;
 
 /* Struct for saving and restoring vacuum error information. */
@@ -464,6 +467,7 @@ heap_vacuum_rel(Relation rel, VacuumParams *params,
 	}
 
 	vacrel->skipwithvm = skipwithvm;
+	vacrel->eager_scanned = 0;
 
 	if (verbose)
 	{
@@ -659,13 +663,14 @@ heap_vacuum_rel(Relation rel, VacuumParams *params,
 							 vacrel->relnamespace,
 							 vacrel->relname,
 							 vacrel->num_index_scans);
-			appendStringInfo(&buf, _("pages: %u removed, %u remain, %u scanned (%.2f%% of total)\n"),
+			appendStringInfo(&buf, _("pages: %u removed, %u remain, %u scanned (%.2f%% of total), %u eagerly scanned\n"),
 							 vacrel->removed_pages,
 							 new_rel_pages,
 							 vacrel->scanned_pages,
 							 orig_rel_pages == 0 ? 100.0 :
 							 100.0 * vacrel->scanned_pages /
-							 orig_rel_pages);
+							 orig_rel_pages,
+							 vacrel->eager_scanned);
 			appendStringInfo(&buf,
 							 _("tuples: %lld removed, %lld remain, %lld are dead but not yet removable\n"),
 							 (long long) vacrel->tuples_deleted,
@@ -1161,10 +1166,18 @@ heap_vac_scan_next_block(LVRelState *vacrel,
 	{
 		/*
 		 * 2. We are processing a range of blocks that we could have skipped
-		 * but chose not to.  We know that they are all-visible in the VM,
-		 * otherwise they would've been unskippable.
+		 * but chose not to because it was under SKIP_PAGES_THRESHOLD.  We
+		 * know that they are all-visible in the VM, otherwise they would've
+		 * been unskippable.
 		 */
 		*all_visible_according_to_vm = true;
+
+		/*
+		 * A skippable page scanned due to SKIP_PAGES_THRESHOLD counts as an
+		 * eager scan.
+		 */
+		vacrel->eager_scanned++;
+
 		return vacrel->current_block;
 	}
 	else
