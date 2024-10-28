@@ -288,6 +288,29 @@ typedef struct VacDeadItemsInfo
 	int64		num_items;		/* current # of entries */
 } VacDeadItemsInfo;
 
+/*
+ * The aggressiveness level of a vacuum determines how many all-visible but
+ * not all-frozen pages it eagerly scans.
+ *
+ * An unaggressive vacuum only eagerly scans pages if the skippable page range
+ * is under SKIP_PAGES_THRESHOLD.
+ *
+ * A fully aggressive vacuum eagerly scans all all-visible but not all-frozen
+ * pages.
+ *
+ * A semi-aggressive vacuum eagerly scans a number of pages up to a limit
+ * based on whether or not it is succeeding or failing. A semi-aggressive
+ * vacuum is downgraded to an unaggressive vacuum when it hits its success
+ * quota. An aggressive vacuum cannot be downgraded and no aggressiveness
+ * level is ever upgraded.
+ */
+typedef enum VacAggressive
+{
+	VAC_UNAGGRESSIVE,
+	VAC_AGGRESSIVE,
+	VAC_SEMIAGGRESSIVE,
+} VacAggressive;
+
 /* GUC parameters */
 extern PGDLLIMPORT int default_statistics_target;	/* PGDLLIMPORT for PostGIS */
 extern PGDLLIMPORT int vacuum_freeze_min_age;
@@ -336,8 +359,8 @@ extern void vac_update_relstats(Relation relation,
 								bool *frozenxid_updated,
 								bool *minmulti_updated,
 								bool in_outer_xact);
-extern bool vacuum_get_cutoffs(Relation rel, const VacuumParams *params,
-							   struct VacuumCutoffs *cutoffs);
+extern VacAggressive vacuum_get_cutoffs(Relation rel, const VacuumParams *params,
+										struct VacuumCutoffs *cutoffs);
 extern bool vacuum_xid_failsafe_check(const struct VacuumCutoffs *cutoffs);
 extern void vac_update_datfrozenxid(void);
 extern void vacuum_delay_point(void);
