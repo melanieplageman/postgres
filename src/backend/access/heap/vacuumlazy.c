@@ -12,6 +12,40 @@
  * that space for future tuples. Finally, vacuum may truncate the relation if
  * it has emptied pages at the end. XXX: this summary needs work.
  *
+ * Relation Scanning:
+ *
+ * Vacuum scans the heap relation, starting at the beginning and progressing
+ * to the end, skipping pages as permitted by their visibility status, vacuum
+ * options, and the aggressiveness level of the vacuum.
+ *
+ * When page skipping is enabled, unaggressive vacuums may skip scanning pages
+ * that are marked all-visible in the visibility map. We may choose not to
+ * skip pages if the range of skippable pages is below SKIP_PAGES_THRESHOLD.
+ *
+ * Semi-aggressive vacuums will scan skippable pages in an effort to freeze
+ * them and decrease the backlog of all-visible but not all-frozen pages that
+ * have to be processed to advance relfrozenxid and avoid transaction ID
+ * wraparound.
+ *
+ * We count it as a success when we are able to set an eagerly scanned page
+ * all-frozen in the VM and a failure when we are not able to set the page
+ * all-frozen.
+ *
+ * Because we want to amortize the overhead of freezing pages over multiple
+ * vacuums, we cap the number of successful eager scans to
+ * EAGER_SCAN_SUCCESS_RATE of the number of all-visible but not all-frozen
+ * pages at the beginning of the vacuum.
+ *
+ * On the assumption that different regions of the table are likely to contain
+ * similarly aged data, we use a localized failure cap instead of a global cap
+ * for the whole relation. The failure count is reset on each region of the
+ * table, comprised of RELSEG_SIZE blocks (or 1/4 of the table size for a
+ * small table). In each region, we tolerate MAX_SUCCESSIVE_EAGER_SCAN_FAILS
+ * before suspending eager scanning until the end of the region.
+ *
+ * Fully aggressive vacuums must examine every unfrozen tuple and are thus not
+ * subject to failure or success caps when eagerly scanning all-visible pages.
+ *
  * Dead TID Storage:
  *
  * The major space usage for vacuuming is storage for the dead tuple IDs that
@@ -142,6 +176,27 @@ typedef enum
 	VACUUM_ERRCB_PHASE_TRUNCATE,
 } VacErrPhase;
 
+/*
+ * Semi-aggressive vacuums eagerly scan some all-visible but not all-frozen
+ * pages. Since our goal is to freeze these pages, an eager scan that fails to
+ * set the page all-frozen in the VM is considered to have "failed".
+ *
+ * On the assumption that different regions of the table tend to have
+ * similarly aged data, once we fail to freeze MAX_SUCCESSIVE_EAGER_SCAN_FAILS
+ * blocks, we suspend eager scanning until vacuum has progressed to another
+ * region of the table with potentially older data.
+ */
+#define MAX_SUCCESSIVE_EAGER_SCAN_FAILS 1024
+
+/*
+ * An eager scan of a page that is set all-frozen in the VM is considered
+ * "successful". To spread out eager scanning across multiple semi-aggressive
+ * vacuums, we limit the number of successful eager scans (as well as the
+ * number of failures). The maximum number of successful eager scans is
+ * calculated as a ratio of the all-visible but not all-frozen pages at the
+ * beginning of the vacuum.
+ */
+#define EAGER_SCAN_SUCCESS_RATE 0.2
 typedef struct LVRelState
 {
 	/* Target heap relation and its indexes */
@@ -153,8 +208,22 @@ typedef struct LVRelState
 	BufferAccessStrategy bstrategy;
 	ParallelVacuumState *pvs;
 
-	/* Aggressive VACUUM? (must set relfrozenxid >= FreezeLimit) */
-	bool		aggressive;
+	/*
+	 * Whether or not this is an aggressive, semi-aggressive, or unaggressive
+	 * VACUUM. A fully aggressive vacuum must set relfrozenxid >= FreezeLimit
+	 * and therefore must scan every unfrozen tuple. A semi-aggressive vacuum
+	 * will scan a certain number of all-visible pages until it is downgraded
+	 * to an unaggressive vacuum.
+	 */
+	VacAggressive aggressive;
+
+	/*
+	 * A semi-aggressive vacuum that has failed to freeze too many eagerly
+	 * scanned blocks in a row suspends eager scanning. unaggressive_to is the
+	 * block number of the first block eligible for resumed eager scanning.
+	 */
+	BlockNumber unaggressive_to;
+
 	/* Use visibility map to skip? (disabled by DISABLE_PAGE_SKIPPING) */
 	bool		skipwithvm;
 	/* Consider index vacuuming bypass optimization? */
@@ -227,6 +296,26 @@ typedef struct LVRelState
 	BlockNumber next_unskippable_block; /* next unskippable block */
 	bool		next_unskippable_allvis;	/* its visibility status */
 	Buffer		next_unskippable_vmbuffer;	/* buffer containing its VM bit */
+
+	/*
+	 * Count of skippable blocks eagerly scanned as part of a semi-aggressive
+	 * vacuum (for logging only).
+	 */
+	BlockNumber eager_scanned;
+
+	/*
+	 * The number of eagerly scanned blocks a semi-aggressive vacuum failed to
+	 * freeze (due to age) in the current eager scan region. It is reset each
+	 * time we hit MAX_SUCCESSIVE_EAGER_SCAN_FAILS.
+	 */
+	BlockNumber eager_scanned_failed_frozen;
+
+	/*
+	 * The remaining number of blocks a semi-aggressive vacuum will consider
+	 * eager scanning. This is initialized to EAGER_SCAN_SUCCESS_RATE of the
+	 * total number of all-visible but not all-frozen pages.
+	 */
+	BlockNumber remaining_eager_scan_successes;
 } LVRelState;
 
 /* Struct for saving and restoring vacuum error information. */
@@ -241,8 +330,13 @@ typedef struct LVSavedErrInfo
 /* non-export function prototypes */
 static void lazy_scan_heap(LVRelState *vacrel);
 static BlockNumber heap_vac_scan_next_block(LVRelState *vacrel,
-											bool *all_visible_according_to_vm);
-static void find_next_unskippable_block(LVRelState *vacrel, bool *skipsallvis);
+											bool *all_visible_according_to_vm,
+											bool *was_eager_scanned);
+static void find_next_unskippable_block(
+										LVRelState *vacrel,
+										bool consider_eager_scan,
+										bool *was_eager_scanned,
+										bool *skipsallvis);
 static bool lazy_scan_new_or_empty(LVRelState *vacrel, Buffer buf,
 								   BlockNumber blkno, Page page,
 								   bool sharelock, Buffer vmbuffer);
@@ -314,7 +408,9 @@ heap_vacuum_rel(Relation rel, VacuumParams *params,
 				minmulti_updated;
 	BlockNumber orig_rel_pages,
 				new_rel_pages,
-				new_rel_allvisible;
+				orig_rel_allvisible,
+				new_rel_allvisible,
+				orig_rel_allfrozen;
 	PGRUsage	ru0;
 	TimestampTz starttime = 0;
 	PgStat_Counter startreadtime = 0,
@@ -458,6 +554,8 @@ heap_vacuum_rel(Relation rel, VacuumParams *params,
 	 * to increase the number of dead tuples it can prune away.)
 	 */
 	vacrel->aggressive = vacuum_get_cutoffs(rel, params, &vacrel->cutoffs);
+	vacrel->unaggressive_to = 0;
+
 	vacrel->rel_pages = orig_rel_pages = RelationGetNumberOfBlocks(rel);
 	vacrel->vistest = GlobalVisTestFor(rel);
 	/* Initialize state used to track oldest extant XID/MXID */
@@ -471,24 +569,49 @@ heap_vacuum_rel(Relation rel, VacuumParams *params,
 		 * Force aggressive mode, and disable skipping blocks using the
 		 * visibility map (even those set all-frozen)
 		 */
-		vacrel->aggressive = true;
+		vacrel->aggressive = VAC_AGGRESSIVE;
 		skipwithvm = false;
 	}
 
 	vacrel->skipwithvm = skipwithvm;
+	vacrel->eager_scanned = 0;
+	vacrel->eager_scanned_failed_frozen = 0;
+
+	/*
+	 * Even if we successfully freeze them, we want to cap the number of
+	 * eagerly scanned blocks so that we spread out the overhead across
+	 * multiple vacuums. remaining_eager_scan_successes is only used by
+	 * semi-aggressive vacuums.
+	 */
+	visibilitymap_count(rel, &orig_rel_allvisible, &orig_rel_allfrozen);
+	vacrel->remaining_eager_scan_successes =
+		(BlockNumber) (EAGER_SCAN_SUCCESS_RATE * (orig_rel_allvisible - orig_rel_allfrozen));
 
 	if (verbose)
 	{
-		if (vacrel->aggressive)
-			ereport(INFO,
-					(errmsg("aggressively vacuuming \"%s.%s.%s\"",
-							vacrel->dbname, vacrel->relnamespace,
-							vacrel->relname)));
-		else
-			ereport(INFO,
-					(errmsg("vacuuming \"%s.%s.%s\"",
-							vacrel->dbname, vacrel->relnamespace,
-							vacrel->relname)));
+		switch (vacrel->aggressive)
+		{
+			case VAC_UNAGGRESSIVE:
+				ereport(INFO,
+						(errmsg("vacuuming \"%s.%s.%s\"",
+								vacrel->dbname, vacrel->relnamespace,
+								vacrel->relname)));
+				break;
+
+			case VAC_AGGRESSIVE:
+				ereport(INFO,
+						(errmsg("aggressively vacuuming \"%s.%s.%s\"",
+								vacrel->dbname, vacrel->relnamespace,
+								vacrel->relname)));
+				break;
+
+			case VAC_SEMIAGGRESSIVE:
+				ereport(INFO,
+						(errmsg("semiaggressively vacuuming \"%s.%s.%s\"",
+								vacrel->dbname, vacrel->relnamespace,
+								vacrel->relname)));
+				break;
+		}
 	}
 
 	/*
@@ -545,11 +668,13 @@ heap_vacuum_rel(Relation rel, VacuumParams *params,
 	 * Non-aggressive VACUUMs may advance them by any amount, or not at all.
 	 */
 	Assert(vacrel->NewRelfrozenXid == vacrel->cutoffs.OldestXmin ||
-		   TransactionIdPrecedesOrEquals(vacrel->aggressive ? vacrel->cutoffs.FreezeLimit :
+		   TransactionIdPrecedesOrEquals(vacrel->aggressive == VAC_AGGRESSIVE ?
+										 vacrel->cutoffs.FreezeLimit :
 										 vacrel->cutoffs.relfrozenxid,
 										 vacrel->NewRelfrozenXid));
 	Assert(vacrel->NewRelminMxid == vacrel->cutoffs.OldestMxact ||
-		   MultiXactIdPrecedesOrEquals(vacrel->aggressive ? vacrel->cutoffs.MultiXactCutoff :
+		   MultiXactIdPrecedesOrEquals(vacrel->aggressive == VAC_AGGRESSIVE ?
+									   vacrel->cutoffs.MultiXactCutoff :
 									   vacrel->cutoffs.relminmxid,
 									   vacrel->NewRelminMxid));
 	if (vacrel->skippedallvis)
@@ -559,7 +684,7 @@ heap_vacuum_rel(Relation rel, VacuumParams *params,
 		 * chose to skip an all-visible page range.  The state that tracks new
 		 * values will have missed unfrozen XIDs from the pages we skipped.
 		 */
-		Assert(!vacrel->aggressive);
+		Assert(vacrel->aggressive != VAC_AGGRESSIVE);
 		vacrel->NewRelfrozenXid = InvalidTransactionId;
 		vacrel->NewRelminMxid = InvalidMultiXactId;
 	}
@@ -654,14 +779,14 @@ heap_vacuum_rel(Relation rel, VacuumParams *params,
 				 * implies aggressive.  Produce distinct output for the corner
 				 * case all the same, just in case.
 				 */
-				if (vacrel->aggressive)
+				if (vacrel->aggressive == VAC_AGGRESSIVE)
 					msgfmt = _("automatic aggressive vacuum to prevent wraparound of table \"%s.%s.%s\": index scans: %d\n");
 				else
 					msgfmt = _("automatic vacuum to prevent wraparound of table \"%s.%s.%s\": index scans: %d\n");
 			}
 			else
 			{
-				if (vacrel->aggressive)
+				if (vacrel->aggressive == VAC_AGGRESSIVE)
 					msgfmt = _("automatic aggressive vacuum of table \"%s.%s.%s\": index scans: %d\n");
 				else
 					msgfmt = _("automatic vacuum of table \"%s.%s.%s\": index scans: %d\n");
@@ -803,6 +928,16 @@ heap_vacuum_rel(Relation rel, VacuumParams *params,
 }
 
 /*
+ * Helper to decrement a block number to 0 without wrapping around.
+ */
+static void
+decrement_blkno(BlockNumber *block)
+{
+	if ((*block) > 0)
+		(*block)--;
+}
+
+/*
  *	lazy_scan_heap() -- workhorse function for VACUUM
  *
  *		This routine prunes each page in the heap, and considers the need to
@@ -844,7 +979,8 @@ lazy_scan_heap(LVRelState *vacrel)
 	BlockNumber rel_pages = vacrel->rel_pages,
 				blkno,
 				next_fsm_block_to_vacuum = 0;
-	bool		all_visible_according_to_vm;
+	bool		all_visible_according_to_vm,
+				was_eager_scanned = false;
 
 	TidStore   *dead_items = vacrel->dead_items;
 	VacDeadItemsInfo *dead_items_info = vacrel->dead_items_info;
@@ -855,6 +991,7 @@ lazy_scan_heap(LVRelState *vacrel)
 		PROGRESS_VACUUM_MAX_DEAD_TUPLE_BYTES
 	};
 	int64		initprog_val[3];
+	BlockNumber page_freezes = 0;
 
 	/* Report that we're scanning the heap, advertising total # of blocks */
 	initprog_val[0] = PROGRESS_VACUUM_PHASE_SCAN_HEAP;
@@ -869,7 +1006,8 @@ lazy_scan_heap(LVRelState *vacrel)
 	vacrel->next_unskippable_vmbuffer = InvalidBuffer;
 
 	while (BlockNumberIsValid(blkno = heap_vac_scan_next_block(vacrel,
-															   &all_visible_according_to_vm)))
+															   &all_visible_according_to_vm,
+															   &was_eager_scanned)))
 	{
 		Buffer		buf;
 		Page		page;
@@ -956,11 +1094,23 @@ lazy_scan_heap(LVRelState *vacrel)
 		if (!got_cleanup_lock)
 			LockBuffer(buf, BUFFER_LOCK_SHARE);
 
+		page_freezes = vacrel->vm_page_freezes;
+
 		/* Check for new or empty pages before lazy_scan_[no]prune call */
 		if (lazy_scan_new_or_empty(vacrel, buf, blkno, page, !got_cleanup_lock,
 								   vmbuffer))
 		{
 			/* Processed as new/empty page (lock and pin released) */
+
+			/* count an eagerly scanned page as a failure or a success */
+			if (was_eager_scanned)
+			{
+				if (vacrel->vm_page_freezes > page_freezes)
+					decrement_blkno(&vacrel->remaining_eager_scan_successes);
+				else
+					vacrel->eager_scanned_failed_frozen++;
+			}
+
 			continue;
 		}
 
@@ -979,7 +1129,7 @@ lazy_scan_heap(LVRelState *vacrel)
 			 * lazy_scan_noprune could not do all required processing.  Wait
 			 * for a cleanup lock, and call lazy_scan_prune in the usual way.
 			 */
-			Assert(vacrel->aggressive);
+			Assert(vacrel->aggressive == VAC_AGGRESSIVE);
 			LockBuffer(buf, BUFFER_LOCK_UNLOCK);
 			LockBufferForCleanup(buf);
 			got_cleanup_lock = true;
@@ -1002,6 +1152,15 @@ lazy_scan_heap(LVRelState *vacrel)
 			lazy_scan_prune(vacrel, buf, blkno, page,
 							vmbuffer, all_visible_according_to_vm,
 							&has_lpdead_items);
+
+		/* count an eagerly scanned page as a failure or a success */
+		if (was_eager_scanned)
+		{
+			if (vacrel->vm_page_freezes > page_freezes)
+				decrement_blkno(&vacrel->remaining_eager_scan_successes);
+			else
+				vacrel->eager_scanned_failed_frozen++;
+		}
 
 		/*
 		 * Now drop the buffer lock and, potentially, update the FSM.
@@ -1112,7 +1271,9 @@ lazy_scan_heap(LVRelState *vacrel)
  *
  * The block number and visibility status of the next block to process are
  * returned and set in *all_visible_according_to_vm.  The return value is
- * InvalidBlockNumber if there are no further blocks to process.
+ * InvalidBlockNumber if there are no further blocks to process. If the block
+ * is being eagerly scanned, was_eager_scanned is set so that the caller can
+ * count whether or not we successfully freeze it.
  *
  * vacrel is an in/out parameter here.  Vacuum options and information about
  * the relation are read.  vacrel->skippedallvis is set if we skip a block
@@ -1122,10 +1283,13 @@ lazy_scan_heap(LVRelState *vacrel)
  */
 static BlockNumber
 heap_vac_scan_next_block(LVRelState *vacrel,
-						 bool *all_visible_according_to_vm)
+						 bool *all_visible_according_to_vm,
+						 bool *was_eager_scanned)
 {
 	/* relies on InvalidBlockNumber + 1 overflowing to 0 on first call */
 	vacrel->current_block++;
+
+	*was_eager_scanned = false;
 
 	/* Have we reached the end of the relation? */
 	if (vacrel->current_block >= vacrel->rel_pages)
@@ -1137,6 +1301,8 @@ heap_vac_scan_next_block(LVRelState *vacrel,
 	if (vacrel->current_block > vacrel->next_unskippable_block ||
 		vacrel->next_unskippable_block == InvalidBlockNumber)
 	{
+		bool		consider_eager_scan = false;
+
 		/*
 		 * 1. We have just processed an unskippable block (or we're at the
 		 * beginning of the scan).  Find the next unskippable block using the
@@ -1144,7 +1310,65 @@ heap_vac_scan_next_block(LVRelState *vacrel,
 		 */
 		bool		skipsallvis;
 
-		find_next_unskippable_block(vacrel, &skipsallvis);
+		/*
+		 * Figure out if we should disable eager scan going forward or
+		 * downgrade to an unaggressive vacuum altogether.
+		 */
+		if (vacrel->aggressive == VAC_SEMIAGGRESSIVE)
+		{
+			/*
+			 * If we hit our success limit, there is no need to eagerly scan
+			 * any additional pages. Downgrade the vacuum to unaggressive.
+			 */
+			if (vacrel->remaining_eager_scan_successes == 0)
+				vacrel->aggressive = VAC_UNAGGRESSIVE;
+
+			/*
+			 * If we hit the max number of failed eager scans for this region
+			 * of the table, figure out where the next eager scan region
+			 * should start. Eager scanning is effectively disabled until we
+			 * scan a block in that new region.
+			 */
+			else if (vacrel->eager_scanned_failed_frozen >=
+					 MAX_SUCCESSIVE_EAGER_SCAN_FAILS)
+			{
+				BlockNumber region_size,
+							offset;
+
+				/*
+				 * On the assumption that different regions of the table are
+				 * likely to have similarly aged data, we will retry eager
+				 * scanning again later. For a small table, we'll retry eager
+				 * scanning every quarter of the table. For a larger table,
+				 * we'll consider eager scanning again after processing
+				 * another region's worth of data.
+				 *
+				 * We consider the region to start from the first failure, so
+				 * calculate the block to restart eager scanning from there.
+				 */
+				region_size = Min(RELSEG_SIZE, (vacrel->rel_pages / 4));
+
+				offset = vacrel->eager_scanned_failed_frozen % region_size;
+
+				Assert(vacrel->eager_scanned > 0);
+
+				vacrel->unaggressive_to = vacrel->current_block + (region_size - offset);
+				vacrel->eager_scanned_failed_frozen = 0;
+			}
+		}
+
+		/*
+		 * If it is a fully aggressive vacuum or we haven't yet hit the fail
+		 * limit in our current eager scan region, consider eager scanning the
+		 * next block.
+		 */
+		if (vacrel->aggressive == VAC_AGGRESSIVE)
+			consider_eager_scan = true;
+		else if (vacrel->aggressive == VAC_SEMIAGGRESSIVE)
+			consider_eager_scan = vacrel->current_block >= vacrel->unaggressive_to;
+
+		find_next_unskippable_block(vacrel, consider_eager_scan,
+									was_eager_scanned, &skipsallvis);
 
 		/*
 		 * We now know the next block that we must process.  It can be the
@@ -1199,6 +1423,11 @@ heap_vac_scan_next_block(LVRelState *vacrel,
  * The next unskippable block and its visibility information is updated in
  * vacrel.
  *
+ * consider_eager_scan indicates whether or not we should consider scanning
+ * all-visible but not all-frozen blocks. was_eager_scanned is set to true if
+ * we decided to eager scan a block. In this case, next_unskippable_block is
+ * set to that block number.
+ *
  * Note: our opinion of which blocks can be skipped can go stale immediately.
  * It's okay if caller "misses" a page whose all-visible or all-frozen marking
  * was concurrently cleared, though.  All that matters is that caller scan all
@@ -1208,7 +1437,11 @@ heap_vac_scan_next_block(LVRelState *vacrel,
  * to skip such a range is actually made, making everything safe.)
  */
 static void
-find_next_unskippable_block(LVRelState *vacrel, bool *skipsallvis)
+find_next_unskippable_block(
+							LVRelState *vacrel,
+							bool consider_eager_scan,
+							bool *was_eager_scanned,
+							bool *skipsallvis)
 {
 	BlockNumber rel_pages = vacrel->rel_pages;
 	BlockNumber next_unskippable_block = vacrel->next_unskippable_block + 1;
@@ -1217,7 +1450,7 @@ find_next_unskippable_block(LVRelState *vacrel, bool *skipsallvis)
 
 	*skipsallvis = false;
 
-	for (;;)
+	for (;; next_unskippable_block++)
 	{
 		uint8		mapbits = visibilitymap_get_status(vacrel->rel,
 													   next_unskippable_block,
@@ -1253,23 +1486,31 @@ find_next_unskippable_block(LVRelState *vacrel, bool *skipsallvis)
 			break;
 
 		/*
-		 * Aggressive VACUUM caller can't skip pages just because they are
-		 * all-visible.  They may still skip all-frozen pages, which can't
-		 * contain XIDs < OldestXmin (XIDs that aren't already frozen by now).
+		 * In all other cases, we can skip all-frozen pages. Even fully
+		 * aggressive vacuums may skip all-frozen pages since all-frozen pages
+		 * cannot contain XIDs < OldestXmin (XIDs that aren't already frozen
+		 * by now).
 		 */
-		if ((mapbits & VISIBILITYMAP_ALL_FROZEN) == 0)
-		{
-			if (vacrel->aggressive)
-				break;
+		if (mapbits & VISIBILITYMAP_ALL_FROZEN)
+			continue;
 
-			/*
-			 * All-visible block is safe to skip in non-aggressive case.  But
-			 * remember that the final range contains such a block for later.
-			 */
-			*skipsallvis = true;
+		/*
+		 * Fully aggressive vacuums cannot skip all-visible pages that are not
+		 * also all-frozen. Semi-aggressive vacuums only skip such pages if
+		 * they have hit the failure limit for the current eager scan region.
+		 */
+		if (consider_eager_scan)
+		{
+			*was_eager_scanned = true;
+			vacrel->eager_scanned++;
+			break;
 		}
 
-		next_unskippable_block++;
+		/*
+		 * All-visible block is safe to skip in a semi or unaggressive vacuum.
+		 * But remember that the final range contains such a block for later.
+		 */
+		*skipsallvis = true;
 	}
 
 	/* write the local variables back to vacrel */
@@ -1781,7 +2022,7 @@ lazy_scan_noprune(LVRelState *vacrel,
 									 &NoFreezePageRelminMxid))
 		{
 			/* Tuple with XID < FreezeLimit (or MXID < MultiXactCutoff) */
-			if (vacrel->aggressive)
+			if (vacrel->aggressive == VAC_AGGRESSIVE)
 			{
 				/*
 				 * Aggressive VACUUMs must always be able to advance rel's

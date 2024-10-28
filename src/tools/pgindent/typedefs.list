@@ -3056,6 +3056,7 @@ UserAuth
 UserContext
 UserMapping
 UserOpts
+VacAggressive
 VacAttrStats
 VacAttrStatsP
 VacDeadItemsInfo
