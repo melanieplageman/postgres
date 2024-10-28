@@ -188,7 +188,7 @@ typedef struct LVRelState
 	BlockNumber rel_pages;		/* total number of pages */
 	BlockNumber scanned_pages;	/* # pages examined (not skipped via VM) */
 	BlockNumber removed_pages;	/* # pages removed by relation truncation */
-	BlockNumber frozen_pages;	/* # pages with newly frozen tuples */
+	BlockNumber tuple_freeze_pages; /* # pages with newly frozen tuples */
 	BlockNumber lpdead_item_pages;	/* # pages with LP_DEAD items */
 	BlockNumber missed_dead_pages;	/* # pages with missed dead tuples */
 	BlockNumber nonempty_pages; /* actually, last nonempty page + 1 */
@@ -408,7 +408,7 @@ heap_vacuum_rel(Relation rel, VacuumParams *params,
 	/* Initialize page counters explicitly (be tidy) */
 	vacrel->scanned_pages = 0;
 	vacrel->removed_pages = 0;
-	vacrel->frozen_pages = 0;
+	vacrel->tuple_freeze_pages = 0;
 	vacrel->lpdead_item_pages = 0;
 	vacrel->missed_dead_pages = 0;
 	vacrel->nonempty_pages = 0;
@@ -672,7 +672,8 @@ heap_vacuum_rel(Relation rel, VacuumParams *params,
 							 new_rel_pages,
 							 vacrel->scanned_pages,
 							 orig_rel_pages == 0 ? 100.0 :
-							 100.0 * vacrel->scanned_pages / orig_rel_pages);
+							 100.0 * vacrel->scanned_pages /
+							 orig_rel_pages);
 			appendStringInfo(&buf,
 							 _("tuples: %lld removed, %lld remain, %lld are dead but not yet removable\n"),
 							 (long long) vacrel->tuples_deleted,
@@ -705,9 +706,10 @@ heap_vacuum_rel(Relation rel, VacuumParams *params,
 								 vacrel->NewRelminMxid, diff);
 			}
 			appendStringInfo(&buf, _("frozen: %u pages from table (%.2f%% of total) had %lld tuples frozen\n"),
-							 vacrel->frozen_pages,
+							 vacrel->tuple_freeze_pages,
 							 orig_rel_pages == 0 ? 100.0 :
-							 100.0 * vacrel->frozen_pages / orig_rel_pages,
+							 100.0 * vacrel->tuple_freeze_pages /
+							 orig_rel_pages,
 							 (long long) vacrel->tuples_frozen);
 			if (vacrel->do_index_vacuuming)
 			{
@@ -1462,11 +1464,11 @@ lazy_scan_prune(LVRelState *vacrel,
 	if (presult.nfrozen > 0)
 	{
 		/*
-		 * We don't increment the frozen_pages instrumentation counter when
-		 * nfrozen == 0, since it only counts pages with newly frozen tuples
-		 * (don't confuse that with pages newly set all-frozen in VM).
+		 * We don't increment the tuple_freeze_pages instrumentation counter
+		 * when nfrozen == 0, since it only counts pages with newly frozen
+		 * tuples (don't confuse that with pages newly set all-frozen in VM).
 		 */
-		vacrel->frozen_pages++;
+		vacrel->tuple_freeze_pages++;
 	}
 
 	/*
