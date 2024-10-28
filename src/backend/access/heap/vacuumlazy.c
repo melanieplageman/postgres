@@ -1112,19 +1112,17 @@ static bool
 heap_vac_scan_next_block(LVRelState *vacrel, BlockNumber *blkno,
 						 bool *all_visible_according_to_vm)
 {
-	BlockNumber next_block;
-
 	/* relies on InvalidBlockNumber + 1 overflowing to 0 on first call */
-	next_block = vacrel->current_block + 1;
+	vacrel->current_block++;
 
 	/* Have we reached the end of the relation? */
-	if (next_block >= vacrel->rel_pages)
+	if (vacrel->current_block >= vacrel->rel_pages)
 		return false;
 
 	/*
 	 * We must be in one of the three following states:
 	 */
-	if (next_block > vacrel->next_unskippable_block ||
+	if (vacrel->current_block > vacrel->next_unskippable_block ||
 		vacrel->next_unskippable_block == InvalidBlockNumber)
 	{
 		/*
@@ -1151,23 +1149,24 @@ heap_vac_scan_next_block(LVRelState *vacrel, BlockNumber *blkno,
 		 * pages then skipping makes updating relfrozenxid unsafe, which is a
 		 * real downside.
 		 */
-		if (vacrel->next_unskippable_block - next_block >= SKIP_PAGES_THRESHOLD)
+		if (vacrel->next_unskippable_block - vacrel->current_block >=
+			SKIP_PAGES_THRESHOLD)
 		{
-			next_block = vacrel->next_unskippable_block;
+			vacrel->current_block = vacrel->next_unskippable_block;
 			if (skipsallvis)
 				vacrel->skippedallvis = true;
 		}
 	}
 
 	/* Now we must be in one of the two remaining states: */
-	if (next_block < vacrel->next_unskippable_block)
+	if (vacrel->current_block < vacrel->next_unskippable_block)
 	{
 		/*
 		 * 2. We are processing a range of blocks that we could have skipped
 		 * but chose not to.  We know that they are all-visible in the VM,
 		 * otherwise they would've been unskippable.
 		 */
-		*blkno = vacrel->current_block = next_block;
+		*blkno = vacrel->current_block;
 		*all_visible_according_to_vm = true;
 		return true;
 	}
@@ -1177,9 +1176,9 @@ heap_vac_scan_next_block(LVRelState *vacrel, BlockNumber *blkno,
 		 * 3. We reached the next unskippable block.  Process it.  On next
 		 * iteration, we will be back in state 1.
 		 */
-		Assert(next_block == vacrel->next_unskippable_block);
+		Assert(vacrel->current_block == vacrel->next_unskippable_block);
 
-		*blkno = vacrel->current_block = next_block;
+		*blkno = vacrel->current_block;
 		*all_visible_according_to_vm = vacrel->next_unskippable_allvis;
 		return true;
 	}
