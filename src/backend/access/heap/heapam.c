@@ -2540,6 +2540,8 @@ heap_multi_insert(Relation relation, TupleTableSlot **slots, int ntuples,
 		 */
 		if (all_frozen_set)
 		{
+			uint8		flags = VISIBILITYMAP_ALL_VISIBLE | VISIBILITYMAP_ALL_FROZEN;
+
 			Assert(PageIsAllVisible(page));
 			Assert(visibilitymap_pin_ok(BufferGetBlockNumber(buffer), vmbuffer));
 
@@ -2550,8 +2552,7 @@ heap_multi_insert(Relation relation, TupleTableSlot **slots, int ntuples,
 			 */
 			visibilitymap_set(relation, BufferGetBlockNumber(buffer), buffer,
 							  InvalidXLogRecPtr, vmbuffer,
-							  InvalidTransactionId,
-							  VISIBILITYMAP_ALL_VISIBLE | VISIBILITYMAP_ALL_FROZEN);
+							  InvalidTransactionId, &flags);
 		}
 
 		UnlockReleaseBuffer(buffer);

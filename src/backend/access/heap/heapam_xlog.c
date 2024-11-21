@@ -298,7 +298,7 @@ heap_xlog_visible(XLogReaderState *record)
 		visibilitymap_pin(reln, blkno, &vmbuffer);
 
 		visibilitymap_set(reln, blkno, InvalidBuffer, lsn, vmbuffer,
-						  xlrec->snapshotConflictHorizon, vmbits);
+						  xlrec->snapshotConflictHorizon, &vmbits);
 
 		ReleaseBuffer(vmbuffer);
 		FreeFakeRelcacheEntry(reln);

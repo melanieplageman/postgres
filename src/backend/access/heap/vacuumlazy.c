@@ -1356,6 +1356,8 @@ lazy_scan_new_or_empty(LVRelState *vacrel, Buffer buf, BlockNumber blkno,
 		 */
 		if (!PageIsAllVisible(page))
 		{
+			uint8		flags = VISIBILITYMAP_ALL_VISIBLE | VISIBILITYMAP_ALL_FROZEN;
+
 			START_CRIT_SECTION();
 
 			/* mark buffer dirty before writing a WAL record */
@@ -1376,8 +1378,7 @@ lazy_scan_new_or_empty(LVRelState *vacrel, Buffer buf, BlockNumber blkno,
 
 			PageSetAllVisible(page);
 			visibilitymap_set(vacrel->rel, blkno, buf, InvalidXLogRecPtr,
-							  vmbuffer, InvalidTransactionId,
-							  VISIBILITYMAP_ALL_VISIBLE | VISIBILITYMAP_ALL_FROZEN);
+							  vmbuffer, InvalidTransactionId, &flags);
 			END_CRIT_SECTION();
 		}
 
@@ -1558,7 +1559,7 @@ lazy_scan_prune(LVRelState *vacrel,
 		MarkBufferDirty(buf);
 		visibilitymap_set(vacrel->rel, blkno, buf, InvalidXLogRecPtr,
 						  vmbuffer, presult.vm_conflict_horizon,
-						  flags);
+						  &flags);
 	}
 
 	/*
@@ -1608,6 +1609,8 @@ lazy_scan_prune(LVRelState *vacrel,
 	else if (all_visible_according_to_vm && presult.all_visible &&
 			 presult.all_frozen && !VM_ALL_FROZEN(vacrel->rel, blkno, &vmbuffer))
 	{
+		uint8		flags = VISIBILITYMAP_ALL_VISIBLE | VISIBILITYMAP_ALL_FROZEN;
+
 		/*
 		 * Avoid relying on all_visible_according_to_vm as a proxy for the
 		 * page-level PD_ALL_VISIBLE bit being set, since it might have become
@@ -1628,9 +1631,7 @@ lazy_scan_prune(LVRelState *vacrel,
 		 */
 		Assert(!TransactionIdIsValid(presult.vm_conflict_horizon));
 		visibilitymap_set(vacrel->rel, blkno, buf, InvalidXLogRecPtr,
-						  vmbuffer, InvalidTransactionId,
-						  VISIBILITYMAP_ALL_VISIBLE |
-						  VISIBILITYMAP_ALL_FROZEN);
+						  vmbuffer, InvalidTransactionId, &flags);
 	}
 }
 
@@ -2286,7 +2287,7 @@ lazy_vacuum_heap_page(LVRelState *vacrel, BlockNumber blkno, Buffer buffer,
 
 		PageSetAllVisible(page);
 		visibilitymap_set(vacrel->rel, blkno, buffer, InvalidXLogRecPtr,
-						  vmbuffer, visibility_cutoff_xid, flags);
+						  vmbuffer, visibility_cutoff_xid, &flags);
 	}
 
 	/* Revert to the previous phase information for error traceback */

@@ -239,17 +239,22 @@ visibilitymap_pin_ok(BlockNumber heapBlk, Buffer vmbuf)
  * You must pass a buffer containing the correct map page to this function.
  * Call visibilitymap_pin first to pin the right one. This function doesn't do
  * any I/O.
+ *
+ * flags is an in-out parameter. visibilitymap_set() sets the VM bits to the
+ * passed-in value of flags and then saves the VM bits' previous value back
+ * into flags for the caller's benefit.
  */
 void
 visibilitymap_set(Relation rel, BlockNumber heapBlk, Buffer heapBuf,
 				  XLogRecPtr recptr, Buffer vmBuf, TransactionId cutoff_xid,
-				  uint8 flags)
+				  uint8 *flags)
 {
 	BlockNumber mapBlock = HEAPBLK_TO_MAPBLOCK(heapBlk);
 	uint32		mapByte = HEAPBLK_TO_MAPBYTE(heapBlk);
 	uint8		mapOffset = HEAPBLK_TO_OFFSET(heapBlk);
 	Page		page;
 	uint8	   *map;
+	uint8		status;
 
 #ifdef TRACE_VISIBILITYMAP
 	elog(DEBUG1, "vm_set %s %d", RelationGetRelationName(rel), heapBlk);
@@ -257,10 +262,10 @@ visibilitymap_set(Relation rel, BlockNumber heapBlk, Buffer heapBuf,
 
 	Assert(InRecovery || XLogRecPtrIsInvalid(recptr));
 	Assert(InRecovery || PageIsAllVisible((Page) BufferGetPage(heapBuf)));
-	Assert((flags & VISIBILITYMAP_VALID_BITS) == flags);
+	Assert((*flags & VISIBILITYMAP_VALID_BITS) == *flags);
 
 	/* Must never set all_frozen bit without also setting all_visible bit */
-	Assert(flags != VISIBILITYMAP_ALL_FROZEN);
+	Assert(*flags != VISIBILITYMAP_ALL_FROZEN);
 
 	/* Check that we have the right heap page pinned, if present */
 	if (BufferIsValid(heapBuf) && BufferGetBlockNumber(heapBuf) != heapBlk)
@@ -274,11 +279,12 @@ visibilitymap_set(Relation rel, BlockNumber heapBlk, Buffer heapBuf,
 	map = (uint8 *) PageGetContents(page);
 	LockBuffer(vmBuf, BUFFER_LOCK_EXCLUSIVE);
 
-	if (flags != (map[mapByte] >> mapOffset & VISIBILITYMAP_VALID_BITS))
+	status = ((map[mapByte] >> mapOffset) & VISIBILITYMAP_VALID_BITS);
+	if (*flags != status)
 	{
 		START_CRIT_SECTION();
 
-		map[mapByte] |= (flags << mapOffset);
+		map[mapByte] |= (*flags << mapOffset);
 		MarkBufferDirty(vmBuf);
 
 		if (RelationNeedsWAL(rel))
@@ -286,7 +292,7 @@ visibilitymap_set(Relation rel, BlockNumber heapBlk, Buffer heapBuf,
 			if (XLogRecPtrIsInvalid(recptr))
 			{
 				Assert(!InRecovery);
-				recptr = log_heap_visible(rel, heapBuf, vmBuf, cutoff_xid, flags);
+				recptr = log_heap_visible(rel, heapBuf, vmBuf, cutoff_xid, *flags);
 
 				/*
 				 * If data checksums are enabled (or wal_log_hints=on), we
@@ -311,6 +317,7 @@ visibilitymap_set(Relation rel, BlockNumber heapBlk, Buffer heapBuf,
 	}
 
 	LockBuffer(vmBuf, BUFFER_LOCK_UNLOCK);
+	*flags = status;
 }
 
 /*
