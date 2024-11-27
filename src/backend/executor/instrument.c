@@ -228,6 +228,7 @@ BufferUsageAdd(BufferUsage *dst, const BufferUsage *add)
 	dst->shared_blks_hit += add->shared_blks_hit;
 	dst->shared_blks_read += add->shared_blks_read;
 	dst->shared_blks_dirtied += add->shared_blks_dirtied;
+	dst->shared_blks_dirtied_at_all += add->shared_blks_dirtied_at_all;
 	dst->shared_blks_written += add->shared_blks_written;
 	dst->local_blks_hit += add->local_blks_hit;
 	dst->local_blks_read += add->local_blks_read;
@@ -252,6 +253,7 @@ BufferUsageAccumDiff(BufferUsage *dst,
 	dst->shared_blks_hit += add->shared_blks_hit - sub->shared_blks_hit;
 	dst->shared_blks_read += add->shared_blks_read - sub->shared_blks_read;
 	dst->shared_blks_dirtied += add->shared_blks_dirtied - sub->shared_blks_dirtied;
+	dst->shared_blks_dirtied_at_all += add->shared_blks_dirtied_at_all - sub->shared_blks_dirtied_at_all;
 	dst->shared_blks_written += add->shared_blks_written - sub->shared_blks_written;
 	dst->local_blks_hit += add->local_blks_hit - sub->local_blks_hit;
 	dst->local_blks_read += add->local_blks_read - sub->local_blks_read;

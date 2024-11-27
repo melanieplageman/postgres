@@ -140,6 +140,20 @@ PG_STAT_GET_RELENTRY_TIMESTAMPTZ(last_vacuum_time)
 /* pg_stat_get_lastscan */
 PG_STAT_GET_RELENTRY_TIMESTAMPTZ(lastscan)
 
+PG_STAT_GET_RELENTRY_INT64(aggressive_vacuum_count)
+
+PG_STAT_GET_RELENTRY_INT64(msecs_vacuuming)
+PG_STAT_GET_RELENTRY_INT64(msecs_vacuum_delaying)
+PG_STAT_GET_RELENTRY_INT64(pages_scanned_by_vacuum)
+PG_STAT_GET_RELENTRY_INT64(vm_page_freezes)
+PG_STAT_GET_RELENTRY_INT64(pages_with_tuples_frozen)
+PG_STAT_GET_RELENTRY_INT64(eager_page_freezes)
+PG_STAT_GET_RELENTRY_INT64(nofrz_nofpi)
+PG_STAT_GET_RELENTRY_INT64(nofrz_min_age)
+PG_STAT_GET_RELENTRY_INT64(nofrz_eager_scanned_min_age)
+PG_STAT_GET_RELENTRY_INT64(nofrz_partial)
+PG_STAT_GET_RELENTRY_INT64(extra_av_pages_scanned)
+
 Datum
 pg_stat_get_function_calls(PG_FUNCTION_ARGS)
 {

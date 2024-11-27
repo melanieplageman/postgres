@@ -2566,6 +2566,8 @@ MarkBufferDirty(Buffer buffer)
 			break;
 	}
 
+	pgBufferUsage.shared_blks_dirtied_at_all++;
+
 	/*
 	 * If the buffer was not dirty already, do vacuum accounting.
 	 */
@@ -5108,6 +5110,7 @@ MarkBufferDirtyHint(Buffer buffer, bool buffer_std)
 		if (delayChkptFlags)
 			MyProc->delayChkptFlags &= ~DELAY_CHKPT_START;
 
+		pgBufferUsage.shared_blks_dirtied_at_all++;
 		if (dirtied)
 		{
 			pgBufferUsage.shared_blks_dirtied++;
