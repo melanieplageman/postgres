@@ -214,6 +214,9 @@ typedef struct LVRelState
 	BlockNumber next_unskippable_block; /* next unskippable block */
 	bool		next_unskippable_allvis;	/* its visibility status */
 	Buffer		next_unskippable_vmbuffer;	/* buffer containing its VM bit */
+
+	BlockNumber skippable_blocks_scanned;
+	BlockNumber frozen_skippable_blocks_scanned;
 } LVRelState;
 
 /* Struct for saving and restoring vacuum error information. */
@@ -427,6 +430,8 @@ heap_vacuum_rel(Relation rel, VacuumParams *params,
 	vacrel->live_tuples = 0;
 	vacrel->recently_dead_tuples = 0;
 	vacrel->missed_dead_tuples = 0;
+	vacrel->skippable_blocks_scanned = 0;
+	vacrel->frozen_skippable_blocks_scanned = 0;
 
 	/*
 	 * Get cutoffs that determine which deleted tuples are considered DEAD,
@@ -664,6 +669,9 @@ heap_vacuum_rel(Relation rel, VacuumParams *params,
 							 vacrel->scanned_pages,
 							 orig_rel_pages == 0 ? 100.0 :
 							 100.0 * vacrel->scanned_pages / orig_rel_pages);
+			appendStringInfo(&buf, _("skippable blocks scanned: %u. frozen skippable blocks scanned: %u.\n"),
+					vacrel->skippable_blocks_scanned,
+					vacrel->frozen_skippable_blocks_scanned);
 			appendStringInfo(&buf,
 							 _("tuples: %lld removed, %lld remain, %lld are dead but not yet removable\n"),
 							 (long long) vacrel->tuples_deleted,
@@ -1150,13 +1158,28 @@ heap_vac_scan_next_block(LVRelState *vacrel, BlockNumber *blkno,
 	/* Now we must be in one of the two remaining states: */
 	if (next_block < vacrel->next_unskippable_block)
 	{
+		uint8 vmbits = 0;
+		Buffer vmbuffer = InvalidBuffer;
+
 		/*
 		 * 2. We are processing a range of blocks that we could have skipped
 		 * but chose not to.  We know that they are all-visible in the VM,
 		 * otherwise they would've been unskippable.
 		 */
+		vacrel->skippable_blocks_scanned++;
+
 		*blkno = vacrel->current_block = next_block;
 		*all_visible_according_to_vm = true;
+
+		vmbits = visibilitymap_get_status(vacrel->rel,
+				vacrel->current_block,
+				&vmbuffer);
+		if (vmbits & VISIBILITYMAP_ALL_FROZEN)
+			vacrel->frozen_skippable_blocks_scanned++;
+
+		if (vmbuffer != InvalidBuffer)
+			ReleaseBuffer(vmbuffer);
+
 		return true;
 	}
 	else
