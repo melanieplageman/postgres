@@ -311,6 +311,8 @@ typedef struct LVRelState
 	SuccessOrFailure first_failure;
 	SuccessOrFailure last_success;
 	SuccessOrFailure last_failure;
+
+	FILE *es_blocks;
 } LVRelState;
 
 /* Struct for saving and restoring vacuum error information. */
@@ -430,6 +432,7 @@ heap_vacuum_rel(Relation rel, VacuumParams *params,
 	int64 ins_since_vacuum_before = 0;
 	int64 ins_since_vacuum_after = 0;
 	TransactionId next_xid;
+	int autovacuums_before = 0;
 
 	verbose = (params->options & VACOPT_VERBOSE) != 0;
 	instrument = (verbose || (AmAutoVacuumWorkerProcess() &&
@@ -564,6 +567,7 @@ heap_vacuum_rel(Relation rel, VacuumParams *params,
 	if ((tabstats = pgstat_fetch_stat_tabentry(RelationGetRelid(rel))) != NULL)
 	{
 		ins_since_vacuum_before = tabstats->ins_since_vacuum;
+		autovacuums_before = tabstats->autovacuum_count;
 	}
 
 	/*
@@ -622,6 +626,8 @@ heap_vacuum_rel(Relation rel, VacuumParams *params,
 	if (vacrel->rel_pages < EAGER_SCAN_REGION_SIZE)
 		vacrel->aggressive = VAC_UNAGGRESSIVE;
 
+	vacrel->es_blocks = NULL;
+
 	if (vacrel->aggressive == VAC_SEMIAGGRESSIVE)
 	{
 		uint32 randseed = pg_prng_uint32(&pg_global_prng_state);
@@ -631,6 +637,12 @@ heap_vacuum_rel(Relation rel, VacuumParams *params,
 		vacrel->remaining_eager_scan_successes =
 			(BlockNumber) (EAGER_SCAN_SUCCESS_RATE * (orig_rel_allvisible - orig_rel_allfrozen));
 		vacrel->remaining_eager_scan_region_fails = MAX_SUCCESSIVE_EAGER_SCAN_FAILS;
+		if (strcmp(RelationGetRelationName(vacrel->rel), "history") == 0)
+		{
+			vacrel->es_blocks = fopen("/home/melanieplageman/es", "a");
+			fprintf(vacrel->es_blocks, "autovacuum %d.\nrandseed: %u. next eager scan region start block: %u.\n",
+					autovacuums_before + 1, randseed, vacrel->next_eager_scan_region_start);
+		}
 	}
 	else if (vacrel->aggressive == VAC_AGGRESSIVE)
 	{
@@ -1091,6 +1103,11 @@ heap_vacuum_rel(Relation rel, VacuumParams *params,
 			pfree(indnames[i]);
 	}
 	pgBufferUsage.vacuum_delay_time_ms = 0;
+	if (vacrel->es_blocks)
+	{
+		fprintf(vacrel->es_blocks, "\n");
+		fclose(vacrel->es_blocks);
+	}
 }
 
 /*
@@ -1375,7 +1392,13 @@ lazy_scan_heap(LVRelState *vacrel)
 
 				if (fails_before > vacrel->remaining_eager_scan_region_fails &&
 					vacrel->remaining_eager_scan_region_fails == 0)
+				{
 					vacrel->eager_scan_hit_fail_threshold++;
+					if (vacrel->es_blocks)
+						fprintf(vacrel->es_blocks, "hit fail thresh on block: %d. eager_scanned: %d.\n",
+								vacrel->current_block,
+								vacrel->eager_scanned);
+				}
 
 				vacrel->eager_scanned_failed_frozen++;
 			}
