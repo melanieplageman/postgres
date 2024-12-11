@@ -3,6 +3,45 @@
  * vacuumlazy.c
  *	  Concurrent ("lazy") vacuuming.
  *
+ * Heap relations are vacuumed in three main phases. In the phase I,
+ * vacuum scans relation pages, pruning and freezing tuples and saving dead
+ * tuples' TIDs in a TID store. If that TID store fills up or vacuum finishes
+ * scanning the relation, it progresses to the phase II: index vacuuming.
+ *
+ * If there are no indexes or index scanning is disabled, phase II may be
+ * skipped. If phase I identified very few dead index entries, vacuum may skip
+ * phases II and III. Index vacuuming deletes the dead index entries from the
+ * TID store.
+ *
+ * After index vacuuming is complete, vacuum scans the blocks of the relation
+ * indicated by the TIDs in the TID store and reaps the dead tuples, freeing
+ * that space for future tuples. Finally, vacuum may truncate the relation if
+ * it has emptied pages at the end.
+ *
+ * After finishing all phases of work, vacuum updates relation statistics in
+ * pg_class and the cumulative statistics subsystem.
+ *
+ * Relation Scanning:
+ *
+ * Vacuum scans the heap relation, starting at the beginning and progressing
+ * to the end, skipping pages as permitted by their visibility status, vacuum
+ * options, and the eagerness level of the vacuum.
+ *
+ * When page skipping is enabled, non-aggressive vacuums may skip scanning
+ * pages that are marked all-visible in the visibility map. We may choose not
+ * to skip pages if the range of skippable pages is below
+ * SKIP_PAGES_THRESHOLD.
+ *
+ * Once vacuum has decided to scan a given block, it must read in the block
+ * and obtain a cleanup lock to prune tuples on the page. A non-aggressive
+ * vacuums may choose to skip pruning and freezing if it cannot acquire a
+ * cleanup lock on the buffer right away.
+ *
+ * After pruning and freezing, pages that are newly all-visible and all-frozen
+ * are marked as such in the visibility map.
+ *
+ * Dead TID Storage:
+ *
  * The major space usage for vacuuming is storage for the dead tuple IDs that
  * are to be removed from indexes.  We want to ensure we can vacuum even the
  * very largest relations with finite memory space usage.  To do that, we set
