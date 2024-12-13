@@ -550,14 +550,43 @@ heap_vacuum_rel(Relation rel, VacuumParams *params,
 	 * value >= FreezeLimit, and relminmxid to a value >= MultiXactCutoff.
 	 * Non-aggressive VACUUMs may advance them by any amount, or not at all.
 	 */
-	Assert(vacrel->NewRelfrozenXid == vacrel->cutoffs.OldestXmin ||
-		   TransactionIdPrecedesOrEquals(vacrel->aggressive ? vacrel->cutoffs.FreezeLimit :
-										 vacrel->cutoffs.relfrozenxid,
-										 vacrel->NewRelfrozenXid));
-	Assert(vacrel->NewRelminMxid == vacrel->cutoffs.OldestMxact ||
-		   MultiXactIdPrecedesOrEquals(vacrel->aggressive ? vacrel->cutoffs.MultiXactCutoff :
-									   vacrel->cutoffs.relminmxid,
-									   vacrel->NewRelminMxid));
+
+#ifdef USE_ASSERT_CHECKING
+	if (vacrel->NewRelfrozenXid == vacrel->cutoffs.OldestXmin)
+	{
+		/* No new relfrozenxid identified */
+	}
+	else if (vacrel->aggressive)
+	{
+		/*
+		 * Aggressive vacuum must have frozen all tuples older than the freeze
+		 * limit.
+		 */
+		Assert(TransactionIdPrecedesOrEquals(vacrel->cutoffs.FreezeLimit,
+											 vacrel->NewRelfrozenXid));
+	}
+	else
+		Assert(TransactionIdPrecedesOrEquals(vacrel->cutoffs.relfrozenxid,
+											 vacrel->NewRelfrozenXid));
+
+	if (vacrel->NewRelminMxid == vacrel->cutoffs.OldestMxact)
+	{
+		/* No new relminmxid identified */
+	}
+	else if (vacrel->aggressive)
+	{
+		/*
+		 * Aggressive vacuum must have frozen all tuples older than the
+		 * multixact cutoff.
+		 */
+		Assert(MultiXactIdPrecedesOrEquals(vacrel->cutoffs.MultiXactCutoff,
+										   vacrel->NewRelminMxid));
+	}
+	else
+		Assert(MultiXactIdPrecedesOrEquals(vacrel->cutoffs.relminmxid,
+										   vacrel->NewRelminMxid));
+#endif
+
 	if (vacrel->skippedallvis)
 	{
 		/*
