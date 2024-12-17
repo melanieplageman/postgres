@@ -3063,6 +3063,7 @@ UserOpts
 VacAttrStats
 VacAttrStatsP
 VacDeadItemsInfo
+VacEagerness
 VacErrPhase
 VacObjFilter
 VacOptValue
