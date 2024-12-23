@@ -264,6 +264,8 @@ typedef struct PruneFreezeResult
 	 */
 	bool		hastup;
 
+	TransactionId max_xid_on_page;
+
 	/*
 	 * LP_DEAD items on the page after pruning.  Includes existing LP_DEAD
 	 * items.
