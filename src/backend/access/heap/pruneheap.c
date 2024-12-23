@@ -687,6 +687,12 @@ heap_page_prune_and_freeze(Relation relation, Buffer buffer,
 			 * freeze to advance relfrozenxid/relminmxid.
 			 */
 			do_freeze = true;
+			if (!prstate.all_frozen)
+			{
+				presult->nofrz_min_age_partial++;
+				if (cutoffs->was_eager_scanned)
+					presult->nofrz_min_age_partial_es++;
+			}
 		}
 		else
 		{
@@ -711,19 +717,37 @@ heap_page_prune_and_freeze(Relation relation, Buffer buffer,
 				if (RelationNeedsWAL(relation))
 				{
 					if (hint_bit_fpi)
+					{
 						do_freeze = true;
+						presult->eager_page_freezes++;
+					}
 					else if (do_prune)
 					{
 						if (XLogCheckBufferNeedsBackup(buffer))
+						{
 							do_freeze = true;
+							presult->eager_page_freezes++;
+						}
 					}
 					else if (do_hint)
 					{
 						if (XLogHintBitIsNeeded() && XLogCheckBufferNeedsBackup(buffer))
+						{
 							do_freeze = true;
+							presult->eager_page_freezes++;
+						}
 					}
+					else
+						presult->nofrz_nofpi++;
 				}
 			}
+			else if (prstate.nfrozen > 0 && RelationNeedsWAL(relation))
+				presult->nofrz_partial++;
+
+			if (!do_freeze)
+				presult->nofrz_min_age++;
+			if (!do_freeze && cutoffs->was_eager_scanned)
+				presult->nofrz_eager_scanned_min_age++;
 		}
 	}
 
