@@ -224,6 +224,22 @@ typedef enum
 	VACUUM_ERRCB_PHASE_TRUNCATE,
 } VacErrPhase;
 
+typedef struct SuccessOrFailure
+{
+	BlockNumber blockno;
+	TransactionId max_xmin_on_block;
+	TransactionId xid;			/* xid when the failure or success happened */
+}			SuccessOrFailure;
+
+static void
+make_es_success_or_failure(SuccessOrFailure * obj)
+{
+	obj->blockno = InvalidBlockNumber;
+	obj->max_xmin_on_block = InvalidTransactionId;
+	obj->xid = InvalidTransactionId;
+}
+
+
 /*
  * An eager scan of a page that is set all-frozen in the VM is considered
  * "successful". To spread out eager scanning across multiple normal vacuums,
@@ -291,10 +307,18 @@ typedef struct LVRelState
 	BlockNumber scanned_pages;	/* # pages examined (not skipped via VM) */
 
 	/*
+	 * Count of skippable pages scanned due to SKIP_PAGES_THRESHOLD. These may
+	 * be all-visible and even all-frozen. These are exclusive of all-visible
+	 * pages eagerly scanned.
+	 */
+	BlockNumber skip_thresh_pages_scanned;
+
+	/*
 	 * Count of all-visible blocks eagerly scanned (for logging only). This
 	 * does not include skippable blocks scanned due to SKIP_PAGES_THRESHOLD.
 	 */
 	BlockNumber eager_scanned_pages;
+	BlockNumber agg_scanned_av_pages;
 
 	BlockNumber removed_pages;	/* # pages removed by relation truncation */
 	BlockNumber new_frozen_tuple_pages; /* # pages with newly frozen tuples */
@@ -340,6 +364,8 @@ typedef struct LVRelState
 	bool		next_unskippable_eager_scanned; /* if it was eager scanned */
 	Buffer		next_unskippable_vmbuffer;	/* buffer containing its VM bit */
 
+	BlockNumber empty_pages;
+	BlockNumber new_pages;
 	/* State related to managing eager scanning of all-visible pages */
 
 	/*
@@ -383,6 +409,13 @@ typedef struct LVRelState
 	 * scanning is disabled.
 	 */
 	BlockNumber eager_scan_max_fails_per_region;
+	BlockNumber original_eager_scan_success_limit;
+	BlockNumber eager_scan_hit_fail_threshold;
+	BlockNumber eager_scanned_failed_frozen;
+	SuccessOrFailure first_success;
+	SuccessOrFailure first_failure;
+	SuccessOrFailure last_success;
+	SuccessOrFailure last_failure;
 } LVRelState;
 
 
@@ -394,10 +427,20 @@ typedef struct LVSavedErrInfo
 	VacErrPhase phase;
 } LVSavedErrInfo;
 
+typedef enum EAGER_SCAN_TYPE {
+	NO_EAGER_AGGRESSIVE,
+	NO_EAGER_DISABLED,
+	NO_EAGER_RELSIZE,
+	NO_EAGER_MASTER,
+	NO_EAGER_RELFROZENXID,
+	NO_EAGER_ALREADY_FROZEN,
+	YES_EAGER
+} EAGER_SCAN_TYPE;
 
 /* non-export function prototypes */
 static void lazy_scan_heap(LVRelState *vacrel);
-static void heap_vacuum_eager_scan_setup(LVRelState *vacrel, VacuumParams *params);
+static EAGER_SCAN_TYPE heap_vacuum_eager_scan_setup(LVRelState *vacrel, VacuumParams *params,
+										 BlockNumber *orig_rel_allvisible, BlockNumber *orig_rel_allfrozen);
 static bool heap_vac_scan_next_block(LVRelState *vacrel, BlockNumber *blkno,
 									 bool *all_visible_according_to_vm,
 									 bool *was_eager_scanned);
@@ -408,10 +451,13 @@ static bool lazy_scan_new_or_empty(LVRelState *vacrel, Buffer buf,
 static void lazy_scan_prune(LVRelState *vacrel, Buffer buf,
 							BlockNumber blkno, Page page,
 							Buffer vmbuffer, bool all_visible_according_to_vm,
-							bool *has_lpdead_items, bool *vm_page_frozen);
+							bool *has_lpdead_items,
+							bool *vm_page_frozen,
+							TransactionId *max_xid_on_page);
 static bool lazy_scan_noprune(LVRelState *vacrel, Buffer buf,
 							  BlockNumber blkno, Page page,
-							  bool *has_lpdead_items);
+							  bool *has_lpdead_items,
+							  TransactionId *max_xid_on_page);
 static void lazy_vacuum(LVRelState *vacrel);
 static bool lazy_vacuum_all_indexes(LVRelState *vacrel);
 static void lazy_vacuum_heap_rel(LVRelState *vacrel);
@@ -458,12 +504,12 @@ static void restore_vacuum_error_info(LVRelState *vacrel,
  * Caller provides whether or not an aggressive vacuum is required due to
  * vacuum options or for relfrozenxid/relminmxid advancement.
  */
-static void
-heap_vacuum_eager_scan_setup(LVRelState *vacrel, VacuumParams *params)
+static EAGER_SCAN_TYPE
+heap_vacuum_eager_scan_setup(LVRelState *vacrel, VacuumParams *params,
+							 BlockNumber *orig_rel_allvisible,
+							 BlockNumber *orig_rel_allfrozen)
 {
 	uint32		randseed;
-	BlockNumber allvisible;
-	BlockNumber allfrozen;
 	float		first_region_ratio;
 	bool		oldest_unfrozen_before_cutoff = false;
 
@@ -472,6 +518,13 @@ heap_vacuum_eager_scan_setup(LVRelState *vacrel, VacuumParams *params)
 	 * Aggressive vacuums, normal vacuums of small tables, and normal vacuums
 	 * of tables without sufficiently old tuples disable eager scanning.
 	 */
+	vacrel->eager_scanned_failed_frozen = 0;
+	vacrel->eager_scan_hit_fail_threshold = 0;
+	make_es_success_or_failure(&vacrel->first_success);
+	make_es_success_or_failure(&vacrel->first_failure);
+	make_es_success_or_failure(&vacrel->last_success);
+	make_es_success_or_failure(&vacrel->last_failure);
+
 	vacrel->next_eager_scan_region_start = InvalidBlockNumber;
 	vacrel->eager_scan_max_fails_per_region = 0;
 	vacrel->eager_scan_remaining_fails = 0;
@@ -479,7 +532,15 @@ heap_vacuum_eager_scan_setup(LVRelState *vacrel, VacuumParams *params)
 
 	/* If eager scanning is explicitly disabled, just return. */
 	if (params->eager_scan_max_fails == 0)
-		return;
+		return NO_EAGER_DISABLED;
+
+	/*
+	 * Our success cap is EAGER_SCAN_SUCCESS_RATE of the number of all-visible
+	 * but not all-frozen blocks in the relation.
+	 */
+	visibilitymap_count(vacrel->rel,
+						orig_rel_allvisible,
+						orig_rel_allfrozen);
 
 	/*
 	 * The caller will have determined whether or not an aggressive vacuum is
@@ -489,7 +550,7 @@ heap_vacuum_eager_scan_setup(LVRelState *vacrel, VacuumParams *params)
 	 * so scans of all-visible pages are not considered eager.
 	 */
 	if (vacrel->aggressive)
-		return;
+		return NO_EAGER_AGGRESSIVE;
 
 	/*
 	 * If the relation is smaller than a single region, we won't bother eager
@@ -497,7 +558,10 @@ heap_vacuum_eager_scan_setup(LVRelState *vacrel, VacuumParams *params)
 	 * there is no point in amortization.
 	 */
 	if (vacrel->rel_pages < VACUUM_EAGER_SCAN_REGION_SIZE)
-		return;
+		return NO_EAGER_RELSIZE;
+
+	if (pgversion == 0)
+		return NO_EAGER_MASTER;
 
 	/*
 	 * We only want to enable eager scanning if we are likely to be able to
@@ -521,23 +585,17 @@ heap_vacuum_eager_scan_setup(LVRelState *vacrel, VacuumParams *params)
 		oldest_unfrozen_before_cutoff = true;
 
 	if (!oldest_unfrozen_before_cutoff)
-		return;
+		return NO_EAGER_RELFROZENXID;
 
 	/* We have met the criteria to eagerly scan some pages. */
 
-	/*
-	 * Our success cap is EAGER_SCAN_SUCCESS_RATE of the number of all-visible
-	 * but not all-frozen blocks in the relation.
-	 */
-	visibilitymap_count(vacrel->rel, &allvisible, &allfrozen);
-
 	vacrel->eager_scan_remaining_successes =
 		(BlockNumber) (EAGER_SCAN_SUCCESS_RATE *
-					   (allvisible - allfrozen));
+					   ((*orig_rel_allvisible) - (*orig_rel_allfrozen)));
 
 	/* If every all-visible page is frozen, eager scanning is disabled. */
 	if (vacrel->eager_scan_remaining_successes == 0)
-		return;
+		return NO_EAGER_ALREADY_FROZEN;
 
 	/*
 	 * Now calculate the eager scan start block. Start at a random spot
@@ -564,6 +622,8 @@ heap_vacuum_eager_scan_setup(LVRelState *vacrel, VacuumParams *params)
 
 	vacrel->eager_scan_remaining_fails = vacrel->eager_scan_max_fails_per_region *
 		first_region_ratio;
+
+	return YES_EAGER;
 }
 
 /*
@@ -589,8 +649,13 @@ heap_vacuum_rel(Relation rel, VacuumParams *params,
 				minmulti_updated;
 	BlockNumber orig_rel_pages,
 				new_rel_pages,
+				new_real_rel_pages,
+				orig_rel_allvisible,
 				new_rel_allvisible,
-				new_rel_allfrozen;
+				new_real_rel_allvisible,
+				orig_rel_allfrozen,
+				new_rel_allfrozen,
+				new_real_rel_allfrozen;
 	PGRUsage	ru0;
 	TimestampTz starttime = 0;
 	PgStat_Counter startreadtime = 0,
@@ -599,6 +664,15 @@ heap_vacuum_rel(Relation rel, VacuumParams *params,
 	BufferUsage startbufferusage = pgBufferUsage;
 	ErrorContextCallback errcallback;
 	char	  **indnames = NULL;
+	PgStat_PendingWalStats wal_stats_before = PendingWalStats;
+	int64		delta_wal_write_time;
+	int64		delta_wal_sync_time;
+	int64		msecs_dur = 0;
+	PgStat_StatTabEntry *tabstats;
+	int64		ins_since_vacuum_before = 0;
+	int64		ins_since_vacuum_after = 0;
+	TransactionId next_xid;
+	EAGER_SCAN_TYPE es_type;
 
 	verbose = (params->options & VACOPT_VERBOSE) != 0;
 	instrument = (verbose || (AmAutoVacuumWorkerProcess() &&
@@ -667,6 +741,8 @@ heap_vacuum_rel(Relation rel, VacuumParams *params,
 	Assert(params->truncate != VACOPTVALUE_UNSPECIFIED &&
 		   params->truncate != VACOPTVALUE_AUTO);
 
+	pgBufferUsage.vacuum_delay_time_ms = 0;
+
 	/*
 	 * While VacuumFailSafeActive is reset to false before calling this, we
 	 * still need to reset it here due to recursive calls.
@@ -695,12 +771,16 @@ heap_vacuum_rel(Relation rel, VacuumParams *params,
 
 	/* Initialize page counters explicitly (be tidy) */
 	vacrel->scanned_pages = 0;
+	vacrel->skip_thresh_pages_scanned = 0;
 	vacrel->eager_scanned_pages = 0;
+	vacrel->agg_scanned_av_pages = 0;
 	vacrel->removed_pages = 0;
 	vacrel->new_frozen_tuple_pages = 0;
 	vacrel->lpdead_item_pages = 0;
 	vacrel->missed_dead_pages = 0;
 	vacrel->nonempty_pages = 0;
+	vacrel->empty_pages = 0;
+	vacrel->new_pages = 0;
 	/* dead_items_alloc allocates vacrel->dead_items later on */
 
 	/* Allocate/initialize output statistics state */
@@ -722,6 +802,9 @@ heap_vacuum_rel(Relation rel, VacuumParams *params,
 	vacrel->vm_new_visible_frozen_pages = 0;
 	vacrel->vm_new_frozen_pages = 0;
 	vacrel->rel_pages = orig_rel_pages = RelationGetNumberOfBlocks(rel);
+
+	if ((tabstats = pgstat_fetch_stat_tabentry(RelationGetRelid(rel))) != NULL)
+		ins_since_vacuum_before = tabstats->ins_since_vacuum;
 
 	/*
 	 * Get cutoffs that determine which deleted tuples are considered DEAD,
@@ -769,7 +852,8 @@ heap_vacuum_rel(Relation rel, VacuumParams *params,
 	 * whether or not the vacuum must be aggressive, because only normal
 	 * vacuums use the eager scan algorithm.
 	 */
-	heap_vacuum_eager_scan_setup(vacrel, params);
+	es_type = heap_vacuum_eager_scan_setup(vacrel, params, &orig_rel_allvisible, &orig_rel_allfrozen);
+	vacrel->original_eager_scan_success_limit = vacrel->eager_scan_remaining_successes;
 
 	if (verbose)
 	{
@@ -864,6 +948,8 @@ heap_vacuum_rel(Relation rel, VacuumParams *params,
 	 */
 	new_rel_pages = vacrel->rel_pages;	/* After possible rel truncation */
 	visibilitymap_count(rel, &new_rel_allvisible, &new_rel_allfrozen);
+	new_real_rel_allvisible = new_rel_allvisible;
+	new_real_rel_allfrozen = new_rel_allfrozen;
 	if (new_rel_allvisible > new_rel_pages)
 		new_rel_allvisible = new_rel_pages;
 
@@ -873,6 +959,8 @@ heap_vacuum_rel(Relation rel, VacuumParams *params,
 	 */
 	if (new_rel_allfrozen > new_rel_allvisible)
 		new_rel_allfrozen = new_rel_allvisible;
+
+	new_real_rel_pages = RelationGetNumberOfBlocks(rel);
 
 	/*
 	 * Now actually update rel's pg_class entry.
@@ -924,8 +1012,10 @@ heap_vacuum_rel(Relation rel, VacuumParams *params,
 			int64		total_blks_hit;
 			int64		total_blks_read;
 			int64		total_blks_dirtied;
+			int64		total_blks_dirtied_at_all;
 
 			TimestampDifference(starttime, endtime, &secs_dur, &usecs_dur);
+			msecs_dur = (secs_dur * 1000) + (usecs_dur / 1000);
 			memset(&walusage, 0, sizeof(WalUsage));
 			WalUsageAccumDiff(&walusage, &pgWalUsage, &startwalusage);
 			memset(&bufferusage, 0, sizeof(BufferUsage));
@@ -937,6 +1027,10 @@ heap_vacuum_rel(Relation rel, VacuumParams *params,
 				bufferusage.local_blks_read;
 			total_blks_dirtied = bufferusage.shared_blks_dirtied +
 				bufferusage.local_blks_dirtied;
+			total_blks_dirtied_at_all = bufferusage.shared_blks_dirtied_at_all;
+
+			if ((tabstats = pgstat_fetch_stat_tabentry(RelationGetRelid(rel))) != NULL)
+				ins_since_vacuum_after = tabstats->ins_since_vacuum;
 
 			initStringInfo(&buf);
 			if (verbose)
@@ -973,14 +1067,40 @@ heap_vacuum_rel(Relation rel, VacuumParams *params,
 							 vacrel->relnamespace,
 							 vacrel->relname,
 							 vacrel->num_index_scans);
-			appendStringInfo(&buf, _("pages: %u removed, %u remain, %u scanned (%.2f%% of total), %u eager scanned\n"),
+			appendStringInfo(&buf, _("vacuum start time: %s. duration: %ld seconds (msecs: %ld).\n"),
+							 timestamptz_to_str(starttime),
+							 secs_dur,
+							 msecs_dur
+				);
+			appendStringInfo(&buf, _("pages: %u removed, %u remain, %u scanned (%.2f%% of total), %u eagerly scanned (%.2f%% of scanned), %u SPT scanned, %u agg scanned.\n"),
 							 vacrel->removed_pages,
 							 new_rel_pages,
 							 vacrel->scanned_pages,
 							 orig_rel_pages == 0 ? 100.0 :
 							 100.0 * vacrel->scanned_pages /
 							 orig_rel_pages,
-							 vacrel->eager_scanned_pages);
+							 vacrel->eager_scanned_pages,
+							 vacrel->scanned_pages == 0 ? 100.0 :
+							 100.0 * vacrel->eager_scanned_pages /
+							 vacrel->scanned_pages,
+							 vacrel->skip_thresh_pages_scanned,
+							 vacrel->agg_scanned_av_pages);
+			switch (es_type)
+			{
+				case NO_EAGER_RELSIZE:
+					appendStringInfo(&buf, "no eager scan bc relsize. ");
+					break;
+				case NO_EAGER_RELFROZENXID:
+					appendStringInfo(&buf, "no eager scan bc relfrozenxid too young. ");
+					break;
+				case NO_EAGER_ALREADY_FROZEN:
+					appendStringInfo(&buf, "no eager scan bc already frozen. ");
+					break;
+				default:
+					break;
+			}
+			appendStringInfo(&buf, _("new pages: %d. empty pages: %d\n"), vacrel->new_pages,
+							 vacrel->empty_pages);
 			appendStringInfo(&buf,
 							 _("tuples: %lld removed, %lld remain, %lld are dead but not yet removable\n"),
 							 (long long) vacrel->tuples_deleted,
@@ -991,11 +1111,13 @@ heap_vacuum_rel(Relation rel, VacuumParams *params,
 								 _("tuples missed: %lld dead from %u pages not removed due to cleanup lock contention\n"),
 								 (long long) vacrel->missed_dead_tuples,
 								 vacrel->missed_dead_pages);
-			diff = (int32) (ReadNextTransactionId() -
-							vacrel->cutoffs.OldestXmin);
+			next_xid = ReadNextTransactionId();
+			diff = (int32) (next_xid - vacrel->cutoffs.OldestXmin);
 			appendStringInfo(&buf,
-							 _("removable cutoff: %u, which was %d XIDs old when operation ended\n"),
-							 vacrel->cutoffs.OldestXmin, diff);
+							 _("removable cutoff: %u, which was %d XIDs old when operation ended. FreezeLimit: %u, which was %d XIDs old. \n"),
+							 vacrel->cutoffs.OldestXmin, diff,
+							 vacrel->cutoffs.FreezeLimit,
+							 (int32) (next_xid - vacrel->cutoffs.FreezeLimit));
 			if (frozenxid_updated)
 			{
 				diff = (int32) (vacrel->NewRelfrozenXid -
@@ -1004,6 +1126,8 @@ heap_vacuum_rel(Relation rel, VacuumParams *params,
 								 _("new relfrozenxid: %u, which is %d XIDs ahead of previous value\n"),
 								 vacrel->NewRelfrozenXid, diff);
 			}
+			else
+				appendStringInfo(&buf, _("current relfrozenxid: %u\n"), vacrel->cutoffs.relfrozenxid);
 			if (minmulti_updated)
 			{
 				diff = (int32) (vacrel->NewRelminMxid -
@@ -1025,6 +1149,51 @@ heap_vacuum_rel(Relation rel, VacuumParams *params,
 							 vacrel->vm_new_visible_frozen_pages +
 							 vacrel->vm_new_frozen_pages,
 							 vacrel->vm_new_frozen_pages);
+
+			appendStringInfo(&buf, _("vacuum start: all-visible pages: %d, all-frozen pages: %d, pages: %d. AVnAF: %d.\nvacuum end: all-visible pages: %d, all-frozen pages: %d, pages: %d. AVnAF: %d.\nins_since_vacuum_before: %ld. ins_since_vacuum_after: %ld. diff: %ld.\n"),
+							 orig_rel_allvisible,
+							 orig_rel_allfrozen,
+							 orig_rel_pages,
+							 orig_rel_allvisible - orig_rel_allfrozen,
+							 new_real_rel_allvisible,
+							 new_real_rel_allfrozen,
+							 new_real_rel_pages,
+							 new_real_rel_allvisible - new_real_rel_allfrozen,
+							 ins_since_vacuum_before,
+							 ins_since_vacuum_after,
+							 ins_since_vacuum_after - ins_since_vacuum_before);
+			if (vacrel->aggressive)
+				appendStringInfo(&buf, _("agg scanned av pages: %d of %d AVnAF pages in rel.\n"),
+								vacrel->agg_scanned_av_pages,
+								orig_rel_allvisible - orig_rel_allfrozen);
+			else
+				appendStringInfo(&buf, _("eagerly scanned: %d of %d AVnAF pages in rel. success freezing: %d. failed freezing: %d.\nsuccess rate: %d%%. hit eager scan fail limit: %d, success limit: %d.\nmax eager scan success: %d. eager scan fail seg size: %d\n"),
+								vacrel->eager_scanned_pages,
+								orig_rel_allvisible - orig_rel_allfrozen,
+								vacrel->original_eager_scan_success_limit - vacrel->eager_scan_remaining_successes,
+								vacrel->eager_scanned_failed_frozen,
+								vacrel->eager_scanned_pages <= 0 ? 0 :
+								((int) (((double) (vacrel->original_eager_scan_success_limit - vacrel->eager_scan_remaining_successes) /
+										vacrel->eager_scanned_pages) * 100)),
+								vacrel->eager_scan_hit_fail_threshold,
+								vacrel->eager_scanned_pages <= 0 ? 0 :
+								vacrel->eager_scan_remaining_successes == 0,
+								vacrel->original_eager_scan_success_limit,
+								Min(RELSEG_SIZE, (orig_rel_pages / 4)));
+			appendStringInfo(&buf, _("first ES frz success: block %d with max xmin %u which was %d xids old.\nfirst ES frz failure: block %d with max xmin %u which was %d xids old.\nlast ES frz success: block %d with max xmin %u which was %d xids old.\nlast ES frz failure: block %d with max xmin %u which was %d xids old.\n"),
+							 vacrel->first_success.blockno,
+							 vacrel->first_success.max_xmin_on_block,
+							 (int32) (vacrel->first_success.xid - vacrel->first_success.max_xmin_on_block),
+							 vacrel->first_failure.blockno,
+							 vacrel->first_failure.max_xmin_on_block,
+							 (int32) (vacrel->first_failure.xid - vacrel->first_failure.max_xmin_on_block),
+							 vacrel->last_success.blockno,
+							 vacrel->last_success.max_xmin_on_block,
+							 (int32) (vacrel->last_success.xid -= vacrel->last_success.max_xmin_on_block),
+							 vacrel->last_failure.blockno,
+							 vacrel->last_failure.max_xmin_on_block,
+							 (int32) (vacrel->last_failure.xid -= vacrel->last_failure.max_xmin_on_block));
+
 			if (vacrel->do_index_vacuuming)
 			{
 				if (vacrel->nindexes == 0 || vacrel->num_index_scans == 0)
@@ -1068,8 +1237,8 @@ heap_vacuum_rel(Relation rel, VacuumParams *params,
 				double		read_ms = (double) (pgStatBlockReadTime - startreadtime) / 1000;
 				double		write_ms = (double) (pgStatBlockWriteTime - startwritetime) / 1000;
 
-				appendStringInfo(&buf, _("I/O timings: read: %.3f ms, write: %.3f ms\n"),
-								 read_ms, write_ms);
+				appendStringInfo(&buf, _("I/O timings: read: %.3f ms, write: %.3f ms. approx time spent in vacuum delay: %ld ms.\n"),
+								 read_ms, write_ms, (int64) pgBufferUsage.vacuum_delay_time_ms);
 			}
 			if (secs_dur > 0 || usecs_dur > 0)
 			{
@@ -1081,15 +1250,25 @@ heap_vacuum_rel(Relation rel, VacuumParams *params,
 			appendStringInfo(&buf, _("avg read rate: %.3f MB/s, avg write rate: %.3f MB/s\n"),
 							 read_rate, write_rate);
 			appendStringInfo(&buf,
-							 _("buffer usage: %lld hits, %lld reads, %lld dirtied\n"),
+							 _("buffer usage: %lld hits, %lld reads, %lld newly dirtied, %lld dirtied.\n"),
 							 (long long) total_blks_hit,
 							 (long long) total_blks_read,
-							 (long long) total_blks_dirtied);
+							 (long long) total_blks_dirtied,
+							 (long long) total_blks_dirtied_at_all);
+			delta_wal_write_time = INSTR_TIME_GET_MILLISEC(PendingWalStats.wal_write_time) -
+				INSTR_TIME_GET_MILLISEC(wal_stats_before.wal_write_time);
+			delta_wal_sync_time = INSTR_TIME_GET_MILLISEC(PendingWalStats.wal_sync_time) -
+				INSTR_TIME_GET_MILLISEC(wal_stats_before.wal_sync_time);
 			appendStringInfo(&buf,
-							 _("WAL usage: %lld records, %lld full page images, %llu bytes\n"),
+							 _("WAL usage: %lld records, %lld full page images, %llu bytes.\nwal_buffers_full: %ld. wal writes: %ld. wal write time ms: %ld. wal syncs: %ld. wal sync time ms: %ld.\n"),
 							 (long long) walusage.wal_records,
 							 (long long) walusage.wal_fpi,
-							 (unsigned long long) walusage.wal_bytes);
+							 (unsigned long long) walusage.wal_bytes,
+							 PendingWalStats.wal_buffers_full - wal_stats_before.wal_buffers_full,
+							 PendingWalStats.wal_write - wal_stats_before.wal_write,
+							 delta_wal_write_time,
+							 PendingWalStats.wal_sync - wal_stats_before.wal_sync,
+							 delta_wal_sync_time);
 			appendStringInfo(&buf, _("system usage: %s"), pg_rusage_show(&ru0));
 
 			ereport(verbose ? INFO : LOG,
@@ -1107,6 +1286,7 @@ heap_vacuum_rel(Relation rel, VacuumParams *params,
 		if (instrument)
 			pfree(indnames[i]);
 	}
+	pgBufferUsage.vacuum_delay_time_ms = 0;
 }
 
 /*
@@ -1184,6 +1364,7 @@ lazy_scan_heap(LVRelState *vacrel)
 		bool		has_lpdead_items;
 		bool		vm_page_frozen = false;
 		bool		got_cleanup_lock = false;
+		TransactionId max_xid_on_page = InvalidTransactionId;
 
 		vacrel->scanned_pages++;
 
@@ -1282,7 +1463,8 @@ lazy_scan_heap(LVRelState *vacrel)
 		 * for a cleanup lock and call lazy_scan_prune().
 		 */
 		if (!got_cleanup_lock &&
-			!lazy_scan_noprune(vacrel, buf, blkno, page, &has_lpdead_items))
+			!lazy_scan_noprune(vacrel, buf, blkno, page, &has_lpdead_items,
+							   &max_xid_on_page))
 		{
 			/*
 			 * lazy_scan_noprune could not do all required processing.  Wait
@@ -1310,7 +1492,7 @@ lazy_scan_heap(LVRelState *vacrel)
 		if (got_cleanup_lock)
 			lazy_scan_prune(vacrel, buf, blkno, page,
 							vmbuffer, all_visible_according_to_vm,
-							&has_lpdead_items, &vm_page_frozen);
+							&has_lpdead_items, &vm_page_frozen, &max_xid_on_page);
 
 		/*
 		 * Count an eagerly scanned page as a failure or a success.
@@ -1322,6 +1504,30 @@ lazy_scan_heap(LVRelState *vacrel)
 
 			if (vm_page_frozen)
 			{
+				if (vacrel->original_eager_scan_success_limit > 0)
+				{
+					/* the first success */
+					if (vacrel->original_eager_scan_success_limit ==
+						vacrel->eager_scan_remaining_successes)
+					{
+						TransactionId nextxid = ReadNextTransactionId();
+
+						vacrel->first_success.max_xmin_on_block = max_xid_on_page;
+						vacrel->first_success.blockno = blkno;
+						vacrel->first_success.xid = nextxid;
+						/* just in case we only have one success */
+						vacrel->last_success.max_xmin_on_block = max_xid_on_page;
+						vacrel->last_success.blockno = blkno;
+						vacrel->last_success.xid = nextxid;
+					}
+					else
+					{
+						vacrel->last_success.max_xmin_on_block = max_xid_on_page;
+						vacrel->last_success.blockno = blkno;
+						vacrel->last_success.xid = ReadNextTransactionId();
+					}
+				}
+
 				Assert(vacrel->eager_scan_remaining_successes > 0);
 				vacrel->eager_scan_remaining_successes--;
 
@@ -1345,8 +1551,32 @@ lazy_scan_heap(LVRelState *vacrel)
 			}
 			else
 			{
+				TransactionId nextxid = ReadNextTransactionId();
+
+				/* first failure */
+				if (vacrel->eager_scanned_failed_frozen == 0)
+				{
+					vacrel->first_failure.max_xmin_on_block = max_xid_on_page;
+					vacrel->first_failure.blockno = blkno;
+					vacrel->first_failure.xid = nextxid;
+					/* just in case we only have one failure */
+					vacrel->last_failure.max_xmin_on_block = max_xid_on_page;
+					vacrel->last_failure.blockno = blkno;
+					vacrel->last_failure.xid = nextxid;
+				}
+				else
+				{
+					vacrel->last_failure.max_xmin_on_block = max_xid_on_page;
+					vacrel->last_failure.blockno = blkno;
+					vacrel->last_failure.xid = nextxid;
+				}
+
 				Assert(vacrel->eager_scan_remaining_fails > 0);
 				vacrel->eager_scan_remaining_fails--;
+				if (vacrel->eager_scan_remaining_fails == 0)
+					vacrel->eager_scan_hit_fail_threshold++;
+
+				vacrel->eager_scanned_failed_frozen++;
 			}
 		}
 
@@ -1530,6 +1760,7 @@ heap_vac_scan_next_block(LVRelState *vacrel, BlockNumber *blkno,
 		 */
 		*blkno = vacrel->current_block = next_block;
 		*all_visible_according_to_vm = true;
+		vacrel->skip_thresh_pages_scanned++;
 		return true;
 	}
 	else
@@ -1545,6 +1776,8 @@ heap_vac_scan_next_block(LVRelState *vacrel, BlockNumber *blkno,
 		*was_eager_scanned = vacrel->next_unskippable_eager_scanned;
 		if (*was_eager_scanned)
 			vacrel->eager_scanned_pages++;
+		else if (*all_visible_according_to_vm)
+			vacrel->agg_scanned_av_pages++;
 		return true;
 	}
 }
@@ -1725,6 +1958,7 @@ lazy_scan_new_or_empty(LVRelState *vacrel, Buffer buf, BlockNumber blkno,
 			RecordPageWithFreeSpace(vacrel->rel, blkno, freespace);
 		}
 
+		vacrel->new_pages++;
 		return true;
 	}
 
@@ -1801,6 +2035,7 @@ lazy_scan_new_or_empty(LVRelState *vacrel, Buffer buf, BlockNumber blkno,
 		freespace = PageGetHeapFreeSpace(page);
 		UnlockReleaseBuffer(buf);
 		RecordPageWithFreeSpace(vacrel->rel, blkno, freespace);
+		vacrel->empty_pages++;
 		return true;
 	}
 
@@ -1840,7 +2075,8 @@ lazy_scan_prune(LVRelState *vacrel,
 				Buffer vmbuffer,
 				bool all_visible_according_to_vm,
 				bool *has_lpdead_items,
-				bool *vm_page_frozen)
+				bool *vm_page_frozen,
+				TransactionId *max_xid_on_page)
 {
 	Relation	rel = vacrel->rel;
 	PruneFreezeResult presult;
@@ -1867,11 +2103,14 @@ lazy_scan_prune(LVRelState *vacrel,
 	if (vacrel->nindexes == 0)
 		prune_options |= HEAP_PAGE_PRUNE_MARK_UNUSED_NOW;
 
+	presult.max_xid_on_page = InvalidTransactionId;
+
 	heap_page_prune_and_freeze(rel, buf, vacrel->vistest, prune_options,
 							   &vacrel->cutoffs, &presult, PRUNE_VACUUM_SCAN,
 							   &vacrel->offnum,
 							   &vacrel->NewRelfrozenXid, &vacrel->NewRelminMxid);
 
+	*max_xid_on_page = presult.max_xid_on_page;
 	Assert(MultiXactIdIsValid(vacrel->NewRelminMxid));
 	Assert(TransactionIdIsValid(vacrel->NewRelfrozenXid));
 
@@ -1942,6 +2181,8 @@ lazy_scan_prune(LVRelState *vacrel,
 	/* Can't truncate this page */
 	if (presult.hastup)
 		vacrel->nonempty_pages = blkno + 1;
+	else
+		vacrel->empty_pages++;
 
 	/* Did we find LP_DEAD items? */
 	*has_lpdead_items = (presult.lpdead_items > 0);
@@ -2130,7 +2371,8 @@ lazy_scan_noprune(LVRelState *vacrel,
 				  Buffer buf,
 				  BlockNumber blkno,
 				  Page page,
-				  bool *has_lpdead_items)
+				  bool *has_lpdead_items,
+				  TransactionId *max_xid_on_page)
 {
 	OffsetNumber offnum,
 				maxoff;
@@ -2140,6 +2382,7 @@ lazy_scan_noprune(LVRelState *vacrel,
 				missed_dead_tuples;
 	bool		hastup;
 	HeapTupleHeader tupleheader;
+	TransactionId xmin;
 	TransactionId NoFreezePageRelfrozenXid = vacrel->NewRelfrozenXid;
 	MultiXactId NoFreezePageRelminMxid = vacrel->NewRelminMxid;
 	OffsetNumber deadoffsets[MaxHeapTuplesPerPage];
@@ -2185,6 +2428,10 @@ lazy_scan_noprune(LVRelState *vacrel,
 
 		hastup = true;			/* page prevents rel truncation */
 		tupleheader = (HeapTupleHeader) PageGetItem(page, itemid);
+		xmin = HeapTupleHeaderGetXmin(tupleheader);
+		if (TransactionIdIsNormal(xmin) &&
+			TransactionIdFollows(xmin, *max_xid_on_page))
+			*max_xid_on_page = xmin;
 		if (heap_tuple_should_freeze(tupleheader, &vacrel->cutoffs,
 									 &NoFreezePageRelfrozenXid,
 									 &NoFreezePageRelminMxid))

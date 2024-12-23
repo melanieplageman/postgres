@@ -495,6 +495,7 @@ heap_page_prune_and_freeze(Relation relation, Buffer buffer,
 	{
 		ItemId		itemid = PageGetItemId(page, offnum);
 		HeapTupleHeader htup;
+		TransactionId xmin;
 
 		/*
 		 * Set the offset number so that we can display it along with any
@@ -544,6 +545,11 @@ heap_page_prune_and_freeze(Relation relation, Buffer buffer,
 
 		prstate.htsv[offnum] = heap_prune_satisfies_vacuum(&prstate, &tup,
 														   buffer);
+
+		xmin = HeapTupleHeaderGetRawXmin(htup);
+		if (TransactionIdIsNormal(xmin) &&
+			TransactionIdFollows(xmin, presult->max_xid_on_page))
+			presult->max_xid_on_page = xmin;
 
 		if (!HeapTupleHeaderIsHeapOnly(htup))
 			prstate.root_items[prstate.nroot_items++] = offnum;
