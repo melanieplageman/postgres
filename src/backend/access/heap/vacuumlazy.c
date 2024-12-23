@@ -341,6 +341,19 @@ typedef struct LVRelState
 	BlockNumber missed_dead_pages;	/* # pages with missed dead tuples */
 	BlockNumber nonempty_pages; /* actually, last nonempty page + 1 */
 
+	BlockNumber eager_page_freezes; /* pages eagerly frozen bc fpi */
+	BlockNumber nofrz_nofpi;
+	BlockNumber nofrz_partial;
+	BlockNumber nofrz_min_age;
+	BlockNumber nofrz_eager_scanned_min_age;
+
+	/*
+	 * Froze some tuples because of min age but since not all were frozen,
+	 * could not set the page all-frozen.
+	 */
+	BlockNumber nofrz_min_age_partial;
+	BlockNumber nofrz_min_age_partial_es;
+
 	/* Statistics output by us, for table */
 	double		new_rel_tuples; /* new estimated total # of tuples */
 	double		new_live_tuples;	/* new estimated total # of live tuples */
@@ -802,6 +815,13 @@ heap_vacuum_rel(Relation rel, VacuumParams *params,
 	vacrel->vm_new_visible_frozen_pages = 0;
 	vacrel->vm_new_frozen_pages = 0;
 	vacrel->rel_pages = orig_rel_pages = RelationGetNumberOfBlocks(rel);
+	vacrel->eager_page_freezes = 0;
+	vacrel->nofrz_nofpi = 0;
+	vacrel->nofrz_partial = 0;
+	vacrel->nofrz_min_age = 0;
+	vacrel->nofrz_min_age_partial = 0;
+	vacrel->nofrz_min_age_partial_es = 0;
+	vacrel->nofrz_eager_scanned_min_age = 0;
 
 	if ((tabstats = pgstat_fetch_stat_tabentry(RelationGetRelid(rel))) != NULL)
 		ins_since_vacuum_before = tabstats->ins_since_vacuum;
@@ -975,21 +995,6 @@ heap_vacuum_rel(Relation rel, VacuumParams *params,
 						vacrel->NewRelfrozenXid, vacrel->NewRelminMxid,
 						&frozenxid_updated, &minmulti_updated, false);
 
-	/*
-	 * Report results to the cumulative stats system, too.
-	 *
-	 * Deliberately avoid telling the stats system about LP_DEAD items that
-	 * remain in the table due to VACUUM bypassing index and heap vacuuming.
-	 * ANALYZE will consider the remaining LP_DEAD items to be dead "tuples".
-	 * It seems like a good idea to err on the side of not vacuuming again too
-	 * soon in cases where the failsafe prevented significant amounts of heap
-	 * vacuuming.
-	 */
-	pgstat_report_vacuum(RelationGetRelid(rel),
-						 rel->rd_rel->relisshared,
-						 Max(vacrel->new_live_tuples, 0),
-						 vacrel->recently_dead_tuples +
-						 vacrel->missed_dead_tuples);
 	pgstat_progress_end_command();
 
 	if (instrument)
@@ -1277,6 +1282,36 @@ heap_vacuum_rel(Relation rel, VacuumParams *params,
 		}
 	}
 
+	/*
+	 * Report results to the cumulative stats system, too.
+	 *
+	 * Deliberately avoid telling the stats system about LP_DEAD items that
+	 * remain in the table due to VACUUM bypassing index and heap vacuuming.
+	 * ANALYZE will consider the remaining LP_DEAD items to be dead "tuples".
+	 * It seems like a good idea to err on the side of not vacuuming again too
+	 * soon in cases where the failsafe prevented significant amounts of heap
+	 * vacuuming.
+	 */
+	pgstat_report_vacuum(RelationGetRelid(rel),
+						 rel->rd_rel->relisshared,
+						 vacrel->aggressive,
+						 Max(vacrel->new_live_tuples, 0),
+						 vacrel->recently_dead_tuples +
+						 vacrel->missed_dead_tuples,
+						 vacrel->vm_new_frozen_pages + vacrel->vm_new_visible_frozen_pages,
+						 vacrel->eager_scanned_pages,
+						 vacrel->agg_scanned_av_pages,
+						 vacrel->skip_thresh_pages_scanned,
+						 vacrel->new_frozen_tuple_pages,
+						 vacrel->eager_page_freezes,
+						 vacrel->nofrz_nofpi,
+						 vacrel->nofrz_partial,
+						 vacrel->nofrz_min_age,
+						 vacrel->nofrz_eager_scanned_min_age,
+						 msecs_dur,
+						 pgBufferUsage.vacuum_delay_time_ms,
+						 vacrel->scanned_pages);
+
 	/* Cleanup index statistics and index names */
 	for (int i = 0; i < vacrel->nindexes; i++)
 	{
@@ -1445,6 +1480,8 @@ lazy_scan_heap(LVRelState *vacrel)
 
 		if (!got_cleanup_lock)
 			LockBuffer(buf, BUFFER_LOCK_SHARE);
+
+		vacrel->cutoffs.was_eager_scanned = was_eager_scanned;
 
 		/* Check for new or empty pages before lazy_scan_[no]prune call */
 		if (lazy_scan_new_or_empty(vacrel, buf, blkno, page, !got_cleanup_lock,
@@ -2103,6 +2140,13 @@ lazy_scan_prune(LVRelState *vacrel,
 	if (vacrel->nindexes == 0)
 		prune_options |= HEAP_PAGE_PRUNE_MARK_UNUSED_NOW;
 
+	presult.eager_page_freezes = 0;
+	presult.nofrz_partial = 0;
+	presult.nofrz_nofpi = 0;
+	presult.nofrz_min_age = 0;
+	presult.nofrz_eager_scanned_min_age = 0;
+	presult.nofrz_min_age_partial = 0;
+	presult.nofrz_min_age_partial_es = 0;
 	presult.max_xid_on_page = InvalidTransactionId;
 
 	heap_page_prune_and_freeze(rel, buf, vacrel->vistest, prune_options,
@@ -2177,6 +2221,14 @@ lazy_scan_prune(LVRelState *vacrel,
 	vacrel->lpdead_items += presult.lpdead_items;
 	vacrel->live_tuples += presult.live_tuples;
 	vacrel->recently_dead_tuples += presult.recently_dead_tuples;
+
+	vacrel->eager_page_freezes += presult.eager_page_freezes;
+	vacrel->nofrz_partial += presult.nofrz_partial;
+	vacrel->nofrz_nofpi += presult.nofrz_nofpi;
+	vacrel->nofrz_min_age += presult.nofrz_min_age;
+	vacrel->nofrz_eager_scanned_min_age += presult.nofrz_eager_scanned_min_age;
+	vacrel->nofrz_min_age_partial += presult.nofrz_min_age_partial;
+	vacrel->nofrz_min_age_partial_es += presult.nofrz_min_age_partial_es;
 
 	/* Can't truncate this page */
 	if (presult.hastup)
@@ -2386,6 +2438,7 @@ lazy_scan_noprune(LVRelState *vacrel,
 	TransactionId NoFreezePageRelfrozenXid = vacrel->NewRelfrozenXid;
 	MultiXactId NoFreezePageRelminMxid = vacrel->NewRelminMxid;
 	OffsetNumber deadoffsets[MaxHeapTuplesPerPage];
+	bool		even_one_tuple_older = false;
 
 	Assert(BufferGetBlockNumber(buf) == blkno);
 
@@ -2436,6 +2489,7 @@ lazy_scan_noprune(LVRelState *vacrel,
 									 &NoFreezePageRelfrozenXid,
 									 &NoFreezePageRelminMxid))
 		{
+			even_one_tuple_older = true;
 			/* Tuple with XID < FreezeLimit (or MXID < MultiXactCutoff) */
 			if (vacrel->aggressive)
 			{
@@ -2567,6 +2621,18 @@ lazy_scan_noprune(LVRelState *vacrel,
 	*has_lpdead_items = (lpdead_items > 0);
 
 	/* Caller won't need to call lazy_scan_prune with same page */
+	if (even_one_tuple_older)
+	{
+		vacrel->nofrz_min_age_partial++;
+		if (vacrel->cutoffs.was_eager_scanned)
+			vacrel->nofrz_min_age_partial_es++;
+	}
+	else
+	{
+		vacrel->nofrz_min_age++;
+		if (vacrel->cutoffs.was_eager_scanned)
+			vacrel->nofrz_eager_scanned_min_age++;
+	}
 	return true;
 }
 
