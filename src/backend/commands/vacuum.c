@@ -69,6 +69,7 @@ int			vacuum_multixact_freeze_min_age;
 int			vacuum_multixact_freeze_table_age;
 int			vacuum_failsafe_age;
 int			vacuum_multixact_failsafe_age;
+int			vacuum_eager_scan_max_fails;
 
 /*
  * Variables for cost-based vacuum delay. The defaults differ between
@@ -404,6 +405,9 @@ ExecVacuum(ParseState *pstate, VacuumStmt *vacstmt, bool isTopLevel)
 
 	/* user-invoked vacuum uses VACOPT_VERBOSE instead of log_min_duration */
 	params.log_min_duration = -1;
+
+	/* Later we check if a reloption override was specified */
+	params.eager_scan_max_fails = vacuum_eager_scan_max_fails;
 
 	/*
 	 * Create special memory context for cross-transaction storage.
@@ -2170,6 +2174,15 @@ vacuum_rel(Oid relid, RangeVar *relation, VacuumParams *params,
 			params->index_cleanup = VACOPTVALUE_DISABLED;
 		}
 	}
+
+	/*
+	 * Check if the vacuum_eager_scan_max_fails table storage parameter was
+	 * specified. This overrides the GUC value.
+	 */
+	if (rel->rd_options != NULL &&
+		((StdRdOptions *) rel->rd_options)->vacuum_eager_scan_max_fails >= 0)
+		params->eager_scan_max_fails =
+			((StdRdOptions *) rel->rd_options)->vacuum_eager_scan_max_fails;
 
 	/*
 	 * Set truncate option based on truncate reloption if it wasn't specified

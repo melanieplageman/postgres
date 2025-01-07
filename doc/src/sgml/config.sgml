@@ -9116,6 +9116,26 @@ COPY postgres_log FROM '/full/path/to/logfile.csv' WITH csv;
        </listitem>
       </varlistentry>
 
+     <varlistentry id="guc-vacuum-eager-scan-max-fails" xreflabel="vacuum_eager_scan_max_fails">
+      <term><varname>vacuum_eager_scan_max_fails</varname> (<type>integer</type>)
+      <indexterm>
+       <primary><varname>vacuum_eager_scan_max_fails</varname> configuration parameter</primary>
+      </indexterm>
+      </term>
+      <listitem>
+       <para>
+        Specifies the maximum number of all-visible pages that
+        <command>VACUUM</command> may scan and fail to set all-frozen in the
+        visibility map before disabling eager scanning until the next region
+        (currently 4096 blocks) of the relation. A value of 0 disables eager
+        scanning altogether. The default is 128. This parameter can be set in
+        postgresql.conf or on the server command line but is overridden for
+        individual tables by changing the
+        <link linkend="reloption-vacuum-eager-scan-max-fails">corresponding table storage parameter</link>.
+       </para>
+      </listitem>
+     </varlistentry>
+
      </variablelist>
     </sect2>
    </sect1>

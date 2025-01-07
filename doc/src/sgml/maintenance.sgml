@@ -488,22 +488,34 @@
    </para>
 
    <para>
-    <command>VACUUM</command> uses the <link linkend="storage-vm">visibility map</link>
-    to determine which pages of a table must be scanned.  Normally, it
-    will skip pages that don't have any dead row versions even if those pages
+    <command>VACUUM</command> uses the <link linkend="storage-vm">visibility
+    map</link> to determine which pages of a table must be scanned.  Normally,
+    it may skip pages that don't have any dead row versions even if those pages
     might still have row versions with old XID values.  Therefore, normal
-    <command>VACUUM</command>s won't always freeze every old row version in the table.
-    When that happens, <command>VACUUM</command> will eventually need to perform an
-    <firstterm>aggressive vacuum</firstterm>, which will freeze all eligible unfrozen
-    XID and MXID values, including those from all-visible but not all-frozen pages.
-    In practice most tables require periodic aggressive vacuuming.
+    <command>VACUUM</command>s won't always freeze every old row version in the
+    table. When that happens, <command>VACUUM</command> will eventually need to
+    perform an <firstterm>aggressive vacuum</firstterm>, which will freeze all
+    eligible unfrozen XID and MXID values, including those from all-visible but
+    not all-frozen pages. If a table is building up a backlog of all-visible
+    but not all-frozen pages, a normal vacuum may choose to scan skippable
+    pages in an effort to freeze them. Doing so decreases the number of pages
+    the next aggressive vacuum must scan. These are referred to as
+    <firstterm>eagerly scanned</firstterm> pages. Eager scanning can be tuned
+    to scan and attempt to freeze more all-visible pages by increasing <xref
+    linkend="guc-vacuum-eager-scan-max-fails"/>. Even if eager scanning has
+    kept the number of all-visible but not all-frozen pages to a minimum, most
+    tables still require periodic aggressive vacuuming.
+   </para>
+
+   <para>
     <xref linkend="guc-vacuum-freeze-table-age"/>
-    controls when <command>VACUUM</command> does that: all-visible but not all-frozen
-    pages are scanned if the number of transactions that have passed since the
-    last such scan is greater than <varname>vacuum_freeze_table_age</varname> minus
+    controls when a table is aggressively vacuumed. All all-visible but
+    not all-frozen pages are scanned if the number of transactions that
+    have passed since the last such scan is greater than
+    <varname>vacuum_freeze_table_age</varname> minus
     <varname>vacuum_freeze_min_age</varname>. Setting
-    <varname>vacuum_freeze_table_age</varname> to 0 forces <command>VACUUM</command> to
-    always use its aggressive strategy.
+    <varname>vacuum_freeze_table_age</varname> to 0 forces
+    <command>VACUUM</command> to always use its aggressive strategy.
    </para>
 
    <para>
@@ -626,10 +638,12 @@ SELECT datname, age(datfrozenxid) FROM pg_database;
    </tip>
 
    <para>
-    <command>VACUUM</command> normally only scans pages that have been modified
-    since the last vacuum, but <structfield>relfrozenxid</structfield> can only be
-    advanced when every page of the table
-    that might contain unfrozen XIDs is scanned.  This happens when
+    <command>VACUUM</command> mostly scans pages that have been modified since
+    the last vacuum. Some all-visible but not all-frozen pages are eagerly
+    scanned to try and freeze them. But the
+    <structfield>relfrozenxid</structfield> can only be advanced when every
+    page of the table that might contain unfrozen XIDs is scanned.  This
+    happens when
     <structfield>relfrozenxid</structfield> is more than
     <varname>vacuum_freeze_table_age</varname> transactions old, when
     <command>VACUUM</command>'s <literal>FREEZE</literal> option is used, or when all

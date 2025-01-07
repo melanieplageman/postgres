@@ -1931,6 +1931,21 @@ WITH ( MODULUS <replaceable class="parameter">numeric_literal</replaceable>, REM
     </listitem>
    </varlistentry>
 
+   <varlistentry id="reloption-vacuum-eager-scan-max-fails" xreflabel="vacuum_eager_scan_max_fails">
+    <term><literal>vacuum_eager_scan_max_fails</literal>, <literal>toast.vacuum_eager_scan_max_fails</literal> (<type>integer</type>)
+    <indexterm>
+     <primary><varname>vacuum_eager_scan_max_fails</varname></primary>
+     <secondary>storage parameter</secondary>
+    </indexterm>
+    </term>
+    <listitem>
+     <para>
+      Per-table value for <xref linkend="guc-vacuum-eager-scan-max-fails"/>
+      parameter.
+     </para>
+    </listitem>
+   </varlistentry>
+
    <varlistentry id="reloption-user-catalog-table" xreflabel="user_catalog_table">
     <term><literal>user_catalog_table</literal> (<type>boolean</type>)
     <indexterm>

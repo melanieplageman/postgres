@@ -232,6 +232,14 @@ typedef struct VacuumParams
 	Oid			toast_parent;	/* for privilege checks when recursing */
 
 	/*
+	 * The maximum number of all-visible pages that can be scanned and failed
+	 * to be set all-frozen before eager scanning is disabled for the current
+	 * region. Only applicable for table AMs using visibility maps. Derived
+	 * from GUC or table storage parameter. 0 if disabled.
+	 */
+	uint32		eager_scan_max_fails;
+
+	/*
 	 * The number of parallel vacuum workers.  0 by default which means choose
 	 * based on the number of indexes.  -1 indicates parallel vacuum is
 	 * disabled.
@@ -296,6 +304,21 @@ extern PGDLLIMPORT int vacuum_multixact_freeze_min_age;
 extern PGDLLIMPORT int vacuum_multixact_freeze_table_age;
 extern PGDLLIMPORT int vacuum_failsafe_age;
 extern PGDLLIMPORT int vacuum_multixact_failsafe_age;
+
+/*
+ * Relevant for vacuums implementing eager scanning. Normal vacuums may eagerly
+ * scan some all-visible but not all-frozen pages. Since the goal is to freeze
+ * these pages, an eager scan that fails to set the page all-frozen in the VM
+ * is considered to have "failed".
+ *
+ * On the assumption that different regions of the table tend to have similarly
+ * aged data, once vacuum fails to freeze vacuum_eager_scan_max_fails blocks in
+ * a region of size VACUUM_EAGER_SCAN_REGION_SIZE, it suspends eager scanning
+ * until it has progressed to another region of the table with potentially
+ * older data.
+ */
+extern PGDLLIMPORT int vacuum_eager_scan_max_fails;
+#define VACUUM_EAGER_SCAN_REGION_SIZE 4096
 
 /*
  * Maximum value for default_statistics_target and per-column statistics

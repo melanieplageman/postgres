@@ -27,6 +27,7 @@
 #include "catalog/pg_type.h"
 #include "commands/defrem.h"
 #include "commands/tablespace.h"
+#include "commands/vacuum.h"
 #include "nodes/makefuncs.h"
 #include "utils/array.h"
 #include "utils/attoptcache.h"
@@ -318,6 +319,14 @@ static relopt_int intRelOpts[] =
 			ShareUpdateExclusiveLock
 		},
 		-1, -1, INT_MAX
+	},
+	{
+		{
+			"vacuum_eager_scan_max_fails",
+			"Maximum number of all-visible pages that vacuum will eagerly scan and fail to freeze before giving up on eager scanning until the next region",
+			RELOPT_KIND_HEAP | RELOPT_KIND_TOAST,
+			ShareUpdateExclusiveLock
+		}, -1, 0, VACUUM_EAGER_SCAN_REGION_SIZE
 	},
 	{
 		{
@@ -1880,7 +1889,9 @@ default_reloptions(Datum reloptions, bool validate, relopt_kind kind)
 		{"vacuum_index_cleanup", RELOPT_TYPE_ENUM,
 		offsetof(StdRdOptions, vacuum_index_cleanup)},
 		{"vacuum_truncate", RELOPT_TYPE_BOOL,
-		offsetof(StdRdOptions, vacuum_truncate)}
+		offsetof(StdRdOptions, vacuum_truncate)},
+		{"vacuum_eager_scan_max_fails", RELOPT_TYPE_INT,
+		offsetof(StdRdOptions, vacuum_eager_scan_max_fails)}
 	};
 
 	return (bytea *) build_reloptions(reloptions, validate, kind,

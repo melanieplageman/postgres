@@ -343,6 +343,13 @@ typedef struct StdRdOptions
 	int			parallel_workers;	/* max number of parallel workers */
 	StdRdOptIndexCleanup vacuum_index_cleanup;	/* controls index vacuuming */
 	bool		vacuum_truncate;	/* enables vacuum to truncate a relation */
+
+	/*
+	 * The maximum number of all-visible pages vacuum may scan and fail to
+	 * freeze before eager scanning is disabled for the current region of the
+	 * table. 0 if disabled, -1 if unspecified.
+	 */
+	int			vacuum_eager_scan_max_fails;
 } StdRdOptions;
 
 #define HEAP_MIN_FILLFACTOR			10

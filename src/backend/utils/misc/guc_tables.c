@@ -2805,6 +2805,15 @@ struct config_int ConfigureNamesInt[] =
 		1600000000, 0, 2100000000,
 		NULL, NULL, NULL
 	},
+	{
+		{"vacuum_eager_scan_max_fails", PGC_USERSET, VACUUM_FREEZING,
+			gettext_noop("Maximum number of all-visible pages vacuum can eager scan and fail to freeze before suspending eager scanning until the next region of the table"),
+			NULL
+		},
+		&vacuum_eager_scan_max_fails,
+		128, 0, VACUUM_EAGER_SCAN_REGION_SIZE,
+		NULL, NULL, NULL
+	},
 
 	/*
 	 * See also CheckRequiredParameterValues() if this parameter changes
