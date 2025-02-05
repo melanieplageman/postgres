@@ -2262,6 +2262,29 @@ lazy_vacuum_all_indexes(LVRelState *vacrel)
 }
 
 /*
+ * Read stream callback for vacuum's third phase (second pass over the heap).
+ * Gets the next block from the TID store and returns it or InvalidBlockNumber
+ * if there are no further blocks to vacuum.
+ */
+static BlockNumber
+vacuum_reap_lp_read_stream_next(ReadStream *stream,
+								void *callback_private_data,
+								void *per_buffer_data)
+{
+	TidStoreIter *iter = callback_private_data;
+	TidStoreIterResult *iter_result;
+
+	iter_result = TidStoreIterateNext(iter);
+	if (iter_result == NULL)
+		return InvalidBlockNumber;
+
+	/* Save the TidStoreIterResult for later, so we can extract the offsets. */
+	memcpy(per_buffer_data, iter_result, sizeof(*iter_result));
+
+	return iter_result->blkno;
+}
+
+/*
  *	lazy_vacuum_heap_rel() -- second pass over the heap for two pass strategy
  *
  * This routine marks LP_DEAD items in vacrel->dead_items as LP_UNUSED. Pages
@@ -2281,6 +2304,7 @@ lazy_vacuum_all_indexes(LVRelState *vacrel)
 static void
 lazy_vacuum_heap_rel(LVRelState *vacrel)
 {
+	ReadStream *stream;
 	BlockNumber vacuumed_pages = 0;
 	Buffer		vmbuffer = InvalidBuffer;
 	LVSavedErrInfo saved_err_info;
@@ -2301,7 +2325,17 @@ lazy_vacuum_heap_rel(LVRelState *vacrel)
 							 InvalidBlockNumber, InvalidOffsetNumber);
 
 	iter = TidStoreBeginIterate(vacrel->dead_items);
-	while ((iter_result = TidStoreIterateNext(iter)) != NULL)
+
+	/* Set up the read stream */
+	stream = read_stream_begin_relation(READ_STREAM_MAINTENANCE,
+										vacrel->bstrategy,
+										vacrel->rel,
+										MAIN_FORKNUM,
+										vacuum_reap_lp_read_stream_next,
+										iter,
+										sizeof(TidStoreIterResult));
+
+	while (true)
 	{
 		BlockNumber blkno;
 		Buffer		buf;
@@ -2312,9 +2346,14 @@ lazy_vacuum_heap_rel(LVRelState *vacrel)
 
 		vacuum_delay_point();
 
-		blkno = iter_result->blkno;
-		vacrel->blkno = blkno;
+		buf = read_stream_next_buffer(stream, (void **) &iter_result);
 
+		if (!BufferIsValid(buf))
+			break;
+
+		vacrel->blkno = blkno = BufferGetBlockNumber(buf);
+
+		Assert(iter_result);
 		num_offsets = TidStoreGetBlockOffsets(iter_result, offsets, lengthof(offsets));
 		Assert(num_offsets <= lengthof(offsets));
 
@@ -2326,8 +2365,6 @@ lazy_vacuum_heap_rel(LVRelState *vacrel)
 		visibilitymap_pin(vacrel->rel, blkno, &vmbuffer);
 
 		/* We need a non-cleanup exclusive lock to mark dead_items unused */
-		buf = ReadBufferExtended(vacrel->rel, MAIN_FORKNUM, blkno, RBM_NORMAL,
-								 vacrel->bstrategy);
 		LockBuffer(buf, BUFFER_LOCK_EXCLUSIVE);
 		lazy_vacuum_heap_page(vacrel, blkno, buf, offsets,
 							  num_offsets, vmbuffer);
@@ -2340,6 +2377,8 @@ lazy_vacuum_heap_rel(LVRelState *vacrel)
 		RecordPageWithFreeSpace(vacrel->rel, blkno, freespace);
 		vacuumed_pages++;
 	}
+
+	read_stream_end(stream);
 	TidStoreEndIterate(iter);
 
 	vacrel->blkno = InvalidBlockNumber;
