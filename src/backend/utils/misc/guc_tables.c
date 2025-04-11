@@ -4065,7 +4065,7 @@ struct config_real ConfigureNamesReal[] =
 			GUC_UNIT_MS
 		},
 		&VacuumCostDelay,
-		0, 0, 100,
+		0, 0, 10000,
 		NULL, NULL, NULL
 	},
 
