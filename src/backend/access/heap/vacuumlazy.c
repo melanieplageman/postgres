@@ -202,6 +202,8 @@ typedef struct LVRelState
 	BlockNumber missed_dead_pages;	/* # pages with missed dead tuples */
 	BlockNumber nonempty_pages; /* actually, last nonempty page + 1 */
 
+	BlockNumber page_freezes; /* newly frozen pages */
+
 	/* Statistics output by us, for table */
 	double		new_rel_tuples; /* new estimated total # of tuples */
 	double		new_live_tuples;	/* new estimated total # of live tuples */
@@ -417,6 +419,7 @@ heap_vacuum_rel(Relation rel, VacuumParams *params,
 	vacrel->scanned_pages = 0;
 	vacrel->removed_pages = 0;
 	vacrel->frozen_pages = 0;
+	vacrel->page_freezes = 0;
 	vacrel->lpdead_item_pages = 0;
 	vacrel->missed_dead_pages = 0;
 	vacrel->nonempty_pages = 0;
@@ -595,7 +598,9 @@ heap_vacuum_rel(Relation rel, VacuumParams *params,
 						 rel->rd_rel->relisshared,
 						 Max(vacrel->new_live_tuples, 0),
 						 vacrel->recently_dead_tuples +
-						 vacrel->missed_dead_tuples);
+						 vacrel->missed_dead_tuples,
+						 vacrel->aggressive,
+						 vacrel->page_freezes);
 	pgstat_progress_end_command();
 
 	if (instrument)
@@ -1398,6 +1403,7 @@ lazy_scan_new_or_empty(LVRelState *vacrel, Buffer buf, BlockNumber blkno,
 							  vmbuffer, InvalidTransactionId,
 							  VISIBILITYMAP_ALL_VISIBLE | VISIBILITYMAP_ALL_FROZEN);
 			END_CRIT_SECTION();
+			vacrel->page_freezes++;
 		}
 
 		freespace = PageGetHeapFreeSpace(page);
@@ -1552,6 +1558,7 @@ lazy_scan_prune(LVRelState *vacrel,
 	if (!all_visible_according_to_vm && presult.all_visible)
 	{
 		uint8		flags = VISIBILITYMAP_ALL_VISIBLE;
+		uint8 old_flags = 0;
 
 		if (presult.all_frozen)
 		{
@@ -1574,9 +1581,12 @@ lazy_scan_prune(LVRelState *vacrel,
 		 */
 		PageSetAllVisible(page);
 		MarkBufferDirty(buf);
-		visibilitymap_set(vacrel->rel, blkno, buf, InvalidXLogRecPtr,
+		old_flags = visibilitymap_set(vacrel->rel, blkno, buf, InvalidXLogRecPtr,
 						  vmbuffer, presult.vm_conflict_horizon,
 						  flags);
+		if (((old_flags & VISIBILITYMAP_ALL_FROZEN) == 0) &&
+			presult.all_frozen)
+			vacrel->page_freezes++;
 	}
 
 	/*
@@ -1649,6 +1659,7 @@ lazy_scan_prune(LVRelState *vacrel,
 						  vmbuffer, InvalidTransactionId,
 						  VISIBILITYMAP_ALL_VISIBLE |
 						  VISIBILITYMAP_ALL_FROZEN);
+		vacrel->page_freezes++;
 	}
 }
 
@@ -2295,6 +2306,7 @@ lazy_vacuum_heap_page(LVRelState *vacrel, BlockNumber blkno, Buffer buffer,
 								 &all_frozen))
 	{
 		uint8		flags = VISIBILITYMAP_ALL_VISIBLE;
+		uint8		old_flags = 0;
 
 		if (all_frozen)
 		{
@@ -2303,8 +2315,11 @@ lazy_vacuum_heap_page(LVRelState *vacrel, BlockNumber blkno, Buffer buffer,
 		}
 
 		PageSetAllVisible(page);
-		visibilitymap_set(vacrel->rel, blkno, buffer, InvalidXLogRecPtr,
+		old_flags = visibilitymap_set(vacrel->rel, blkno, buffer, InvalidXLogRecPtr,
 						  vmbuffer, visibility_cutoff_xid, flags);
+		if (((old_flags & VISIBILITYMAP_ALL_FROZEN) == 0) &&
+			all_frozen)
+			vacrel->page_freezes++;
 	}
 
 	/* Revert to the previous phase information for error traceback */

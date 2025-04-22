@@ -345,7 +345,8 @@ pgstat_unset_accum_absorb(PgStat_Accumulator *target, PgStat_Accumulator *source
  */
 void
 pgstat_report_vacuum(Oid tableoid, bool shared,
-					 PgStat_Counter livetuples, PgStat_Counter deadtuples)
+					 PgStat_Counter livetuples, PgStat_Counter deadtuples,
+					 bool aggressive, PgStat_Counter page_freezes)
 {
 	PgStat_EntryRef *entry_ref;
 	PgStatShared_Relation *shtabentry;
@@ -391,6 +392,11 @@ pgstat_report_vacuum(Oid tableoid, bool shared,
 		tabentry->last_vacuum_time = ts;
 		tabentry->vacuum_count++;
 	}
+
+	if (aggressive)
+		tabentry->aggressive_vacuum_count++;
+
+	tabentry->page_freezes += page_freezes;
 
 	pgstat_unlock_entry(entry_ref);
 

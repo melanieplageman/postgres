@@ -576,6 +576,9 @@ typedef struct PgStat_StatTabEntry
 	TimestampTz last_autoanalyze_time;	/* autovacuum initiated */
 	PgStat_Counter autoanalyze_count;
 
+	PgStat_Counter aggressive_vacuum_count;
+	PgStat_Counter page_freezes;
+
 	/*
 	 * When a previously all-visible page in this table is modified, its
 	 * associated bits in the visibility map are unset. Then, the page's
@@ -885,7 +888,8 @@ extern void pgstat_assoc_relation(Relation rel);
 extern void pgstat_unlink_relation(Relation rel);
 
 extern void pgstat_report_vacuum(Oid tableoid, bool shared,
-								 PgStat_Counter livetuples, PgStat_Counter deadtuples);
+								 PgStat_Counter livetuples, PgStat_Counter deadtuples,
+								 bool aggressive, PgStat_Counter page_freezes);
 extern void pgstat_report_analyze(Relation rel,
 								  PgStat_Counter livetuples, PgStat_Counter deadtuples,
 								  bool resetcounter);
