@@ -367,6 +367,8 @@ heap_page_prune_and_freeze(Relation relation, Buffer buffer,
 	bool		do_freeze;
 	bool		do_prune;
 	bool		do_hint;
+	bool		hint_bit_fpi;
+	int64		fpi_before = pgWalUsage.wal_fpi;
 
 	/* Copy parameters to prstate */
 	prstate.vistest = vistest;
@@ -551,6 +553,12 @@ heap_page_prune_and_freeze(Relation relation, Buffer buffer,
 	}
 
 	/*
+	 * If checksums are enabled, heap_prune_satisfies_vacuum() may have caused
+	 * an FPI to be emitted.
+	 */
+	hint_bit_fpi = fpi_before != pgWalUsage.wal_fpi;
+
+	/*
 	 * Process HOT chains.
 	 *
 	 * We added the items to the array starting from 'maxoff', so by
@@ -688,9 +696,23 @@ heap_page_prune_and_freeze(Relation relation, Buffer buffer,
 			 */
 
 			Assert(cutoffs);
-			do_freeze = page_will_endure_if_frozen(page_lsn,
-												   cutoffs->lsn_target_freeze_duration,
-												   &cutoffs->early_unfreezes);
+
+			if (hint_bit_fpi)
+				do_freeze = true;
+			else if (do_prune)
+			{
+				if (XLogCheckBufferNeedsBackup(buffer))
+					do_freeze = true;
+			}
+			else if (do_hint)
+			{
+				if (XLogHintBitIsNeeded() && XLogCheckBufferNeedsBackup(buffer))
+					do_freeze = true;
+			}
+
+			/* do_freeze = page_will_endure_if_frozen(page_lsn, */
+			/* 									   cutoffs->lsn_target_freeze_duration, */
+			/* 									   &cutoffs->early_unfreezes); */
 		}
 	}
 
