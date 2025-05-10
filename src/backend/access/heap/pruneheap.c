@@ -118,6 +118,9 @@ typedef struct
 	int			live_tuples;
 	int			recently_dead_tuples;
 
+	/* Number of tuples on the page */
+	int			ntuples;
+
 	/* Whether or not the page makes rel truncation unsafe */
 	bool		hastup;
 
@@ -413,6 +416,7 @@ heap_page_prune_and_freeze(Relation relation, Buffer buffer,
 
 	prstate.ndeleted = 0;
 	prstate.live_tuples = 0;
+	prstate.ntuples = 0;
 	prstate.recently_dead_tuples = 0;
 	prstate.hastup = false;
 	prstate.lpdead_items = 0;
@@ -511,6 +515,9 @@ heap_page_prune_and_freeze(Relation relation, Buffer buffer,
 			heap_prune_record_unchanged_lp_unused(page, &prstate, offnum);
 			continue;
 		}
+
+		/* Count all used slots */
+		prstate.ntuples++;
 
 		if (ItemIdIsDead(itemid))
 		{
@@ -851,6 +858,7 @@ heap_page_prune_and_freeze(Relation relation, Buffer buffer,
 	presult->nnewlpdead = prstate.ndead;
 	presult->nfrozen = prstate.nfrozen;
 	presult->live_tuples = prstate.live_tuples;
+	presult->ntuples = prstate.ntuples;
 	presult->recently_dead_tuples = prstate.recently_dead_tuples;
 
 	/*

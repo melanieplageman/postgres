@@ -432,6 +432,8 @@ typedef struct PgStat_StatTabEntry
 	PgStat_Counter tuples_hot_updated;
 	PgStat_Counter tuples_newpage_updated;
 
+	PgStat_Counter tuples_removed;
+
 	PgStat_Counter live_tuples;
 	PgStat_Counter dead_tuples;
 	PgStat_Counter mod_since_analyze;
@@ -439,6 +441,8 @@ typedef struct PgStat_StatTabEntry
 
 	PgStat_Counter blocks_fetched;
 	PgStat_Counter blocks_hit;
+
+	instr_time first_vacuum_time;
 
 	TimestampTz last_vacuum_time;	/* user initiated vacuum */
 	PgStat_Counter vacuum_count;
@@ -660,7 +664,8 @@ extern void pgstat_unlink_relation(Relation rel);
 
 extern void pgstat_report_vacuum(Oid tableoid, bool shared,
 								 PgStat_Counter livetuples, PgStat_Counter deadtuples,
-								 TimestampTz starttime);
+								 PgStat_Counter tuples_removed,
+								 TimestampTz starttime, instr_time starttime_instr);
 extern void pgstat_report_analyze(Relation rel,
 								  PgStat_Counter livetuples, PgStat_Counter deadtuples,
 								  bool resetcounter, TimestampTz starttime);

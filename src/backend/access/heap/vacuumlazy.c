@@ -157,6 +157,7 @@
 #include "utils/lsyscache.h"
 #include "utils/pg_rusage.h"
 #include "utils/timestamp.h"
+#include "utils/pgstat_internal.h"
 
 
 /*
@@ -349,12 +350,37 @@ typedef struct LVRelState
 	/* Instrumentation counters */
 	int			num_index_scans;
 	/* Counters that follow are only for scanned_pages */
-	int64		tuples_deleted; /* # deleted from table */
 	int64		tuples_frozen;	/* # newly frozen */
 	int64		lpdead_items;	/* # deleted from indexes */
 	int64		live_tuples;	/* # live tuples remaining */
 	int64		recently_dead_tuples;	/* # dead, but not yet removable */
 	int64		missed_dead_tuples; /* # removable, but not removed */
+
+	instr_time time_zero;
+	instr_time vac_start_time;
+	instr_time last_update;
+	instr_time vac_end_time;
+
+	void *last_tab_stats;
+
+	int64 tuples_processed;
+	int64 last_tuples_processed;
+
+	int64 starting_dead_tuples;
+	int64 last_dead_tuples;
+	int64 peak_dead_tuples;
+
+	int64 last_tuples_removed;
+	int64		tuples_removed; /* # deleted from table */
+
+	double smoothed_dead_rate;
+	double smoothed_removed_rate;
+
+	double dynamic_rate;
+	double target_rate;
+
+	FILE *in_prog_vac_data;
+	FILE *end_vac_data;
 
 	/* State maintained by heap_vac_scan_next_block() */
 	BlockNumber current_block;	/* last block returned */
@@ -600,6 +626,253 @@ heap_vacuum_eager_scan_setup(LVRelState *vacrel, VacuumParams *params)
 		first_region_ratio;
 }
 
+static void
+pgstat_get_dead_tuples(Relation rel, void **stats_data,
+		int64 *updated_tuples, int64 *deleted_tuples, int64 *inserted_tuples,
+		int64 *dead_tuples, int64 *removed_tuples, instr_time *time_zero)
+{
+	PgStat_StatTabEntry *tabentry;
+	PgStat_EntryRef *entry_ref;
+	const PgStat_KindInfo *kind_info = pgstat_get_kind_info(PGSTAT_KIND_RELATION);
+
+	entry_ref = pgstat_get_entry_ref(PGSTAT_KIND_RELATION, MyDatabaseId,
+			RelationGetRelid(rel), false, NULL);
+
+	if (!entry_ref)
+		return;
+	(void) pgstat_lock_entry_shared(entry_ref, false);
+	if ((*stats_data) == NULL)
+		*stats_data = palloc(kind_info->shared_data_len);
+	memcpy((*stats_data),
+		   pgstat_get_entry_data(PGSTAT_KIND_RELATION, entry_ref->shared_stats),
+		   kind_info->shared_data_len);
+	pgstat_unlock_entry(entry_ref);
+
+	tabentry = (PgStat_StatTabEntry *) (*stats_data);
+	*updated_tuples = tabentry->tuples_updated;
+	*deleted_tuples = tabentry->tuples_deleted;
+	*inserted_tuples = tabentry->tuples_inserted;
+	*dead_tuples = tabentry->dead_tuples;
+	*removed_tuples = tabentry->tuples_removed;
+
+	if (tabentry->vacuum_count > 0 || tabentry->autovacuum_count > 0)
+		*time_zero = tabentry->first_vacuum_time;
+}
+
+static void
+vacuum_log_rates(LVRelState *vacrel, int cost_balance_before, double time_waited)
+{
+	StringInfoData msg;
+
+	instr_time now;
+
+	instr_time time_since_last_delay;
+	instr_time cur_vac_time_elapsed;
+	instr_time all_time_elapsed;
+
+	int64 removed_since_last_delay;
+	int64 removed_this_vac;
+	int64 removed_ever;
+
+	int64 updated_deleted_since_last_delay;
+	int64 updated_deleted_this_vac;
+	int64 updated_deleted_ever;
+
+	double dead_since_last_delay_rate = 0;
+	double removed_since_last_delay_rate = 0;
+
+	double removed_this_vac_rate = 0;
+	double dead_this_vac_rate = 0;
+
+	double removed_ever_rate = 0;
+	double dead_ever_rate = 0;
+
+	double old_dynamic_rate;
+	double old_target_rate;
+
+	double old_delay = vacuum_cost_delay;
+	double new_delay = old_delay;
+	double max_delay = 500;
+
+	double old_smoothed_dead_rate = vacrel->smoothed_dead_rate;
+	double old_smoothed_removed_rate = vacrel->smoothed_removed_rate;
+
+	double alpha = 0.1;
+
+	int64 dead_tuples, removed, inserted, deleted, updated = 0;
+
+	double delay_rate;
+
+	double dynamic_error = 0;
+	double dynamic_gain = 0.001;
+
+	uint64 backlog = 0;
+	double static_gain = 0.00007;
+	/* double static_gain = 0.000012; */
+	double rate_static;
+
+	if (strcmp("foo", RelationGetRelationName(vacrel->rel)) != 0)
+		return;
+
+	pgstat_get_dead_tuples(vacrel->rel, &vacrel->last_tab_stats,
+			&updated, &deleted, &inserted, &dead_tuples,
+			&removed, &vacrel->time_zero);
+
+	removed_since_last_delay = vacrel->tuples_removed - vacrel->last_tuples_removed;
+	removed_this_vac = vacrel->tuples_removed;
+	removed_ever = removed + vacrel->tuples_removed;
+
+	updated_deleted_since_last_delay = updated + deleted - vacrel->last_dead_tuples;
+	updated_deleted_this_vac = updated + deleted - vacrel->starting_dead_tuples;
+	updated_deleted_ever = updated + deleted;
+
+	if (updated_deleted_ever - removed_ever > vacrel->peak_dead_tuples)
+		vacrel->peak_dead_tuples = updated_deleted_ever - removed_ever;
+
+	INSTR_TIME_SET_CURRENT(now);
+
+	time_since_last_delay = now;
+	cur_vac_time_elapsed = now;
+	all_time_elapsed = now;
+
+	INSTR_TIME_SUBTRACT(time_since_last_delay, vacrel->last_update);
+	INSTR_TIME_SUBTRACT(cur_vac_time_elapsed, vacrel->vac_start_time);
+	INSTR_TIME_SUBTRACT(all_time_elapsed, vacrel->time_zero);
+
+	if (INSTR_TIME_GET_MILLISEC(time_since_last_delay) <= 0 ||
+		INSTR_TIME_GET_MILLISEC(cur_vac_time_elapsed) <= 0 ||
+		INSTR_TIME_GET_MILLISEC(all_time_elapsed) <= 0)
+		goto updateinfo;
+
+	removed_since_last_delay_rate = removed_since_last_delay /
+		(double) INSTR_TIME_GET_MILLISEC(time_since_last_delay);
+	dead_since_last_delay_rate = updated_deleted_since_last_delay /
+		(double) INSTR_TIME_GET_MILLISEC(time_since_last_delay);
+
+	removed_this_vac_rate = removed_this_vac /
+		(double) INSTR_TIME_GET_MILLISEC(cur_vac_time_elapsed);
+	dead_this_vac_rate = updated_deleted_this_vac /
+		(double) INSTR_TIME_GET_MILLISEC(cur_vac_time_elapsed);
+
+	removed_ever_rate = removed_ever /
+		(double) INSTR_TIME_GET_MILLISEC(all_time_elapsed);
+	dead_ever_rate = updated_deleted_ever /
+		(double) INSTR_TIME_GET_MILLISEC(all_time_elapsed);
+
+	vacrel->smoothed_dead_rate = alpha * dead_this_vac_rate +
+		(1 - alpha) * old_smoothed_dead_rate;
+
+	vacrel->smoothed_removed_rate = alpha * removed_this_vac_rate +
+		(1 - alpha) * old_smoothed_removed_rate;
+
+	old_target_rate = vacrel->target_rate;
+	old_dynamic_rate = vacrel->dynamic_rate;
+
+	dynamic_error = vacrel->smoothed_dead_rate - vacrel->smoothed_removed_rate;
+	vacrel->dynamic_rate = old_dynamic_rate + dynamic_gain * dynamic_error;
+	vacrel->dynamic_rate = Max(0, vacrel->dynamic_rate);
+
+	backlog = Max(0, (updated_deleted_ever - removed_ever));
+	rate_static = static_gain * backlog;
+
+	vacrel->target_rate = Max(0, rate_static + vacrel->dynamic_rate);
+	/* vacrel->target_rate = Max(0, rate_static); */
+
+	if (vacrel->target_rate > 0)
+		delay_rate = 1 / (double) vacrel->target_rate;
+	else
+		delay_rate = max_delay;
+
+	new_delay = delay_rate *
+	/* approximate tuples / wakeup */
+		(vacrel->tuples_processed - vacrel->last_tuples_processed) / 5;
+
+	new_delay = Max(0.1, new_delay);
+	new_delay = Min(new_delay, 5000);
+
+	VacuumCostDelay = vacuum_cost_delay = new_delay;
+
+	initStringInfo(&msg);
+	appendStringInfo(&msg,
+		("\nVacuumCostBalance before: %d, after: %d. vacuum_cost_limit: %d, \n"),
+			cost_balance_before,
+			VacuumCostBalance,
+			vacuum_cost_limit);
+
+	appendStringInfo(&msg,
+			("dead_debt: %ld, time waited: %f. scanned: %u. tuples: %ld\n"),
+			updated + deleted - removed - vacrel->tuples_removed,
+			time_waited, vacrel->scanned_pages, vacrel->tuples_processed);
+
+	appendStringInfo(&msg,
+		("recent dead_rate: %f, recent removed_rate: %f\n"),
+			dead_since_last_delay_rate * 1000,
+			removed_since_last_delay_rate * 1000);
+
+	appendStringInfo(&msg,
+			("this vac dead_rate: %f, this vac removed_rate: %f\n"),
+			dead_this_vac_rate * 1000,
+			removed_this_vac_rate * 1000);
+
+	appendStringInfo(&msg,
+			("cumul dead_rate: %f, cumul removed rate: %f\n"),
+			dead_ever_rate * 1000,
+			removed_ever_rate * 1000);
+
+	appendStringInfo(&msg,
+			("old target rate: %f, new target rate: %f\n"),
+			old_target_rate * 1000,
+			vacrel->target_rate * 1000);
+
+	appendStringInfo(&msg,
+			("backlog: %ld, static gain: %f, static rate: %f\n"),
+			backlog, static_gain,
+			rate_static * 1000);
+
+	appendStringInfo(&msg,
+			("dynamic_error: %f, dynamic_gain: %f\nold dynamic rate: %f, new dynamic rate: %f\n"),
+			dynamic_error, dynamic_gain,
+			old_dynamic_rate * 1000,
+			vacrel->dynamic_rate * 1000);
+
+	appendStringInfo(&msg,
+			("old delay: %f, new delay: %f\n"),
+			old_delay, vacuum_cost_delay);
+
+	appendStringInfo(&msg,
+			("old smoothed recent dead_rate: %f, old smoothed recent removed_rate: %f\n"),
+			old_smoothed_dead_rate * 1000,
+			old_smoothed_removed_rate * 1000);
+
+	appendStringInfo(&msg,
+			("new smoothed recent dead_rate: %f, new smoothed recent removed_rate: %f\n"),
+			vacrel->smoothed_dead_rate * 1000,
+			vacrel->smoothed_removed_rate * 1000);
+
+	elog(LOG, "%s", msg.data);
+	pfree(msg.data);
+
+updateinfo:
+
+	fprintf(vacrel->in_prog_vac_data, "%ld,%ld,%ld,%ld,%ld,%ld,%f,%f,%f,%f,%f,%f,%f,%ld,%ld\n",
+			removed_since_last_delay,removed_this_vac,removed_ever,
+			updated_deleted_since_last_delay,updated_deleted_this_vac,updated_deleted_ever,
+			INSTR_TIME_GET_MILLISEC(time_since_last_delay),
+			INSTR_TIME_GET_MILLISEC(cur_vac_time_elapsed),
+			INSTR_TIME_GET_MILLISEC(all_time_elapsed),
+			time_waited,
+			vacuum_cost_delay,
+			vacrel->smoothed_removed_rate,
+			vacrel->smoothed_dead_rate,
+			vacrel->peak_dead_tuples,
+			vacrel->tuples_processed);
+
+	vacrel->last_update = now;
+	vacrel->last_dead_tuples = updated + deleted;
+	vacrel->last_tuples_removed = vacrel->tuples_removed;
+	vacrel->last_tuples_processed = vacrel->tuples_processed;
+}
+
 /*
  *	heap_vacuum_rel() -- perform VACUUM for one heap relation
  *
@@ -633,6 +906,8 @@ heap_vacuum_rel(Relation rel, VacuumParams *params,
 	BufferUsage startbufferusage = pgBufferUsage;
 	ErrorContextCallback errcallback;
 	char	  **indnames = NULL;
+	int64 dead, inserted, deleted, updated, removed = 0;
+	instr_time time_since_zero;
 
 	verbose = (params->options & VACOPT_VERBOSE) != 0;
 	instrument = (verbose || (AmAutoVacuumWorkerProcess() &&
@@ -688,6 +963,42 @@ heap_vacuum_rel(Relation rel, VacuumParams *params,
 		indnames = palloc(sizeof(char *) * vacrel->nindexes);
 		for (int i = 0; i < vacrel->nindexes; i++)
 			indnames[i] = pstrdup(RelationGetRelationName(vacrel->indrels[i]));
+	}
+
+	vacrel->last_tab_stats = NULL;
+
+	INSTR_TIME_SET_CURRENT(vacrel->time_zero);
+	time_since_zero = vacrel->time_zero;
+	INSTR_TIME_SET_CURRENT(vacrel->vac_start_time);
+	INSTR_TIME_SET_CURRENT(vacrel->last_update);
+
+	pgstat_get_dead_tuples(vacrel->rel, &vacrel->last_tab_stats,
+			&updated, &deleted, &inserted, &dead,
+			&removed, &vacrel->time_zero);
+
+	vacrel->starting_dead_tuples = updated + deleted;
+	vacrel->last_dead_tuples = updated + deleted;
+	vacrel->peak_dead_tuples = updated + deleted - removed;
+	vacrel->tuples_processed = 0;
+	vacrel->last_tuples_processed = 0;
+	vacrel->last_tuples_removed = 0;
+	vacrel->tuples_removed = 0;
+	vacrel->smoothed_dead_rate = 0;
+	vacrel->smoothed_removed_rate = 0;
+
+	vacrel->dynamic_rate = 0;
+	vacrel->target_rate = 0;
+
+	INSTR_TIME_SUBTRACT(time_since_zero, vacrel->time_zero);
+	if (strcmp("foo", RelationGetRelationName(vacrel->rel)) == 0)
+	{
+		vacrel->in_prog_vac_data =
+			fopen("/home/melanieplageman/code/vacuum_pid/pd2_in_prog_vac_data.csv", "a");
+		setbuf(vacrel->in_prog_vac_data, NULL);
+
+		vacrel->end_vac_data =
+			fopen("/home/melanieplageman/code/vacuum_pid/pd2_end_vac_data.csv", "a");
+		setbuf(vacrel->end_vac_data, NULL);
 	}
 
 	/*
@@ -747,7 +1058,6 @@ heap_vacuum_rel(Relation rel, VacuumParams *params,
 
 	/* Initialize remaining counters (be tidy) */
 	vacrel->num_index_scans = 0;
-	vacrel->tuples_deleted = 0;
 	vacrel->tuples_frozen = 0;
 	vacrel->lpdead_items = 0;
 	vacrel->live_tuples = 0;
@@ -939,9 +1249,9 @@ heap_vacuum_rel(Relation rel, VacuumParams *params,
 						 Max(vacrel->new_live_tuples, 0),
 						 vacrel->recently_dead_tuples +
 						 vacrel->missed_dead_tuples,
-						 starttime);
+						 vacrel->tuples_removed,
+						 starttime, vacrel->vac_start_time);
 	pgstat_progress_end_command();
-
 	if (instrument)
 	{
 		TimestampTz endtime = GetCurrentTimestamp();
@@ -1021,7 +1331,7 @@ heap_vacuum_rel(Relation rel, VacuumParams *params,
 							 vacrel->eager_scanned_pages);
 			appendStringInfo(&buf,
 							 _("tuples: %" PRId64 " removed, %" PRId64 " remain, %" PRId64 " are dead but not yet removable\n"),
-							 vacrel->tuples_deleted,
+							 vacrel->tuples_removed,
 							 (int64) vacrel->new_rel_tuples,
 							 vacrel->recently_dead_tuples);
 			if (vacrel->missed_dead_tuples > 0)
@@ -1148,6 +1458,26 @@ heap_vacuum_rel(Relation rel, VacuumParams *params,
 		}
 	}
 
+	pgstat_get_dead_tuples(vacrel->rel, &vacrel->last_tab_stats,
+			&updated, &deleted, &inserted, &dead,
+			&removed, &vacrel->time_zero);
+	INSTR_TIME_SET_CURRENT(vacrel->vac_end_time);
+
+	if (strcmp("foo", RelationGetRelationName(vacrel->rel)) == 0)
+	{
+		fprintf(vacrel->end_vac_data, "%f,%ld,%ld,%ld,%ld\n",
+				INSTR_TIME_GET_MILLISEC(vacrel->vac_end_time),
+				vacrel->tuples_processed, vacrel->tuples_removed,
+				updated + deleted - removed,
+				vacrel->peak_dead_tuples);
+		elog(LOG, "tuples removed end: %ld", vacrel->tuples_removed);
+		fclose(vacrel->in_prog_vac_data);
+		fclose(vacrel->end_vac_data);
+	}
+	if (vacrel->last_tab_stats)
+		pfree(vacrel->last_tab_stats);
+
+
 	/* Cleanup index statistics and index names */
 	for (int i = 0; i < vacrel->nindexes; i++)
 	{
@@ -1248,8 +1578,11 @@ lazy_scan_heap(LVRelState *vacrel)
 		void	   *per_buffer_data = NULL;
 		bool		vm_page_frozen = false;
 		bool		got_cleanup_lock = false;
+		int			cost_balance_before = VacuumCostBalance;
+		double time_waited = 0;
 
-		vacuum_delay_point(false);
+		time_waited = vacuum_delay_point(false);
+		vacuum_log_rates(vacrel, cost_balance_before, time_waited);
 
 		/*
 		 * Regularly check if wraparound failsafe should trigger.
@@ -2042,11 +2375,12 @@ lazy_scan_prune(LVRelState *vacrel,
 	}
 
 	/* Finally, add page-local counts to whole-VACUUM counts */
-	vacrel->tuples_deleted += presult.ndeleted;
+	vacrel->tuples_removed += presult.ndeleted;
 	vacrel->tuples_frozen += presult.nfrozen;
 	vacrel->lpdead_items += presult.lpdead_items;
 	vacrel->live_tuples += presult.live_tuples;
 	vacrel->recently_dead_tuples += presult.recently_dead_tuples;
+	vacrel->tuples_processed += presult.ntuples;
 
 	/* Can't truncate this page */
 	if (presult.hastup)
@@ -2586,11 +2920,13 @@ lazy_vacuum_all_indexes(LVRelState *vacrel)
 	};
 	int64		progress_start_val[2];
 	int64		progress_end_val[3];
+	double old_cost_delay = vacuum_cost_delay;
 
 	Assert(vacrel->nindexes > 0);
 	Assert(vacrel->do_index_vacuuming);
 	Assert(vacrel->do_index_cleanup);
 
+	VacuumCostDelay = vacuum_cost_delay = 1;
 	/* Precheck for XID wraparound emergencies */
 	if (lazy_check_wraparound_failsafe(vacrel))
 	{
@@ -2666,6 +3002,7 @@ lazy_vacuum_all_indexes(LVRelState *vacrel)
 	progress_end_val[1] = 0;
 	progress_end_val[2] = vacrel->num_index_scans;
 	pgstat_progress_update_multi_param(3, progress_end_index, progress_end_val);
+	VacuumCostDelay = vacuum_cost_delay = old_cost_delay;
 
 	return allindexes;
 }
@@ -2765,8 +3102,11 @@ lazy_vacuum_heap_rel(LVRelState *vacrel)
 		Size		freespace;
 		OffsetNumber offsets[MaxOffsetNumber];
 		int			num_offsets;
+		int			cost_balance_before = VacuumCostBalance;
+		double time_waited = 0;
 
-		vacuum_delay_point(false);
+		time_waited = vacuum_delay_point(false);
+		vacuum_log_rates(vacrel, cost_balance_before, time_waited);
 
 		buf = read_stream_next_buffer(stream, (void **) &iter_result);
 

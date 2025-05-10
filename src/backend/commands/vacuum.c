@@ -2398,7 +2398,7 @@ vac_close_indexes(int nindexes, Relation *Irel, LOCKMODE lockmode)
  * This should be called in each major loop of VACUUM processing,
  * typically once per page processed.
  */
-void
+double
 vacuum_delay_point(bool is_analyze)
 {
 	double		msec = 0;
@@ -2408,7 +2408,7 @@ vacuum_delay_point(bool is_analyze)
 
 	if (InterruptPending ||
 		(!VacuumCostActive && !ConfigReloadPending))
-		return;
+		return msec;
 
 	/*
 	 * Autovacuum workers should reload the configuration file if requested.
@@ -2428,7 +2428,7 @@ vacuum_delay_point(bool is_analyze)
 	 * return.
 	 */
 	if (!VacuumCostActive)
-		return;
+		return msec;
 
 	/*
 	 * For parallel vacuum, the delay is computed based on the shared cost
@@ -2450,6 +2450,8 @@ vacuum_delay_point(bool is_analyze)
 		if (track_cost_delay_timing)
 			INSTR_TIME_SET_CURRENT(delay_start);
 
+		elog(WARNING, "WOULD HAVE DELAYED FOR %f msec", msec);
+		msec = Min(5000, msec);
 		pgstat_report_wait_start(WAIT_EVENT_VACUUM_DELAY);
 		pg_usleep(msec * 1000);
 		pgstat_report_wait_end();
@@ -2526,6 +2528,7 @@ vacuum_delay_point(bool is_analyze)
 		/* Might have gotten an interrupt while sleeping */
 		CHECK_FOR_INTERRUPTS();
 	}
+	return msec;
 }
 
 /*

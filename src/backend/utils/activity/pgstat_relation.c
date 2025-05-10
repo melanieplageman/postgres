@@ -209,7 +209,8 @@ pgstat_drop_relation(Relation rel)
 void
 pgstat_report_vacuum(Oid tableoid, bool shared,
 					 PgStat_Counter livetuples, PgStat_Counter deadtuples,
-					 TimestampTz starttime)
+					 PgStat_Counter tuples_removed,
+					 TimestampTz starttime, instr_time starttime_instr)
 {
 	PgStat_EntryRef *entry_ref;
 	PgStatShared_Relation *shtabentry;
@@ -234,6 +235,10 @@ pgstat_report_vacuum(Oid tableoid, bool shared,
 
 	tabentry->live_tuples = livetuples;
 	tabentry->dead_tuples = deadtuples;
+
+	tabentry->tuples_removed += tuples_removed;
+	if (tabentry->vacuum_count == 0 && tabentry->autovacuum_count == 0)
+		tabentry->first_vacuum_time = starttime_instr;
 
 	/*
 	 * It is quite possible that a non-aggressive VACUUM ended up skipping

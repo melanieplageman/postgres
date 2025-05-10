@@ -70,6 +70,8 @@ PG_STAT_GET_RELENTRY_INT64(blocks_hit)
 /* pg_stat_get_dead_tuples */
 PG_STAT_GET_RELENTRY_INT64(dead_tuples)
 
+PG_STAT_GET_RELENTRY_INT64(tuples_removed)
+
 /* pg_stat_get_ins_since_vacuum */
 PG_STAT_GET_RELENTRY_INT64(ins_since_vacuum)
 

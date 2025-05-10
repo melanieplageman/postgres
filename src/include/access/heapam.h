@@ -232,6 +232,9 @@ typedef struct PruneFreezeResult
 	int			live_tuples;
 	int			recently_dead_tuples;
 
+	/* Number of tuples on the page */
+	int			ntuples;
+
 	/*
 	 * all_visible and all_frozen indicate if the all-visible and all-frozen
 	 * bits in the visibility map can be set for this page, after pruning.

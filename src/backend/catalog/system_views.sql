@@ -696,6 +696,7 @@ CREATE VIEW pg_stat_all_tables AS
             pg_stat_get_tuples_inserted(C.oid) AS n_tup_ins,
             pg_stat_get_tuples_updated(C.oid) AS n_tup_upd,
             pg_stat_get_tuples_deleted(C.oid) AS n_tup_del,
+            pg_stat_get_tuples_removed(C.oid) AS n_tup_removed,
             pg_stat_get_tuples_hot_updated(C.oid) AS n_tup_hot_upd,
             pg_stat_get_tuples_newpage_updated(C.oid) AS n_tup_newpage_upd,
             pg_stat_get_live_tuples(C.oid) AS n_live_tup,
