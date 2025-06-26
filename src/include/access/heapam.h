@@ -360,6 +360,9 @@ extern bool heap_tuple_should_freeze(HeapTupleHeader tuple,
 									 TransactionId *NoFreezePageRelfrozenXid,
 									 MultiXactId *NoFreezePageRelminMxid);
 extern bool heap_tuple_needs_eventual_freeze(HeapTupleHeader tuple);
+extern uint8 heap_page_set_vm_and_log(Relation rel, BlockNumber heap_blk, Buffer heap_buf,
+									  Buffer vmbuf, TransactionId cutoff_xid,
+									  uint8 vmflags);
 
 extern void simple_heap_insert(Relation relation, HeapTuple tup);
 extern void simple_heap_delete(Relation relation, ItemPointer tid);

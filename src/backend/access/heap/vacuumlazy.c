@@ -1874,9 +1874,6 @@ lazy_scan_new_or_empty(LVRelState *vacrel, Buffer buf, BlockNumber blkno,
 		{
 			START_CRIT_SECTION();
 
-			/* mark buffer dirty before writing a WAL record */
-			MarkBufferDirty(buf);
-
 			/*
 			 * It's possible that another backend has extended the heap,
 			 * initialized the page, and then failed to WAL-log the page due
@@ -1888,14 +1885,15 @@ lazy_scan_new_or_empty(LVRelState *vacrel, Buffer buf, BlockNumber blkno,
 			 */
 			if (RelationNeedsWAL(vacrel->rel) &&
 				PageGetLSN(page) == InvalidXLogRecPtr)
+			{
+				MarkBufferDirty(buf);
 				log_newpage_buffer(buf, true);
+			}
 
-			PageSetAllVisible(page);
-			visibilitymap_set(vacrel->rel, blkno, buf,
-							  InvalidXLogRecPtr,
-							  vmbuffer, InvalidTransactionId,
-							  VISIBILITYMAP_ALL_VISIBLE |
-							  VISIBILITYMAP_ALL_FROZEN);
+			heap_page_set_vm_and_log(vacrel->rel, blkno, buf,
+									 vmbuffer, InvalidTransactionId,
+									 VISIBILITYMAP_ALL_VISIBLE |
+									 VISIBILITYMAP_ALL_FROZEN);
 			END_CRIT_SECTION();
 
 			/* Count the newly all-frozen pages for logging */
@@ -2069,25 +2067,9 @@ lazy_scan_prune(LVRelState *vacrel,
 			flags |= VISIBILITYMAP_ALL_FROZEN;
 		}
 
-		/*
-		 * It should never be the case that the visibility map page is set
-		 * while the page-level bit is clear, but the reverse is allowed (if
-		 * checksums are not enabled).  Regardless, set both bits so that we
-		 * get back in sync.
-		 *
-		 * NB: If the heap page is all-visible but the VM bit is not set, we
-		 * don't need to dirty the heap page.  However, if checksums are
-		 * enabled, we do need to make sure that the heap page is dirtied
-		 * before passing it to visibilitymap_set(), because it may be logged.
-		 * Given that this situation should only happen in rare cases after a
-		 * crash, it is not worth optimizing.
-		 */
-		PageSetAllVisible(page);
-		MarkBufferDirty(buf);
-		old_vmbits = visibilitymap_set(vacrel->rel, blkno, buf,
-									   InvalidXLogRecPtr,
-									   vmbuffer, presult.vm_conflict_horizon,
-									   flags);
+		old_vmbits = heap_page_set_vm_and_log(vacrel->rel, blkno, buf,
+											  vmbuffer, presult.vm_conflict_horizon,
+											  flags);
 
 		/*
 		 * If the page wasn't already set all-visible and/or all-frozen in the
@@ -2160,17 +2142,6 @@ lazy_scan_prune(LVRelState *vacrel,
 		uint8		old_vmbits;
 
 		/*
-		 * Avoid relying on all_visible_according_to_vm as a proxy for the
-		 * page-level PD_ALL_VISIBLE bit being set, since it might have become
-		 * stale -- even when all_visible is set
-		 */
-		if (!PageIsAllVisible(page))
-		{
-			PageSetAllVisible(page);
-			MarkBufferDirty(buf);
-		}
-
-		/*
 		 * Set the page all-frozen (and all-visible) in the VM.
 		 *
 		 * We can pass InvalidTransactionId as our cutoff_xid, since a
@@ -2178,11 +2149,10 @@ lazy_scan_prune(LVRelState *vacrel,
 		 * was logged when the page's tuples were frozen.
 		 */
 		Assert(!TransactionIdIsValid(presult.vm_conflict_horizon));
-		old_vmbits = visibilitymap_set(vacrel->rel, blkno, buf,
-									   InvalidXLogRecPtr,
-									   vmbuffer, InvalidTransactionId,
-									   VISIBILITYMAP_ALL_VISIBLE |
-									   VISIBILITYMAP_ALL_FROZEN);
+		old_vmbits = heap_page_set_vm_and_log(vacrel->rel, blkno, buf,
+											  vmbuffer, InvalidTransactionId,
+											  VISIBILITYMAP_ALL_VISIBLE |
+											  VISIBILITYMAP_ALL_FROZEN);
 
 		/*
 		 * The page was likely already set all-visible in the VM. However,
@@ -2913,11 +2883,9 @@ lazy_vacuum_heap_page(LVRelState *vacrel, BlockNumber blkno, Buffer buffer,
 			flags |= VISIBILITYMAP_ALL_FROZEN;
 		}
 
-		PageSetAllVisible(page);
-		visibilitymap_set(vacrel->rel, blkno, buffer,
-						  InvalidXLogRecPtr,
-						  vmbuffer, visibility_cutoff_xid,
-						  flags);
+		heap_page_set_vm_and_log(vacrel->rel, blkno, buffer,
+								 vmbuffer, visibility_cutoff_xid,
+								 flags);
 
 		/* Count the newly set VM page for logging */
 		vacrel->vm_new_visible_pages++;

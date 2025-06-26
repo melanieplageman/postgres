@@ -222,29 +222,31 @@ visibilitymap_pin_ok(BlockNumber heapBlk, Buffer vmbuf)
 /*
  *	visibilitymap_set - set bit(s) on a previously pinned page
  *
- * recptr is the LSN of the XLOG record we're replaying, if we're in recovery,
- * or InvalidXLogRecPtr in normal running.  The VM page LSN is advanced to the
- * one provided; in normal running, we generate a new XLOG record and set the
- * page LSN to that value (though the heap page's LSN may *not* be updated;
- * see below).  cutoff_xid is the largest xmin on the page being marked
- * all-visible; it is needed for Hot Standby, and can be InvalidTransactionId
- * if the page contains no tuples.  It can also be set to InvalidTransactionId
- * when a page that is already all-visible is being marked all-frozen.
- *
  * Caller is expected to set the heap page's PD_ALL_VISIBLE bit before calling
- * this function. Except in recovery, caller should also pass the heap
- * buffer. When checksums are enabled and we're not in recovery, we must add
- * the heap buffer to the WAL chain to protect it from being torn.
+ * this function. Except in recovery, caller should also pass the heap buffer.
+ * When checksums are enabled and we're not in recovery, we must add the heap
+ * buffer to the WAL chain to protect it from being torn.
  *
  * You must pass a buffer containing the correct map page to this function.
  * Call visibilitymap_pin first to pin the right one. This function doesn't do
  * any I/O.
  *
- * Returns the state of the page's VM bits before setting flags.
+ * cutoff_xid is the largest xmin on the page being marked all-visible; it is
+ * needed for Hot Standby, and can be InvalidTransactionId if the page
+ * contains no tuples.  It can also be set to InvalidTransactionId when a page
+ * that is already all-visible is being marked all-frozen.
+ *
+ * If we're in recovery, recptr points to the LSN of the XLOG record we're
+ * replaying and the VM page LSN is advanced to this LSN. During normal
+ * running, we'll generate a new XLOG record for the changes to the VM and set
+ * the VM page LSN. We will return this LSN in recptr, and the caller may use
+ * this to set the heap page LSN.
+ *
+ * Returns the state of the page's VM bits before setting flags and sets.
  */
 uint8
 visibilitymap_set(Relation rel, BlockNumber heapBlk, Buffer heapBuf,
-				  XLogRecPtr recptr, Buffer vmBuf, TransactionId cutoff_xid,
+				  XLogRecPtr *recptr, Buffer vmBuf, TransactionId cutoff_xid,
 				  uint8 flags)
 {
 	BlockNumber mapBlock = HEAPBLK_TO_MAPBLOCK(heapBlk);
@@ -258,16 +260,12 @@ visibilitymap_set(Relation rel, BlockNumber heapBlk, Buffer heapBuf,
 	elog(DEBUG1, "vm_set %s %d", RelationGetRelationName(rel), heapBlk);
 #endif
 
-	Assert(InRecovery || XLogRecPtrIsInvalid(recptr));
+	Assert(InRecovery || XLogRecPtrIsInvalid(*recptr));
 	Assert(InRecovery || PageIsAllVisible((Page) BufferGetPage(heapBuf)));
 	Assert((flags & VISIBILITYMAP_VALID_BITS) == flags);
 
 	/* Must never set all_frozen bit without also setting all_visible bit */
 	Assert(flags != VISIBILITYMAP_ALL_FROZEN);
-
-	/* Check that we have the right heap page pinned, if present */
-	if (BufferIsValid(heapBuf) && BufferGetBlockNumber(heapBuf) != heapBlk)
-		elog(ERROR, "wrong heap buffer passed to visibilitymap_set");
 
 	/* Check that we have the right VM page pinned */
 	if (!BufferIsValid(vmBuf) || BufferGetBlockNumber(vmBuf) != mapBlock)
@@ -287,28 +285,12 @@ visibilitymap_set(Relation rel, BlockNumber heapBlk, Buffer heapBuf,
 
 		if (RelationNeedsWAL(rel))
 		{
-			if (XLogRecPtrIsInvalid(recptr))
+			if (XLogRecPtrIsInvalid(*recptr))
 			{
 				Assert(!InRecovery);
-				recptr = log_heap_visible(rel, heapBuf, vmBuf, cutoff_xid, flags);
-
-				/*
-				 * If data checksums are enabled (or wal_log_hints=on), we
-				 * need to protect the heap page from being torn.
-				 *
-				 * If not, then we must *not* update the heap page's LSN. In
-				 * this case, the FPI for the heap page was omitted from the
-				 * WAL record inserted above, so it would be incorrect to
-				 * update the heap page's LSN.
-				 */
-				if (XLogHintBitIsNeeded())
-				{
-					Page		heapPage = BufferGetPage(heapBuf);
-
-					PageSetLSN(heapPage, recptr);
-				}
+				*recptr = log_heap_visible(rel, heapBuf, vmBuf, cutoff_xid, flags);
 			}
-			PageSetLSN(page, recptr);
+			PageSetLSN(page, *recptr);
 		}
 
 		END_CRIT_SECTION();

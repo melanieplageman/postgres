@@ -2505,8 +2505,6 @@ heap_multi_insert(Relation relation, TupleTableSlot **slots, int ntuples,
 								BufferGetBlockNumber(buffer),
 								vmbuffer, VISIBILITYMAP_VALID_BITS);
 		}
-		else if (all_frozen_set)
-			PageSetAllVisible(page);
 
 		/*
 		 * XXX Should we set PageSetPrunable on this page ? See heap_insert()
@@ -2632,23 +2630,16 @@ heap_multi_insert(Relation relation, TupleTableSlot **slots, int ntuples,
 
 		/*
 		 * If we've frozen everything on the page, update the visibilitymap.
-		 * We're already holding pin on the vmbuffer.
+		 * We're already holding pin on the vmbuffer. It's fine to use
+		 * InvalidTransactionId as the cutoff_xid here - this is only used
+		 * when HEAP_INSERT_FROZEN is specified, which intentionally violates
+		 * visibility rules.
 		 */
 		if (all_frozen_set)
-		{
-			Assert(PageIsAllVisible(page));
-			Assert(visibilitymap_pin_ok(BufferGetBlockNumber(buffer), vmbuffer));
-
-			/*
-			 * It's fine to use InvalidTransactionId here - this is only used
-			 * when HEAP_INSERT_FROZEN is specified, which intentionally
-			 * violates visibility rules.
-			 */
-			visibilitymap_set(relation, BufferGetBlockNumber(buffer), buffer,
-							  InvalidXLogRecPtr, vmbuffer,
-							  InvalidTransactionId,
-							  VISIBILITYMAP_ALL_VISIBLE | VISIBILITYMAP_ALL_FROZEN);
-		}
+			heap_page_set_vm_and_log(relation, BufferGetBlockNumber(buffer), buffer,
+									 vmbuffer,
+									 InvalidTransactionId,
+									 VISIBILITYMAP_ALL_VISIBLE | VISIBILITYMAP_ALL_FROZEN);
 
 		UnlockReleaseBuffer(buffer);
 		ndone += nthispage;
@@ -7838,6 +7829,73 @@ heap_tuple_needs_eventual_freeze(HeapTupleHeader tuple)
 	}
 
 	return false;
+}
+
+/*
+ * Make the heap and VM page changes needed to set a page all-visible.
+ * Do not call in recovery.
+ */
+uint8
+heap_page_set_vm_and_log(Relation rel, BlockNumber heap_blk, Buffer heap_buf,
+						 Buffer vmbuf, TransactionId cutoff_xid,
+						 uint8 vmflags)
+{
+	Page		heap_page = BufferGetPage(heap_buf);
+	bool		set_heap_lsn = false;
+	XLogRecPtr	recptr = InvalidXLogRecPtr;
+	uint8		old_vmbits = 0;
+
+	Assert(BufferIsValid(heap_buf));
+
+	START_CRIT_SECTION();
+
+	/* Check that we have the right heap page pinned, if present */
+	if (BufferGetBlockNumber(heap_buf) != heap_blk)
+		elog(ERROR, "wrong heap buffer passed to heap_page_set_vm_and_log");
+
+	/*
+	 * We must never end up with the VM bit set and the page-level
+	 * PD_ALL_VISIBLE bit clear. If that were to occur, a subsequent page
+	 * modification would fail to clear the VM bit. Though it is possible for
+	 * the page-level bit to be set and the VM bit to be clear if checksums
+	 * and wal_log_hints are not enabled.
+	 */
+	if (!PageIsAllVisible(heap_page))
+	{
+		PageSetAllVisible(heap_page);
+
+		/*
+		 * Buffer will usually be dirty from other changes, so it is worth the
+		 * extra check
+		 */
+		if (!BufferIsDirty(heap_buf))
+		{
+			if (XLogHintBitIsNeeded())
+				MarkBufferDirty(heap_buf);
+			else
+				MarkBufferDirtyHint(heap_buf, true);
+		}
+
+		set_heap_lsn = XLogHintBitIsNeeded();
+	}
+
+	old_vmbits = visibilitymap_set(rel, heap_blk, heap_buf,
+								   &recptr, vmbuf, cutoff_xid, vmflags);
+
+	/*
+	 * If we modified the heap page and data checksums are enabled (or
+	 * wal_log_hints=on), we need to protect the heap page from being torn.
+	 *
+	 * If not, then we must *not* update the heap page's LSN. In this case,
+	 * the FPI for the heap page was omitted from the WAL record inserted in
+	 * the VM record, so it would be incorrect to update the heap page's LSN.
+	 */
+	if (set_heap_lsn)
+		PageSetLSN(heap_page, recptr);
+
+	END_CRIT_SECTION();
+
+	return old_vmbits;
 }
 
 /*
