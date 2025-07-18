@@ -203,9 +203,13 @@ static bool identify_and_fix_vm_corruption(Relation relation,
  * if there's not any use in pruning.
  *
  * Caller must have pin on the buffer, and must *not* have a lock on it.
+ *
+ * If vmbuffer is not NULL, it is okay for pruning to set the visibility map if
+ * the page is all visible. We will take care of pinning and, if needed,
+ * reading in the page of the visibility map.
  */
 void
-heap_page_prune_opt(Relation relation, Buffer buffer)
+heap_page_prune_opt(Relation relation, Buffer buffer, Buffer *vmbuffer)
 {
 	Page		page = BufferGetPage(buffer);
 	TransactionId prune_xid;
@@ -231,7 +235,8 @@ heap_page_prune_opt(Relation relation, Buffer buffer)
 
 	/*
 	 * Check whether prune_xid indicates that there may be dead rows that can
-	 * be cleaned up.
+	 * be cleaned up. If this transaction ID isn't removable, then there is no
+	 * guarantee that there are removable tuples on the page.
 	 */
 	vistest = GlobalVisTestFor(relation);
 
@@ -269,6 +274,13 @@ heap_page_prune_opt(Relation relation, Buffer buffer)
 		{
 			OffsetNumber dummy_off_loc;
 			PruneFreezeResult presult;
+			int			options = 0;
+
+			if (vmbuffer)
+			{
+				visibilitymap_pin(relation, BufferGetBlockNumber(buffer), vmbuffer);
+				options = HEAP_PAGE_PRUNE_UPDATE_VM;
+			}
 
 			/*
 			 * For now, pass mark_unused_now as false regardless of whether or
@@ -276,9 +288,10 @@ heap_page_prune_opt(Relation relation, Buffer buffer)
 			 * that during on-access pruning with the current implementation.
 			 */
 			heap_page_prune_and_freeze(relation, buffer, false,
-									   InvalidBuffer,
-									   vistest, 0,
-									   NULL, &presult, PRUNE_ON_ACCESS, &dummy_off_loc, NULL, NULL);
+									   vmbuffer ? *vmbuffer : InvalidBuffer,
+									   vistest, options,
+									   NULL, &presult, PRUNE_ON_ACCESS,
+									   &dummy_off_loc, NULL, NULL);
 
 			/*
 			 * Report the number of tuples reclaimed to pgstats.  This is
@@ -516,12 +529,17 @@ heap_page_prune_and_freeze(Relation relation, Buffer buffer,
 	 * all-frozen for use in opportunistic freezing and to update the VM if
 	 * the caller requests it.
 	 *
-	 * Currently, only VACUUM attempts freezing and setting the VM bits. But
-	 * other callers could do either one. The visibility bookkeeping is
-	 * required for opportunistic freezing (in addition to setting the VM
-	 * bits) because we only consider opportunistically freezing tuples if the
-	 * whole page would become all-frozen or if the whole page will be frozen
-	 * except for dead tuples that will be removed by vacuum.
+	 * Currently, only VACUUM attempts freezing. But other callers could. The
+	 * visibility bookkeeping is required for opportunistic freezing (in
+	 * addition to setting the VM bits) because we only consider
+	 * opportunistically freezing tuples if the whole page would become
+	 * all-frozen or if the whole page will be frozen except for dead tuples
+	 * that will be removed by vacuum. But if update_vm is false, we'll not
+	 * set the VM even if the page is discovered to be all-visible.
+	 *
+	 * If only HEAP_PAGE_PRUNE_UPDATE_VM is passed and not
+	 * HEAP_PAGE_PRUNE_FREEZE, prstate.all_frozen must be initialized to false
+	 * because we will not call heap_prepare_freeze_tuple() on each tuple.
 	 *
 	 * If only updating the VM, we must initialize all_frozen to false, as
 	 * heap_prepare_freeze_tuple() will not be called for each tuple on the
@@ -533,7 +551,7 @@ heap_page_prune_and_freeze(Relation relation, Buffer buffer,
 	 * whether or not to freeze but before deciding whether or not to update
 	 * the VM so that we don't set the VM bit incorrectly.
 	 *
-	 * If not freezing or updating the VM, we otherwise avoid the extra
+	 * If not freezing and not updating the VM, we avoid the extra
 	 * bookkeeping. Initializing all_visible to false allows skipping the work
 	 * to update them in heap_prune_record_unchanged_lp_normal().
 	 */
@@ -555,14 +573,14 @@ heap_page_prune_and_freeze(Relation relation, Buffer buffer,
 
 	/*
 	 * The visibility cutoff xid is the newest xmin of live, committed tuples
-	 * older than OldestXmin on the page. This field is only kept up-to-date
-	 * if the page is all-visible. As soon as a tuple is encountered that is
-	 * not visible to all, this field is unmaintained. As long as it is
-	 * maintained, it can be used to calculate the snapshot conflict horizon.
-	 * This is most likely to happen when updating the VM and/or freezing all
-	 * live tuples on the page. It is updated before returning to the caller
-	 * because vacuum does assert-build only validation on the page using this
-	 * field.
+	 * on the page older than the visibility horizon represented in the
+	 * GlobalVisState.
+	 *
+	 * This field is only kept up-to-date if the page is all-visible. As soon
+	 * as a tuple is encountered that is not visible to all, this field is
+	 * unmaintained. As long as it is maintained, it can be used to calculate
+	 * the snapshot conflict horizon. This is most likely to happen when
+	 * updating the VM and/or freezing all live tuples on the page.
 	 */
 	prstate.visibility_cutoff_xid = InvalidTransactionId;
 
@@ -884,6 +902,21 @@ heap_page_prune_and_freeze(Relation relation, Buffer buffer,
 	if (prstate.update_vm)
 	{
 		/*
+		 * If this is an on-access call and we're not actually pruning, avoid
+		 * setting the visibility map if it would newly dirty the heap page
+		 * or, if the page is already dirty, if doing so would require
+		 * including a full-page image (FPI) of the heap page in the WAL. This
+		 * situation should be rare, as on-access pruning is only attempted
+		 * when pd_prune_xid is valid.
+		 */
+		if (reason == PRUNE_ON_ACCESS &&
+			!do_prune && !do_freeze &&
+			(!BufferIsDirty(buffer) || XLogCheckBufferNeedsBackup(buffer)))
+		{
+			/* Don't update the VM */
+		}
+
+		/*
 		 * Clear any VM corruption. This does not need to be in a critical
 		 * section, so we do it first. If PD_ALL_VISIBLE is incorrectly set,
 		 * we may mark the heap page buffer dirty here and could end up doing
@@ -891,9 +924,9 @@ heap_page_prune_and_freeze(Relation relation, Buffer buffer,
 		 * of VM corruption, so we don't have to worry about the extra
 		 * performance overhead.
 		 */
-		if (identify_and_fix_vm_corruption(relation,
-										   blockno, buffer, page,
-										   blk_known_av, prstate.lpdead_items, vmbuffer))
+		else if (identify_and_fix_vm_corruption(relation,
+												blockno, buffer, page,
+												blk_known_av, prstate.lpdead_items, vmbuffer))
 		{
 			/* If we fix corruption, don't update the VM further */
 		}
@@ -910,7 +943,16 @@ heap_page_prune_and_freeze(Relation relation, Buffer buffer,
 	}
 
 	do_set_vm = vmflags & VISIBILITYMAP_VALID_BITS;
+
+	/*
+	 * Don't se PD_ALL_VISIBLE unless we also plan to set the VM. While it is
+	 * correct for a heap page to have PD_ALL_VISIBLE even if the VM is not
+	 * set, we strongly prefer to keep them in sync.
+	 */
 	set_pd_all_visible = do_set_vm && !PageIsAllVisible(page);
+
+	/* Page cannot be all-frozen without also being all-visible */
+	Assert(!prstate.all_frozen || prstate.all_visible);
 
 	/* Save these for the caller in case we later zero out vmflags */
 	presult->new_vmbits = vmflags;
@@ -1091,12 +1133,10 @@ heap_page_prune_and_freeze(Relation relation, Buffer buffer,
 		TransactionId debug_cutoff;
 		bool		debug_all_frozen;
 
-		Assert(cutoffs);
-
 		Assert(prstate.lpdead_items == 0);
 
 		if (!heap_page_is_all_visible(relation, buffer,
-									  cutoffs->OldestXmin,
+									  prstate.vistest,
 									  &debug_all_frozen,
 									  &debug_cutoff, off_loc))
 			Assert(false);
@@ -1621,14 +1661,7 @@ heap_prune_record_unchanged_lp_normal(Page page, PruneState *prstate, OffsetNumb
 				 */
 				xmin = HeapTupleHeaderGetXmin(htup);
 
-				/*
-				 * For now always use prstate->cutoffs for this test, because
-				 * we only update 'all_visible' when freezing is requested. We
-				 * could use GlobalVisTestIsRemovableXid instead, if a
-				 * non-freezing caller wanted to set the VM bit.
-				 */
-				Assert(prstate->cutoffs);
-				if (!TransactionIdPrecedes(xmin, prstate->cutoffs->OldestXmin))
+				if (!GlobalVisXidVisible(prstate->vistest, xmin))
 				{
 					prstate->all_visible = prstate->all_frozen = false;
 					break;
