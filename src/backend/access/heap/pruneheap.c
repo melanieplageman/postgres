@@ -235,7 +235,7 @@ heap_page_prune_opt(Relation relation, Buffer buffer)
 	 */
 	vistest = GlobalVisTestFor(relation);
 
-	if (!GlobalVisTestIsRemovableXid(vistest, prune_xid))
+	if (!GlobalVisXidVisible(vistest, prune_xid))
 		return;
 
 	/*
@@ -1169,7 +1169,7 @@ heap_prune_satisfies_vacuum(PruneState *prstate, HeapTuple tup, Buffer buffer)
 	 * if the GlobalVisState has been updated since the beginning of vacuuming
 	 * the relation.
 	 */
-	if (GlobalVisTestIsRemovableXid(prstate->vistest, dead_after))
+	if (GlobalVisXidVisible(prstate->vistest, dead_after))
 		return HEAPTUPLE_DEAD;
 
 	return res;
