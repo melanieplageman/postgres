@@ -3057,9 +3057,8 @@ l1:
 	/*
 	 * If this transaction commits, the tuple will become DEAD sooner or
 	 * later.  Set flag that this page is a candidate for pruning once our xid
-	 * falls below the OldestXmin horizon.  If the transaction finally aborts,
-	 * the subsequent page pruning will be a no-op and the hint will be
-	 * cleared.
+	 * falls below the XID horizon.  If the transaction finally aborts, the
+	 * subsequent page pruning will be a no-op and the hint will be cleared.
 	 */
 	PageSetPrunable(page, xid);
 
@@ -4068,9 +4067,8 @@ l2:
 	/*
 	 * If this transaction commits, the old tuple will become DEAD sooner or
 	 * later.  Set flag that this page is a candidate for pruning once our xid
-	 * falls below the OldestXmin horizon.  If the transaction finally aborts,
-	 * the subsequent page pruning will be a no-op and the hint will be
-	 * cleared.
+	 * falls below the XID horizon.  If the transaction finally aborts, the
+	 * subsequent page pruning will be a no-op and the hint will be cleared.
 	 *
 	 * XXX Should we set hint on newbuf as well?  If the transaction aborts,
 	 * there would be a prunable tuple in the newbuf; but for now we choose
@@ -6714,7 +6712,8 @@ heap_inplace_unlock(Relation relation,
  */
 static TransactionId
 FreezeMultiXactId(MultiXactId multi, uint16 t_infomask,
-				  const struct VacuumCutoffs *cutoffs, uint16 *flags,
+				  const struct VacuumCutoffs *cutoffs,
+				  GlobalVisState *vistest, uint16 *flags,
 				  HeapPageFreeze *pagefrz)
 {
 	TransactionId newxmax;
@@ -6777,19 +6776,19 @@ FreezeMultiXactId(MultiXactId multi, uint16 t_infomask,
 					 errmsg_internal("multixact %u contains update XID %u from before relfrozenxid %u",
 									 multi, update_xact,
 									 cutoffs->relfrozenxid)));
-		else if (TransactionIdPrecedes(update_xact, cutoffs->OldestXmin))
+		else if (GlobalVisXidVisible(vistest, update_xact))
 		{
 			/*
 			 * Updater XID has to have aborted (otherwise the tuple would have
-			 * been pruned away instead, since updater XID is < OldestXmin).
-			 * Just remove xmax.
+			 * been pruned away instead, since updater XID is < vistest
+			 * horizon). Just remove xmax.
 			 */
 			if (TransactionIdDidCommit(update_xact))
 				ereport(ERROR,
 						(errcode(ERRCODE_DATA_CORRUPTED),
 						 errmsg_internal("multixact %u contains committed update XID %u from before removable cutoff %u",
 										 multi, update_xact,
-										 cutoffs->OldestXmin)));
+										 GlobalVisXidLowerBound(vistest))));
 			*flags |= FRM_INVALIDATE_XMAX;
 			pagefrz->freeze_required = true;
 			return InvalidTransactionId;
@@ -6830,10 +6829,11 @@ FreezeMultiXactId(MultiXactId multi, uint16 t_infomask,
 	 * Our policy is to force freezing in every case other than FRM_NOOP,
 	 * which obviates the need to maintain either set of trackers, anywhere.
 	 * Every other case will reliably execute a freeze plan for xmax that
-	 * either replaces xmax with an XID/MXID >= OldestXmin/OldestMxact, or
+	 * either replaces xmax with an XID/MXID >= XID horizon/OldestMxact, or
 	 * sets xmax to an InvalidTransactionId XID, rendering xmax fully frozen.
 	 * (VACUUM's NewRelfrozenXid/NewRelminMxid trackers are initialized with
-	 * OldestXmin/OldestMxact, so later values never need to be tracked here.)
+	 * XID horizon/OldestMxact, so later values never need to be tracked
+	 * here.)
 	 */
 	need_replace = false;
 	FreezePageRelfrozenXid = pagefrz->FreezePageRelfrozenXid;
@@ -6878,7 +6878,7 @@ FreezeMultiXactId(MultiXactId multi, uint16 t_infomask,
 	 * individual members might even show that we don't need to keep anything.
 	 * That is quite possible even though the Multi must be >= OldestMxact,
 	 * since our second pass only keeps member XIDs when it's truly necessary;
-	 * even member XIDs >= OldestXmin often won't be kept by second pass.
+	 * even member XIDs >= XID horizon often won't be kept by second pass.
 	 */
 	nnewmembers = 0;
 	newmembers = palloc(sizeof(MultiXactMember) * nmembers);
@@ -6905,12 +6905,12 @@ FreezeMultiXactId(MultiXactId multi, uint16 t_infomask,
 			if (TransactionIdIsCurrentTransactionId(xid) ||
 				TransactionIdIsInProgress(xid))
 			{
-				if (TransactionIdPrecedes(xid, cutoffs->OldestXmin))
+				if (GlobalVisXidVisible(vistest, xid))
 					ereport(ERROR,
 							(errcode(ERRCODE_DATA_CORRUPTED),
 							 errmsg_internal("multixact %u contains running locker XID %u from before removable cutoff %u",
 											 multi, xid,
-											 cutoffs->OldestXmin)));
+											 GlobalVisXidLowerBound(vistest))));
 				newmembers[nnewmembers++] = members[i];
 				has_lockers = true;
 			}
@@ -6922,9 +6922,9 @@ FreezeMultiXactId(MultiXactId multi, uint16 t_infomask,
 		 * Updater XID (not locker XID).  Should we keep it?
 		 *
 		 * Since the tuple wasn't totally removed when vacuum pruned, the
-		 * update Xid cannot possibly be older than OldestXmin cutoff unless
-		 * the updater XID aborted.  If the updater transaction is known
-		 * aborted or crashed then it's okay to ignore it, otherwise not.
+		 * update Xid cannot possibly be older than XID horizon unless the
+		 * updater XID aborted.  If the updater transaction is known aborted
+		 * or crashed then it's okay to ignore it, otherwise not.
 		 *
 		 * In any case the Multi should never contain two updaters, whatever
 		 * their individual commit status.  Check for that first, in passing.
@@ -6968,11 +6968,12 @@ FreezeMultiXactId(MultiXactId multi, uint16 t_infomask,
 		 * We determined that updater must be kept -- add it to pending new
 		 * members list
 		 */
-		if (TransactionIdPrecedes(xid, cutoffs->OldestXmin))
+		if (GlobalVisXidVisible(vistest, xid))
 			ereport(ERROR,
 					(errcode(ERRCODE_DATA_CORRUPTED),
 					 errmsg_internal("multixact %u contains committed update XID %u from before removable cutoff %u",
-									 multi, xid, cutoffs->OldestXmin)));
+									 multi, xid,
+									 GlobalVisXidLowerBound(vistest))));
 		newmembers[nnewmembers++] = members[i];
 	}
 
@@ -7023,7 +7024,7 @@ FreezeMultiXactId(MultiXactId multi, uint16 t_infomask,
  * heap_prepare_freeze_tuple
  *
  * Check to see whether any of the XID fields of a tuple (xmin, xmax, xvac)
- * are older than the OldestXmin and/or OldestMxact freeze cutoffs.  If so,
+ * are older than the XID horizon and/or OldestMxact freeze cutoffs.  If so,
  * setup enough state (in the *frz output argument) to enable caller to
  * process this tuple as part of freezing its page, and return true.  Return
  * false if nothing can be changed about the tuple right now.
@@ -7065,6 +7066,7 @@ FreezeMultiXactId(MultiXactId multi, uint16 t_infomask,
 bool
 heap_prepare_freeze_tuple(HeapTupleHeader tuple,
 						  const struct VacuumCutoffs *cutoffs,
+						  GlobalVisState *vistest,
 						  HeapPageFreeze *pagefrz,
 						  HeapTupleFreeze *frz, bool *totally_frozen)
 {
@@ -7099,7 +7101,7 @@ heap_prepare_freeze_tuple(HeapTupleHeader tuple,
 									 xid, cutoffs->relfrozenxid)));
 
 		/* Will set freeze_xmin flags in freeze plan below */
-		freeze_xmin = TransactionIdPrecedes(xid, cutoffs->OldestXmin);
+		freeze_xmin = GlobalVisXidVisible(vistest, xid);
 
 		/* Verify that xmin committed if and when freeze plan is executed */
 		if (freeze_xmin)
@@ -7114,7 +7116,7 @@ heap_prepare_freeze_tuple(HeapTupleHeader tuple,
 	if (TransactionIdIsNormal(xid))
 	{
 		Assert(TransactionIdPrecedesOrEquals(cutoffs->relfrozenxid, xid));
-		Assert(TransactionIdPrecedes(xid, cutoffs->OldestXmin));
+		Assert(GlobalVisXidVisible(vistest, xid));
 
 		/*
 		 * For Xvac, we always freeze proactively.  This allows totally_frozen
@@ -7139,7 +7141,7 @@ heap_prepare_freeze_tuple(HeapTupleHeader tuple,
 		 * perform no-op xmax processing.  The only constraint is that the
 		 * FreezeLimit/MultiXactCutoff postcondition must never be violated.
 		 */
-		newxmax = FreezeMultiXactId(xid, tuple->t_infomask, cutoffs,
+		newxmax = FreezeMultiXactId(xid, tuple->t_infomask, cutoffs, vistest,
 									&flags, pagefrz);
 
 		if (flags & FRM_NOOP)
@@ -7172,7 +7174,7 @@ heap_prepare_freeze_tuple(HeapTupleHeader tuple,
 			 * xmax will become an updater Xid (original MultiXact's updater
 			 * member Xid will be carried forward as a simple Xid in Xmax).
 			 */
-			Assert(!TransactionIdPrecedes(newxmax, cutoffs->OldestXmin));
+			Assert(!GlobalVisXidVisible(vistest, newxmax));
 
 			/*
 			 * NB -- some of these transformations are only valid because we
@@ -7238,7 +7240,7 @@ heap_prepare_freeze_tuple(HeapTupleHeader tuple,
 									 xid, cutoffs->relfrozenxid)));
 
 		/* Will set freeze_xmax flags in freeze plan below */
-		freeze_xmax = TransactionIdPrecedes(xid, cutoffs->OldestXmin);
+		freeze_xmax = GlobalVisXidVisible(vistest, xid);
 
 		/*
 		 * Verify that xmax aborted if and when freeze plan is executed,
@@ -7411,7 +7413,7 @@ heap_freeze_prepared_tuples(Buffer buffer, HeapTupleFreeze *tuples, int ntuples)
  * Useful for callers like CLUSTER that perform their own WAL logging.
  */
 bool
-heap_freeze_tuple(HeapTupleHeader tuple,
+heap_freeze_tuple(HeapTupleHeader tuple, GlobalVisState *vistest,
 				  TransactionId relfrozenxid, TransactionId relminmxid,
 				  TransactionId FreezeLimit, TransactionId MultiXactCutoff)
 {
@@ -7423,7 +7425,6 @@ heap_freeze_tuple(HeapTupleHeader tuple,
 
 	cutoffs.relfrozenxid = relfrozenxid;
 	cutoffs.relminmxid = relminmxid;
-	cutoffs.OldestXmin = FreezeLimit;
 	cutoffs.OldestMxact = MultiXactCutoff;
 	cutoffs.FreezeLimit = FreezeLimit;
 	cutoffs.MultiXactCutoff = MultiXactCutoff;
@@ -7434,7 +7435,7 @@ heap_freeze_tuple(HeapTupleHeader tuple,
 	pagefrz.NoFreezePageRelfrozenXid = FreezeLimit;
 	pagefrz.NoFreezePageRelminMxid = MultiXactCutoff;
 
-	do_freeze = heap_prepare_freeze_tuple(tuple, &cutoffs,
+	do_freeze = heap_prepare_freeze_tuple(tuple, &cutoffs, vistest,
 										  &pagefrz, &frz, &totally_frozen);
 
 	/*

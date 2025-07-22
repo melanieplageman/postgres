@@ -536,10 +536,11 @@ heap_vacuum_eager_scan_setup(LVRelState *vacrel, const VacuumParams params)
 	 * We only want to enable eager scanning if we are likely to be able to
 	 * freeze some of the pages in the relation.
 	 *
-	 * Tuples with XIDs older than OldestXmin or MXIDs older than OldestMxact
-	 * are technically freezable, but we won't freeze them unless the criteria
-	 * for opportunistic freezing is met. Only tuples with XIDs/MXIDs older
-	 * than the FreezeLimit/MultiXactCutoff are frozen in the common case.
+	 * Tuples with XIDs older than the XID visibility horizon or MXIDs older
+	 * than OldestMxact are technically freezable, but we won't freeze them
+	 * unless the criteria for opportunistic freezing is met. Only tuples with
+	 * XIDs/MXIDs older than the FreezeLimit/MultiXactCutoff are frozen in the
+	 * common case.
 	 *
 	 * So, as a heuristic, we wait until the FreezeLimit has advanced past the
 	 * relfrozenxid or the MultiXactCutoff has advanced past the relminmxid to
@@ -638,6 +639,7 @@ heap_vacuum_rel(Relation rel, const VacuumParams params,
 	BufferUsage startbufferusage = pgBufferUsage;
 	ErrorContextCallback errcallback;
 	char	  **indnames = NULL;
+	TransactionId lower_bound;
 
 	verbose = (params.options & VACOPT_VERBOSE) != 0;
 	instrument = (verbose || (AmAutoVacuumWorkerProcess() &&
@@ -764,27 +766,35 @@ heap_vacuum_rel(Relation rel, const VacuumParams params,
 	vacrel->vm_new_frozen_pages = 0;
 
 	/*
-	 * Get cutoffs that determine which deleted tuples are considered DEAD,
-	 * not just RECENTLY_DEAD, and which XIDs/MXIDs to freeze.  Then determine
-	 * the extent of the blocks that we'll scan in lazy_scan_heap.  It has to
-	 * happen in this order to ensure that the OldestXmin cutoff field works
-	 * as an upper bound on the XIDs stored in the pages we'll actually scan
-	 * (NewRelfrozenXid tracking must never be allowed to miss unfrozen XIDs).
+	 * Get cutoffs and visibility horizon that determines which deleted tuples
+	 * are considered DEAD, not just RECENTLY_DEAD, and which XIDs/MXIDs to
+	 * freeze. Then determine the extent of the blocks that we'll scan in
+	 * lazy_scan_heap.  It has to happen in this order to ensure that the
+	 * vistest horizon works as an upper bound on the XIDs stored in the pages
+	 * we'll actually scan (NewRelfrozenXid tracking must never be allowed to
+	 * miss unfrozen XIDs).
 	 *
-	 * Next acquire vistest, a related cutoff that's used in pruning.  We use
-	 * vistest in combination with OldestXmin to ensure that
-	 * heap_page_prune_and_freeze() always removes any deleted tuple whose
-	 * xmax is < OldestXmin.  lazy_scan_prune must never become confused about
-	 * whether a tuple should be frozen or removed.  (In the future we might
-	 * want to teach lazy_scan_prune to recompute vistest from time to time,
-	 * to increase the number of dead tuples it can prune away.)
+	 * vistest is the visibility horizon for XIDs that's used in pruning and
+	 * freezing. When acquiring the visibility horizon, we can always ignore
+	 * processes running lazy vacuum.  This is because we use these values
+	 * only for deciding which tuples we must keep in the tables.  Since lazy
+	 * vacuum doesn't write its XID anywhere (usually no XID assigned), it's
+	 * safe to ignore it.  In theory it could be problematic to ignore lazy
+	 * vacuums in a full vacuum, but keep in mind that only one vacuum process
+	 * can be working on a particular table at any time, and that each vacuum
+	 * is always an independent transaction.
+	 *
+	 * In the future we might want to teach lazy_scan_prune to recompute
+	 * vistest from time to time, to increase the number of dead tuples it can
+	 * prune away.
 	 */
-	vacrel->aggressive = vacuum_get_cutoffs(rel, params, &vacrel->cutoffs);
+	vacrel->vistest = FreshGlobalVisTestFor(rel);
+	vacrel->aggressive = vacuum_get_cutoffs(rel, params, vacrel->vistest,
+											&vacrel->cutoffs);
 	vacrel->rel_pages = orig_rel_pages = RelationGetNumberOfBlocks(rel);
-	vacrel->vistest = GlobalVisTestFor(rel);
 
 	/* Initialize state used to track oldest extant XID/MXID */
-	vacrel->NewRelfrozenXid = vacrel->cutoffs.OldestXmin;
+	vacrel->NewRelfrozenXid = lower_bound = GlobalVisXidLowerBound(vacrel->vistest);
 	vacrel->NewRelminMxid = vacrel->cutoffs.OldestMxact;
 
 	/*
@@ -880,7 +890,7 @@ heap_vacuum_rel(Relation rel, const VacuumParams params,
 	 * value >= FreezeLimit, and relminmxid to a value >= MultiXactCutoff.
 	 * Non-aggressive VACUUMs may advance them by any amount, or not at all.
 	 */
-	Assert(vacrel->NewRelfrozenXid == vacrel->cutoffs.OldestXmin ||
+	Assert(vacrel->NewRelfrozenXid == lower_bound ||
 		   TransactionIdPrecedesOrEquals(vacrel->aggressive ? vacrel->cutoffs.FreezeLimit :
 										 vacrel->cutoffs.relfrozenxid,
 										 vacrel->NewRelfrozenXid));
@@ -1035,15 +1045,16 @@ heap_vacuum_rel(Relation rel, const VacuumParams params,
 								 _("tuples missed: %" PRId64 " dead from %u pages not removed due to cleanup lock contention\n"),
 								 vacrel->missed_dead_tuples,
 								 vacrel->missed_dead_pages);
-			diff = (int32) (ReadNextTransactionId() -
-							vacrel->cutoffs.OldestXmin);
+			lower_bound = GlobalVisXidLowerBound(vacrel->vistest);
+			diff = (int32) (ReadNextTransactionId() - lower_bound);
 			appendStringInfo(&buf,
-							 _("removable cutoff: %u, which was %d XIDs old when operation ended\n"),
-							 vacrel->cutoffs.OldestXmin, diff);
+							 _("final removable cutoff: %u, which was %u XIDs old when operation ended\n"),
+							 lower_bound, diff);
 			if (frozenxid_updated)
 			{
 				diff = (int32) (vacrel->NewRelfrozenXid -
 								vacrel->cutoffs.relfrozenxid);
+
 				appendStringInfo(&buf,
 								 _("new relfrozenxid: %u, which is %d XIDs ahead of previous value\n"),
 								 vacrel->NewRelfrozenXid, diff);
@@ -1673,10 +1684,11 @@ heap_vac_scan_next_block(ReadStream *stream,
  * Note: our opinion of which blocks can be skipped can go stale immediately.
  * It's okay if caller "misses" a page whose all-visible or all-frozen marking
  * was concurrently cleared, though.  All that matters is that caller scan all
- * pages whose tuples might contain XIDs < OldestXmin, or MXIDs < OldestMxact.
- * (Actually, non-aggressive VACUUMs can choose to skip all-visible pages with
- * older XIDs/MXIDs.  The *skippedallvis flag will be set here when the choice
- * to skip such a range is actually made, making everything safe.)
+ * pages whose tuples might contain XIDs < XID visibility horizon, or MXIDs <
+ * OldestMxact. (Actually, non-aggressive VACUUMs can choose to skip
+ * all-visible pages with older XIDs/MXIDs.  The *skippedallvis flag will be
+ * set here when the choice to skip such a range is actually made, making
+ * everything safe.)
  */
 static void
 find_next_unskippable_block(LVRelState *vacrel, bool *skipsallvis)
@@ -1738,8 +1750,8 @@ find_next_unskippable_block(LVRelState *vacrel, bool *skipsallvis)
 			break;
 
 		/*
-		 * All-frozen pages cannot contain XIDs < OldestXmin (XIDs that aren't
-		 * already frozen by now), so this page can be skipped.
+		 * All-frozen pages cannot contain XIDs < XID visibility horizon (XIDs
+		 * that aren't already frozen by now), so this page can be skipped.
 		 */
 		if ((mapbits & VISIBILITYMAP_ALL_FROZEN) != 0)
 			continue;
@@ -2189,8 +2201,9 @@ lazy_scan_noprune(LVRelState *vacrel,
 		tuple.t_len = ItemIdGetLength(itemid);
 		tuple.t_tableOid = RelationGetRelid(vacrel->rel);
 
-		switch (HeapTupleSatisfiesVacuum(&tuple, vacrel->cutoffs.OldestXmin,
-										 buf))
+		switch (HeapTupleSatisfiesVacuumGlobalVis(&tuple,
+												  vacrel->vistest,
+												  buf))
 		{
 			case HEAPTUPLE_DELETE_IN_PROGRESS:
 			case HEAPTUPLE_LIVE:
@@ -3476,7 +3489,7 @@ heap_page_is_all_visible(Relation rel, Buffer buf,
  * Check if every tuple in the given page is visible to all current and future
  * transactions.
  *
- * OldestXmin is used to determine visibility.
+ * vistest is used to determine visibility.
  *
  * *logging_offnum will have the OffsetNumber of the current tuple being
  * processed for vacuum's error callback system.

@@ -368,6 +368,7 @@ static void MaintainLatestCompletedXidRecovery(TransactionId latestXid);
 static inline FullTransactionId FullXidRelativeTo(FullTransactionId rel,
 												  TransactionId xid);
 static void GlobalVisUpdateApply(ComputeXidHorizonsResult *horizons);
+static void GlobalVisUpdate(void);
 
 /*
  * Report shared-memory space needed by ProcArrayShmemInit
@@ -4096,6 +4097,16 @@ GlobalVisTestFor(Relation rel)
 }
 
 /*
+ * Like GlobalVisTestFor(), but forces an update of the GlobalVisState first.
+ */
+GlobalVisState *
+FreshGlobalVisTestFor(Relation rel)
+{
+	GlobalVisUpdate();
+	return GlobalVisTestFor(rel);
+}
+
+/*
  * Return true if it's worth updating the accurate maybe_needed boundary.
  *
  * As it is somewhat expensive to determine xmin horizons, we don't want to
@@ -4212,6 +4223,12 @@ GlobalVisFullXidVisible(GlobalVisState *state, FullTransactionId fxid)
 	}
 	else
 		return false;
+}
+
+TransactionId
+GlobalVisXidLowerBound(GlobalVisState *state)
+{
+	return XidFromFullTransactionId(state->maybe_needed);
 }
 
 /*

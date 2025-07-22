@@ -259,19 +259,14 @@ struct VacuumCutoffs
 	MultiXactId relminmxid;
 
 	/*
-	 * OldestXmin is the Xid below which tuples deleted by any xact (that
-	 * committed) should be considered DEAD, not just RECENTLY_DEAD.
-	 *
 	 * OldestMxact is the Mxid below which MultiXacts are definitely not seen
 	 * as visible by any running transaction.
 	 *
-	 * OldestXmin and OldestMxact are also the most recent values that can
-	 * ever be passed to vac_update_relstats() as frozenxid and minmulti
-	 * arguments at the end of VACUUM.  These same values should be passed
-	 * when it turns out that VACUUM will leave no unfrozen XIDs/MXIDs behind
-	 * in the table.
+	 * OldestMxact is the most recent values that can ever be passed to
+	 * vac_update_relstats() as frozenxid and minmulti arguments at the end of
+	 * VACUUM.  These same values should be passed when it turns out that
+	 * VACUUM will leave no unfrozen XIDs/MXIDs behind in the table.
 	 */
-	TransactionId OldestXmin;
 	MultiXactId OldestMxact;
 
 	/*
@@ -358,6 +353,7 @@ extern void vac_update_relstats(Relation relation,
 								bool *minmulti_updated,
 								bool in_outer_xact);
 extern bool vacuum_get_cutoffs(Relation rel, const VacuumParams params,
+							   struct GlobalVisState *vistest,
 							   struct VacuumCutoffs *cutoffs);
 extern bool vacuum_xid_failsafe_check(const struct VacuumCutoffs *cutoffs);
 extern void vac_update_datfrozenxid(void);

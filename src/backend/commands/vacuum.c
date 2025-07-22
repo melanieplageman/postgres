@@ -1088,11 +1088,12 @@ get_all_vacuum_rels(MemoryContext vac_context, int options)
 }
 
 /*
- * vacuum_get_cutoffs() -- compute OldestXmin and freeze cutoff points
+ * Compute freeze cutoff points
  *
  * The target relation and VACUUM parameters are our inputs.
  *
- * Output parameters are the cutoffs that VACUUM caller should use.
+ * vistest is an input parameter that must be populated by the caller
+ * beforehand and is used to bound some of the freeze cutoffs.
  *
  * Return value indicates if vacuumlazy.c caller should make its VACUUM
  * operation aggressive.  An aggressive VACUUM must advance relfrozenxid up to
@@ -1101,6 +1102,7 @@ get_all_vacuum_rels(MemoryContext vac_context, int options)
  */
 bool
 vacuum_get_cutoffs(Relation rel, const VacuumParams params,
+				   GlobalVisState *vistest,
 				   struct VacuumCutoffs *cutoffs)
 {
 	int			freeze_min_age,
@@ -1114,6 +1116,9 @@ vacuum_get_cutoffs(Relation rel, const VacuumParams params,
 	MultiXactId nextMXID,
 				safeOldestMxact,
 				aggressiveMXIDCutoff;
+	TransactionId lower_bound;
+
+	Assert(vistest);
 
 	/* Use mutable copies of freeze age parameters */
 	freeze_min_age = params.freeze_min_age;
@@ -1124,21 +1129,6 @@ vacuum_get_cutoffs(Relation rel, const VacuumParams params,
 	/* Set pg_class fields in cutoffs */
 	cutoffs->relfrozenxid = rel->rd_rel->relfrozenxid;
 	cutoffs->relminmxid = rel->rd_rel->relminmxid;
-
-	/*
-	 * Acquire OldestXmin.
-	 *
-	 * We can always ignore processes running lazy vacuum.  This is because we
-	 * use these values only for deciding which tuples we must keep in the
-	 * tables.  Since lazy vacuum doesn't write its XID anywhere (usually no
-	 * XID assigned), it's safe to ignore it.  In theory it could be
-	 * problematic to ignore lazy vacuums in a full vacuum, but keep in mind
-	 * that only one vacuum process can be working on a particular table at
-	 * any time, and that each vacuum is always an independent transaction.
-	 */
-	cutoffs->OldestXmin = GetOldestNonRemovableTransactionId(rel);
-
-	Assert(TransactionIdIsNormal(cutoffs->OldestXmin));
 
 	/* Acquire OldestMxact */
 	cutoffs->OldestMxact = GetOldestMultiXactId();
@@ -1165,7 +1155,7 @@ vacuum_get_cutoffs(Relation rel, const VacuumParams params,
 	safeOldestMxact = nextMXID - effective_multixact_freeze_max_age;
 	if (safeOldestMxact < FirstMultiXactId)
 		safeOldestMxact = FirstMultiXactId;
-	if (TransactionIdPrecedes(cutoffs->OldestXmin, safeOldestXmin))
+	if (GlobalVisXidVisible(vistest, safeOldestXmin))
 		ereport(WARNING,
 				(errmsg("cutoff for removing and freezing tuples is far in the past"),
 				 errhint("Close open transactions soon to avoid wraparound problems.\n"
@@ -1191,9 +1181,10 @@ vacuum_get_cutoffs(Relation rel, const VacuumParams params,
 	cutoffs->FreezeLimit = nextXID - freeze_min_age;
 	if (!TransactionIdIsNormal(cutoffs->FreezeLimit))
 		cutoffs->FreezeLimit = FirstNormalTransactionId;
-	/* FreezeLimit must always be <= OldestXmin */
-	if (TransactionIdPrecedes(cutoffs->OldestXmin, cutoffs->FreezeLimit))
-		cutoffs->FreezeLimit = cutoffs->OldestXmin;
+	/* FreezeLimit must always be <= the lower bound of GlobalVisState */
+	lower_bound = GlobalVisXidLowerBound(vistest);
+	if (TransactionIdPrecedes(lower_bound, cutoffs->FreezeLimit))
+		cutoffs->FreezeLimit = lower_bound;
 
 	/*
 	 * Determine the minimum multixact freeze age to use: as specified by
@@ -2023,7 +2014,7 @@ vacuum_rel(Oid relid, RangeVar *relation, VacuumParams params,
 		/*
 		 * In lazy vacuum, we can set the PROC_IN_VACUUM flag, which lets
 		 * other concurrent VACUUMs know that they can ignore this one while
-		 * determining their OldestXmin.  (The reason we don't set it during a
+		 * determining their horizons.  (The reason we don't set it during a
 		 * full VACUUM is exactly that we may have to run user-defined
 		 * functions for functional indexes, and we want to make sure that if
 		 * they use the snapshot set above, any tuples it requires can't get

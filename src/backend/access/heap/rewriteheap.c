@@ -369,6 +369,7 @@ rewrite_heap_tuple(RewriteState state,
 	 * eligible xmin or xmax, so that future VACUUM effort can be saved.
 	 */
 	heap_freeze_tuple(new_tuple->t_data,
+					  GlobalVisTestFor(state->rs_old_rel),
 					  state->rs_old_rel->rd_rel->relfrozenxid,
 					  state->rs_old_rel->rd_rel->relminmxid,
 					  state->rs_freeze_xid,

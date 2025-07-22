@@ -847,6 +847,7 @@ copy_table_data(Relation NewHeap, Relation OldHeap, Relation OldIndex, bool verb
 	int			elevel = verbose ? INFO : DEBUG2;
 	PGRUsage	ru0;
 	char	   *nspname;
+	GlobalVisState *vistest;
 
 	pg_rusage_init(&ru0);
 
@@ -917,7 +918,8 @@ copy_table_data(Relation NewHeap, Relation OldHeap, Relation OldIndex, bool verb
 	 * not to be aggressive about this.
 	 */
 	memset(&params, 0, sizeof(VacuumParams));
-	vacuum_get_cutoffs(OldHeap, params, &cutoffs);
+	vistest = FreshGlobalVisTestFor(OldHeap);
+	vacuum_get_cutoffs(OldHeap, params, vistest, &cutoffs);
 
 	/*
 	 * FreezeXid will become the table's new relfrozenxid, and that mustn't go
@@ -980,7 +982,8 @@ copy_table_data(Relation NewHeap, Relation OldHeap, Relation OldIndex, bool verb
 	 * values (e.g. because the AM doesn't use freezing).
 	 */
 	table_relation_copy_for_cluster(OldHeap, NewHeap, OldIndex, use_sort,
-									cutoffs.OldestXmin, &cutoffs.FreezeLimit,
+									GlobalVisXidLowerBound(vistest),
+									&cutoffs.FreezeLimit,
 									&cutoffs.MultiXactCutoff,
 									&num_tuples, &tups_vacuumed,
 									&tups_recently_dead);

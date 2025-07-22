@@ -97,10 +97,12 @@ extern char *ExportSnapshot(Snapshot snapshot);
  */
 typedef struct GlobalVisState GlobalVisState;
 extern GlobalVisState *GlobalVisTestFor(Relation rel);
+extern GlobalVisState *FreshGlobalVisTestFor(Relation rel);
 extern bool GlobalVisXidVisible(GlobalVisState *state, TransactionId xid);
 extern bool GlobalVisFullXidVisible(GlobalVisState *state, FullTransactionId fxid);
 extern bool GlobalVisCheckRemovableXid(Relation rel, TransactionId xid);
 extern bool GlobalVisCheckRemovableFullXid(Relation rel, FullTransactionId fxid);
+extern TransactionId GlobalVisXidLowerBound(GlobalVisState *state);
 
 /*
  * Utility functions for implementing visibility routines in table AMs.

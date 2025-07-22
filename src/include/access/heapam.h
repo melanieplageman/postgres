@@ -210,9 +210,9 @@ typedef struct HeapPageFreeze
 	 * "freeze the page".  Only the "freeze" path needs to consider the need
 	 * to set pages all-frozen in the visibility map under this scheme.
 	 *
-	 * When we freeze a page, we generally freeze all XIDs < OldestXmin, only
-	 * leaving behind XIDs that are ineligible for freezing, if any.  And so
-	 * you might wonder why these trackers are necessary at all; why should
+	 * When we freeze a page, we generally freeze all XIDs < vistest horizon,
+	 * only leaving behind XIDs that are ineligible for freezing, if any.  And
+	 * so you might wonder why these trackers are necessary at all; why should
 	 * _any_ page that VACUUM freezes _ever_ be left with XIDs/MXIDs that
 	 * ratchet back the top-level NewRelfrozenXid/NewRelminMxid trackers?
 	 *
@@ -365,6 +365,7 @@ extern bool heap_page_is_all_visible(Relation rel, Buffer buf,
 									 OffsetNumber *logging_offnum);
 extern bool heap_prepare_freeze_tuple(HeapTupleHeader tuple,
 									  const struct VacuumCutoffs *cutoffs,
+									  GlobalVisState *vistest,
 									  HeapPageFreeze *pagefrz,
 									  HeapTupleFreeze *frz, bool *totally_frozen);
 
@@ -372,7 +373,7 @@ extern void heap_pre_freeze_checks(Buffer buffer,
 								   HeapTupleFreeze *tuples, int ntuples);
 extern void heap_freeze_prepared_tuples(Buffer buffer,
 										HeapTupleFreeze *tuples, int ntuples);
-extern bool heap_freeze_tuple(HeapTupleHeader tuple,
+extern bool heap_freeze_tuple(HeapTupleHeader tuple, GlobalVisState *vistest,
 							  TransactionId relfrozenxid, TransactionId relminmxid,
 							  TransactionId FreezeLimit, TransactionId MultiXactCutoff);
 extern bool heap_tuple_should_freeze(HeapTupleHeader tuple,
