@@ -799,43 +799,46 @@ heap_page_prune_and_freeze(Relation relation, Buffer buffer,
 			 */
 			do_freeze = true;
 		}
-		else
+
+		/*
+		 * Even if freezing is not "required", we may choose to freeze tuples
+		 * opportunistically. Our current heuristics for opportunistic
+		 * freezing are largely based on trying to reduce WAL emitted. These
+		 * heuristics should be improved.
+		 */
+		else if (RelationNeedsWAL(relation))
 		{
 			/*
-			 * Opportunistically freeze the page if we are generating an FPI
-			 * anyway and if doing so means that we can set the page
-			 * all-frozen afterwards (might not happen until VACUUM's final
-			 * heap pass).
-			 *
-			 * XXX: Previously, we knew if pruning emitted an FPI by checking
-			 * pgWalUsage.wal_fpi before and after pruning.  Once the freeze
-			 * and prune records were combined, this heuristic couldn't be
-			 * used anymore.  The opportunistic freeze heuristic must be
-			 * improved; however, for now, try to approximate the old logic.
+			 * If we are already making WAL-logged changes to the page (either
+			 * pruning tuples or setting page hints and checksums or
+			 * wal_log_hints is enabled), and we have to emit an FPI, there is
+			 * no reason not to freeze the tuples.
 			 */
-			if (prstate.all_visible && prstate.all_frozen && prstate.nfrozen > 0)
-			{
-				/*
-				 * Freezing would make the page all-frozen.  Have already
-				 * emitted an FPI or will do so anyway?
-				 */
-				if (RelationNeedsWAL(relation))
-				{
-					if (hint_bit_fpi)
-						do_freeze = true;
-					else if (do_prune)
-					{
-						if (XLogCheckBufferNeedsBackup(buffer))
-							do_freeze = true;
-					}
-					else if (do_hint_full_or_prunable)
-					{
-						if (XLogHintBitIsNeeded() && XLogCheckBufferNeedsBackup(buffer))
-							do_freeze = true;
-					}
-				}
-			}
+			if (XLogCheckBufferNeedsBackup(buffer) &&
+				(do_prune ||
+				 (do_hint_full_or_prunable && XLogHintBitIsNeeded())))
+				do_freeze = true;
+
+			/*
+			 * If freezing tuples means that we can set the page all-frozen
+			 * afterwards (which might not happen until VACUUM's final heap
+			 * pass), we opportunistically freeze the tuples if doing so
+			 * wouldn't cost us an FPI. If we just emitted an FPI when setting
+			 * tuple hints, it is unlikely that these changes will cause us to
+			 * emit another.
+			 */
+			if (prstate.all_visible &&
+				prstate.all_frozen && prstate.nfrozen > 0 &&
+				hint_bit_fpi)
+				do_freeze = true;
 		}
+
+		/*
+		 * If we are not emitting WAL and are already dirtying the page by
+		 * pruning, there is no reason not to freeze the freezable tuples.
+		 */
+		else if (do_prune)
+			do_freeze = true;
 	}
 
 	if (do_freeze)
