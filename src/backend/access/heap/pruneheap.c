@@ -824,6 +824,7 @@ heap_page_prune_and_freeze(Relation relation, Buffer buffer,
 		 */
 	}
 
+	Assert(!prstate.all_frozen || prstate.all_visible);
 	/* Any error while applying the changes is critical */
 	START_CRIT_SECTION();
 
@@ -1468,7 +1469,7 @@ heap_prune_record_unchanged_lp_normal(Page page, PruneState *prstate, OffsetNumb
 
 				if (!HeapTupleHeaderXminCommitted(htup))
 				{
-					prstate->all_visible = false;
+					prstate->all_visible = prstate->all_frozen = false;
 					break;
 				}
 
@@ -1490,7 +1491,7 @@ heap_prune_record_unchanged_lp_normal(Page page, PruneState *prstate, OffsetNumb
 				Assert(prstate->cutoffs);
 				if (!TransactionIdPrecedes(xmin, prstate->cutoffs->OldestXmin))
 				{
-					prstate->all_visible = false;
+					prstate->all_visible = prstate->all_frozen = false;
 					break;
 				}
 
@@ -1503,7 +1504,7 @@ heap_prune_record_unchanged_lp_normal(Page page, PruneState *prstate, OffsetNumb
 
 		case HEAPTUPLE_RECENTLY_DEAD:
 			prstate->recently_dead_tuples++;
-			prstate->all_visible = false;
+			prstate->all_visible = prstate->all_frozen = false;
 
 			/*
 			 * This tuple will soon become DEAD.  Update the hint field so
@@ -1522,7 +1523,7 @@ heap_prune_record_unchanged_lp_normal(Page page, PruneState *prstate, OffsetNumb
 			 * assumption is a bit shaky, but it is what acquire_sample_rows()
 			 * does, so be consistent.
 			 */
-			prstate->all_visible = false;
+			prstate->all_visible = prstate->all_frozen = false;
 
 			/*
 			 * If we wanted to optimize for aborts, we might consider marking
@@ -1540,7 +1541,7 @@ heap_prune_record_unchanged_lp_normal(Page page, PruneState *prstate, OffsetNumb
 			 * will commit and update the counters after we report.
 			 */
 			prstate->live_tuples++;
-			prstate->all_visible = false;
+			prstate->all_visible = prstate->all_frozen = false;
 
 			/*
 			 * This tuple may soon become DEAD.  Update the hint field so that
