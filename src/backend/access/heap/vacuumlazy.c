@@ -280,7 +280,7 @@ typedef struct LVRelState
 	bool		do_rel_truncate;
 
 	/* VACUUM operation's cutoffs for freezing and pruning */
-	struct VacuumCutoffs cutoffs;
+	struct FreezeCutoffs cutoffs;
 	GlobalVisState *vistest;
 	/* Tracks oldest extant XID/MXID for setting relfrozenxid/relminmxid */
 	TransactionId NewRelfrozenXid;
@@ -789,7 +789,7 @@ heap_vacuum_rel(Relation rel, const VacuumParams params,
 	 * prune away.
 	 */
 	vacrel->vistest = FreshGlobalVisTestFor(rel);
-	vacrel->aggressive = vacuum_get_cutoffs(rel, params, vacrel->vistest,
+	vacrel->aggressive = get_freeze_cutoffs(rel, params.freeze, vacrel->vistest,
 											&vacrel->cutoffs);
 	vacrel->rel_pages = orig_rel_pages = RelationGetNumberOfBlocks(rel);
 

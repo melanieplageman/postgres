@@ -400,17 +400,17 @@ ExecVacuum(ParseState *pstate, VacuumStmt *vacstmt, bool isTopLevel)
 	 */
 	if (params.options & VACOPT_FREEZE)
 	{
-		params.freeze_min_age = 0;
-		params.freeze_table_age = 0;
-		params.multixact_freeze_min_age = 0;
-		params.multixact_freeze_table_age = 0;
+		params.freeze.freeze_min_age = 0;
+		params.freeze.freeze_table_age = 0;
+		params.freeze.multixact_freeze_min_age = 0;
+		params.freeze.multixact_freeze_table_age = 0;
 	}
 	else
 	{
-		params.freeze_min_age = -1;
-		params.freeze_table_age = -1;
-		params.multixact_freeze_min_age = -1;
-		params.multixact_freeze_table_age = -1;
+		params.freeze.freeze_min_age = -1;
+		params.freeze.freeze_table_age = -1;
+		params.freeze.multixact_freeze_min_age = -1;
+		params.freeze.multixact_freeze_table_age = -1;
 	}
 
 	/* user-invoked vacuum is never "for wraparound" */
@@ -1090,7 +1090,8 @@ get_all_vacuum_rels(MemoryContext vac_context, int options)
 /*
  * Compute freeze cutoff points
  *
- * The target relation and VACUUM parameters are our inputs.
+ * Given the target relation and freeze-related parameters, populate the
+ * provided FreezeCutoffs.
  *
  * vistest is an input parameter that must be populated by the caller
  * beforehand and is used to bound some of the freeze cutoffs.
@@ -1101,9 +1102,9 @@ get_all_vacuum_rels(MemoryContext vac_context, int options)
  * minimum).
  */
 bool
-vacuum_get_cutoffs(Relation rel, const VacuumParams params,
+get_freeze_cutoffs(Relation rel, const FreezeAgeParams params,
 				   GlobalVisState *vistest,
-				   struct VacuumCutoffs *cutoffs)
+				   struct FreezeCutoffs *cutoffs)
 {
 	int			freeze_min_age,
 				multixact_freeze_min_age,
@@ -1259,7 +1260,7 @@ vacuum_get_cutoffs(Relation rel, const VacuumParams params,
  * When we return true, VACUUM caller triggers the failsafe.
  */
 bool
-vacuum_xid_failsafe_check(const struct VacuumCutoffs *cutoffs)
+vacuum_xid_failsafe_check(const struct FreezeCutoffs *cutoffs)
 {
 	TransactionId relfrozenxid = cutoffs->relfrozenxid;
 	MultiXactId relminmxid = cutoffs->relminmxid;

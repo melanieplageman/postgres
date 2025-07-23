@@ -25,6 +25,7 @@
 #include "storage/buf.h"
 #include "storage/lock.h"
 #include "utils/relcache.h"
+#include "utils/snapmgr.h"
 
 /*
  * Flags for amparallelvacuumoptions to control the participation of bulkdelete
@@ -205,6 +206,18 @@ typedef enum VacOptValue
 	VACOPTVALUE_ENABLED,
 } VacOptValue;
 
+typedef struct FreezeAgeParams
+{
+	/* min freeze age, -1 to use default */
+	int			freeze_min_age;
+	/* age at which to scan whole table */
+	int			freeze_table_age;
+	/* min multixact freeze age, -1 to use default */
+	int			multixact_freeze_min_age;
+	/* multixact age at which to scan whole table */
+	int			multixact_freeze_table_age;
+} FreezeAgeParams;
+
 /*
  * Parameters customizing behavior of VACUUM and ANALYZE.
  *
@@ -217,12 +230,6 @@ typedef enum VacOptValue
 typedef struct VacuumParams
 {
 	bits32		options;		/* bitmask of VACOPT_* */
-	int			freeze_min_age; /* min freeze age, -1 to use default */
-	int			freeze_table_age;	/* age at which to scan whole table */
-	int			multixact_freeze_min_age;	/* min multixact freeze age, -1 to
-											 * use default */
-	int			multixact_freeze_table_age; /* multixact age at which to scan
-											 * whole table */
 	bool		is_wraparound;	/* force a for-wraparound vacuum */
 	int			log_min_duration;	/* minimum execution threshold in ms at
 									 * which autovacuum is logged, -1 to use
@@ -244,13 +251,16 @@ typedef struct VacuumParams
 	 * disabled.
 	 */
 	int			nworkers;
+	FreezeAgeParams freeze;
 } VacuumParams;
 
 /*
- * VacuumCutoffs is immutable state that describes the cutoffs used by VACUUM.
- * Established at the beginning of each VACUUM operation.
+ * FreezeCutoffs is immutable state that describes the cutoffs used by VACUUM
+ * and on-access freezing.
+ * Established at the beginning of each VACUUM operation or before on-access
+ * freezing.
  */
-struct VacuumCutoffs
+struct FreezeCutoffs
 {
 	/*
 	 * Existing pg_class fields at start of VACUUM
@@ -352,10 +362,9 @@ extern void vac_update_relstats(Relation relation,
 								bool *frozenxid_updated,
 								bool *minmulti_updated,
 								bool in_outer_xact);
-extern bool vacuum_get_cutoffs(Relation rel, const VacuumParams params,
-							   struct GlobalVisState *vistest,
-							   struct VacuumCutoffs *cutoffs);
-extern bool vacuum_xid_failsafe_check(const struct VacuumCutoffs *cutoffs);
+extern bool get_freeze_cutoffs(Relation rel, const FreezeAgeParams params,
+							   GlobalVisState *vistest, struct FreezeCutoffs *cutoffs);
+extern bool vacuum_xid_failsafe_check(const struct FreezeCutoffs *cutoffs);
 extern void vac_update_datfrozenxid(void);
 extern void vacuum_delay_point(bool is_analyze);
 extern bool vacuum_is_permitted_for_relation(Oid relid, Form_pg_class reltuple,
@@ -373,6 +382,7 @@ extern IndexBulkDeleteResult *vac_cleanup_one_index(IndexVacuumInfo *ivinfo,
 /* In postmaster/autovacuum.c */
 extern void AutoVacuumUpdateCostLimit(void);
 extern void VacuumUpdateCosts(void);
+extern void extract_freeze_params_on_access(Oid relid, FreezeAgeParams *params);
 
 /* in commands/vacuumparallel.c */
 extern ParallelVacuumState *parallel_vacuum_init(Relation rel, Relation *indrels,

@@ -2734,6 +2734,89 @@ extract_autovac_opts(HeapTuple tup, TupleDesc pg_class_desc)
 }
 
 
+void
+extract_freeze_params_on_access(Oid relid, FreezeAgeParams *params)
+{
+	HeapTuple	classtup;
+	HeapTuple	dbtup;
+	Form_pg_database dbform;
+	Relation	classrel;
+	TupleDesc	pg_class_desc;
+	AutoVacOpts avopts;
+	bytea	   *relopts;
+
+	/*
+	 * If we aren't able to look up the reloptions or there are none, we
+	 * default to the GUC values.
+	 */
+	params->freeze_min_age = vacuum_freeze_min_age;
+	params->freeze_table_age = vacuum_freeze_table_age;
+	params->multixact_freeze_min_age = vacuum_multixact_freeze_min_age;
+	params->multixact_freeze_table_age = vacuum_multixact_freeze_table_age;
+
+	/*
+	 * Find the pg_database entry and select the default freeze ages. We use
+	 * zero in template and nonconnectable databases, else the system-wide
+	 * default.
+	 */
+	dbtup = SearchSysCache1(DATABASEOID, ObjectIdGetDatum(MyDatabaseId));
+	if (!HeapTupleIsValid(dbtup))
+		return;
+	dbform = (Form_pg_database) GETSTRUCT(dbtup);
+	if (dbform->datistemplate || !dbform->datallowconn)
+	{
+		params->freeze_min_age = 0;
+		params->freeze_table_age = 0;
+		params->multixact_freeze_min_age = 0;
+		params->multixact_freeze_table_age = 0;
+	}
+
+	/*
+	 * Get the pg_class entry for the relation so we can extract the
+	 * reloptions. If no pg_class entry exists, bail out.
+	 */
+	classtup = SearchSysCache1(RELOID, ObjectIdGetDatum(relid));
+
+	if (!HeapTupleIsValid(classtup))
+		goto oa_freeze_cleanup_dbtup;
+
+	/* We shouldn't do on-access freezing on other relkinds */
+	if (((Form_pg_class) GETSTRUCT(classtup))->relkind != RELKIND_RELATION)
+		goto oa_freeze_cleanup_classtup;
+
+	classrel = table_open(RelationRelationId, AccessShareLock);
+	pg_class_desc = RelationGetDescr(classrel);
+
+	relopts = extractRelOptions(classtup, pg_class_desc, NULL);
+
+	/* If there aren't reloptions, we're done */
+	if (relopts == NULL)
+		goto oa_freeze_cleanup_pg_class;
+
+	avopts = ((StdRdOptions *) relopts)->autovacuum;
+
+	/* If any of the vacuum reloptions are non-default, use them. */
+	if (avopts.freeze_min_age >= 0)
+		params->freeze_min_age = avopts.freeze_min_age;
+
+	if (avopts.freeze_table_age >= 0)
+		params->freeze_table_age = avopts.freeze_table_age;
+
+	if (avopts.multixact_freeze_min_age >= 0)
+		params->multixact_freeze_min_age = avopts.multixact_freeze_min_age;
+
+	if (avopts.multixact_freeze_table_age >= 0)
+		params->multixact_freeze_table_age = avopts.multixact_freeze_table_age;
+
+oa_freeze_cleanup_pg_class:
+	table_close(classrel, AccessShareLock);
+oa_freeze_cleanup_classtup:
+	ReleaseSysCache(classtup);
+oa_freeze_cleanup_dbtup:
+	ReleaseSysCache(dbtup);
+}
+
+
 /*
  * table_recheck_autovac
  *
@@ -2849,10 +2932,10 @@ table_recheck_autovac(Oid relid, HTAB *table_toast_map,
 		tab->at_params.truncate = VACOPTVALUE_UNSPECIFIED;
 		/* As of now, we don't support parallel vacuum for autovacuum */
 		tab->at_params.nworkers = -1;
-		tab->at_params.freeze_min_age = freeze_min_age;
-		tab->at_params.freeze_table_age = freeze_table_age;
-		tab->at_params.multixact_freeze_min_age = multixact_freeze_min_age;
-		tab->at_params.multixact_freeze_table_age = multixact_freeze_table_age;
+		tab->at_params.freeze.freeze_min_age = freeze_min_age;
+		tab->at_params.freeze.freeze_table_age = freeze_table_age;
+		tab->at_params.freeze.multixact_freeze_min_age = multixact_freeze_min_age;
+		tab->at_params.freeze.multixact_freeze_table_age = multixact_freeze_table_age;
 		tab->at_params.is_wraparound = wraparound;
 		tab->at_params.log_min_duration = log_min_duration;
 		tab->at_params.toast_parent = InvalidOid;

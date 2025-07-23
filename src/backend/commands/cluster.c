@@ -837,8 +837,8 @@ copy_table_data(Relation NewHeap, Relation OldHeap, Relation OldIndex, bool verb
 	Form_pg_class relform;
 	TupleDesc	oldTupDesc PG_USED_FOR_ASSERTS_ONLY;
 	TupleDesc	newTupDesc PG_USED_FOR_ASSERTS_ONLY;
-	VacuumParams params;
-	struct VacuumCutoffs cutoffs;
+	FreezeAgeParams params;
+	struct FreezeCutoffs cutoffs;
 	bool		use_sort;
 	double		num_tuples = 0,
 				tups_vacuumed = 0,
@@ -917,9 +917,9 @@ copy_table_data(Relation NewHeap, Relation OldHeap, Relation OldIndex, bool verb
 	 * Since we're going to rewrite the whole table anyway, there's no reason
 	 * not to be aggressive about this.
 	 */
-	memset(&params, 0, sizeof(VacuumParams));
+	memset(&params, 0, sizeof(params));
 	vistest = FreshGlobalVisTestFor(OldHeap);
-	vacuum_get_cutoffs(OldHeap, params, vistest, &cutoffs);
+	get_freeze_cutoffs(OldHeap, params, vistest, &cutoffs);
 
 	/*
 	 * FreezeXid will become the table's new relfrozenxid, and that mustn't go

@@ -51,7 +51,7 @@ typedef struct
 	 */
 	bool		update_vm;
 
-	struct VacuumCutoffs *cutoffs;
+	struct FreezeCutoffs *cutoffs;
 
 	/*-------------------------------------------------------
 	 * Fields describing what to do to the page
@@ -274,13 +274,42 @@ heap_page_prune_opt(Relation relation, Buffer buffer, Buffer *vmbuffer)
 		{
 			OffsetNumber dummy_off_loc;
 			PruneFreezeResult presult;
+			struct FreezeCutoffs cutoffs;
 			int			options = 0;
+			TransactionId NewRelfrozenXid = InvalidTransactionId;
+			MultiXactId NewRelminMxid = InvalidMultiXactId;
+
+			/*
+			 * We can't do on-access freezing of catalog tables because we
+			 * can't search the catalog for reloptions while also holding an
+			 * exclusive lock on a page of any catalog table.
+			 */
+			bool		allow_freeze = !IsCatalogRelationOid(RelationGetRelid(relation));
 
 			if (vmbuffer)
 			{
 				visibilitymap_pin(relation, BufferGetBlockNumber(buffer), vmbuffer);
-				options = HEAP_PAGE_PRUNE_UPDATE_VM;
+				options |= HEAP_PAGE_PRUNE_UPDATE_VM;
+
+				/*
+				 * Get cutoffs for freezing, in case we decide to do it.
+				 * If the query may modify this page, vmbuffer is not passed
+				 * in, so we should only attempt to freeze if we have vmbuffer
+				 * because otherwise we will attempt to freeze when we would
+				 * then modify the page.
+				 */
+				if (allow_freeze)
+				{
+					FreezeAgeParams params;
+
+					extract_freeze_params_on_access(RelationGetRelid(relation), &params);
+					get_freeze_cutoffs(relation, params, vistest, &cutoffs);
+					NewRelfrozenXid = GlobalVisXidLowerBound(vistest);
+					NewRelminMxid = cutoffs.OldestMxact;
+					options |= HEAP_PAGE_PRUNE_FREEZE;
+				}
 			}
+
 
 			/*
 			 * For now, pass mark_unused_now as false regardless of whether or
@@ -290,8 +319,11 @@ heap_page_prune_opt(Relation relation, Buffer buffer, Buffer *vmbuffer)
 			heap_page_prune_and_freeze(relation, buffer, false,
 									   vmbuffer ? *vmbuffer : InvalidBuffer,
 									   vistest, options,
-									   NULL, &presult, PRUNE_ON_ACCESS,
-									   &dummy_off_loc, NULL, NULL);
+									   allow_freeze ? &cutoffs : NULL,
+									   &presult, PRUNE_ON_ACCESS,
+									   &dummy_off_loc,
+									   allow_freeze ? &NewRelfrozenXid : NULL,
+									   allow_freeze ? &NewRelminMxid : NULL);
 
 			/*
 			 * Report the number of tuples reclaimed to pgstats.  This is
@@ -405,8 +437,9 @@ identify_and_fix_vm_corruption(Relation relation,
  * for the caller to use in bookkeeping. Note that new and old_vmbits will be
  * 0 if HEAP_PAGE_PRUNE_UPDATE_VM is not set.
  *
- * blk_known_av is the visibility status of the heap block as of the last call
- * to find_next_unskippable_block(). vmbuffer is the buffer that may already
+ * blk_known_av is a previously known visibility status of the heap block, if
+ * any. In vacuum's case, this would be as of the last call to
+ * find_next_unskippable_block(). vmbuffer is the buffer that may already
  * contain the required block of the visibility map.
  *
  * vistest is used to distinguish whether tuples are DEAD or RECENTLY_DEAD
@@ -440,7 +473,9 @@ identify_and_fix_vm_corruption(Relation relation,
  * multi-XID seen on the relation so far.  They will be updated with oldest
  * values present on the page after pruning.  After processing the whole
  * relation, VACUUM can use these values as the new relfrozenxid/relminmxid
- * for the relation.
+ * for the relation. Callers such as on-access pruning cannot advance
+ * relfrozenxid/relminmxid since they will not have seen every unfrozen tuple
+ * in the table.
  */
 void
 heap_page_prune_and_freeze(Relation relation, Buffer buffer,
@@ -448,7 +483,7 @@ heap_page_prune_and_freeze(Relation relation, Buffer buffer,
 						   Buffer vmbuffer,
 						   GlobalVisState *vistest,
 						   int options,
-						   struct VacuumCutoffs *cutoffs,
+						   struct FreezeCutoffs *cutoffs,
 						   PruneFreezeResult *presult,
 						   PruneReason reason,
 						   OffsetNumber *off_loc,
@@ -527,8 +562,7 @@ heap_page_prune_and_freeze(Relation relation, Buffer buffer,
 	 * all-frozen for use in opportunistic freezing and to update the VM if
 	 * the caller requests it.
 	 *
-	 * Currently, only VACUUM attempts freezing. But other callers could. The
-	 * visibility bookkeeping is required for opportunistic freezing (in
+	 * The visibility bookkeeping is required for opportunistic freezing (in
 	 * addition to setting the VM bits) because we only consider
 	 * opportunistically freezing tuples if the whole page would become
 	 * all-frozen or if the whole page will be frozen except for dead tuples
@@ -543,11 +577,11 @@ heap_page_prune_and_freeze(Relation relation, Buffer buffer,
 	 * heap_prepare_freeze_tuple() will not be called for each tuple on the
 	 * page and we will not end up correctly setting it to false later.
 	 *
-	 * Dead tuples which will be removed by the end of vacuuming should not
-	 * preclude us from opportunistically freezing, so we do not clear
-	 * all_visible when we see LP_DEAD items. We fix that after determining
-	 * whether or not to freeze but before deciding whether or not to update
-	 * the VM so that we don't set the VM bit incorrectly.
+	 * Dead tuples which cannot be removed until after scanning all indexes
+	 * should not preclude us from opportunistically freezing, so we do not
+	 * clear all_visible when we see LP_DEAD items. We fix that after
+	 * determining whether or not to freeze but before deciding whether or not
+	 * to update the VM so that we don't set the VM bit incorrectly.
 	 *
 	 * If not freezing and not updating the VM, we avoid the extra
 	 * bookkeeping. Initializing all_visible to false allows skipping the work
@@ -826,8 +860,13 @@ heap_page_prune_and_freeze(Relation relation, Buffer buffer,
 			 * wouldn't cost us an FPI. If we just emitted an FPI when setting
 			 * tuple hints, it is unlikely that these changes will cause us to
 			 * emit another.
+			 *
+			 * Don't use this heuristic when we got here on-access, though. It
+			 * will be pretty common to set hint bits in a SELECT query and we
+			 * don't want to incur twice the WAL for that.
 			 */
-			if (prstate.all_visible &&
+			if (reason != PRUNE_ON_ACCESS &&
+				prstate.all_visible &&
 				prstate.all_frozen && prstate.nfrozen > 0 &&
 				hint_bit_fpi)
 				do_freeze = true;

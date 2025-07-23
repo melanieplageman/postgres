@@ -979,6 +979,7 @@ FreePageBtreeLeafKey
 FreePageBtreeSearchResult
 FreePageManager
 FreePageSpanLeader
+FreezeAgeParams
 From
 FromCharDateMode
 FromExpr

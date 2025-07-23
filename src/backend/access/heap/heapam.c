@@ -6358,7 +6358,7 @@ heap_abort_speculative(Relation relation, ItemPointer tid)
  * in one critical section or (b) accepting a chance of partial completion.
  * Partial completion of a relfrozenxid update would have the weird
  * consequence that the table's next VACUUM could see the table's relfrozenxid
- * move forward between vacuum_get_cutoffs() and finishing.
+ * move forward between get_freeze_cutoffs() and finishing.
  */
 bool
 heap_inplace_lock(Relation relation,
@@ -6712,7 +6712,7 @@ heap_inplace_unlock(Relation relation,
  */
 static TransactionId
 FreezeMultiXactId(MultiXactId multi, uint16 t_infomask,
-				  const struct VacuumCutoffs *cutoffs,
+				  const struct FreezeCutoffs *cutoffs,
 				  GlobalVisState *vistest, uint16 *flags,
 				  HeapPageFreeze *pagefrz)
 {
@@ -7065,7 +7065,7 @@ FreezeMultiXactId(MultiXactId multi, uint16 t_infomask,
  */
 bool
 heap_prepare_freeze_tuple(HeapTupleHeader tuple,
-						  const struct VacuumCutoffs *cutoffs,
+						  const struct FreezeCutoffs *cutoffs,
 						  GlobalVisState *vistest,
 						  HeapPageFreeze *pagefrz,
 						  HeapTupleFreeze *frz, bool *totally_frozen)
@@ -7420,7 +7420,7 @@ heap_freeze_tuple(HeapTupleHeader tuple, GlobalVisState *vistest,
 	HeapTupleFreeze frz;
 	bool		do_freeze;
 	bool		totally_frozen;
-	struct VacuumCutoffs cutoffs;
+	struct FreezeCutoffs cutoffs;
 	HeapPageFreeze pagefrz;
 
 	cutoffs.relfrozenxid = relfrozenxid;
@@ -7876,7 +7876,7 @@ heap_tuple_needs_eventual_freeze(HeapTupleHeader tuple)
  */
 bool
 heap_tuple_should_freeze(HeapTupleHeader tuple,
-						 const struct VacuumCutoffs *cutoffs,
+						 const struct FreezeCutoffs *cutoffs,
 						 TransactionId *NoFreezePageRelfrozenXid,
 						 MultiXactId *NoFreezePageRelminMxid)
 {

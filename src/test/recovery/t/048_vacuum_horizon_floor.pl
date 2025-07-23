@@ -160,7 +160,7 @@ is($res, 7, qq[Cursor query returned $res. Expected value 7.]);
 # use it to filter pg_stat_activity later.
 my $vacuum_pid = $psql_primaryA->query_safe("SELECT pg_backend_pid();");
 
-# Now start a VACUUM FREEZE on the primary. It will call vacuum_get_cutoffs()
+# Now start a VACUUM FREEZE on the primary. It will call get_freeze_cutoffs()
 # and establish values of OldestXmin and GlobalVisState which are newer than
 # all of our dead tuples. Then it will be unable to get a cleanup lock to
 # start pruning, so it will hang.
@@ -183,7 +183,7 @@ $psql_primaryA->{stdin} .= qq[
 # Make sure the VACUUM command makes it to the server.
 $psql_primaryA->{run}->pump_nb();
 
-# Make sure that the VACUUM has already called vacuum_get_cutoffs() and is
+# Make sure that the VACUUM has already called get_freeze_cutoffs() and is
 # just waiting on the lock to start vacuuming. We don't want the standby to
 # re-establish a connection to the primary and push the horizon back until
 # we've saved initial values in GlobalVisState and calculated OldestXmin.

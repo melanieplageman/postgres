@@ -46,7 +46,7 @@
 
 typedef struct BulkInsertStateData *BulkInsertState;
 struct TupleTableSlot;
-struct VacuumCutoffs;
+struct FreezeCutoffs;
 
 #define MaxLockTupleMode	LockTupleExclusive
 
@@ -364,7 +364,7 @@ extern bool heap_page_is_all_visible(Relation rel, Buffer buf,
 									 TransactionId *visibility_cutoff_xid,
 									 OffsetNumber *logging_offnum);
 extern bool heap_prepare_freeze_tuple(HeapTupleHeader tuple,
-									  const struct VacuumCutoffs *cutoffs,
+									  const struct FreezeCutoffs *cutoffs,
 									  GlobalVisState *vistest,
 									  HeapPageFreeze *pagefrz,
 									  HeapTupleFreeze *frz, bool *totally_frozen);
@@ -377,7 +377,7 @@ extern bool heap_freeze_tuple(HeapTupleHeader tuple, GlobalVisState *vistest,
 							  TransactionId relfrozenxid, TransactionId relminmxid,
 							  TransactionId FreezeLimit, TransactionId MultiXactCutoff);
 extern bool heap_tuple_should_freeze(HeapTupleHeader tuple,
-									 const struct VacuumCutoffs *cutoffs,
+									 const struct FreezeCutoffs *cutoffs,
 									 TransactionId *NoFreezePageRelfrozenXid,
 									 MultiXactId *NoFreezePageRelminMxid);
 extern bool heap_tuple_needs_eventual_freeze(HeapTupleHeader tuple);
@@ -399,7 +399,7 @@ extern void heap_page_prune_and_freeze(Relation relation, Buffer buffer,
 									   Buffer vmbuffer,
 									   struct GlobalVisState *vistest,
 									   int options,
-									   struct VacuumCutoffs *cutoffs,
+									   struct FreezeCutoffs *cutoffs,
 									   PruneFreezeResult *presult,
 									   PruneReason reason,
 									   OffsetNumber *off_loc,
