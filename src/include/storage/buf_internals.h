@@ -514,6 +514,7 @@ extern uint64 WaitBufHdrUnlocked(BufferDesc *buf);
 typedef struct CkptSortItem
 {
 	Oid			tsId;
+	Oid			dbId;
 	RelFileNumber relNumber;
 	ForkNumber	forkNum;
 	BlockNumber blockNum;
