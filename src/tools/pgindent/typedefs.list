@@ -3498,6 +3498,7 @@ WorkerJobRestorePtrType
 WorkerNodeInstrumentation
 Working_State
 WriteBufPtrType
+WriteBuffersOperation
 WriteBytePtrType
 WriteDataCallback
 WriteDataPtrType
