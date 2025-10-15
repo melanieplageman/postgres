@@ -655,19 +655,34 @@ static inline BufferDesc *BufferAlloc(SMgrRelation smgr,
 									  bool *foundPtr, IOContext io_context);
 static bool AsyncReadBuffers(ReadBuffersOperation *operation, int *nblocks_progress);
 static void CheckReadBuffersOperation(ReadBuffersOperation *operation, bool is_complete);
-
 static pg_attribute_always_inline void TrackBufferHit(IOObject io_object,
 													  IOContext io_context,
 													  Relation rel, char persistence, SMgrRelation smgr,
 													  ForkNumber forknum, BlockNumber blocknum);
+static uint32 MaxWriteBatchSize(BufferAccessStrategy strategy);
+static BlockNumber WriteBatchInit(BufferDesc *batch_start, uint32 max_batch_size,
+								  BufferWriteBatch *batch);
 static Buffer GetVictimBuffer(BufferAccessStrategy strategy, IOContext io_context);
 static void FlushUnlockedBuffer(BufferDesc *buf, SMgrRelation reln,
 								IOObject io_object, IOContext io_context);
 static void FlushBuffer(BufferDesc *buf, SMgrRelation reln,
 						IOObject io_object, IOContext io_context);
+static void FlushBufferBatch(BufferWriteBatch *batch, IOContext io_context);
+static BufferDesc *PrepareOrRejectEagerFlushBuffer(Buffer bufnum,
+												   BufferTag *require,
+												   XLogRecPtr *lsn);
+static void FindStrategyFlushAdjacents(BufferAccessStrategy strategy, Buffer sweep_end,
+									   BufferDesc *batch_start,
+									   uint32 max_batch_size,
+									   BufferWriteBatch *batch,
+									   int *sweep_cursor);
+static void CompleteWriteBatchIO(BufferWriteBatch *batch, IOContext io_context,
+								 WritebackContext *wb_context);
 static void ScheduleBufferTagForWriteback(WritebackContext *wb_context,
 										  IOContext io_context, BufferTag *tag);
-static BufferDesc *PrepareOrRejectEagerFlushBuffer(Buffer bufnum);
+static void ScheduleBufferTagBatchForWriteback(WritebackContext *wb_context,
+											   BufferTag *tag, uint32 batch_size,
+											   IOContext io_context);
 static void FindAndDropRelationBuffers(RelFileLocator rlocator,
 									   ForkNumber forkNum,
 									   BlockNumber nForkBlock,
@@ -2549,6 +2564,34 @@ InvalidateVictimBuffer(BufferDesc *buf_hdr)
 	return true;
 }
 
+/*
+ * Determine the largest IO we can assemble given strategy-specific and global
+ * constraints on the number of pinned buffers and max IO size. Currently only
+ * a single write is inflight at a time, so the batch can consume all the
+ * pinned buffers this backend is allowed. Only for batches of shared
+ * (non-local) relations.
+ */
+static uint32
+MaxWriteBatchSize(BufferAccessStrategy strategy)
+{
+	uint32		result = io_combine_limit;
+	uint32		strategy_pin_limit;
+	uint32		max_pin_limit = GetPinLimit();
+
+	/* Apply pin limits */
+	result = Min(result, max_pin_limit);
+	if (strategy)
+	{
+		strategy_pin_limit = GetAccessStrategyPinLimit(strategy);
+		result = Min(result, strategy_pin_limit);
+	}
+
+	/* Ensure forward progress */
+	result = Max(result, 1);
+
+	return result;
+}
+
 static Buffer
 GetVictimBuffer(BufferAccessStrategy strategy, IOContext io_context)
 {
@@ -2635,26 +2678,58 @@ again:
 			goto again;
 		}
 
-		/* OK, do the I/O */
-		FlushBuffer(buf_hdr, NULL, IOOBJECT_RELATION, io_context);
-		LockBuffer(buf, BUFFER_LOCK_UNLOCK);
-
-		ScheduleBufferTagForWriteback(&BackendWritebackContext, io_context,
-									  &buf_hdr->tag);
-
 		if (from_ring && StrategySupportsEagerFlush(strategy))
 		{
-			BufferDesc *next_bufdesc;
-			Buffer		next_buf;
+			BufferDesc *next_bufdesc = buf_hdr;
 			Buffer		sweep_end = buf;
 			int			cursor = StrategyGetCurrentIndex(strategy);
+			uint32		max_batch_size = MaxWriteBatchSize(strategy);
+
+			/* Start IO on the first buffer */
+			if (!StartBufferIO(buf, false, false, NULL))
+				goto clean;
+
+			/* Pin victim again so it stays ours even after batch released */
+			ReservePrivateRefCountEntry();
+			ResourceOwnerEnlarge(CurrentResourceOwner);
+			IncrBufferRefCount(BufferDescriptorGetBuffer(buf_hdr));
 
 			/*
-			 * Loop around strategy ring one time eagerly flushing all of the
-			 * eligible buffers.
+			 * Flush the victim buffer and then loop around strategy ring one
+			 * time eagerly flushing all of the eligible buffers. IO
+			 * concurrency only needs to be taken into account if AIO writes
+			 * are added in the future.
 			 */
 			for (;;)
 			{
+				Buffer		next_buf;
+				XLogRecPtr	next_buf_lsn;	/* unused */
+
+				if (next_bufdesc)
+				{
+					BufferWriteBatch batch;
+					BlockNumber limit;
+
+					/*
+					 * After finding an eligible buffer, if we are allowed
+					 * more pins and there are more blocks in the relation,
+					 * identify any of the buffers following it which are also
+					 * eligible and combine them into a batch.
+					 *
+					 * The cursor will be advanced through the ring such that
+					 * the next write batch will start at the next eligible
+					 * buffer after the current batch ends.
+					 */
+					limit = WriteBatchInit(next_bufdesc, max_batch_size, &batch);
+					if (limit > 1)
+						FindStrategyFlushAdjacents(strategy, sweep_end,
+												   next_bufdesc,
+												   limit, &batch, &cursor);
+					FlushBufferBatch(&batch, io_context);
+					/* Pins and locks released inside CompleteWriteBatchIO */
+					CompleteWriteBatchIO(&batch, io_context, &BackendWritebackContext);
+				}
+
 				next_buf = StrategyNextBuffer(strategy, &cursor);
 
 				/* Completed one sweep of the strategy ring */
@@ -2672,24 +2747,27 @@ again:
 					break;
 
 				/*
-				 * Check buffer eager flush eligibility. If the buffer is
-				 * ineligible, we'll keep looking until we complete one full
-				 * sweep around the ring.
+				 * If the buffer is eligible for eager flushing, it will be
+				 * the start of a new batch.  Otherwise, we'll keep looking
+				 * until we complete one full sweep around the ring.
 				 */
-				next_bufdesc = PrepareOrRejectEagerFlushBuffer(next_buf);
-
-				if (next_bufdesc)
-				{
-					FlushBuffer(next_bufdesc, NULL, IOOBJECT_RELATION, io_context);
-					BufferLockUnlock(next_buf, next_bufdesc);
-					ScheduleBufferTagForWriteback(&BackendWritebackContext, io_context,
-												  &next_bufdesc->tag);
-					UnpinBuffer(next_bufdesc);
-				}
+				next_bufdesc = PrepareOrRejectEagerFlushBuffer(next_buf,
+															   NULL,
+															   &next_buf_lsn);
 			}
+		}
+		else
+		{
+			/* OK, do the I/O */
+			FlushBuffer(buf_hdr, NULL, IOOBJECT_RELATION, io_context);
+			LockBuffer(buf, BUFFER_LOCK_UNLOCK);
+
+			ScheduleBufferTagForWriteback(&BackendWritebackContext, io_context,
+										  &buf_hdr->tag);
 		}
 	}
 
+clean:
 	if (buf_state & BM_VALID)
 	{
 		/*
@@ -4726,19 +4804,62 @@ FlushBuffer(BufferDesc *buf, SMgrRelation reln, IOObject io_object,
 }
 
 /*
+ * Given the starting buffer of a batch, initialize the batch structure. The
+ * starting buffer must be ready to flush.
+ */
+static BlockNumber
+WriteBatchInit(BufferDesc *batch_start, uint32 max_batch_size,
+			   BufferWriteBatch *batch)
+{
+	BlockNumber limit;
+	uint64		buf_state;
+
+	Assert(batch_start);
+	batch->bufdescs[0] = batch_start;
+
+	Assert(BufferIsLockedByMe(BufferDescriptorGetBuffer(batch_start)));
+	buf_state = LockBufHdr(batch_start);
+	batch->max_lsn = buf_state & BM_PERMANENT ?
+		BufferGetLSN(batch_start) : InvalidXLogRecPtr;
+	UnlockBufHdr(batch_start);
+
+	batch->start = batch->bufdescs[0]->tag.blockNum;
+	Assert(BlockNumberIsValid(batch->start));
+	batch->forkno = BufTagGetForkNum(&batch->bufdescs[0]->tag);
+	batch->reln = smgropen(BufTagGetRelFileLocator(&batch->bufdescs[0]->tag),
+						   INVALID_PROC_NUMBER);
+
+	batch->n = 1;
+
+	limit = smgrmaxcombine(batch->reln, batch->forkno, batch->start);
+	limit = Min(max_batch_size, limit);
+	limit = Min(GetAdditionalPinLimit(), limit);
+
+	return limit;
+}
+
+/*
  * Prepare bufdesc for eager flushing.
  *
  * Given bufnum, return the buffer descriptor of the buffer to eagerly flush,
  * pinned and locked and with BM_IO_IN_PROGRESS set, or NULL if this buffer
  * does not contain a block that should be flushed.
  *
+ * If the caller requires a particular block to be in the buffer in order to
+ * accept it, they will provide the required block number and its
+ * RelFileLocator and fork.
+ *
  * If returning a buffer, also return its LSN.
  */
 static BufferDesc *
-PrepareOrRejectEagerFlushBuffer(Buffer bufnum)
+PrepareOrRejectEagerFlushBuffer(Buffer bufnum,
+								BufferTag *require,
+								XLogRecPtr *lsn)
 {
 	BufferDesc *bufdesc;
 	uint64		buf_state;
+
+	*lsn = InvalidXLogRecPtr;
 
 	if (!BufferIsValid(bufnum))
 		goto reject_buffer;
@@ -4746,11 +4867,19 @@ PrepareOrRejectEagerFlushBuffer(Buffer bufnum)
 	Assert(!BufferIsLocal(bufnum));
 
 	bufdesc = GetBufferDescriptor(bufnum - 1);
+
+	/*
+	 * Quick, unsafe checks to see if buffer even possibly contains a block
+	 * meeting our requirements. We'll recheck it all again after getting a
+	 * pin.
+	 */
+	if (require && !BufferTagsEqual(require, &bufdesc->tag))
+		goto reject_buffer;
+
 	buf_state = pg_atomic_read_u64(&bufdesc->state);
 
 	/*
-	 * Quick racy check to see if the buffer is clean, in which case we don't
-	 * need to flush it. We'll recheck if it is dirty again later before
+	 * We'll recheck if it is dirty later, when we have a pin and lock, before
 	 * actually setting BM_IO_IN_PROGRESS.
 	 */
 	if (!(buf_state & BM_DIRTY))
@@ -4787,12 +4916,25 @@ PrepareOrRejectEagerFlushBuffer(Buffer bufnum)
 
 	CheckBufferIsPinnedOnce(bufnum);
 
+	/* Now that we have the buffer pinned, recheck it's got the right block */
+	if (require && !BufferTagsEqual(require, &bufdesc->tag))
+		goto reject_buffer_unpin;
+
 	if (!BufferLockConditional(bufnum, bufdesc, BUFFER_LOCK_SHARE_EXCLUSIVE))
 		goto reject_buffer_unpin;
 
 	/* Now that we have the lock, recheck if it needs WAL flush */
 	if (BufferNeedsWALFlush(bufdesc, false))
 		goto reject_buffer_unlock;
+
+	/* Try to start an I/O operation */
+	if (!StartBufferIO(bufnum, false, true, NULL))
+		goto reject_buffer_unlock;
+
+	/* Need the buffer header spinlock to read the page LSN */
+	buf_state = LockBufHdr(bufdesc);
+	*lsn = BufferGetLSN(bufdesc);
+	UnlockBufHdrExt(bufdesc, buf_state, 0, 0, 0);
 
 	return bufdesc;
 
@@ -4804,6 +4946,131 @@ reject_buffer_unpin:
 
 reject_buffer:
 	return NULL;
+}
+
+/*
+ * Given a starting buffer descriptor from a strategy ring that supports eager
+ * flushing, find additional buffers from the ring that can be combined into a
+ * single write batch with the starting buffer.
+ *
+ * This function will pin and content lock all of the buffers that it
+ * assembles for the IO batch. The caller is responsible for issuing the IO.
+ *
+ * batch_limit is the largest batch we are allowed to construct given the
+ * remaining blocks in the table, the number of available pins, and the
+ * current configuration.
+ *
+ * batch is an output parameter that this function will fill with the needed
+ * information to issue this IO.
+ */
+static void
+FindStrategyFlushAdjacents(BufferAccessStrategy strategy,
+						   Buffer sweep_end,
+						   BufferDesc *batch_start,
+						   uint32 batch_limit,
+						   BufferWriteBatch *batch,
+						   int *sweep_cursor)
+{
+	BufferTag	require;
+
+	Assert(batch_limit > 1);
+
+	InitBufferTag(&require, &batch->reln->smgr_rlocator.locator,
+				  batch->forkno, InvalidBlockNumber);
+
+	/* Now assemble a run of blocks to write out. */
+	for (; batch->n < batch_limit; batch->n++)
+	{
+		Buffer		bufnum;
+		XLogRecPtr	lsn;
+
+		if ((bufnum =
+			 StrategyNextBuffer(strategy, sweep_cursor)) == sweep_end)
+			break;
+
+		/*
+		 * For BAS_BULKWRITE, once you hit an InvalidBuffer, the remaining
+		 * buffers in the ring will be invalid.
+		 */
+		if (!BufferIsValid(bufnum))
+			break;
+
+		require.blockNum = batch->start + batch->n;
+
+		batch->bufdescs[batch->n] =
+			PrepareOrRejectEagerFlushBuffer(bufnum,
+											&require,
+											&lsn);
+
+		/*
+		 * Because we don't eagerly flush buffers that need WAL flushed, this
+		 * buffer's LSN should only be greater than the victim buffer LSN if
+		 * the victim doesn't need WAL flushing either -- in which case, we
+		 * don't really need to update max_lsn. But, it seems better to keep
+		 * the max_lsn honest -- especially since doing so is cheap.
+		 */
+		if (lsn > batch->max_lsn)
+			batch->max_lsn = lsn;
+
+		/* Stop when we encounter a buffer that will break the run */
+		if (batch->bufdescs[batch->n] == NULL)
+			break;
+	}
+}
+
+/*
+ * Given a prepared batch of buffers write them out as a vector.
+ */
+static void
+FlushBufferBatch(BufferWriteBatch *batch,
+				 IOContext io_context)
+{
+	BlockNumber blknums[MAX_IO_COMBINE_LIMIT];
+	Block		blocks[MAX_IO_COMBINE_LIMIT];
+	instr_time	io_start;
+	ErrorContextCallback errcallback =
+	{
+		.callback = shared_buffer_write_error_callback,
+		.previous = error_context_stack,
+	};
+
+	error_context_stack = &errcallback;
+
+	if (XLogRecPtrIsValid(batch->max_lsn))
+		XLogFlush(batch->max_lsn);
+
+	/* Should have been opened when initializing the batch */
+	Assert(batch->reln);
+
+#ifdef USE_ASSERT_CHECKING
+	for (uint32 i = 0; i < batch->n; i++)
+		Assert(!BufferNeedsWALFlush(batch->bufdescs[i], false));
+#endif
+
+	TRACE_POSTGRESQL_BUFFER_BATCH_FLUSH_START(batch->forkno,
+											  batch->reln->smgr_rlocator.locator.spcOid,
+											  batch->reln->smgr_rlocator.locator.dbOid,
+											  batch->reln->smgr_rlocator.locator.relNumber,
+											  batch->reln->smgr_rlocator.backend,
+											  batch->n);
+
+	for (BlockNumber i = 0; i < batch->n; i++)
+	{
+		blknums[i] = batch->start + i;
+		blocks[i] = BufHdrGetBlock(batch->bufdescs[i]);
+	}
+
+	PageSetBatchChecksum((Page *) blocks, blknums, batch->n);
+
+	io_start = pgstat_prepare_io_time(track_io_timing);
+
+	smgrwritev(batch->reln, batch->forkno,
+			   batch->start, (const void **) blocks, batch->n, false);
+
+	pgstat_count_io_op_time(IOOBJECT_RELATION, io_context, IOOP_WRITE,
+							io_start, 1, batch->n * BLCKSZ);
+
+	error_context_stack = errcallback.previous;
 }
 
 /*
@@ -4819,6 +5086,49 @@ FlushUnlockedBuffer(BufferDesc *buf, SMgrRelation reln,
 	BufferLockAcquire(buffer, buf, BUFFER_LOCK_SHARE_EXCLUSIVE);
 	FlushBuffer(buf, reln, io_object, io_context);
 	BufferLockUnlock(buffer, buf);
+}
+
+/*
+ * Given a previously initialized batch with buffers that have already been
+ * flushed, terminate the IO on each buffer and then unlock and unpin them.
+ * This assumes all the buffers were locked and pinned. wb_context will be
+ * modified.
+ */
+static void
+CompleteWriteBatchIO(BufferWriteBatch *batch, IOContext io_context,
+					 WritebackContext *wb_context)
+{
+	BufferTag	tag = batch->bufdescs[0]->tag;
+	ErrorContextCallback errcallback =
+	{
+		.callback = shared_buffer_write_error_callback,
+		.previous = error_context_stack,
+	};
+
+	error_context_stack = &errcallback;
+	pgBufferUsage.shared_blks_written += batch->n;
+
+	for (uint32 i = 0; i < batch->n; i++)
+	{
+		Buffer		buffer = BufferDescriptorGetBuffer(batch->bufdescs[i]);
+
+		errcallback.arg = batch->bufdescs[i];
+
+		/* Mark the buffer as clean and end the BM_IO_IN_PROGRESS state. */
+		TerminateBufferIO(batch->bufdescs[i], true, 0, true, false);
+		UnlockReleaseBuffer(buffer);
+	}
+
+	TRACE_POSTGRESQL_BUFFER_BATCH_FLUSH_DONE(batch->forkno,
+											 batch->reln->smgr_rlocator.locator.spcOid,
+											 batch->reln->smgr_rlocator.locator.dbOid,
+											 batch->reln->smgr_rlocator.locator.relNumber,
+											 batch->reln->smgr_rlocator.backend,
+											 batch->n, batch->start);
+
+	error_context_stack = errcallback.previous;
+
+	ScheduleBufferTagBatchForWriteback(wb_context, &tag, batch->n, io_context);
 }
 
 /*
@@ -7908,6 +8218,55 @@ ScheduleBufferTagForWriteback(WritebackContext *wb_context, IOContext io_context
 	 */
 	if (wb_context->nr_pending >= *wb_context->max_pending)
 		IssuePendingWritebacks(wb_context, io_context);
+}
+
+/*
+ * Don't call while holding buffer locks and pins
+ */
+static void
+ScheduleBufferTagBatchForWriteback(WritebackContext *wb_context,
+								   BufferTag *tag, uint32 batch_size,
+								   IOContext io_context)
+{
+	/*
+	 * As pg_flush_data() doesn't do anything with fsync disabled, there's no
+	 * point in tracking in that case.
+	 */
+	if (io_direct_flags & IO_DIRECT_DATA ||
+		!enableFsync)
+		return;
+
+	/*
+	 * Drain the queue to make room if needed. We do thiseven if writeback
+	 * control is disabled because it may have been previously enabled.
+	 */
+	if (wb_context->nr_pending >= *wb_context->max_pending)
+		IssuePendingWritebacks(wb_context, io_context);
+
+	/* If writeback control is disabled, leave */
+	if (*wb_context->max_pending <= 0)
+		return;
+
+	/* It is okay if n is > max_pending because we flush as we go */
+	Assert(*wb_context->max_pending <= WRITEBACK_MAX_PENDING_FLUSHES);
+
+	/*
+	 * Add buffer to the pending writeback array. All must be from same
+	 * relation.
+	 */
+	for (uint32 i = 0; i < batch_size; i++)
+	{
+		PendingWriteback *pending;
+
+		pending = &wb_context->pending_writebacks[wb_context->nr_pending++];
+		pending->tag = *tag;
+
+		tag->blockNum++;
+
+		/* Perform pending flushes if writeback limit exceeded */
+		if (wb_context->nr_pending >= *wb_context->max_pending)
+			IssuePendingWritebacks(wb_context, io_context);
+	}
 }
 
 #define ST_SORT sort_pending_writebacks
