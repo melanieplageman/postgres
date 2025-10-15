@@ -544,6 +544,27 @@ ResourceOwnerForgetBufferIO(ResourceOwner owner, Buffer buffer)
 }
 
 /*
+ * Used to write out multiple blocks at a time in a combined IO. bufdescs
+ * contains buffer descriptors for buffers containing adjacent blocks of the
+ * same fork of the same relation.
+ */
+typedef struct BufferWriteBatch
+{
+	ForkNumber	forkno;
+	SMgrRelation reln;
+
+	/*
+	 * While assembling the buffers, we keep track of the maximum LSN so that
+	 * we can flush WAL through this LSN before flushing the buffers.
+	 */
+	XLogRecPtr	max_lsn;
+
+	/* The number of valid buffers in bufdescs */
+	uint32		n;
+	BufferDesc *bufdescs[MAX_IO_COMBINE_LIMIT];
+} BufferWriteBatch;
+
+/*
  * Internal buffer management routines
  */
 /* bufmgr.c */
