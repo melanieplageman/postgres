@@ -656,12 +656,15 @@ static pg_attribute_always_inline void TrackBufferHit(IOObject io_object,
 													  Relation rel, char persistence, SMgrRelation smgr,
 													  ForkNumber forknum, BlockNumber blocknum);
 static Buffer GetVictimBuffer(BufferAccessStrategy strategy, IOContext io_context);
+static void EagerCleanBuffer(BufferAccessStrategy strategy, BufferDesc *buf_hdr, IOContext io_context);
+static void EagerCleanStrategyBuffer(BufferAccessStrategy strategy, BufferDesc *buf_hdr, IOContext io_context);
 static void FlushUnlockedBuffer(BufferDesc *buf, SMgrRelation reln,
 								IOObject io_object, IOContext io_context);
 static void FlushBuffer(BufferDesc *buf, SMgrRelation reln,
 						IOObject io_object, IOContext io_context);
 static void ScheduleBufferTagForWriteback(WritebackContext *wb_context,
 										  IOContext io_context, BufferTag *tag);
+static BufferDesc *PrepareOrRejectEagerFlushBuffer(Buffer bufnum);
 static void FindAndDropRelationBuffers(RelFileLocator rlocator,
 									   ForkNumber forkNum,
 									   BlockNumber nForkBlock,
@@ -696,7 +699,10 @@ static inline uint64 BufferLockReleaseSub(BufferLockMode mode);
 static BufferDesc *SelectVictimBuffer(BufferAccessStrategy strategy,
 									  IOContext io_context,
 									  uint64 *buf_state,
-									  IOOp *io_op);
+									  IOOp *io_op,
+									  void (**CleanBuffer) (BufferAccessStrategy strategy,
+															BufferDesc *buf_hdr,
+															IOContext io_context));
 
 
 /*
@@ -2564,6 +2570,9 @@ GetVictimBuffer(BufferAccessStrategy strategy, IOContext io_context)
 	Buffer		buf;
 	uint64		buf_state;
 	IOOp		io_op;
+	void		(*CleanBuffer) (BufferAccessStrategy strategy,
+								BufferDesc *buf_hdr,
+								IOContext io_context);
 
 	/*
 	 * Ensure, before we pin a victim buffer, that there's a free refcount
@@ -2581,7 +2590,9 @@ again:
 	 * victim is ultimately kept: IOOP_REUSE for buffers from the strategy
 	 * ring and IOOP_EVICT otherwise.
 	 */
-	buf_hdr = SelectVictimBuffer(strategy, io_context, &buf_state, &io_op);
+	buf_hdr = SelectVictimBuffer(strategy, io_context, &buf_state, &io_op,
+								 &CleanBuffer);
+
 	buf = BufferDescriptorGetBuffer(buf_hdr);
 
 	/*
@@ -2601,12 +2612,7 @@ again:
 		Assert(buf_state & BM_TAG_VALID);
 		Assert(buf_state & BM_VALID);
 
-		/* OK, do the I/O */
-		FlushBuffer(buf_hdr, NULL, IOOBJECT_RELATION, io_context);
-		LockBuffer(buf, BUFFER_LOCK_UNLOCK);
-
-		ScheduleBufferTagForWriteback(&BackendWritebackContext, io_context,
-									  &buf_hdr->tag);
+		CleanBuffer(strategy, buf_hdr, io_context);
 	}
 
 	/*
@@ -2662,7 +2668,10 @@ again:
  */
 static BufferDesc *
 SelectVictimBuffer(BufferAccessStrategy strategy, IOContext io_context,
-				   uint64 *buf_state, IOOp *io_op)
+				   uint64 *buf_state, IOOp *io_op,
+				   void (**CleanBuffer) (BufferAccessStrategy strategy,
+										 BufferDesc *buf_hdr,
+										 IOContext io_context))
 {
 	BufferDesc *buf_hdr = NULL;
 
@@ -2680,7 +2689,13 @@ SelectVictimBuffer(BufferAccessStrategy strategy, IOContext io_context,
 	{
 		buf_hdr = GetBufferFromRing(strategy, buf_state, io_context);
 		if (buf_hdr)
+		{
 			*io_op = IOOP_REUSE;
+			if (StrategySupportsEagerFlush(strategy))
+				*CleanBuffer = &EagerCleanStrategyBuffer;
+			else
+				*CleanBuffer = &EagerCleanBuffer;
+		}
 	}
 
 	/* If no strategy or didn't find a strategy buffer, get one from SB */
@@ -2689,9 +2704,77 @@ SelectVictimBuffer(BufferAccessStrategy strategy, IOContext io_context,
 		buf_hdr = GetBufferFromClocksweep(buf_state, io_context);
 		if (strategy)
 			AddBufferToRing(strategy, buf_hdr);
+		*CleanBuffer = &EagerCleanBuffer;
 	}
 
 	return buf_hdr;
+}
+
+static void
+EagerCleanBuffer(BufferAccessStrategy strategy, BufferDesc *buf_hdr, IOContext io_context)
+{
+	Buffer		buf = BufferDescriptorGetBuffer(buf_hdr);
+
+	FlushBuffer(buf_hdr, NULL, IOOBJECT_RELATION, io_context);
+	LockBuffer(buf, BUFFER_LOCK_UNLOCK);
+
+	ScheduleBufferTagForWriteback(&BackendWritebackContext, io_context,
+								  &buf_hdr->tag);
+}
+
+static void
+EagerCleanStrategyBuffer(BufferAccessStrategy strategy, BufferDesc *buf_hdr,
+						 IOContext io_context)
+{
+	BufferDesc *next_bufdesc = buf_hdr;
+	Buffer		buf = BufferDescriptorGetBuffer(buf_hdr);
+	Buffer		next_buf = buf;
+	Buffer		sweep_end = buf;
+	int			cursor = StrategyGetCurrentIndex(strategy);
+
+	/*
+	 * Pin victim again so it stays ours even after batch released. See
+	 * comment in EagerCleanBuffer() for details.
+	 */
+	IncrBufferRefCount(buf);
+
+	/*
+	 * Flush the victim buffer and then loop around strategy ring one time
+	 * eagerly flushing all of the eligible buffers.
+	 */
+	for (;;)
+	{
+		if (next_bufdesc)
+		{
+			FlushBuffer(next_bufdesc, NULL, IOOBJECT_RELATION, io_context);
+			BufferLockUnlock(next_buf, next_bufdesc);
+			ScheduleBufferTagForWriteback(&BackendWritebackContext, io_context,
+										  &next_bufdesc->tag);
+			UnpinBuffer(next_bufdesc);
+		}
+
+		next_buf = StrategyNextBuffer(strategy, &cursor);
+
+		/* Completed one sweep of the strategy ring */
+		if (next_buf == sweep_end)
+			break;
+
+		/*
+		 * For strategies currently supporting eager flush (BAS_BULKWRITE,
+		 * eventually BAS_VACUUM), once you hit an InvalidBuffer, the
+		 * remaining buffers in the ring will be invalid. If BAS_BULKREAD is
+		 * someday supported, this logic will have to change.
+		 */
+		if (!BufferIsValid(next_buf))
+			break;
+
+		/*
+		 * Check buffer eager flush eligibility. If the buffer is ineligible,
+		 * we'll keep looking until we complete one full sweep around the
+		 * ring.
+		 */
+		next_bufdesc = PrepareOrRejectEagerFlushBuffer(next_buf);
+	}
 }
 
 /*
@@ -4641,6 +4724,89 @@ FlushBuffer(BufferDesc *buf, SMgrRelation reln, IOObject io_object,
 
 	/* Pop the error context stack */
 	error_context_stack = errcallback.previous;
+}
+
+/*
+ * Prepare bufdesc for eager flushing.
+ *
+ * Given bufnum, return the buffer descriptor of the buffer to eagerly flush,
+ * pinned and locked and with BM_IO_IN_PROGRESS set, or NULL if this buffer
+ * does not contain a block that should be flushed.
+ *
+ * If returning a buffer, also return its LSN.
+ */
+static BufferDesc *
+PrepareOrRejectEagerFlushBuffer(Buffer bufnum)
+{
+	BufferDesc *bufdesc;
+	uint64		buf_state;
+
+	if (!BufferIsValid(bufnum))
+		goto reject_buffer;
+
+	Assert(!BufferIsLocal(bufnum));
+
+	bufdesc = GetBufferDescriptor(bufnum - 1);
+	buf_state = pg_atomic_read_u64(&bufdesc->state);
+
+	/*
+	 * Quick racy check to see if the buffer is clean, in which case we don't
+	 * need to flush it. We'll recheck if it is dirty again later before
+	 * actually setting BM_IO_IN_PROGRESS.
+	 */
+	if (!(buf_state & BM_DIRTY))
+		goto reject_buffer;
+
+	/*
+	 * Quick check to see if the buffer is pinned, in which case it is more
+	 * likely to be dirtied again soon, and we don't want to eagerly flush it.
+	 * We don't care if it has a non-zero usage count because we don't need to
+	 * reuse it right away and a non-zero usage count doesn't necessarily mean
+	 * it will be dirtied again soon.
+	 */
+	if (BUF_STATE_GET_REFCOUNT(buf_state) > 0)
+		goto reject_buffer;
+
+	/*
+	 * Don't eagerly flush buffers requiring WAL flush. We must check this
+	 * again later while holding the buffer content lock for correctness.
+	 */
+	if (buf_state & BM_PERMANENT &&
+		XLogNeedsFlush(BufferGetLSN(bufdesc)))
+		goto reject_buffer;
+
+	/*
+	 * Ensure that there's a free refcount entry and resource owner slot for
+	 * the pin before pinning the buffer. While this may leak a refcount and
+	 * slot if we return without a buffer, that slot will be reused.
+	 */
+	ResourceOwnerEnlarge(CurrentResourceOwner);
+	ReservePrivateRefCountEntry();
+
+	/* There is no need to flush the buffer if it is not BM_VALID */
+	if (!PinBuffer(bufdesc, BUC_ZERO, true /* skip_if_not_valid */ ))
+		goto reject_buffer;
+
+	CheckBufferIsPinnedOnce(bufnum);
+
+	if (!BufferLockConditional(bufnum, bufdesc, BUFFER_LOCK_SHARE_EXCLUSIVE))
+		goto reject_buffer_unpin;
+
+	/* Now that we have the lock, recheck if it needs WAL flush */
+	if (buf_state & BM_PERMANENT &&
+		XLogNeedsFlush(BufferGetLSN(bufdesc)))
+		goto reject_buffer_unlock;
+
+	return bufdesc;
+
+reject_buffer_unlock:
+	BufferLockUnlock(bufnum, bufdesc);
+
+reject_buffer_unpin:
+	UnpinBuffer(bufdesc);
+
+reject_buffer:
+	return NULL;
 }
 
 /*
