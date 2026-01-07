@@ -551,6 +551,7 @@ extern void WritebackContextInit(WritebackContext *context, int *max_pending);
 extern void IssuePendingWritebacks(WritebackContext *wb_context, IOContext io_context);
 
 extern void TrackNewBufferPin(Buffer buf);
+extern bool BufferNeedsWALFlush(BufferDesc *bufdesc, bool exclusive_locked);
 
 /*
  * Return value for StartBufferIO / StartSharedBufferIO / StartLocalBufferIO.
@@ -576,6 +577,10 @@ extern void TerminateBufferIO(BufferDesc *buf, bool clear_dirty, uint64 set_flag
 
 
 /* freelist.c */
+extern bool StrategySupportsEagerFlush(BufferAccessStrategy strategy);
+extern Buffer StrategyNextBuffer(BufferAccessStrategy strategy,
+								 int *cursor);
+extern int	StrategyGetCurrentIndex(BufferAccessStrategy strategy);
 extern IOContext IOContextForStrategy(BufferAccessStrategy strategy);
 extern BufferDesc *StrategyGetBuffer(BufferAccessStrategy strategy,
 									 uint64 *buf_state, bool *from_ring);
