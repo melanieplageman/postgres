@@ -160,6 +160,31 @@ ClockSweepTick(void)
 }
 
 /*
+ * Some BufferAccessStrategies support eager flushing -- which is flushing
+ * buffers in the ring before they are needed. This can lead to better I/O
+ * patterns than lazily flushing buffers immediately before reusing them.
+ */
+bool
+StrategySupportsEagerFlush(BufferAccessStrategy strategy)
+{
+	Assert(strategy);
+
+	switch (strategy->btype)
+	{
+		case BAS_BULKWRITE:
+			return true;
+		case BAS_VACUUM:
+		case BAS_NORMAL:
+		case BAS_BULKREAD:
+			return false;
+		default:
+			elog(ERROR, "unrecognized buffer access strategy: %d",
+				 (int) strategy->btype);
+			return false;
+	}
+}
+
+/*
  *	Return a buffer from clock sweep, pinned and marked as owned using
  *	TrackNewBufferPin(). It is the caller's responsibility to make sure the
  *	buffer ownership can be tracked.
@@ -281,6 +306,29 @@ GetBufferFromClocksweep(uint64 *buf_state)
 		}
 	}
 }
+
+/*
+ * Returns the next buffer in the ring after the one at cursor and increments
+ * cursor.
+ */
+Buffer
+StrategyNextBuffer(BufferAccessStrategy strategy, int *cursor)
+{
+	if (++(*cursor) >= strategy->nbuffers)
+		*cursor = 0;
+
+	return strategy->buffers[*cursor];
+}
+
+/*
+ * Return the current slot in the strategy ring.
+ */
+int
+StrategyGetCurrentIndex(BufferAccessStrategy strategy)
+{
+	return strategy->current;
+}
+
 
 /*
  * StrategySyncStart -- tell BgBufferSync where to start syncing

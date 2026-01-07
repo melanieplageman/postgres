@@ -576,6 +576,10 @@ extern void TerminateBufferIO(BufferDesc *buf, bool clear_dirty, uint64 set_flag
 
 
 /* freelist.c */
+extern bool StrategySupportsEagerFlush(BufferAccessStrategy strategy);
+extern Buffer StrategyNextBuffer(BufferAccessStrategy strategy,
+								 int *cursor);
+extern int	StrategyGetCurrentIndex(BufferAccessStrategy strategy);
 extern IOContext IOContextForStrategy(BufferAccessStrategy strategy);
 extern bool StrategyRejectBuffer(BufferAccessStrategy strategy,
 								 BufferDesc *buf, bool from_ring);
