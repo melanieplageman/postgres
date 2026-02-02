@@ -665,10 +665,11 @@ static void FlushBufferBatch(BufferWriteBatch *batch, IOContext io_context);
 static BufferDesc *PrepareOrRejectEagerFlushBuffer(Buffer bufnum,
 												   BufferTag *require,
 												   LWLock *buftable_lock,
-												   XLogRecPtr *lsn);
-static void FindFlushAdjacents(BufferDesc *batch_start,
-							   uint32 batch_limit,
-							   BufferWriteBatch *batch);
+												   XLogRecPtr *lsn,
+												   bool *usage_count_zero);
+static uint32 FindFlushAdjacents(BufferDesc *batch_start,
+								 uint32 batch_limit,
+								 BufferWriteBatch *batch);
 static void FindStrategyFlushAdjacents(BufferAccessStrategy strategy, Buffer sweep_end,
 									   BufferDesc *batch_start,
 									   uint32 max_batch_size,
@@ -676,8 +677,6 @@ static void FindStrategyFlushAdjacents(BufferAccessStrategy strategy, Buffer swe
 									   int *sweep_cursor);
 static void CompleteWriteBatchIO(BufferWriteBatch *batch, IOContext io_context,
 								 WritebackContext *wb_context);
-static void ScheduleBufferTagForWriteback(WritebackContext *wb_context,
-										  IOContext io_context, BufferTag *tag);
 static void ScheduleBufferTagBatchForWriteback(WritebackContext *wb_context,
 											   BufferTag *tag, uint32 batch_size,
 											   IOContext io_context);
@@ -2701,6 +2700,7 @@ again:
 			 */
 			for (;;)
 			{
+				bool		usage_count_zero;
 				Buffer		next_buf;
 				XLogRecPtr	next_buf_lsn;	/* unused */
 
@@ -2750,10 +2750,12 @@ again:
 				 * the start of a new batch.  Otherwise, we'll keep looking
 				 * until we complete one full sweep around the ring.
 				 */
-				next_bufdesc = PrepareOrRejectEagerFlushBuffer(next_buf,
-															   NULL,
-															   NULL,
-															   &next_buf_lsn);
+				next_bufdesc =
+					PrepareOrRejectEagerFlushBuffer(next_buf,
+													NULL,
+													NULL,
+													&next_buf_lsn,
+													&usage_count_zero);
 			}
 		}
 		else
@@ -4084,8 +4086,8 @@ BufferSync(int flags)
 			 * processed if we end up failing to acquire the content lock.
 			 */
 			if (batch.n == 0)
-				BufferLockAcquire(buffer, bufHdr, BUFFER_LOCK_SHARE);
-			else if (!BufferLockConditional(buffer, bufHdr, BUFFER_LOCK_SHARE))
+				BufferLockAcquire(buffer, bufHdr, BUFFER_LOCK_SHARE_EXCLUSIVE);
+			else if (!BufferLockConditional(buffer, bufHdr, BUFFER_LOCK_SHARE_EXCLUSIVE))
 			{
 				UnpinBuffer(bufHdr);
 				break;
@@ -4424,6 +4426,10 @@ BgBufferSync(WritebackContext *wb_context)
 	{
 		uint64		buf_state;
 		BufferDesc *bufHdr;
+		Buffer		buffer;
+		BufferWriteBatch batch;
+		BlockNumber limit;
+		uint32		max_batch_size = 3; /* we only look for two successors */
 
 		if (reusable_buffers >= upcoming_alloc_est)
 			break;
@@ -4457,12 +4463,25 @@ BgBufferSync(WritebackContext *wb_context)
 		if (!PinBuffer(bufHdr, BUC_ZERO, true))
 			continue;
 
-		FlushUnlockedBuffer(bufHdr, NULL, IOOBJECT_RELATION, IOCONTEXT_NORMAL);
-		UnpinBuffer(bufHdr);
+		buffer = BufferDescriptorGetBuffer(bufHdr);
+		BufferLockAcquire(buffer, bufHdr, BUFFER_LOCK_SHARE);
 
-		ScheduleBufferTagForWriteback(wb_context, IOCONTEXT_NORMAL, &bufHdr->tag);
+		if (!StartBufferIO(buffer, false, false, NULL))
+		{
+			LockBuffer(buffer, BUFFER_LOCK_UNLOCK);
+			UnpinBuffer(bufHdr);
+			continue;
+		}
 
-		if (++num_written >= bgwriter_lru_maxpages)
+		/* So we can detect block content changes while flushing */
+		limit = WriteBatchInit(bufHdr, max_batch_size, &batch);
+		if (limit > 1)
+			reusable_buffers += FindFlushAdjacents(bufHdr, limit, &batch);
+		FlushBufferBatch(&batch, IOCONTEXT_NORMAL);
+		CompleteWriteBatchIO(&batch, IOCONTEXT_NORMAL, wb_context);
+		num_written += batch.n;
+
+		if (num_written >= bgwriter_lru_maxpages)
 		{
 			PendingBgWriterStats.maxwritten_clean++;
 			break;
@@ -4983,22 +5002,31 @@ WriteBatchInit(BufferDesc *batch_start, uint32 max_batch_size,
  * accept it, they will provide the required block number and its
  * RelFileLocator and fork.
  *
+ * Callers specify if and by how much they want to bump the buffer's usage
+ * count.
+ *
  * If the caller is holding the buftable_lock, it will be released after
  * acquiring a pin on the buffer.
  *
  * max_lsn may be updated if the provided buffer LSN exceeds the current max
  * LSN.
+ *
+ * usage_count_zero is set to true if the buffer that is selected has a zero
+ * usage count. It is set to false if either the buffer is rejected or it has
+ * a non-zero usage count.
  */
 static BufferDesc *
 PrepareOrRejectEagerFlushBuffer(Buffer bufnum,
 								BufferTag *require,
 								LWLock *buftable_lock,
-								XLogRecPtr *lsn)
+								XLogRecPtr *lsn,
+								bool *usage_count_zero)
 {
 	BufferDesc *bufdesc;
 	uint64		buf_state;
 
 	*lsn = InvalidXLogRecPtr;
+	*usage_count_zero = false;
 
 	if (!BufferIsValid(bufnum))
 		goto reject_buffer;
@@ -5079,6 +5107,7 @@ PrepareOrRejectEagerFlushBuffer(Buffer bufnum,
 	/* Need the buffer header spinlock to read the page LSN */
 	buf_state = LockBufHdr(bufdesc);
 	*lsn = BufferGetLSN(bufdesc);
+	*usage_count_zero = BUF_STATE_GET_USAGECOUNT(buf_state) == 0;
 	UnlockBufHdrExt(bufdesc, buf_state, 0, 0, 0);
 
 	return bufdesc;
@@ -5121,6 +5150,7 @@ FindStrategyFlushAdjacents(BufferAccessStrategy strategy,
 						   int *sweep_cursor)
 {
 	BufferTag	require;
+	bool		usage_count_zero;
 
 	Assert(batch_limit > 1);
 
@@ -5150,7 +5180,8 @@ FindStrategyFlushAdjacents(BufferAccessStrategy strategy,
 			PrepareOrRejectEagerFlushBuffer(bufnum,
 											&require,
 											NULL,
-											&lsn);
+											&lsn,
+											&usage_count_zero);
 
 		/*
 		 * Because we don't eagerly flush buffers that need WAL flushed, this
@@ -5172,8 +5203,11 @@ FindStrategyFlushAdjacents(BufferAccessStrategy strategy,
 /*
  * Check if the blocks after my block are in shared buffers and dirty and if
  * they are, write them out too.
+ *
+ * Returns the number of buffers in the batch of adjacents that have zero
+ * usage counts. These will be reusable once their contents have been flushed.
  */
-static void
+static uint32
 FindFlushAdjacents(BufferDesc *batch_start,
 				   uint32 batch_limit,
 				   BufferWriteBatch *batch)
@@ -5182,6 +5216,8 @@ FindFlushAdjacents(BufferDesc *batch_start,
 	uint32		newHash;		/* hash value for require */
 	LWLock	   *newPartitionLock;	/* buffer partition lock for it */
 	int			buf_id;
+	bool		usage_count_zero;
+	uint32		zero_usage_count_buffers = 0;
 
 	/* create a tag so we can lookup the buffers */
 	InitBufferTag(&require, &batch->reln->smgr_rlocator.locator,
@@ -5214,13 +5250,18 @@ FindFlushAdjacents(BufferDesc *batch_start,
 			PrepareOrRejectEagerFlushBuffer(buf_id + 1,
 											&require,
 											newPartitionLock,
-											&lsn);
+											&lsn, &usage_count_zero);
+		if (usage_count_zero)
+			zero_usage_count_buffers++;
+
 		if (lsn > batch->max_lsn)
 			batch->max_lsn = lsn;
 
 		if (batch->bufdescs[batch->n] == NULL)
 			break;
 	}
+
+	return zero_usage_count_buffers;
 }
 
 /*
@@ -8394,45 +8435,6 @@ WritebackContextInit(WritebackContext *context, int *max_pending)
 }
 
 /*
- * Add buffer to list of pending writeback requests.
- */
-static void
-ScheduleBufferTagForWriteback(WritebackContext *wb_context, IOContext io_context,
-							  BufferTag *tag)
-{
-	PendingWriteback *pending;
-
-	/*
-	 * As pg_flush_data() doesn't do anything with fsync disabled, there's no
-	 * point in tracking in that case.
-	 */
-	if (io_direct_flags & IO_DIRECT_DATA ||
-		!enableFsync)
-		return;
-
-	/*
-	 * Add buffer to the pending writeback array, unless writeback control is
-	 * disabled.
-	 */
-	if (*wb_context->max_pending > 0)
-	{
-		Assert(*wb_context->max_pending <= WRITEBACK_MAX_PENDING_FLUSHES);
-
-		pending = &wb_context->pending_writebacks[wb_context->nr_pending++];
-
-		pending->tag = *tag;
-	}
-
-	/*
-	 * Perform pending flushes if the writeback limit is exceeded. This
-	 * includes the case where previously an item has been added, but control
-	 * is now disabled.
-	 */
-	if (wb_context->nr_pending >= *wb_context->max_pending)
-		IssuePendingWritebacks(wb_context, io_context);
-}
-
-/*
  * Don't call while holding buffer locks and pins
  */
 static void
@@ -8490,7 +8492,7 @@ ScheduleBufferTagBatchForWriteback(WritebackContext *wb_context,
 
 /*
  * Issue all pending writeback requests, previously scheduled with
- * ScheduleBufferTagForWriteback, to the OS.
+ * ScheduleBufferTagBatchForWriteback, to the OS.
  *
  * Because this is only used to improve the OSs IO scheduling we try to never
  * error out - it's just a hint.
