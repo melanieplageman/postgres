@@ -605,10 +605,6 @@ extern int	StrategyGetCurrentIndex(BufferAccessStrategy strategy);
 extern IOContext IOContextForStrategy(BufferAccessStrategy strategy);
 extern bool StrategyRejectBuffer(BufferAccessStrategy strategy,
 								 BufferDesc *buf, bool from_ring);
-extern void AddBufferToRing(BufferAccessStrategy strategy, BufferDesc *buf);
-extern BufferDesc *GetBufferFromClocksweep(uint64 *buf_state);
-extern BufferDesc *GetBufferFromRing(BufferAccessStrategy strategy,
-									 uint64 *buf_state);
 
 extern int	StrategySyncStart(uint32 *complete_passes, uint32 *num_buf_alloc);
 extern void StrategyNotifyBgWriter(int bgwprocno);
@@ -647,5 +643,12 @@ extern void DropRelationLocalBuffers(RelFileLocator rlocator,
 									 BlockNumber *firstDelBlock);
 extern void DropRelationAllLocalBuffers(RelFileLocator rlocator);
 extern void AtEOXact_LocalBuffers(bool isCommit);
+
+extern void AddBufferToRing(BufferAccessStrategy strategy, BufferDesc *buf);
+extern BufferDesc *GetBufferFromClocksweep(uint64 *buf_state, IOContext io_context);
+
+
+extern BufferDesc *GetBufferFromRing(BufferAccessStrategy strategy,
+									 uint64 *buf_state, IOContext io_context);
 
 #endif							/* BUFMGR_INTERNALS_H */
