@@ -370,6 +370,7 @@ BufferManagerRelation
 BufferStrategyControl
 BufferTag
 BufferUsage
+BufferUsageCountChange
 BuildAccumulator
 BuiltinScript
 BulkInsertState
