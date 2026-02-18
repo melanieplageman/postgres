@@ -174,9 +174,11 @@ extern PGDLLIMPORT int maintenance_io_concurrency;
 
 #define MAX_IO_COMBINE_LIMIT PG_IOV_MAX
 #define DEFAULT_IO_COMBINE_LIMIT Min(MAX_IO_COMBINE_LIMIT, (128 * 1024) / BLCKSZ)
+#define DEFAULT_EAGER_CLEAN_MAX_BATCH_SIZE 3
 extern PGDLLIMPORT int io_combine_limit;	/* min of the two GUCs below */
 extern PGDLLIMPORT int io_combine_limit_guc;
 extern PGDLLIMPORT int io_max_combine_limit;
+extern PGDLLIMPORT int eager_clean_max_batch_size;
 
 extern PGDLLIMPORT int checkpoint_flush_after;
 extern PGDLLIMPORT int backend_flush_after;
@@ -340,6 +342,9 @@ LockBuffer(Buffer buffer, BufferLockMode mode)
 }
 
 extern bool ConditionalLockBuffer(Buffer buffer);
+
+extern bool ConditionalShareExclusiveLockBuffer(Buffer buffer);
+extern bool ConditionalShareLockBuffer(Buffer buffer);
 extern void LockBufferForCleanup(Buffer buffer);
 extern bool ConditionalLockBufferForCleanup(Buffer buffer);
 extern bool IsBufferCleanupOK(Buffer buffer);

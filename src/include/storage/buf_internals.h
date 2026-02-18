@@ -555,12 +555,6 @@ typedef struct BufferWriteBatch
 	SMgrRelation reln;
 
 	/*
-	 * The BlockNumber of the first block in the run of contiguous blocks to
-	 * be written out as a single IO.
-	 */
-	BlockNumber start;
-
-	/*
 	 * While assembling the buffers, we keep track of the maximum LSN so that
 	 * we can flush WAL through this LSN before flushing the buffers.
 	 */
@@ -610,8 +604,6 @@ extern Buffer StrategyNextBuffer(BufferAccessStrategy strategy,
 								 int *cursor);
 extern int	StrategyGetCurrentIndex(BufferAccessStrategy strategy);
 extern IOContext IOContextForStrategy(BufferAccessStrategy strategy);
-extern BufferDesc *StrategyGetBuffer(BufferAccessStrategy strategy,
-									 uint64 *buf_state, bool *from_ring);
 extern bool StrategyRejectBuffer(BufferAccessStrategy strategy,
 								 BufferDesc *buf, bool from_ring);
 
@@ -652,5 +644,12 @@ extern void DropRelationLocalBuffers(RelFileLocator rlocator,
 									 BlockNumber *firstDelBlock);
 extern void DropRelationAllLocalBuffers(RelFileLocator rlocator);
 extern void AtEOXact_LocalBuffers(bool isCommit);
+
+extern void AddBufferToRing(BufferAccessStrategy strategy, BufferDesc *buf);
+extern BufferDesc *GetBufferFromClocksweep(uint64 *buf_state, IOContext io_context);
+
+
+extern BufferDesc *GetBufferFromRing(BufferAccessStrategy strategy,
+									 uint64 *buf_state, IOContext io_context);
 
 #endif							/* BUFMGR_INTERNALS_H */
