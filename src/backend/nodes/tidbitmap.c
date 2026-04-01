@@ -207,12 +207,22 @@ typedef struct PTIterationArray
  * same as TBMPrivateIterator, but it is used for joint iteration, therefore
  * this also holds a reference to the shared state.
  */
+#define TBM_SHARED_ITERATE_BATCH_SIZE 16
+
 struct TBMSharedIterator
 {
 	TBMSharedIteratorState *state;	/* shared state */
 	PTEntryArray *ptbase;		/* pagetable element array */
 	PTIterationArray *ptpages;	/* sorted exact page index list */
 	PTIterationArray *ptchunks; /* sorted lossy page index list */
+
+	/*
+	 * Local cache of results claimed from the shared state under a single
+	 * lock acquisition, to reduce lock contention during parallel scans.
+	 */
+	int			batch_count;	/* number of valid entries in batch[] */
+	int			batch_index;	/* next entry to return from batch[] */
+	TBMIterateResult batch[TBM_SHARED_ITERATE_BATCH_SIZE];
 };
 
 /* Local function prototypes */
@@ -1058,12 +1068,26 @@ tbm_shared_iterate(TBMSharedIterator *iterator, TBMIterateResult *tbmres)
 	int		   *idxpages = NULL;
 	int		   *idxchunks = NULL;
 
+	/*
+	 * If we have locally cached results from a previous batch, return the
+	 * next one without acquiring the lock.
+	 */
+	if (iterator->batch_index < iterator->batch_count)
+	{
+		*tbmres = iterator->batch[iterator->batch_index++];
+		return true;
+	}
+
 	if (iterator->ptbase != NULL)
 		ptbase = iterator->ptbase->ptentry;
 	if (iterator->ptpages != NULL)
 		idxpages = iterator->ptpages->index;
 	if (iterator->ptchunks != NULL)
 		idxchunks = iterator->ptchunks->index;
+
+	/* Reset the batch */
+	iterator->batch_index = 0;
+	iterator->batch_count = 0;
 
 	/* Acquire the LWLock before accessing the shared members */
 	LWLockAcquire(&istate->lock, LW_EXCLUSIVE);
@@ -1114,22 +1138,55 @@ tbm_shared_iterate(TBMSharedIterator *iterator, TBMIterateResult *tbmres)
 		}
 	}
 
+	/*
+	 * Claim a batch of exact pages from the shared state under this single
+	 * lock acquisition to reduce contention during parallel scans.  We stop
+	 * batching if we reach a lossy chunk page that should come before the
+	 * next exact page (to maintain sorted order).
+	 */
 	if (istate->spageptr < istate->npages)
 	{
-		PagetableEntry *page = &ptbase[idxpages[istate->spageptr]];
+		bool		have_chunks = (istate->schunkptr < istate->nchunks);
+		BlockNumber chunk_blockno = InvalidBlockNumber;
 
-		tbmres->internal_page = page;
-		tbmres->blockno = page->blockno;
-		tbmres->lossy = false;
-		tbmres->recheck = page->recheck;
-		istate->spageptr++;
+		if (have_chunks)
+		{
+			PagetableEntry *chunk = &ptbase[idxchunks[istate->schunkptr]];
+
+			chunk_blockno = chunk->blockno + istate->schunkbit;
+		}
+
+		while (iterator->batch_count < TBM_SHARED_ITERATE_BATCH_SIZE &&
+			   istate->spageptr < istate->npages)
+		{
+			PagetableEntry *page = &ptbase[idxpages[istate->spageptr]];
+
+			/*
+			 * If a lossy chunk page is numerically before this exact page,
+			 * stop batching so the chunk page is returned first on the next
+			 * call.
+			 */
+			if (have_chunks && chunk_blockno < page->blockno)
+				break;
+
+			iterator->batch[iterator->batch_count].blockno = page->blockno;
+			iterator->batch[iterator->batch_count].lossy = false;
+			iterator->batch[iterator->batch_count].recheck = page->recheck;
+			iterator->batch[iterator->batch_count].internal_page = page;
+			iterator->batch_count++;
+			istate->spageptr++;
+		}
 
 		LWLockRelease(&istate->lock);
 
-		return true;
+		if (iterator->batch_count > 0)
+		{
+			*tbmres = iterator->batch[iterator->batch_index++];
+			return true;
+		}
 	}
-
-	LWLockRelease(&istate->lock);
+	else
+		LWLockRelease(&istate->lock);
 
 	/* Nothing more in the bitmap */
 	tbmres->blockno = InvalidBlockNumber;
