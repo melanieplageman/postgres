@@ -115,6 +115,27 @@ sub test_repeated_blocks
 }
 
 
+sub test_read_stream_resume
+{
+	my $io_method = shift;
+	my $node = shift;
+
+	my $psql = $node->background_psql('postgres', on_error_stop => 0);
+
+	$psql->query_safe(
+		qq(
+CREATE TEMPORARY TABLE tmp_read_stream(data int not null);
+INSERT INTO tmp_read_stream SELECT generate_series(1, 10000);
+SELECT test_read_stream_resume('tmp_read_stream', 0);
+DROP TABLE tmp_read_stream;
+));
+
+	ok(1, "$io_method: read_stream_resume");
+
+	$psql->quit();
+}
+
+
 sub test_inject_foreign
 {
 	my $io_method = shift;
@@ -268,6 +289,7 @@ sub test_io_method
 		$io_method, "$io_method: io_method set correctly");
 
 	test_repeated_blocks($io_method, $node);
+	test_read_stream_resume($io_method, $node);
 
   SKIP:
 	{
