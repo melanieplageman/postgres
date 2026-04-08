@@ -134,6 +134,6 @@ AS 'MODULE_PATHNAME' LANGUAGE C;
 /*
  * Read stream related functions
  */
-CREATE FUNCTION test_read_stream_resume(rel regclass, blockno int4)
-RETURNS pg_catalog.void STRICT
+CREATE FUNCTION test_read_stream_resume(rel regclass, blockno int4, OUT call_index int4, OUT blocknum int4)
+RETURNS SETOF record STRICT
 AS 'MODULE_PATHNAME' LANGUAGE C;

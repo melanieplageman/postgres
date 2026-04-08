@@ -939,6 +939,11 @@ test_read_stream_resume_cb(ReadStream *stream,
 /*
  * Test read_stream_resume(), allowing a stream to end temporarily and then
  * continue where it left off.
+ *
+ * Returns a result set of (call_index int4, blocknum int4) rows so that the
+ * caller can validate the exact sequence.  A blocknum of -1 indicates that
+ * read_stream_next_buffer() returned InvalidBuffer (i.e. the stream was
+ * paused).
  */
 PG_FUNCTION_INFO_V1(test_read_stream_resume);
 Datum
@@ -946,10 +951,14 @@ test_read_stream_resume(PG_FUNCTION_ARGS)
 {
 	Oid			relid = PG_GETARG_OID(0);
 	BlockNumber blkno = PG_GETARG_UINT32(1);
+	ReturnSetInfo *rsinfo = (ReturnSetInfo *) fcinfo->resultinfo;
 	Relation	rel;
 	Buffer		buf;
 	ReadStream *stream;
 	test_read_stream_resume_state state = {.blkno = blkno};
+	int			call_index = 0;
+
+	InitMaterializedSRF(fcinfo, 0);
 
 	rel = relation_open(relid, AccessShareLock);
 	stream = read_stream_begin_relation(READ_STREAM_DEFAULT,
@@ -962,19 +971,37 @@ test_read_stream_resume(PG_FUNCTION_ARGS)
 
 	for (int i = 0; i < 3; ++i)
 	{
+		Datum		values[2] = {0};
+		bool		nulls[2] = {0};
+
 		/* Same block twice. */
 		buf = read_stream_next_buffer(stream, NULL);
-		Assert(BufferGetBlockNumber(buf) == blkno);
-		ReleaseBuffer(buf);
-		buf = read_stream_next_buffer(stream, NULL);
-		Assert(BufferGetBlockNumber(buf) == blkno);
-		ReleaseBuffer(buf);
+		values[0] = Int32GetDatum(call_index++);
+		values[1] = BufferIsValid(buf) ?
+			Int32GetDatum((int32) BufferGetBlockNumber(buf)) :
+			Int32GetDatum(-1);
+		tuplestore_putvalues(rsinfo->setResult, rsinfo->setDesc, values, nulls);
+		if (BufferIsValid(buf))
+			ReleaseBuffer(buf);
 
-		/* End-of-stream. */
 		buf = read_stream_next_buffer(stream, NULL);
-		Assert(buf == InvalidBuffer);
+		values[0] = Int32GetDatum(call_index++);
+		values[1] = BufferIsValid(buf) ?
+			Int32GetDatum((int32) BufferGetBlockNumber(buf)) :
+			Int32GetDatum(-1);
+		tuplestore_putvalues(rsinfo->setResult, rsinfo->setDesc, values, nulls);
+		if (BufferIsValid(buf))
+			ReleaseBuffer(buf);
+
+		/* End-of-stream (paused). */
 		buf = read_stream_next_buffer(stream, NULL);
-		Assert(buf == InvalidBuffer);
+		values[0] = Int32GetDatum(call_index++);
+		values[1] = BufferIsValid(buf) ?
+			Int32GetDatum((int32) BufferGetBlockNumber(buf)) :
+			Int32GetDatum(-1);
+		tuplestore_putvalues(rsinfo->setResult, rsinfo->setDesc, values, nulls);
+		if (BufferIsValid(buf))
+			ReleaseBuffer(buf);
 
 		/* Resume. */
 		read_stream_resume(stream);
@@ -983,7 +1010,7 @@ test_read_stream_resume(PG_FUNCTION_ARGS)
 	read_stream_end(stream);
 	relation_close(rel, NoLock);
 
-	PG_RETURN_VOID();
+	return (Datum) 0;
 }
 
 

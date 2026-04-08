@@ -122,15 +122,18 @@ sub test_read_stream_resume
 
 	my $psql = $node->background_psql('postgres', on_error_stop => 0);
 
-	$psql->query_safe(
-		qq(
-CREATE TEMPORARY TABLE tmp_read_stream(data int not null);
-INSERT INTO tmp_read_stream SELECT generate_series(1, 10000);
-SELECT test_read_stream_resume('tmp_read_stream', 0);
-DROP TABLE tmp_read_stream;
-));
+	# The callback returns block 0 twice then pauses.  We resume 3 times.
+	# -1 means read_stream_next_buffer() returned InvalidBuffer (paused).
+	my @one_cycle = (0, 0, -1);
+	my $expected = '{' . join(',', @one_cycle, @one_cycle, @one_cycle) . '}';
 
-	ok(1, "$io_method: read_stream_resume");
+	my $result = $psql->query_safe(
+		qq(SELECT array_agg(blocknum ORDER BY call_index)
+		   FROM test_read_stream_resume('largeish', 0);));
+	chomp($result);
+
+	is($result, $expected,
+		"$io_method: read_stream_resume");
 
 	$psql->quit();
 }
