@@ -53,12 +53,6 @@ mask_page_hint_bits(Page page)
 	/* Ignore PD_PAGE_FULL and PD_HAS_FREE_LINES flags, they are just hints. */
 	PageClearFull(page);
 	PageClearHasFreeLinePointers(page);
-
-	/*
-	 * PD_ALL_VISIBLE is masked during WAL consistency checking. XXX: It is
-	 * worth investigating if we could stop doing this.
-	 */
-	PageClearAllVisible(page);
 }
 
 /*
