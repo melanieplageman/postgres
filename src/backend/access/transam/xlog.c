@@ -9537,6 +9537,16 @@ xlog_redo(XLogReaderState *record)
 			{
 				if (info == XLOG_FPI)
 					elog(ERROR, "XLOG_FPI record did not contain a full-page image");
+
+#ifdef USE_ASSERT_CHECKING
+
+				/*
+				 * If full_page_writes are disabled, we don't want to error
+				 * out because we didn't read the block.
+				 */
+				if (info == XLOG_FPI_FOR_HINT)
+					record->record->blocks[block_id].used_read = true;
+#endif
 				continue;
 			}
 

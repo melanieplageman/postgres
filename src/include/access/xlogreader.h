@@ -145,6 +145,10 @@ typedef struct
 	bool		has_data;
 	char	   *data;
 	uint16		data_len;
+
+#ifdef USE_ASSERT_CHECKING
+	bool		used_read;
+#endif
 } DecodedBkpBlock;
 
 /*

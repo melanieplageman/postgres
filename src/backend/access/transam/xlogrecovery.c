@@ -1980,6 +1980,22 @@ ApplyWalRecord(XLogReaderState *xlogreader, XLogRecord *record, TimeLineID *repl
 	GetRmgr(record->xl_rmid).rm_redo(xlogreader);
 
 	/*
+	 * Verify that all block references were used during replay. This helps
+	 * detect bugs in redo routines. Every referenced block needs to be
+	 * replayed with XLogReadBufferForRedoExtended(), possibly via a helper,
+	 * to ensure that we replay FPIs, extend the relation if necessary, and
+	 * other perform other similar protections.
+	 */
+#ifdef USE_ASSERT_CHECKING
+	for (int block_id = 0; block_id <= xlogreader->record->max_block_id; block_id++)
+	{
+		DecodedBkpBlock *blk = &xlogreader->record->blocks[block_id];
+
+		Assert(!blk->in_use || blk->used_read);
+	}
+#endif
+
+	/*
 	 * After redo, check whether the backup pages associated with the WAL
 	 * record are consistent with the existing pages. This check is done only
 	 * if consistency check is enabled for this record.

@@ -381,6 +381,12 @@ XLogReadBufferForRedoExtended(XLogReaderState *record,
 			 block_id);
 	}
 
+#ifdef USE_ASSERT_CHECKING
+	/* Shouldn't have multiple read references to block */
+	Assert(!record->record->blocks[block_id].used_read);
+	record->record->blocks[block_id].used_read = true;
+#endif
+
 	/*
 	 * Make sure that if the block is marked with WILL_INIT, the caller is
 	 * going to initialize it. And vice versa.

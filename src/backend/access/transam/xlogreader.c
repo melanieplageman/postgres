@@ -1825,6 +1825,10 @@ DecodeXLogRecord(XLogReaderState *state,
 
 			blk = &decoded->blocks[block_id];
 			blk->in_use = true;
+#ifdef USE_ASSERT_CHECKING
+			blk->used_read = false;
+#endif
+
 			blk->apply_image = false;
 
 			COPY_HEADER_FIELD(&fork_flags, sizeof(uint8));
