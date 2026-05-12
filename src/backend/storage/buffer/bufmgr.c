@@ -686,6 +686,11 @@ static void BufferLockWakeup(BufferDesc *buf_hdr, bool wake_exclusive);
 static void BufferLockProcessRelease(BufferDesc *buf_hdr, BufferLockMode mode, uint64 lockstate);
 static inline uint64 BufferLockReleaseSub(BufferLockMode mode);
 
+static BufferDesc *SelectVictimBuffer(BufferAccessStrategy strategy,
+									  IOContext io_context,
+									  uint64 *buf_state,
+									  IOOp *io_op);
+
 
 /*
  * Implementation of PrefetchBuffer() for shared buffers.
@@ -2547,7 +2552,7 @@ GetVictimBuffer(BufferAccessStrategy strategy, IOContext io_context)
 	BufferDesc *buf_hdr;
 	Buffer		buf;
 	uint64		buf_state;
-	bool		from_ring;
+	IOOp		io_op;
 
 	/*
 	 * Ensure, before we pin a victim buffer, that there's a free refcount
@@ -2561,9 +2566,11 @@ again:
 
 	/*
 	 * Select a victim buffer.  The buffer is returned pinned and owned by
-	 * this backend.
+	 * this backend. io_op is the pg_stat_io operation to count if this valid
+	 * victim is ultimately kept: IOOP_REUSE for buffers from the strategy
+	 * ring and IOOP_EVICT otherwise.
 	 */
-	buf_hdr = StrategyGetBuffer(strategy, &buf_state, &from_ring);
+	buf_hdr = SelectVictimBuffer(strategy, io_context, &buf_state, &io_op);
 	buf = BufferDescriptorGetBuffer(buf_hdr);
 
 	/*
@@ -2572,58 +2579,16 @@ again:
 	CheckBufferIsPinnedOnce(buf);
 
 	/*
-	 * If the buffer was dirty, try to write it out.  There is a race
-	 * condition here, another backend could dirty the buffer between
-	 * StrategyGetBuffer() checking that it is not in use and invalidating the
-	 * buffer below. That's addressed by InvalidateVictimBuffer() verifying
-	 * that the buffer is not dirty.
+	 * If the buffer was dirty, try to write it out. There is a race condition
+	 * here: another backend could dirty the buffer between when
+	 * SelectVictimBuffer() checked it was not in use and where we invalidate
+	 * the buffer below. That's addressed by InvalidateVictimBuffer()
+	 * verifying that the buffer is not dirty.
 	 */
 	if (buf_state & BM_DIRTY)
 	{
 		Assert(buf_state & BM_TAG_VALID);
 		Assert(buf_state & BM_VALID);
-
-		/*
-		 * We need a share-exclusive lock on the buffer contents to write it
-		 * out (else we might write invalid data, eg because someone else is
-		 * compacting the page contents while we write).  We must use a
-		 * conditional lock acquisition here to avoid deadlock.  Even though
-		 * the buffer was not pinned (and therefore surely not locked) when
-		 * StrategyGetBuffer returned it, someone else could have pinned and
-		 * (share-)exclusive-locked it by the time we get here. If we try to
-		 * get the lock unconditionally, we'd block waiting for them; if they
-		 * later block waiting for us, deadlock ensues. (This has been
-		 * observed to happen when two backends are both trying to split btree
-		 * index pages, and the second one just happens to be trying to split
-		 * the page the first one got from StrategyGetBuffer.)
-		 */
-		if (!BufferLockConditional(buf, buf_hdr, BUFFER_LOCK_SHARE_EXCLUSIVE))
-		{
-			/*
-			 * Someone else has locked the buffer, so give it up and loop back
-			 * to get another one.
-			 */
-			UnpinBuffer(buf_hdr);
-			goto again;
-		}
-
-		/*
-		 * If using a nondefault strategy, and this victim came from the
-		 * strategy ring, let the strategy decide whether to reject it when
-		 * reusing it would require a WAL flush.  This only applies to
-		 * permanent buffers; unlogged buffers can have fake LSNs, so
-		 * XLogNeedsFlush() is not meaningful for them.
-		 *
-		 * We need to hold the content lock in at least share-exclusive mode
-		 * to safely inspect the page LSN, so this couldn't have been done
-		 * inside StrategyGetBuffer().
-		 */
-		if (strategy && from_ring &&
-			StrategyRejectBuffer(strategy, buf_hdr, buf_state))
-		{
-			UnlockReleaseBuffer(buf);
-			goto again;
-		}
 
 		/* OK, do the I/O */
 		FlushBuffer(buf_hdr, NULL, IOOBJECT_RELATION, io_context);
@@ -2663,8 +2628,7 @@ again:
 		 * forced to release the buffer due to concurrent pinners or erroring
 		 * out.
 		 */
-		pgstat_count_io_op(IOOBJECT_RELATION, io_context,
-						   from_ring ? IOOP_REUSE : IOOP_EVICT, 1, 0);
+		pgstat_count_io_op(IOOBJECT_RELATION, io_context, io_op, 1, 0);
 	}
 
 	/* a final set of sanity checks */
@@ -2678,6 +2642,45 @@ again:
 #endif
 
 	return buf;
+}
+
+/*
+ * Called by the bufmgr to get the next candidate buffer to use in
+ * GetVictimBuffer(). The only hard requirement GetVictimBuffer() has is that
+ * the selected buffer must not currently be pinned by anyone.
+ */
+static BufferDesc *
+SelectVictimBuffer(BufferAccessStrategy strategy, IOContext io_context,
+				   uint64 *buf_state, IOOp *io_op)
+{
+	BufferDesc *buf_hdr = NULL;
+
+	/*
+	 * Preserve the old pg_stat_io distinction: buffers reused from a strategy
+	 * ring are IOOP_REUSE, and all other selected buffers are IOOP_EVICT.
+	 */
+	*io_op = IOOP_EVICT;
+
+	/*
+	 * If given a strategy object, see whether it can select a buffer. We
+	 * assume strategy objects don't need buffer_strategy_lock.
+	 */
+	if (strategy)
+	{
+		buf_hdr = GetBufferFromRing(strategy, buf_state, io_context);
+		if (buf_hdr)
+			*io_op = IOOP_REUSE;
+	}
+
+	/* If no strategy or didn't find a strategy buffer, get one from SB */
+	if (!buf_hdr)
+	{
+		buf_hdr = GetBufferFromClocksweep(buf_state, io_context);
+		if (strategy)
+			AddBufferToRing(strategy, buf_hdr);
+	}
+
+	return buf_hdr;
 }
 
 /*
@@ -4596,8 +4599,7 @@ FlushBuffer(BufferDesc *buf, SMgrRelation reln, IOObject io_object,
 	 * If a shared buffer which was added to the ring later because the
 	 * current strategy buffer is pinned or in use or because all strategy
 	 * buffers were dirty and rejected (for BAS_BULKREAD operations only)
-	 * requires flushing, this is counted as an IOCONTEXT_NORMAL IOOP_WRITE
-	 * (from_ring will be false).
+	 * requires flushing, this is counted as an IOCONTEXT_NORMAL IOOP_WRITE.
 	 *
 	 * When a strategy is not in use, the write can only be a "regular" write
 	 * of a dirty shared buffer (IOCONTEXT_NORMAL IOOP_WRITE).
@@ -6629,6 +6631,20 @@ ConditionalLockBuffer(Buffer buffer)
 	buf = GetBufferDescriptor(buffer - 1);
 
 	return BufferLockConditional(buffer, buf, BUFFER_LOCK_EXCLUSIVE);
+}
+
+bool
+ConditionalShareExclusiveLockBuffer(Buffer buffer)
+{
+	BufferDesc *buf;
+
+	Assert(BufferIsPinned(buffer));
+	if (BufferIsLocal(buffer))
+		return true;			/* act as though we got it */
+
+	buf = GetBufferDescriptor(buffer - 1);
+
+	return BufferLockConditional(buffer, buf, BUFFER_LOCK_SHARE_EXCLUSIVE);
 }
 
 /*
