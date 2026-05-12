@@ -96,10 +96,8 @@ typedef struct BufferAccessStrategyData
 
 
 /* Prototypes for internal functions */
-static BufferDesc *GetBufferFromRing(BufferAccessStrategy strategy,
-									 uint64 *buf_state);
-static void AddBufferToRing(BufferAccessStrategy strategy,
-							BufferDesc *buf);
+static bool StrategyRejectBuffer(BufferAccessStrategy strategy,
+								 BufferDesc *buf, uint64 buf_state);
 
 /*
  * ClockSweepTick - Helper routine for StrategyGetBuffer()
@@ -209,8 +207,8 @@ StrategySyncStart(uint32 *complete_passes, uint32 *num_buf_alloc)
 /*
  * StrategyNotifyBgWriter -- set or clear allocation notification latch
  *
- * If bgwprocno isn't -1, the next invocation of StrategyGetBuffer will
- * set that latch.  Pass -1 to clear the pending notification before it
+ * If bgwprocno isn't -1, the next invocation of GetBufferFromClocksweep()
+ * will set that latch.  Pass -1 to clear the pending notification before it
  * happens.  This feature is used by the bgwriter process to wake itself up
  * from hibernation, and is not meant for anybody else to use.
  */
@@ -219,8 +217,8 @@ StrategyNotifyBgWriter(int bgwprocno)
 {
 	/*
 	 * We acquire buffer_strategy_lock just to ensure that the store appears
-	 * atomic to StrategyGetBuffer.  The bgwriter should call this rather
-	 * infrequently, so there's no performance penalty from being safe.
+	 * atomic to GetBufferFromClocksweep.  The bgwriter should call this
+	 * rather infrequently, so there's no performance penalty from being safe.
 	 */
 	SpinLockAcquire(&StrategyControl->buffer_strategy_lock);
 	StrategyControl->bgwprocno = bgwprocno;
@@ -463,76 +461,117 @@ FreeAccessStrategy(BufferAccessStrategy strategy)
 }
 
 /*
- * GetBufferFromRing -- returns a buffer from the ring, or NULL if the
- *		ring is empty / not usable.
+ * Returns a buffer from the ring, or NULL if the ring is empty or contains no
+ * usable buffers. In that case, the caller will select a buffer from the
+ * clocksweep and add it to the ring.
  *
  * The buffer is pinned and marked as owned, using TrackNewBufferPin(), before
- * returning.
+ * returning. It is the caller's responsibility to make sure the buffer
+ * ownership can be tracked.
  */
-static BufferDesc *
-GetBufferFromRing(BufferAccessStrategy strategy, uint64 *buf_state)
+BufferDesc *
+GetBufferFromRing(BufferAccessStrategy strategy, uint64 *buf_state, IOContext io_context)
 {
 	BufferDesc *buf;
 	Buffer		bufnum;
 	uint64		old_buf_state;
 	uint64		local_buf_state;	/* to avoid repeated (de-)referencing */
 
-
-	/* Advance to next ring slot */
-	if (++strategy->current >= strategy->nbuffers)
-		strategy->current = 0;
+	Assert(strategy);
 
 	/*
-	 * If the slot hasn't been filled yet, tell the caller to allocate a new
-	 * buffer with the normal allocation strategy.  He will then fill this
-	 * slot by calling AddBufferToRing with the new buffer.
+	 * Don't loop around the ring forever if none of the strategy buffers meet
+	 * our criteria.
 	 */
-	bufnum = strategy->buffers[strategy->current];
-	if (bufnum == InvalidBuffer)
-		return NULL;
-
-	buf = GetBufferDescriptor(bufnum - 1);
-
-	/*
-	 * Check whether the buffer can be used and pin it if so. Do this using a
-	 * CAS loop, to avoid having to lock the buffer header.
-	 */
-	old_buf_state = pg_atomic_read_u64(&buf->state);
-	for (;;)
+	for (int trycounter = 0; trycounter < strategy->nbuffers; trycounter++)
 	{
-		local_buf_state = old_buf_state;
+		/* Advance to next ring slot */
+		if (++strategy->current >= strategy->nbuffers)
+			strategy->current = 0;
 
 		/*
-		 * If the buffer is pinned we cannot use it under any circumstances.
-		 *
-		 * If usage_count is 0 or 1 then the buffer is fair game (we expect 1,
-		 * since our own previous usage of the ring element would have left it
-		 * there, but it might've been decremented by clock-sweep since then).
-		 * A higher usage_count indicates someone else has touched the buffer,
-		 * so we shouldn't re-use it.
+		 * If the slot hasn't been filled yet, tell the caller to allocate a
+		 * new buffer with the normal allocation strategy.  He will then fill
+		 * this slot by calling AddBufferToRing with the new buffer.
 		 */
-		if (BUF_STATE_GET_REFCOUNT(local_buf_state) != 0
-			|| BUF_STATE_GET_USAGECOUNT(local_buf_state) > 1)
-			break;
+		bufnum = strategy->buffers[strategy->current];
+		if (bufnum == InvalidBuffer)
+			return NULL;
 
-		/* See equivalent code in PinBuffer() */
-		if (unlikely(local_buf_state & BM_LOCKED))
+		buf = GetBufferDescriptor(bufnum - 1);
+
+		/*
+		 * Check whether the buffer can be used and pin it if so. Do this
+		 * using a CAS loop, to avoid having to lock the buffer header.
+		 */
+		old_buf_state = pg_atomic_read_u64(&buf->state);
+		for (;;)
 		{
-			old_buf_state = WaitBufHdrUnlocked(buf);
-			continue;
+			local_buf_state = old_buf_state;
+
+			/*
+			 * If the buffer is pinned we cannot use it under any
+			 * circumstances.
+			 *
+			 * If usage_count is 0 or 1 then the buffer is fair game (we
+			 * expect 1, since our own previous usage of the ring element
+			 * would have left it there, but it might've been decremented by
+			 * clock-sweep since then). A higher usage_count indicates someone
+			 * else has touched the buffer, so we shouldn't re-use it.
+			 */
+			if (BUF_STATE_GET_REFCOUNT(local_buf_state) != 0
+				|| BUF_STATE_GET_USAGECOUNT(local_buf_state) > 1)
+				return NULL;
+
+			/* See equivalent code in PinBuffer() */
+			if (unlikely(local_buf_state & BM_LOCKED))
+			{
+				old_buf_state = WaitBufHdrUnlocked(buf);
+				continue;
+			}
+
+			/* pin the buffer if the CAS succeeds */
+			local_buf_state += BUF_REFCOUNT_ONE;
+
+			/* if we can't change state, keep trying */
+			if (pg_atomic_compare_exchange_u64(&buf->state, &old_buf_state,
+											   local_buf_state))
+			{
+				/* got a pin */
+				*buf_state = local_buf_state;
+				TrackNewBufferPin(BufferDescriptorGetBuffer(buf));
+				break;
+			}
 		}
 
-		/* pin the buffer if the CAS succeeds */
-		local_buf_state += BUF_REFCOUNT_ONE;
-
-		if (pg_atomic_compare_exchange_u64(&buf->state, &old_buf_state,
-										   local_buf_state))
+		if (*buf_state & BM_DIRTY)
 		{
-			*buf_state = local_buf_state;
+			/*
+			 * We need a share-exclusive lock on the buffer to write it out to
+			 * avoid writing invalid data. See comment in
+			 * GetBufferFromClocksweep() on why we take the lock
+			 * conditionally.
+			 */
+			if (!ConditionalShareExclusiveLockBuffer(bufnum))
+			{
+				ReleaseBuffer(bufnum);
+				continue;
+			}
 
-			TrackNewBufferPin(BufferDescriptorGetBuffer(buf));
-			return buf;
+			/*
+			 * Let the strategy decide whether to reject this dirty ring
+			 * buffer. This must happen after locking the buffer so the page
+			 * LSN can be inspected safely.
+			 */
+			if (StrategyRejectBuffer(strategy, buf, *buf_state))
+			{
+				LockBuffer(bufnum, BUFFER_LOCK_UNLOCK);
+				ReleaseBuffer(bufnum);
+				continue;
+			}
 		}
+
+		return buf;
 	}
 
 	/*
@@ -548,49 +587,24 @@ GetBufferFromRing(BufferAccessStrategy strategy, uint64 *buf_state)
  * Caller must hold the buffer header spinlock on the buffer.  Since this
  * is called with the spinlock held, it had better be quite cheap.
  */
-static void
+void
 AddBufferToRing(BufferAccessStrategy strategy, BufferDesc *buf)
 {
 	strategy->buffers[strategy->current] = BufferDescriptorGetBuffer(buf);
 }
 
 /*
- * StrategyGetBuffer
- *
- *	Called by the bufmgr to get the next candidate buffer to use in
- *	GetVictimBuffer(). The only hard requirement GetVictimBuffer() has is that
- *	the selected buffer must not currently be pinned by anyone.
- *
- *	strategy is a BufferAccessStrategy object, or NULL for default strategy.
- *
- *	It is the callers responsibility to ensure the buffer ownership can be
- *	tracked via TrackNewBufferPin().
- *
- *	The buffer is pinned and marked as owned, using TrackNewBufferPin(),
- *	before returning.
+ *	Return a buffer from clock sweep, pinned and marked as owned using
+ *	TrackNewBufferPin(). It is the caller's responsibility to make sure the
+ *	buffer ownership can be tracked.
  */
 BufferDesc *
-StrategyGetBuffer(BufferAccessStrategy strategy, uint64 *buf_state, bool *from_ring)
+GetBufferFromClocksweep(uint64 *buf_state, IOContext io_context)
 {
 	BufferDesc *buf;
+	Buffer		bufnum;
 	int			bgwprocno;
 	int			trycounter;
-
-	*from_ring = false;
-
-	/*
-	 * If given a strategy object, see whether it can select a buffer. We
-	 * assume strategy objects don't need buffer_strategy_lock.
-	 */
-	if (strategy != NULL)
-	{
-		buf = GetBufferFromRing(strategy, buf_state);
-		if (buf != NULL)
-		{
-			*from_ring = true;
-			return buf;
-		}
-	}
 
 	/*
 	 * If asked, we need to waken the bgwriter. Since we don't want to rely on
@@ -662,7 +676,7 @@ StrategyGetBuffer(BufferAccessStrategy strategy, uint64 *buf_state, bool *from_r
 					 */
 					elog(ERROR, "no unpinned buffers available");
 				}
-				break;
+				goto next_buffer;
 			}
 
 			/* See equivalent code in PinBuffer() */
@@ -680,7 +694,7 @@ StrategyGetBuffer(BufferAccessStrategy strategy, uint64 *buf_state, bool *from_r
 												   local_buf_state))
 				{
 					trycounter = NBuffers;
-					break;
+					goto next_buffer;
 				}
 			}
 			else
@@ -692,18 +706,47 @@ StrategyGetBuffer(BufferAccessStrategy strategy, uint64 *buf_state, bool *from_r
 												   local_buf_state))
 				{
 					/* Found a usable buffer */
-					if (strategy != NULL)
-						AddBufferToRing(strategy, buf);
 					*buf_state = local_buf_state;
 
 					TrackNewBufferPin(BufferDescriptorGetBuffer(buf));
-
-					return buf;
+					break;
 				}
 			}
 		}
+
+		bufnum = BufferDescriptorGetBuffer(buf);
+
+		/*
+		 * We need a share-exclusive lock on the buffer contents to write it
+		 * out (else we might write invalid data, eg because someone else is
+		 * compacting the page contents while we write). We must use a
+		 * conditional lock acquisition here to avoid deadlock. Even though
+		 * the buffer was not already pinned (and thus not locked) above,
+		 * someone else could have pinned and (share-)exclusive-locked it by
+		 * now. If we try to get the lock unconditionally, we'd block waiting
+		 * for them; if they later block waiting for us, deadlock ensues.
+		 * (This has been observed to happen when two backends are both trying
+		 * to split btree index pages, and the second one just happens to be
+		 * trying to split the page the first one selected as a victim
+		 * buffer.)
+		 */
+		if (*buf_state & BM_DIRTY &&
+			!ConditionalShareExclusiveLockBuffer(bufnum))
+		{
+			/*
+			 * Someone else has locked the buffer, so give it up and loop back
+			 * to get another one.
+			 */
+			ReleaseBuffer(bufnum);
+			continue;
+		}
+
+		return buf;
+
+next_buffer:;
 	}
 }
+
 
 
 /*
@@ -750,9 +793,8 @@ IOContextForStrategy(BufferAccessStrategy strategy)
  * Returns true if buffer manager should ask for a new victim, and false
  * if this buffer should be written and re-used.
  */
-bool
-StrategyRejectBuffer(BufferAccessStrategy strategy, BufferDesc *buf, uint64 buf_state,
-					 bool from_ring)
+static bool
+StrategyRejectBuffer(BufferAccessStrategy strategy, BufferDesc *buf, uint64 buf_state)
 {
 	/* We only do this in bulkread mode */
 	if (strategy->btype != BAS_BULKREAD)
