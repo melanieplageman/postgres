@@ -691,6 +691,10 @@ static void BufferLockWakeup(BufferDesc *buf_hdr, bool wake_exclusive);
 static void BufferLockProcessRelease(BufferDesc *buf_hdr, BufferLockMode mode, uint64 lockstate);
 static inline uint64 BufferLockReleaseSub(BufferLockMode mode);
 
+static BufferDesc *SelectVictimBuffer(BufferAccessStrategy strategy,
+									  uint64 *buf_state,
+									  bool *from_ring);
+
 
 /*
  * Implementation of PrefetchBuffer() for shared buffers.
@@ -2559,7 +2563,7 @@ again:
 	 * Select a victim buffer.  The buffer is returned pinned and owned by
 	 * this backend.
 	 */
-	buf_hdr = StrategyGetBuffer(strategy, &buf_state, &from_ring);
+	buf_hdr = SelectVictimBuffer(strategy, &buf_state, &from_ring);
 	buf = BufferDescriptorGetBuffer(buf_hdr);
 
 	/*
@@ -2676,6 +2680,40 @@ again:
 #endif
 
 	return buf;
+}
+
+/*
+ * Called by the bufmgr to get the next candidate buffer to use in
+ * GetVictimBuffer(). The only hard requirement GetVictimBuffer() has is that
+ * the selected buffer must not currently be pinned by anyone.
+ */
+static BufferDesc *
+SelectVictimBuffer(BufferAccessStrategy strategy, uint64 *buf_state,
+				   bool *from_ring)
+{
+	BufferDesc *buf_hdr = NULL;
+
+	*from_ring = false;
+
+	/*
+	 * If given a strategy object, see whether it can select a buffer. We
+	 * assume strategy objects don't need buffer_strategy_lock.
+	 */
+	if (strategy != NULL)
+	{
+		buf_hdr = GetBufferFromRing(strategy, buf_state);
+		if (buf_hdr != NULL)
+		{
+			*from_ring = true;
+			return buf_hdr;
+		}
+	}
+
+	buf_hdr = GetBufferFromClocksweep(buf_state);
+	if (strategy != NULL)
+		AddBufferToRing(strategy, buf_hdr);
+
+	return buf_hdr;
 }
 
 /*
