@@ -342,6 +342,7 @@ LockBuffer(Buffer buffer, BufferLockMode mode)
 }
 
 extern bool ConditionalLockBuffer(Buffer buffer);
+
 extern bool ConditionalShareExclusiveLockBuffer(Buffer buffer);
 extern void LockBufferForCleanup(Buffer buffer);
 extern bool ConditionalLockBufferForCleanup(Buffer buffer);

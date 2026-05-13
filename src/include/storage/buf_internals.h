@@ -630,4 +630,11 @@ extern void DropRelationLocalBuffers(RelFileLocator rlocator,
 extern void DropRelationAllLocalBuffers(RelFileLocator rlocator);
 extern void AtEOXact_LocalBuffers(bool isCommit);
 
+extern void AddBufferToRing(BufferAccessStrategy strategy, BufferDesc *buf);
+extern BufferDesc *GetBufferFromClocksweep(uint64 *buf_state, IOContext io_context);
+
+
+extern BufferDesc *GetBufferFromRing(BufferAccessStrategy strategy,
+									 uint64 *buf_state, IOContext io_context);
+
 #endif							/* BUFMGR_INTERNALS_H */
