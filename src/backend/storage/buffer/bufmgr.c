@@ -696,8 +696,6 @@ static void ExtendStrategyEagerWriteBatch(BufferAccessStrategy strategy, Buffer 
 										  int *sweep_cursor);
 static void CompleteWriteBatchIO(BufferWriteBatch *batch, IOContext io_context,
 								 WritebackContext *wb_context);
-static void ScheduleBufferTagForWriteback(WritebackContext *wb_context,
-										  IOContext io_context, BufferTag *tag);
 static void ScheduleBufferTagBatchForWriteback(WritebackContext *wb_context,
 											   BufferTag *tag, uint32 batch_size,
 											   IOContext io_context);
@@ -4475,7 +4473,10 @@ BgBufferSync(WritebackContext *wb_context)
 	for (; num_to_scan > 0; num_to_scan--, next_to_clean++)
 	{
 		uint64		buf_state;
+		StartBufferIOResult status;
 		BufferDesc *bufHdr;
+		Buffer		buffer;
+		BufferWriteBatch batch;
 
 		if (reusable_buffers >= upcoming_alloc_est)
 			break;
@@ -4506,15 +4507,33 @@ BgBufferSync(WritebackContext *wb_context)
 		ReservePrivateRefCountEntry();
 		ResourceOwnerEnlarge(CurrentResourceOwner);
 
+		/*
+		 * Any other buffers found and added to the same batch will be pinned
+		 * when they are identified. We know we want to flush this buffer,
+		 * however, so we'll pin and lock it now. Pins and locks are released
+		 * when completing the writes on all buffers in the batch.
+		 */
 		if (!PinBuffer(bufHdr, BUC_ZERO, true))
 			continue;
 
-		FlushUnlockedBuffer(bufHdr, NULL, IOOBJECT_RELATION, IOCONTEXT_NORMAL);
-		UnpinBuffer(bufHdr);
+		buffer = BufferDescriptorGetBuffer(bufHdr);
+		BufferLockAcquire(buffer, bufHdr, BUFFER_LOCK_SHARE_EXCLUSIVE);
 
-		ScheduleBufferTagForWriteback(wb_context, IOCONTEXT_NORMAL, &bufHdr->tag);
+		if ((status = StartBufferIO(buffer, false, true, NULL)) !=
+			BUFFER_IO_READY_FOR_IO)
+		{
+			Assert(status == BUFFER_IO_ALREADY_DONE);
+			LockBuffer(buffer, BUFFER_LOCK_UNLOCK);
+			UnpinBuffer(bufHdr);
+			continue;
+		}
 
-		if (++num_written >= bgwriter_lru_maxpages)
+		reusable_buffers += ConstructCenteredEagerWriteBatch(bufHdr, &batch);
+		FlushBufferBatch(&batch, IOCONTEXT_NORMAL);
+		CompleteWriteBatchIO(&batch, IOCONTEXT_NORMAL, wb_context);
+		num_written += batch.n;
+
+		if (num_written >= bgwriter_lru_maxpages)
 		{
 			PendingBgWriterStats.maxwritten_clean++;
 			break;
@@ -8647,45 +8666,6 @@ WritebackContextInit(WritebackContext *context, int *max_pending)
 }
 
 /*
- * Add buffer to list of pending writeback requests.
- */
-static void
-ScheduleBufferTagForWriteback(WritebackContext *wb_context, IOContext io_context,
-							  BufferTag *tag)
-{
-	PendingWriteback *pending;
-
-	/*
-	 * As pg_flush_data() doesn't do anything with fsync disabled, there's no
-	 * point in tracking in that case.
-	 */
-	if (io_direct_flags & IO_DIRECT_DATA ||
-		!enableFsync)
-		return;
-
-	/*
-	 * Add buffer to the pending writeback array, unless writeback control is
-	 * disabled.
-	 */
-	if (*wb_context->max_pending > 0)
-	{
-		Assert(*wb_context->max_pending <= WRITEBACK_MAX_PENDING_FLUSHES);
-
-		pending = &wb_context->pending_writebacks[wb_context->nr_pending++];
-
-		pending->tag = *tag;
-	}
-
-	/*
-	 * Perform pending flushes if the writeback limit is exceeded. This
-	 * includes the case where previously an item has been added, but control
-	 * is now disabled.
-	 */
-	if (wb_context->nr_pending >= *wb_context->max_pending)
-		IssuePendingWritebacks(wb_context, io_context);
-}
-
-/*
  * Don't call while holding buffer locks and pins
  */
 static void
@@ -8743,7 +8723,7 @@ ScheduleBufferTagBatchForWriteback(WritebackContext *wb_context,
 
 /*
  * Issue all pending writeback requests, previously scheduled with
- * ScheduleBufferTagForWriteback, to the OS.
+ * ScheduleBufferTagBatchForWriteback, to the OS.
  *
  * Because this is only used to improve the OSs IO scheduling we try to never
  * error out - it's just a hint.
