@@ -5148,7 +5148,7 @@ ConstructCenteredEagerWriteBatch(BufferDesc *required_bufdesc,
 	{
 		Buffer		bufnum;
 		BufferDesc *bufdesc;
-		bool		usage_count_zero;	/* unused */
+		bool		usage_count_zero;
 
 		/*
 		 * We must be sure not to process the required buffer here, as we've
@@ -5199,7 +5199,7 @@ ConstructCenteredEagerWriteBatch(BufferDesc *required_bufdesc,
 	{
 		Buffer		bufnum;
 		BufferDesc *bufdesc;
-		bool		usage_count_zero;	/* unused */
+		bool		usage_count_zero;
 
 		/*
 		 * We must be sure not to process the required buffer here, as we've
