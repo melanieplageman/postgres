@@ -4239,6 +4239,97 @@ BufferSync(int flags)
 }
 
 /*
+ * BgBufferSyncCleanBuffers -- clean dirty reusable buffers.
+ *
+ * This is the bgwriter's LRU cleaning scan.  It works forward from
+ * next_to_clean and stops after scanning num_to_scan buffers, finding enough
+ * reusable buffers, or hitting bgwriter_lru_maxpages.
+ */
+int
+BgBufferSyncCleanBuffers(int lru_maxpages, WritebackContext *wb_context,
+						 int *next_to_clean, uint32 *next_passes,
+						 int *num_to_scan, int *reusable_buffers,
+						 int upcoming_alloc_est, bool *maxwritten_clean)
+{
+	int			num_written = 0;
+
+	*maxwritten_clean = false;
+
+	/* Execute the LRU scan */
+	for (; *num_to_scan > 0; (*num_to_scan)--, (*next_to_clean)++)
+	{
+		uint64		buf_state;
+		StartBufferIOResult status;
+		BufferDesc *bufHdr;
+		Buffer		buffer;
+		BufferWriteBatch batch;
+
+		if (*reusable_buffers >= upcoming_alloc_est)
+			break;
+
+		if (*next_to_clean >= NBuffers)
+		{
+			*next_to_clean = 0;
+			(*next_passes)++;
+		}
+
+		bufHdr = GetBufferDescriptor(*next_to_clean);
+		buf_state = pg_atomic_read_u64(&bufHdr->state);
+		if (BUF_STATE_GET_REFCOUNT(buf_state) != 0 ||
+			BUF_STATE_GET_USAGECOUNT(buf_state) != 0)
+			continue;
+
+		(*reusable_buffers)++;
+
+		/*
+		 * Racy check is fine: bgwriter writes are opportunistic. If we miss a
+		 * buffer that just became dirty, it will be written by a future
+		 * bgwriter pass or by checkpointer.
+		 */
+		if (!(buf_state & BM_VALID) || !(buf_state & BM_DIRTY))
+			continue;
+
+		/* Make sure we can handle the pin */
+		ReservePrivateRefCountEntry();
+		ResourceOwnerEnlarge(CurrentResourceOwner);
+
+		/*
+		 * Any other buffers found and added to the same batch will be pinned
+		 * when they are identified. We know we want to flush this buffer,
+		 * however, so we'll pin and lock it now. Pins and locks are released
+		 * when completing the writes on all buffers in the batch.
+		 */
+		if (!PinBuffer(bufHdr, BUC_ZERO, true))
+			continue;
+
+		buffer = BufferDescriptorGetBuffer(bufHdr);
+		BufferLockAcquire(buffer, bufHdr, BUFFER_LOCK_SHARE_EXCLUSIVE);
+
+		if ((status = StartBufferIO(buffer, false, true, NULL)) !=
+			BUFFER_IO_READY_FOR_IO)
+		{
+			Assert(status == BUFFER_IO_ALREADY_DONE);
+			LockBuffer(buffer, BUFFER_LOCK_UNLOCK);
+			UnpinBuffer(bufHdr);
+			continue;
+		}
+
+		*reusable_buffers += ConstructCenteredEagerWriteBatch(bufHdr, &batch);
+		FlushBufferBatch(&batch, IOCONTEXT_NORMAL);
+		CompleteWriteBatchIO(&batch, IOCONTEXT_NORMAL, wb_context);
+		num_written += batch.n;
+
+		if (num_written >= lru_maxpages)
+		{
+			*maxwritten_clean = true;
+			break;
+		}
+	}
+
+	return num_written;
+}
+
+/*
  * BgBufferSync -- Write out some dirty buffers in the pool.
  *
  * This is called periodically by the background writer process.
@@ -4288,6 +4379,7 @@ BgBufferSync(WritebackContext *wb_context)
 	int			num_to_scan;
 	int			num_written;
 	int			reusable_buffers;
+	bool		maxwritten_clean;
 
 	/* Variables for final smoothed_density update */
 	long		new_strategy_delta;
@@ -4469,76 +4561,12 @@ BgBufferSync(WritebackContext *wb_context)
 	num_written = 0;
 	reusable_buffers = reusable_buffers_est;
 
-	/* Execute the LRU scan */
-	for (; num_to_scan > 0; num_to_scan--, next_to_clean++)
-	{
-		uint64		buf_state;
-		StartBufferIOResult status;
-		BufferDesc *bufHdr;
-		Buffer		buffer;
-		BufferWriteBatch batch;
-
-		if (reusable_buffers >= upcoming_alloc_est)
-			break;
-
-		if (next_to_clean >= NBuffers)
-		{
-			next_to_clean = 0;
-			next_passes++;
-		}
-
-		bufHdr = GetBufferDescriptor(next_to_clean);
-		buf_state = pg_atomic_read_u64(&bufHdr->state);
-		if (BUF_STATE_GET_REFCOUNT(buf_state) != 0 ||
-			BUF_STATE_GET_USAGECOUNT(buf_state) != 0)
-			continue;
-
-		reusable_buffers++;
-
-		/*
-		 * Racy check is fine: bgwriter writes are opportunistic. If we miss a
-		 * buffer that just became dirty, it will be written by a future
-		 * bgwriter pass or by checkpointer.
-		 */
-		if (!(buf_state & BM_VALID) || !(buf_state & BM_DIRTY))
-			continue;
-
-		/* Make sure we can handle the pin */
-		ReservePrivateRefCountEntry();
-		ResourceOwnerEnlarge(CurrentResourceOwner);
-
-		/*
-		 * Any other buffers found and added to the same batch will be pinned
-		 * when they are identified. We know we want to flush this buffer,
-		 * however, so we'll pin and lock it now. Pins and locks are released
-		 * when completing the writes on all buffers in the batch.
-		 */
-		if (!PinBuffer(bufHdr, BUC_ZERO, true))
-			continue;
-
-		buffer = BufferDescriptorGetBuffer(bufHdr);
-		BufferLockAcquire(buffer, bufHdr, BUFFER_LOCK_SHARE_EXCLUSIVE);
-
-		if ((status = StartBufferIO(buffer, false, true, NULL)) !=
-			BUFFER_IO_READY_FOR_IO)
-		{
-			Assert(status == BUFFER_IO_ALREADY_DONE);
-			LockBuffer(buffer, BUFFER_LOCK_UNLOCK);
-			UnpinBuffer(bufHdr);
-			continue;
-		}
-
-		reusable_buffers += ConstructCenteredEagerWriteBatch(bufHdr, &batch);
-		FlushBufferBatch(&batch, IOCONTEXT_NORMAL);
-		CompleteWriteBatchIO(&batch, IOCONTEXT_NORMAL, wb_context);
-		num_written += batch.n;
-
-		if (num_written >= bgwriter_lru_maxpages)
-		{
-			PendingBgWriterStats.maxwritten_clean++;
-			break;
-		}
-	}
+	num_written = BgBufferSyncCleanBuffers(bgwriter_lru_maxpages, wb_context,
+										   &next_to_clean, &next_passes,
+										   &num_to_scan, &reusable_buffers,
+										   upcoming_alloc_est, &maxwritten_clean);
+	if (maxwritten_clean)
+		PendingBgWriterStats.maxwritten_clean++;
 
 	PendingBgWriterStats.buf_written_clean += num_written;
 
