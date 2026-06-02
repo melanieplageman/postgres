@@ -36,6 +36,7 @@ test_bgwriter_combines_writes($node, $block_size);
 test_regular_backend_combines_writes($node, $block_size);
 test_eager_clean_combines_writes($node, $block_size);
 test_checkpointer_combines_writes($node, $block_size);
+test_copy_from_combines_writes($node, $block_size);
 
 $node->stop();
 
@@ -435,4 +436,28 @@ sub test_checkpointer_combines_writes
 		'checkpointer wrote dirty buffers separated by nonresident gaps');
 
 	$psql->quit();
+}
+
+sub test_copy_from_combines_writes
+{
+	my ($node, $block_size) = @_;
+
+	$node->safe_psql(
+		'postgres', qq(
+	CREATE UNLOGGED TABLE wc_copy (id int, payload text);
+	CHECKPOINT;
+	));
+
+	$node->safe_psql('postgres', "SELECT pg_stat_reset_shared('io')");
+	$node->safe_psql(
+		'postgres', qq(
+	COPY wc_copy
+	FROM PROGRAM 'seq 1 200000 | awk ''{ printf "%d\\t%0200d\\n", \$1, 0 }''';
+	));
+	$node->safe_psql('postgres', 'SELECT pg_stat_force_next_flush()');
+
+	assert_combined_writes($node, 'copy from', 'client backend', 'bulkwrite',
+		$block_size);
+	is($node->safe_psql('postgres', 'SELECT count(*) FROM wc_copy'),
+		'200000', 'copy from inserted rows');
 }
