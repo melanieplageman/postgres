@@ -37,7 +37,35 @@ CREATE FUNCTION evict_rel(rel regclass)
 RETURNS pg_catalog.void STRICT
 AS 'MODULE_PATHNAME' LANGUAGE C;
 
+CREATE FUNCTION flush_rel_buffers(rel regclass)
+RETURNS pg_catalog.void STRICT
+AS 'MODULE_PATHNAME' LANGUAGE C;
+
+CREATE FUNCTION prepare_rel_blocks_for_bgwriter(rel regclass, blocks int4[])
+RETURNS pg_catalog.void STRICT
+AS 'MODULE_PATHNAME' LANGUAGE C;
+
+CREATE FUNCTION run_bgwriter_cleaner(lru_maxpages int4)
+RETURNS pg_catalog.int4 STRICT
+AS 'MODULE_PATHNAME' LANGUAGE C;
+
+CREATE FUNCTION rel_blocks_are_dirty(rel regclass, blocks int4[])
+RETURNS pg_catalog.bool[] STRICT
+AS 'MODULE_PATHNAME' LANGUAGE C;
+
 CREATE FUNCTION invalidate_rel_block(rel regclass, blockno int)
+RETURNS pg_catalog.void STRICT
+AS 'MODULE_PATHNAME' LANGUAGE C;
+
+CREATE FUNCTION invalidate_rel_blocks(rel regclass, blocks int4[])
+RETURNS pg_catalog.void STRICT
+AS 'MODULE_PATHNAME' LANGUAGE C;
+
+CREATE FUNCTION pin_rel_block(rel regclass, blockno int4)
+RETURNS pg_catalog.int4 STRICT
+AS 'MODULE_PATHNAME' LANGUAGE C;
+
+CREATE FUNCTION release_buffer(buffer int4)
 RETURNS pg_catalog.void STRICT
 AS 'MODULE_PATHNAME' LANGUAGE C;
 
