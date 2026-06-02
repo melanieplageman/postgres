@@ -35,6 +35,7 @@ my $block_size = $node->safe_psql('postgres',
 test_bgwriter_combines_writes($node, $block_size);
 test_regular_backend_combines_writes($node, $block_size);
 test_eager_clean_combines_writes($node, $block_size);
+test_checkpointer_combines_writes($node, $block_size);
 
 $node->stop();
 
@@ -84,6 +85,19 @@ sub assert_writes
 
 	is($writes, $expected_writes, "$label write count");
 	is($write_bytes, $expected_bytes, "$label write bytes");
+}
+
+sub assert_combined_writes
+{
+	local $Test::Builder::Level = $Test::Builder::Level + 1;
+
+	my ($node, $label, $backend_type, $context, $block_size) = @_;
+	my ($writes, $write_bytes, $avg_write_bytes) =
+	  io_stat_writes($node, $backend_type, $context);
+
+	diag "$label: writes=$writes write_bytes=$write_bytes avg_write_bytes=$avg_write_bytes";
+	ok($writes > 0, "$label wrote buffers");
+	ok($avg_write_bytes > $block_size, "$label combined writes");
 }
 
 sub assert_evictions_at_least
@@ -369,6 +383,56 @@ sub test_eager_clean_combines_writes
 		3 * $block_size);
 	assert_any_blocks_dirty($node, 'wc_victim', '0,2,4', 'f',
 		'direct eager clean wrote dirty buffers separated by nonresident gaps');
+
+	$psql->quit();
+}
+
+sub test_checkpointer_combines_writes
+{
+	my ($node, $block_size) = @_;
+	my $psql = $node->background_psql('postgres', on_error_stop => 0);
+
+	$node->safe_psql(
+		'postgres', qq(
+	CREATE TABLE wc_checkpointer (id int, payload text);
+	INSERT INTO wc_checkpointer SELECT g, repeat('y', 200) FROM generate_series(1, 1000) AS g;
+	SELECT flush_rel_buffers('wc_checkpointer'::regclass);
+	CHECKPOINT;
+	));
+
+	####
+	# Test one big combined write by checkpointer.
+	####
+
+	dirty_blocks($psql, 'wc_checkpointer', '0,1,2,3,4,5');
+	assert_blocks_dirty($node, 'wc_checkpointer', '0,1,2,3,4,5', 't',
+		'contiguous buffers are dirty before checkpoint');
+
+	flush_and_reset_io_stats($node, $psql);
+	$node->safe_psql('postgres', 'CHECKPOINT');
+	$node->safe_psql('postgres', 'SELECT pg_stat_force_next_flush()');
+
+	assert_combined_writes($node, 'contiguous checkpointer', 'checkpointer',
+		'normal', $block_size);
+	assert_any_blocks_dirty($node, 'wc_checkpointer', '0,1,2,3,4,5', 'f',
+		'checkpointer wrote contiguous dirty buffers');
+
+	####
+	# Test multiple single block writes when interspersed blocks are not in
+	# shared buffers.
+	####
+
+	$psql->query_safe(
+		"SELECT invalidate_rel_blocks('wc_checkpointer', ARRAY[1,3,5])");
+	dirty_blocks($psql, 'wc_checkpointer', '0,2,4');
+	flush_and_reset_io_stats($node, $psql);
+	$node->safe_psql('postgres', 'CHECKPOINT');
+	$node->safe_psql('postgres', 'SELECT pg_stat_force_next_flush()');
+
+	assert_writes($node, 'nonresident gaps checkpointer', 'checkpointer',
+		'normal', 3, 3 * $block_size);
+	assert_any_blocks_dirty($node, 'wc_checkpointer', '0,2,4', 'f',
+		'checkpointer wrote dirty buffers separated by nonresident gaps');
 
 	$psql->quit();
 }
