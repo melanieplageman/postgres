@@ -579,6 +579,7 @@ extern StartBufferIOResult StartSharedBufferIO(BufferDesc *buf, bool forInput, b
 											   PgAioWaitRef *io_wref);
 extern void TerminateBufferIO(BufferDesc *buf, bool clear_dirty, uint64 set_flag_bits,
 							  bool forget_owner, bool release_aio);
+extern void EagerCleanBufferForTesting(Buffer buffer);
 
 
 /* freelist.c */
