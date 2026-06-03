@@ -2832,6 +2832,19 @@ EagerCleanBuffer(BufferAccessStrategy strategy, BufferDesc *buf_hdr, IOContext i
 	CompleteWriteBatchIO(&batch, io_context, &BackendWritebackContext);
 }
 
+void
+EagerCleanBufferForTesting(Buffer buffer)
+{
+	BufferDesc *buf_hdr;
+
+	Assert(BufferIsValid(buffer));
+	Assert(!BufferIsLocal(buffer));
+
+	buf_hdr = GetBufferDescriptor(buffer - 1);
+	EagerCleanBuffer(NULL, buf_hdr, IOCONTEXT_NORMAL);
+	ReleaseBuffer(buffer);
+}
+
 static void
 EagerCleanStrategyBuffer(BufferAccessStrategy strategy, BufferDesc *buf_hdr,
 						 IOContext io_context)
