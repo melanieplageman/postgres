@@ -350,6 +350,10 @@ extern bool IsBufferCleanupOK(Buffer buffer);
 extern bool HoldingBufferPinThatDelaysRecovery(void);
 
 extern bool BgBufferSync(WritebackContext *wb_context);
+extern int	BgBufferSyncCleanBuffers(int lru_maxpages, WritebackContext *wb_context,
+									 int *next_to_clean, uint32 *next_passes,
+									 int *num_to_scan, int *reusable_buffers,
+									 int upcoming_alloc_est, bool *maxwritten_clean);
 
 extern uint32 GetPinLimit(void);
 extern uint32 GetLocalPinLimit(void);
