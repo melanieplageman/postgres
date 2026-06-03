@@ -167,157 +167,6 @@ ClockSweepTick(void)
 }
 
 /*
- * StrategyGetBuffer
- *
- *	Called by the bufmgr to get the next candidate buffer to use in
- *	GetVictimBuffer(). The only hard requirement GetVictimBuffer() has is that
- *	the selected buffer must not currently be pinned by anyone.
- *
- *	strategy is a BufferAccessStrategy object, or NULL for default strategy.
- *
- *	It is the callers responsibility to ensure the buffer ownership can be
- *	tracked via TrackNewBufferPin().
- *
- *	The buffer is pinned and marked as owned, using TrackNewBufferPin(),
- *	before returning.
- */
-BufferDesc *
-StrategyGetBuffer(BufferAccessStrategy strategy, uint64 *buf_state, bool *from_ring)
-{
-	BufferDesc *buf;
-	int			bgwprocno;
-	int			trycounter;
-
-	*from_ring = false;
-
-	/*
-	 * If given a strategy object, see whether it can select a buffer. We
-	 * assume strategy objects don't need buffer_strategy_lock.
-	 */
-	if (strategy != NULL)
-	{
-		buf = GetBufferFromRing(strategy, buf_state);
-		if (buf != NULL)
-		{
-			*from_ring = true;
-			return buf;
-		}
-	}
-
-	/*
-	 * If asked, we need to waken the bgwriter. Since we don't want to rely on
-	 * a spinlock for this we force a read from shared memory once, and then
-	 * set the latch based on that value. We need to go through that length
-	 * because otherwise bgwprocno might be reset while/after we check because
-	 * the compiler might just reread from memory.
-	 *
-	 * This can possibly set the latch of the wrong process if the bgwriter
-	 * dies in the wrong moment. But since PGPROC->procLatch is never
-	 * deallocated the worst consequence of that is that we set the latch of
-	 * some arbitrary process.
-	 */
-	bgwprocno = INT_ACCESS_ONCE(StrategyControl->bgwprocno);
-	if (bgwprocno != -1)
-	{
-		/* reset bgwprocno first, before setting the latch */
-		StrategyControl->bgwprocno = -1;
-
-		/*
-		 * Not acquiring ProcArrayLock here which is slightly icky. It's
-		 * actually fine because procLatch isn't ever freed, so we just can
-		 * potentially set the wrong process' (or no process') latch.
-		 */
-		SetLatch(&GetPGProcByNumber(bgwprocno)->procLatch);
-	}
-
-	/*
-	 * We count buffer allocation requests so that the bgwriter can estimate
-	 * the rate of buffer consumption.  Note that buffers recycled by a
-	 * strategy object are intentionally not counted here.
-	 */
-	pg_atomic_fetch_add_u32(&StrategyControl->numBufferAllocs, 1);
-
-	/* Use the "clock sweep" algorithm to find a free buffer */
-	trycounter = NBuffers;
-	for (;;)
-	{
-		uint64		old_buf_state;
-		uint64		local_buf_state;
-
-		buf = GetBufferDescriptor(ClockSweepTick());
-
-		/*
-		 * Check whether the buffer can be used and pin it if so. Do this
-		 * using a CAS loop, to avoid having to lock the buffer header.
-		 */
-		old_buf_state = pg_atomic_read_u64(&buf->state);
-		for (;;)
-		{
-			local_buf_state = old_buf_state;
-
-			/*
-			 * If the buffer is pinned or has a nonzero usage_count, we cannot
-			 * use it; decrement the usage_count (unless pinned) and keep
-			 * scanning.
-			 */
-
-			if (BUF_STATE_GET_REFCOUNT(local_buf_state) != 0)
-			{
-				if (--trycounter == 0)
-				{
-					/*
-					 * We've scanned all the buffers without making any state
-					 * changes, so all the buffers are pinned (or were when we
-					 * looked at them). We could hope that someone will free
-					 * one eventually, but it's probably better to fail than
-					 * to risk getting stuck in an infinite loop.
-					 */
-					elog(ERROR, "no unpinned buffers available");
-				}
-				break;
-			}
-
-			/* See equivalent code in PinBuffer() */
-			if (unlikely(local_buf_state & BM_LOCKED))
-			{
-				old_buf_state = WaitBufHdrUnlocked(buf);
-				continue;
-			}
-
-			if (BUF_STATE_GET_USAGECOUNT(local_buf_state) != 0)
-			{
-				local_buf_state -= BUF_USAGECOUNT_ONE;
-
-				if (pg_atomic_compare_exchange_u64(&buf->state, &old_buf_state,
-												   local_buf_state))
-				{
-					trycounter = NBuffers;
-					break;
-				}
-			}
-			else
-			{
-				/* pin the buffer if the CAS succeeds */
-				local_buf_state += BUF_REFCOUNT_ONE;
-
-				if (pg_atomic_compare_exchange_u64(&buf->state, &old_buf_state,
-												   local_buf_state))
-				{
-					/* Found a usable buffer */
-					if (strategy != NULL)
-						AddBufferToRing(strategy, buf);
-					*buf_state = local_buf_state;
-
-					TrackNewBufferPin(BufferDescriptorGetBuffer(buf));
-
-					return buf;
-				}
-			}
-		}
-	}
-}
-
-/*
  * StrategySyncStart -- tell BgBufferSync where to start syncing
  *
  * The result is the buffer index of the best buffer to sync first.
@@ -704,6 +553,158 @@ AddBufferToRing(BufferAccessStrategy strategy, BufferDesc *buf)
 {
 	strategy->buffers[strategy->current] = BufferDescriptorGetBuffer(buf);
 }
+
+/*
+ * StrategyGetBuffer
+ *
+ *	Called by the bufmgr to get the next candidate buffer to use in
+ *	GetVictimBuffer(). The only hard requirement GetVictimBuffer() has is that
+ *	the selected buffer must not currently be pinned by anyone.
+ *
+ *	strategy is a BufferAccessStrategy object, or NULL for default strategy.
+ *
+ *	It is the callers responsibility to ensure the buffer ownership can be
+ *	tracked via TrackNewBufferPin().
+ *
+ *	The buffer is pinned and marked as owned, using TrackNewBufferPin(),
+ *	before returning.
+ */
+BufferDesc *
+StrategyGetBuffer(BufferAccessStrategy strategy, uint64 *buf_state, bool *from_ring)
+{
+	BufferDesc *buf;
+	int			bgwprocno;
+	int			trycounter;
+
+	*from_ring = false;
+
+	/*
+	 * If given a strategy object, see whether it can select a buffer. We
+	 * assume strategy objects don't need buffer_strategy_lock.
+	 */
+	if (strategy != NULL)
+	{
+		buf = GetBufferFromRing(strategy, buf_state);
+		if (buf != NULL)
+		{
+			*from_ring = true;
+			return buf;
+		}
+	}
+
+	/*
+	 * If asked, we need to waken the bgwriter. Since we don't want to rely on
+	 * a spinlock for this we force a read from shared memory once, and then
+	 * set the latch based on that value. We need to go through that length
+	 * because otherwise bgwprocno might be reset while/after we check because
+	 * the compiler might just reread from memory.
+	 *
+	 * This can possibly set the latch of the wrong process if the bgwriter
+	 * dies in the wrong moment. But since PGPROC->procLatch is never
+	 * deallocated the worst consequence of that is that we set the latch of
+	 * some arbitrary process.
+	 */
+	bgwprocno = INT_ACCESS_ONCE(StrategyControl->bgwprocno);
+	if (bgwprocno != -1)
+	{
+		/* reset bgwprocno first, before setting the latch */
+		StrategyControl->bgwprocno = -1;
+
+		/*
+		 * Not acquiring ProcArrayLock here which is slightly icky. It's
+		 * actually fine because procLatch isn't ever freed, so we just can
+		 * potentially set the wrong process' (or no process') latch.
+		 */
+		SetLatch(&GetPGProcByNumber(bgwprocno)->procLatch);
+	}
+
+	/*
+	 * We count buffer allocation requests so that the bgwriter can estimate
+	 * the rate of buffer consumption.  Note that buffers recycled by a
+	 * strategy object are intentionally not counted here.
+	 */
+	pg_atomic_fetch_add_u32(&StrategyControl->numBufferAllocs, 1);
+
+	/* Use the "clock sweep" algorithm to find a free buffer */
+	trycounter = NBuffers;
+	for (;;)
+	{
+		uint64		old_buf_state;
+		uint64		local_buf_state;
+
+		buf = GetBufferDescriptor(ClockSweepTick());
+
+		/*
+		 * Check whether the buffer can be used and pin it if so. Do this
+		 * using a CAS loop, to avoid having to lock the buffer header.
+		 */
+		old_buf_state = pg_atomic_read_u64(&buf->state);
+		for (;;)
+		{
+			local_buf_state = old_buf_state;
+
+			/*
+			 * If the buffer is pinned or has a nonzero usage_count, we cannot
+			 * use it; decrement the usage_count (unless pinned) and keep
+			 * scanning.
+			 */
+
+			if (BUF_STATE_GET_REFCOUNT(local_buf_state) != 0)
+			{
+				if (--trycounter == 0)
+				{
+					/*
+					 * We've scanned all the buffers without making any state
+					 * changes, so all the buffers are pinned (or were when we
+					 * looked at them). We could hope that someone will free
+					 * one eventually, but it's probably better to fail than
+					 * to risk getting stuck in an infinite loop.
+					 */
+					elog(ERROR, "no unpinned buffers available");
+				}
+				break;
+			}
+
+			/* See equivalent code in PinBuffer() */
+			if (unlikely(local_buf_state & BM_LOCKED))
+			{
+				old_buf_state = WaitBufHdrUnlocked(buf);
+				continue;
+			}
+
+			if (BUF_STATE_GET_USAGECOUNT(local_buf_state) != 0)
+			{
+				local_buf_state -= BUF_USAGECOUNT_ONE;
+
+				if (pg_atomic_compare_exchange_u64(&buf->state, &old_buf_state,
+												   local_buf_state))
+				{
+					trycounter = NBuffers;
+					break;
+				}
+			}
+			else
+			{
+				/* pin the buffer if the CAS succeeds */
+				local_buf_state += BUF_REFCOUNT_ONE;
+
+				if (pg_atomic_compare_exchange_u64(&buf->state, &old_buf_state,
+												   local_buf_state))
+				{
+					/* Found a usable buffer */
+					if (strategy != NULL)
+						AddBufferToRing(strategy, buf);
+					*buf_state = local_buf_state;
+
+					TrackNewBufferPin(BufferDescriptorGetBuffer(buf));
+
+					return buf;
+				}
+			}
+		}
+	}
+}
+
 
 /*
  * Utility function returning the IOContext of a given BufferAccessStrategy's
