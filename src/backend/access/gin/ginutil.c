@@ -323,7 +323,7 @@ GinNewBuffer(Relation index)
 		 * We have to guard against the possibility that someone else already
 		 * recycled this page; the buffer may be locked if so.
 		 */
-		if (ConditionalLockBuffer(buffer))
+		if (ConditionalLockBuffer(buffer, BUFFER_LOCK_EXCLUSIVE))
 		{
 			if (GinPageIsRecyclable(BufferGetPage(buffer)))
 				return buffer;	/* OK to use */

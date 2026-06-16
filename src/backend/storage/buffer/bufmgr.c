@@ -6618,11 +6618,9 @@ LockBufferInternal(Buffer buffer, BufferLockMode mode)
 
 /*
  * Acquire the content_lock for the buffer, but only if we don't have to wait.
- *
- * This assumes the caller wants BUFFER_LOCK_EXCLUSIVE mode.
  */
 bool
-ConditionalLockBuffer(Buffer buffer)
+ConditionalLockBuffer(Buffer buffer, BufferLockMode lockmode)
 {
 	BufferDesc *buf;
 
@@ -6632,7 +6630,7 @@ ConditionalLockBuffer(Buffer buffer)
 
 	buf = GetBufferDescriptor(buffer - 1);
 
-	return BufferLockConditional(buffer, buf, BUFFER_LOCK_EXCLUSIVE);
+	return BufferLockConditional(buffer, buf, lockmode);
 }
 
 /*
@@ -6876,7 +6874,7 @@ ConditionalLockBufferForCleanup(Buffer buffer)
 		return false;
 
 	/* Try to acquire lock */
-	if (!ConditionalLockBuffer(buffer))
+	if (!ConditionalLockBuffer(buffer, BUFFER_LOCK_EXCLUSIVE))
 		return false;
 
 	bufHdr = GetBufferDescriptor(buffer - 1);

@@ -822,7 +822,7 @@ loop:
 		Assert(otherBuffer != buffer);
 		Assert(targetBlock > otherBlock);
 
-		if (unlikely(!ConditionalLockBuffer(otherBuffer)))
+		if (unlikely(!ConditionalLockBuffer(otherBuffer, BUFFER_LOCK_EXCLUSIVE)))
 		{
 			unlockedTargetBuffer = true;
 			LockBuffer(buffer, BUFFER_LOCK_UNLOCK);

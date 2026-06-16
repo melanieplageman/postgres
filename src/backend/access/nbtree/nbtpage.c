@@ -1121,7 +1121,7 @@ bool
 _bt_conditionallockbuf(Relation rel, Buffer buf)
 {
 	/* ConditionalLockBuffer() asserts that pin is held by this backend */
-	if (!ConditionalLockBuffer(buf))
+	if (!ConditionalLockBuffer(buf, BUFFER_LOCK_EXCLUSIVE))
 		return false;
 
 	if (!RelationUsesLocalBuffers(rel))

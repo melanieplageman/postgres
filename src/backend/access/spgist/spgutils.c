@@ -415,7 +415,7 @@ SpGistNewBuffer(Relation index)
 		 * We have to guard against the possibility that someone else already
 		 * recycled this page; the buffer may be locked if so.
 		 */
-		if (ConditionalLockBuffer(buffer))
+		if (ConditionalLockBuffer(buffer, BUFFER_LOCK_EXCLUSIVE))
 		{
 			Page		page = BufferGetPage(buffer);
 
@@ -456,7 +456,7 @@ SpGistUpdateMetaPage(Relation index)
 
 		metabuffer = ReadBuffer(index, SPGIST_METAPAGE_BLKNO);
 
-		if (ConditionalLockBuffer(metabuffer))
+		if (ConditionalLockBuffer(metabuffer, BUFFER_LOCK_EXCLUSIVE))
 		{
 			Page		metapage = BufferGetPage(metabuffer);
 			SpGistMetaPageData *metadata = SpGistPageGetMeta(metapage);
@@ -605,7 +605,7 @@ SpGistGetBuffer(Relation index, int flags, int needSpace, bool *isNew)
 
 		buffer = ReadBuffer(index, lup->blkno);
 
-		if (!ConditionalLockBuffer(buffer))
+		if (!ConditionalLockBuffer(buffer, BUFFER_LOCK_EXCLUSIVE))
 		{
 			/*
 			 * buffer is locked by another process, so return a new buffer

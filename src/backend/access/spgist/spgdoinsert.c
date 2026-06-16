@@ -2079,7 +2079,7 @@ spgdoinsert(Relation index, SpGistState *state,
 			 * held by a reader, or even just background writer/checkpointer
 			 * process.  Perhaps it'd be worth retrying after sleeping a bit?
 			 */
-			if (!ConditionalLockBuffer(current.buffer))
+			if (!ConditionalLockBuffer(current.buffer, BUFFER_LOCK_EXCLUSIVE))
 			{
 				ReleaseBuffer(current.buffer);
 				UnlockReleaseBuffer(parent.buffer);
