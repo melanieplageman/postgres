@@ -778,6 +778,60 @@ IOContextForStrategy(BufferAccessStrategy strategy)
 }
 
 /*
+ * Some BufferAccessStrategies support eager flushing -- which is flushing
+ * buffers in the ring before they are needed. This can lead to better I/O
+ * patterns than lazily flushing buffers immediately before reusing them.
+ */
+bool
+StrategySupportsEagerFlush(BufferAccessStrategy strategy)
+{
+	Assert(strategy);
+
+	switch (strategy->btype)
+	{
+		case BAS_BULKWRITE:
+
+			/*
+			 * Eager strategy-ring flushing is not enabled yet.  Once AIO
+			 * writes are available it will be turned on for BAS_BULKWRITE by
+			 * returning true here.
+			 */
+			return false;
+		case BAS_VACUUM:
+		case BAS_NORMAL:
+		case BAS_BULKREAD:
+			return false;
+		default:
+			elog(ERROR, "unrecognized buffer access strategy: %d",
+				 (int) strategy->btype);
+			return false;
+	}
+}
+
+/*
+ * Returns the next buffer in the ring after the one at cursor and increments
+ * cursor. Used when we do not want to advance the strategy->current to avoid
+ * changing the next buffer reused.
+ */
+Buffer
+StrategyNextBuffer(BufferAccessStrategy strategy, int *cursor)
+{
+	if (++(*cursor) >= strategy->nbuffers)
+		*cursor = 0;
+
+	return strategy->buffers[*cursor];
+}
+
+/*
+ * Return the current slot in the strategy ring.
+ */
+int
+StrategyGetCurrentIndex(BufferAccessStrategy strategy)
+{
+	return strategy->current;
+}
+
+/*
  * StrategyRejectBuffer -- consider rejecting a dirty buffer
  *
  * When a nondefault strategy is used, the buffer manager calls this function

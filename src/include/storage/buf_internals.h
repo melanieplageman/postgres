@@ -613,6 +613,11 @@ extern Buffer GetBufferFromClocksweep(IOContext io_context);
 extern bool StrategyRejectBuffer(BufferAccessStrategy strategy,
 								 BufferDesc *buf, uint64 buf_state);
 
+extern Buffer StrategyNextBuffer(BufferAccessStrategy strategy,
+								 int *cursor);
+extern int	StrategyGetCurrentIndex(BufferAccessStrategy strategy);
+extern bool StrategySupportsEagerFlush(BufferAccessStrategy strategy);
+
 extern int	StrategySyncStart(uint32 *complete_passes, uint32 *num_buf_alloc);
 extern void StrategyNotifyBgWriter(int bgwprocno);
 
