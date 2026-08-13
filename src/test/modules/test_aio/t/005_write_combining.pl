@@ -16,6 +16,7 @@ max_wal_size = '4GB'
 checkpoint_timeout = '1d'
 autovacuum = off
 io_combine_limit = '128kB'
+eager_clean_max_batch_size = 16
 bgwriter_lru_maxpages = 0
 ));
 

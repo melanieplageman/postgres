@@ -241,6 +241,7 @@ int			maintenance_io_concurrency = DEFAULT_MAINTENANCE_IO_CONCURRENCY;
 int			io_combine_limit = DEFAULT_IO_COMBINE_LIMIT;
 int			io_combine_limit_guc = DEFAULT_IO_COMBINE_LIMIT;
 int			io_max_combine_limit = DEFAULT_IO_COMBINE_LIMIT;
+int			eager_clean_max_batch_size = DEFAULT_EAGER_CLEAN_MAX_BATCH_SIZE;
 
 /*
  * GUC variables about triggering kernel writeback for buffers written; OS
@@ -2884,7 +2885,8 @@ CurrentMaxWriteBuffers(uint32 max_batch_size)
 {
 	uint32		limit;
 
-	limit = Min(GetAdditionalPinLimit(), max_batch_size);
+	limit = Min(eager_clean_max_batch_size, max_batch_size);
+	limit = Min(GetAdditionalPinLimit(), limit);
 
 	/* Guarantee forward progress */
 	return Max(limit, 1);
