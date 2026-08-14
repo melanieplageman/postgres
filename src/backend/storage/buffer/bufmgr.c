@@ -763,9 +763,11 @@ static uint32 ProcessWriteBuffersResult(WriteBuffersOperation *batch);
 static WriteStream *WriteStreamBegin(IOContext io_context, WritebackContext *wb_context,
 									 WriteStreamFinishedCB finished_cb, void *finished_cb_arg);
 static WriteBuffersOperation *WriteStreamGetOp(WriteStream *stream);
-static void WriteStreamSubmit(WriteStream *stream);
+static uint32 WriteStreamSubmit(WriteStream *stream);
 static void WriteStreamFinishAll(WriteStream *stream);
+static void WriteStreamFinishThrough(WriteStream *stream, uint32 index);
 static void WriteStreamEnd(WriteStream *stream);
+static WriteStream *StrategyEagerWriteStream(BufferAccessStrategy strategy, IOContext io_context);
 static void ExtendWriteBuffersOperationFromRing(BufferAccessStrategy strategy, Buffer sweep_end,
 												uint32 batch_limit,
 												bool allow_pending_wal,
@@ -2687,6 +2689,8 @@ WriteBufferAndRing(BufferAccessStrategy strategy, Buffer bufnum,
 	Buffer		sweep_end = bufnum;
 	int			cursor = StrategyGetCurrentIndex(strategy);
 	WriteStream *stream;
+	uint32		victim_index = 0;
+	bool		victim_submitted = false;
 
 	/* Start IO on the first buffer */
 	if ((status = StartBufferIO(bufnum, false, true, NULL)) !=
@@ -2723,13 +2727,17 @@ WriteBufferAndRing(BufferAccessStrategy strategy, Buffer bufnum,
 	IncrBufferRefCount(bufnum);
 
 	/*
-	 * A WriteStream keeps a bounded window of these eager-flush writes in
-	 * flight; when it is full, submitting another first waits for and finishes
-	 * the oldest.  The strategy backend must not return to foreground work with
-	 * its writes still in flight, so we finish the whole stream before
-	 * returning (WriteStreamFinishAll() below).
+	 * The strategy's persistent WriteStream keeps a bounded window of these
+	 * eager-flush writes in flight, across GetVictimBuffer() calls.  This
+	 * backend only needs the victim buffer back clean and pinned; the other
+	 * eager writes can complete in the background, so we return once the
+	 * victim's write is done rather than waiting for the whole sweep.
+	 *
+	 * The AIO staging pin keeps every in-flight write's buffer valid until its
+	 * write completes, so those buffers are naturally excluded from ring reuse
+	 * until then (GetBufferFromRing() skips pinned buffers).
 	 */
-	stream = WriteStreamBegin(io_context, &BackendWritebackContext, NULL, NULL);
+	stream = StrategyEagerWriteStream(strategy, io_context);
 
 	/*
 	 * Flush the victim buffer and then loop around strategy ring one time
@@ -2743,6 +2751,7 @@ WriteBufferAndRing(BufferAccessStrategy strategy, Buffer bufnum,
 		{
 			WriteBuffersOperation *batch = WriteStreamGetOp(stream);
 			uint32		limit;
+			uint32		index;
 
 			/*
 			 * After finding an eligible buffer, if we are allowed more pins
@@ -2761,7 +2770,14 @@ WriteBufferAndRing(BufferAccessStrategy strategy, Buffer bufnum,
 													limit, allow_pending_wal,
 													batch, &cursor);
 			/* submit only; leave it in flight and move on */
-			WriteStreamSubmit(stream);
+			index = WriteStreamSubmit(stream);
+
+			/* Remember the batch that contains the victim (the first one). */
+			if (!victim_submitted)
+			{
+				victim_index = index;
+				victim_submitted = true;
+			}
 
 			/* Only the victim's batch may take on pending WAL */
 			allow_pending_wal = false;
@@ -2799,14 +2815,14 @@ WriteBufferAndRing(BufferAccessStrategy strategy, Buffer bufnum,
 	}
 
 	/*
-	 * Finish all remaining in-flight writes before returning.  The victim
-	 * buffer's batch is among these (or was finished earlier to free a slot);
-	 * either way the victim remains pinned via the extra IncrBufferRefCount()
-	 * above, so it is returned clean and pinned to the caller once all writes
-	 * have landed.
+	 * Wait for the victim buffer's write (and any older writes ahead of it) to
+	 * complete, so it is returned clean and pinned; the victim remains pinned
+	 * via the extra IncrBufferRefCount() above.  The remaining eager writes are
+	 * left in flight in the strategy's stream and finished by a later call, by
+	 * the resource-owner-change drain, or by FreeAccessStrategy().
 	 */
-	WriteStreamFinishAll(stream);
-	WriteStreamEnd(stream);
+	if (victim_submitted)
+		WriteStreamFinishThrough(stream, victim_index);
 }
 
 /*
@@ -6093,16 +6109,20 @@ WriteStreamGetOp(WriteStream *stream)
 
 /*
  * Submit the operation most recently returned by WriteStreamGetOp() (which the
- * caller has now filled), leaving it in flight.
+ * caller has now filled), leaving it in flight.  Returns the ring index of the
+ * submitted operation, for use with WriteStreamFinishThrough().
  */
-static void
+static uint32
 WriteStreamSubmit(WriteStream *stream)
 {
 	WriteBuffersOperation *op = &stream->ops[stream->tail];
+	uint32		index = stream->tail;
 
 	StartWriteBuffers(op);
 	stream->tail = (stream->tail + 1) % (stream->max_inflight + 1);
 	stream->n_inflight++;
+
+	return index;
 }
 
 /*
@@ -6116,6 +6136,34 @@ WriteStreamFinishAll(WriteStream *stream)
 }
 
 /*
+ * Finish in-flight operations, oldest first, up to and including the operation
+ * at ring index `index` (as returned by WriteStreamSubmit()).  Operations
+ * submitted after it are left in flight.
+ *
+ * Used by the strategy ring to wait for just the victim buffer's write (and any
+ * older still-in-flight writes ahead of it) before returning to foreground
+ * work, while its later eager writes keep going in the background.
+ *
+ * If the target op was already finished earlier (e.g. drained to free a slot),
+ * this is a no-op, detected by the target no longer being within the current
+ * [head, tail) in-flight window.
+ */
+static void
+WriteStreamFinishThrough(WriteStream *stream, uint32 index)
+{
+	uint32		slots = stream->max_inflight + 1;
+
+	/*
+	 * Distance from head to the target, and to tail, modulo the ring size.  If
+	 * the target is at or past tail's position (distance >= n_inflight), it is
+	 * no longer in flight -- already finished -- so there's nothing to do.
+	 */
+	while (stream->n_inflight > 0 &&
+		   ((index - stream->head + slots) % slots) < stream->n_inflight)
+		WriteStreamFinishOldest(stream);
+}
+
+/*
  * Free a WriteStream.  All operations must already have been finished with
  * WriteStreamFinishAll().
  */
@@ -6125,6 +6173,69 @@ WriteStreamEnd(WriteStream *stream)
 	Assert(stream->n_inflight == 0);
 	pfree(stream->ops);
 	pfree(stream);
+}
+
+/*
+ * Finish and free a strategy's persistent eager-write stream, if any.  Called
+ * from FreeAccessStrategy() and whenever the stream's in-flight AIO handles'
+ * resource owner is about to become invalid (see StrategyEagerWriteStream()).
+ */
+void
+FinishStrategyEagerWrites(BufferAccessStrategy strategy)
+{
+	WriteStream *stream = GetStrategyEagerWriteStream(strategy);
+
+	if (stream == NULL)
+		return;
+
+	WriteStreamFinishAll(stream);
+	WriteStreamEnd(stream);
+	SetStrategyEagerWriteStream(strategy, NULL, NULL);
+}
+
+/*
+ * Get the strategy's persistent eager-write stream, creating it on first use.
+ *
+ * The stream's in-flight AIO handles are tied to the resource owner they were
+ * acquired under.  A strategy outlives individual statements, so if the current
+ * resource owner differs from the one recorded when the stream was (re)created,
+ * we must finish the in-flight writes now -- before that older owner is
+ * released and its handles torn down -- and start a fresh stream under the
+ * current owner.
+ */
+static WriteStream *
+StrategyEagerWriteStream(BufferAccessStrategy strategy, IOContext io_context)
+{
+	WriteStream *stream = GetStrategyEagerWriteStream(strategy);
+
+	if (stream != NULL &&
+		GetStrategyEagerWriteResourceOwner(strategy) != CurrentResourceOwner)
+	{
+		/* Resource owner changed: drain and discard the old stream. */
+		WriteStreamFinishAll(stream);
+		WriteStreamEnd(stream);
+		stream = NULL;
+		SetStrategyEagerWriteStream(strategy, NULL, NULL);
+	}
+
+	if (stream == NULL)
+	{
+		MemoryContext oldcontext;
+
+		/*
+		 * The stream persists for the strategy's lifetime, so allocate it in
+		 * the strategy's memory context, not the (possibly short-lived) current
+		 * context of whatever statement triggered this eviction.
+		 */
+		oldcontext = MemoryContextSwitchTo(GetMemoryChunkContext(strategy));
+		stream = WriteStreamBegin(io_context, &BackendWritebackContext,
+								  NULL, NULL);
+		MemoryContextSwitchTo(oldcontext);
+
+		SetStrategyEagerWriteStream(strategy, stream, CurrentResourceOwner);
+	}
+
+	return stream;
 }
 
 /*

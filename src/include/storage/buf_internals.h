@@ -617,6 +617,12 @@ extern Buffer StrategyNextBuffer(BufferAccessStrategy strategy,
 								 int *cursor);
 extern int	StrategyGetCurrentIndex(BufferAccessStrategy strategy);
 extern bool StrategySupportsEagerFlush(BufferAccessStrategy strategy);
+extern void *GetStrategyEagerWriteStream(BufferAccessStrategy strategy);
+extern ResourceOwner GetStrategyEagerWriteResourceOwner(BufferAccessStrategy strategy);
+extern void SetStrategyEagerWriteStream(BufferAccessStrategy strategy, void *stream,
+										ResourceOwner resowner);
+/* implemented in bufmgr.c */
+extern void FinishStrategyEagerWrites(BufferAccessStrategy strategy);
 
 extern int	StrategySyncStart(uint32 *complete_passes, uint32 *num_buf_alloc);
 extern void StrategyNotifyBgWriter(int bgwprocno);

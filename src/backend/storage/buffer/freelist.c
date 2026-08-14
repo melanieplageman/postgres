@@ -86,6 +86,19 @@ typedef struct BufferAccessStrategyData
 	int			current;
 
 	/*
+	 * Eager write-combining state for strategies that support it.  The
+	 * WriteStream (opaque here; a bufmgr.c type) keeps this strategy's eager
+	 * buffer writes in flight across GetVictimBuffer() calls, so the backend
+	 * can return to foreground work without waiting for them.  It is created
+	 * lazily by bufmgr.c and stored here so it persists for the strategy's
+	 * lifetime.  eager_write_resowner records the resource owner the stream's
+	 * in-flight AIO handles were acquired under; if it changes, the stream must
+	 * be drained before that owner is released (see bufmgr.c).
+	 */
+	void	   *eager_write_stream;
+	ResourceOwner eager_write_resowner;
+
+	/*
 	 * Array of buffer numbers.  InvalidBuffer (that is, zero) indicates we
 	 * have not yet selected a buffer for this ring slot.  For allocation
 	 * simplicity this is palloc'd together with the fixed fields of the
@@ -615,7 +628,12 @@ FreeAccessStrategy(BufferAccessStrategy strategy)
 {
 	/* don't crash if called on a "default" strategy */
 	if (strategy != NULL)
+	{
+		/* Finish any eager writes still in flight before freeing. */
+		if (strategy->eager_write_stream != NULL)
+			FinishStrategyEagerWrites(strategy);
 		pfree(strategy);
+	}
 }
 
 /*
@@ -792,11 +810,11 @@ StrategySupportsEagerFlush(BufferAccessStrategy strategy)
 		case BAS_BULKWRITE:
 
 			/*
-			 * Eager strategy-ring flushing is not enabled yet.  Once AIO
-			 * writes are available it will be turned on for BAS_BULKWRITE by
-			 * returning true here.
+			 * Eager strategy-ring flushing via AIO writes: the ring buffers
+			 * ahead of the clock hand are written out in the background so the
+			 * backend rarely has to wait to reuse them.
 			 */
-			return false;
+			return true;
 		case BAS_VACUUM:
 		case BAS_NORMAL:
 		case BAS_BULKREAD:
@@ -829,6 +847,31 @@ int
 StrategyGetCurrentIndex(BufferAccessStrategy strategy)
 {
 	return strategy->current;
+}
+
+/*
+ * Accessors for the strategy's eager write-combining stream.  The stream is an
+ * opaque WriteStream (a bufmgr.c type) kept in flight across GetVictimBuffer()
+ * calls; see EagerCleanStrategyBuffer().
+ */
+void *
+GetStrategyEagerWriteStream(BufferAccessStrategy strategy)
+{
+	return strategy->eager_write_stream;
+}
+
+ResourceOwner
+GetStrategyEagerWriteResourceOwner(BufferAccessStrategy strategy)
+{
+	return strategy->eager_write_resowner;
+}
+
+void
+SetStrategyEagerWriteStream(BufferAccessStrategy strategy, void *stream,
+							ResourceOwner resowner)
+{
+	strategy->eager_write_stream = stream;
+	strategy->eager_write_resowner = resowner;
 }
 
 /*
