@@ -141,6 +141,17 @@ typedef struct WriteBuffersOperation
 	/* The number of valid entries in buffers */
 	uint32		n;
 	Buffer		buffers[MAX_IO_COMBINE_LIMIT];
+
+	/*
+	 * AIO state for the batch's in-flight write.  io_return receives the
+	 * result; io_wref is the wait reference used to wait for completion.  Valid
+	 * between StartWriteBuffers() (submit) and WaitWriteBuffers() (wait).
+	 */
+	PgAioReturn io_return;
+	PgAioWaitRef io_wref;
+
+	/* IO timing, spanning submit to wait (accounted in WaitWriteBuffers()). */
+	instr_time	io_start;
 } WriteBuffersOperation;
 
 #define SH_PREFIX refcount
@@ -695,21 +706,21 @@ static BufferDesc *PrepareOrRejectEagerWriteBuffer(Buffer bufnum,
 												   BufferTag *require,
 												   bool allow_pending_wal,
 												   XLogRecPtr *lsn);
-static void WriteBuffers(WriteBuffersOperation *batch);
+static void StartWriteBuffers(WriteBuffersOperation *batch);
 static void ExtendWriteBuffersOperationFromRing(BufferAccessStrategy strategy, Buffer sweep_end,
 												uint32 batch_limit,
 												bool allow_pending_wal,
 												WriteBuffersOperation *batch,
 												int *sweep_cursor);
 static void GatherContiguousDirtyBuffers(BufferDesc *required_bufhdr,
-										 IOContext io_context,
-										 WriteBuffersOperation *batch);
+								 IOContext io_context,
+								 WriteBuffersOperation *batch);
 static Buffer LookupBufferForTag(BufferTag *tag);
-static void CompleteWriteBuffers(WriteBuffersOperation *batch,
-								 WritebackContext *wb_context);
+static void WaitWriteBuffers(WriteBuffersOperation *batch,
+					 WritebackContext *wb_context);
 static void ScheduleBufferTagsForWriteback(WritebackContext *wb_context,
-										   BufferTag tag, uint32 n,
-										   IOContext io_context);
+											   BufferTag tag, uint32 batch_size,
+											   IOContext io_context);
 static void FindAndDropRelationBuffers(RelFileLocator rlocator,
 									   ForkNumber forkNum,
 									   BlockNumber nForkBlock,
@@ -2644,7 +2655,7 @@ WriteBufferAndRing(BufferAccessStrategy strategy, Buffer bufnum,
 	/*
 	 * We pin the victim again so it stays ours even after the batch is
 	 * released. The victim buffer was pinned once by the caller and
-	 * CompleteWriteBuffers() will release a pin, so to return a pinned buffer
+	 * WaitWriteBuffers() will release a pin, so to return a pinned buffer
 	 * back to the original caller requesting a clean buffer, we take a second
 	 * pin now. Any other members of the batch will be pinned while building
 	 * the batch.
@@ -2680,9 +2691,9 @@ WriteBufferAndRing(BufferAccessStrategy strategy, Buffer bufnum,
 				ExtendWriteBuffersOperationFromRing(strategy, sweep_end,
 													limit, allow_pending_wal,
 													&batch, &cursor);
-			WriteBuffers(&batch);
-			/* Pins and locks released inside CompleteWriteBuffers */
-			CompleteWriteBuffers(&batch, &BackendWritebackContext);
+			StartWriteBuffers(&batch);
+			/* Pins and locks released inside WaitWriteBuffers */
+			WaitWriteBuffers(&batch, &BackendWritebackContext);
 
 			/* Only the victim's batch may take on pending WAL */
 			allow_pending_wal = false;
@@ -2759,8 +2770,8 @@ WriteBufferAndNeighbors(Buffer bufnum, BufferDesc *buf_hdr, IOContext io_context
 	 * eligible for eager flushing, combine them into a batch.
 	 */
 	GatherContiguousDirtyBuffers(buf_hdr, io_context, &batch);
-	WriteBuffers(&batch);
-	CompleteWriteBuffers(&batch, wb_context);
+	StartWriteBuffers(&batch);
+	WaitWriteBuffers(&batch, wb_context);
 }
 
 /*
@@ -4236,8 +4247,8 @@ CheckPointBuffers(int flags)
 		 */
 		if (batch.n > 0)
 		{
-			WriteBuffers(&batch);
-			CompleteWriteBuffers(&batch, &wb_context);
+			StartWriteBuffers(&batch);
+			WaitWriteBuffers(&batch, &wb_context);
 
 			TRACE_POSTGRESQL_BUFFERS_SYNC_WRITTEN(batch.n);
 			PendingCheckpointerStats.buffers_written += batch.n;
@@ -4380,8 +4391,8 @@ BgwriterWriteBuffers(int lru_maxpages, WritebackContext *wb_context,
 		 * even count buffers behind the clock hand that we won't hand out).
 		 */
 		GatherContiguousDirtyBuffers(bufHdr, IOCONTEXT_NORMAL, &batch);
-		WriteBuffers(&batch);
-		CompleteWriteBuffers(&batch, wb_context);
+		StartWriteBuffers(&batch);
+		WaitWriteBuffers(&batch, wb_context);
 		num_written += batch.n;
 
 		if (num_written >= lru_maxpages)
@@ -5596,15 +5607,20 @@ GatherContiguousDirtyBuffers(BufferDesc *required_bufhdr,
 }
 
 /*
- * Given a prepared batch of buffers write them out as a vector.
+ * Given a prepared batch of buffers, write them out as a single vectored AIO
+ * write.  This only *submits* the IO; the write is still in flight on return.
+ *
+ * The caller must finish the batch with WaitWriteBuffers() before the buffers
+ * are reused or evicted.  Separating submit from wait lets a caller keep
+ * multiple batches in flight at once.
  */
 static void
-WriteBuffers(WriteBuffersOperation *batch)
+StartWriteBuffers(WriteBuffersOperation *batch)
 {
 	BlockNumber batch_start = GetBufferDescriptor(batch->buffers[0] - 1)->tag.blockNum;
 	BlockNumber blknums[MAX_IO_COMBINE_LIMIT];
 	Block		blocks[MAX_IO_COMBINE_LIMIT];
-	instr_time	io_start;
+	PgAioHandle *ioh;
 	ErrorContextCallback errcallback =
 	{
 		.callback = shared_buffers_write_error_callback,
@@ -5613,6 +5629,18 @@ WriteBuffers(WriteBuffersOperation *batch)
 
 	errcallback.arg = batch;
 	error_context_stack = &errcallback;
+
+	/*
+	 * Acquire the AIO handle before flushing WAL.  pgaio_io_acquire() may block
+	 * when this backend has no free handles -- and this backend can hold
+	 * handles for other IO (e.g. reads) at the same time, so a free handle is
+	 * not guaranteed.  When it blocks, it reaps an in-flight IO to free a
+	 * handle.  Doing this before XLogFlush() means we don't flush WAL for a
+	 * write we then have to stall to issue.  (Flushing WAL early would be safe
+	 * for durability, just wasteful.)
+	 */
+	ioh = pgaio_io_acquire(CurrentResourceOwner, &batch->io_return);
+	pgaio_io_get_wref(ioh, &batch->io_wref);
 
 	if (XLogRecPtrIsValid(batch->max_lsn))
 		XLogFlush(batch->max_lsn);
@@ -5647,13 +5675,29 @@ WriteBuffers(WriteBuffersOperation *batch)
 
 	PagesSetChecksum((Page *) blocks, blknums, batch->n);
 
-	io_start = pgstat_prepare_io_time(track_io_timing);
+	batch->io_start = pgstat_prepare_io_time(track_io_timing);
 
-	smgrwritev(batch->reln, batch->forkno,
-			   batch_start, (const void **) blocks, batch->n, false);
+	/*
+	 * Submit the batch as a single AIO write.  The buffers were assembled with
+	 * a pin, the SHARE_EXCLUSIVE content lock, and BM_IO_IN_PROGRESS (via
+	 * StartBufferIO()); that is exactly the precondition the write stage
+	 * callback (buffer_stage_common(is_write)) expects.  Staging hands the pin
+	 * and content lock to the AIO subsystem; completion
+	 * (shared_buffer_writev_complete) ends the IO, clears dirty and releases
+	 * the disowned content lock.
+	 */
+	pgaio_io_set_handle_data_32(ioh, (uint32 *) batch->buffers, batch->n);
+	pgaio_io_register_callbacks(ioh, PGAIO_HCB_SHARED_BUFFER_WRITEV, 0);
 
-	pgstat_count_io_op_time(IOOBJECT_RELATION, batch->io_context, IOOP_WRITE,
-							io_start, 1, batch->n * BLCKSZ);
+	smgrstartwritev(ioh, batch->reln, batch->forkno,
+					batch_start, (const void **) blocks, batch->n, false);
+
+	/*
+	 * smgrstartwritev() only stages the IO; submit it now so it is actually
+	 * handed to the kernel/worker and can make progress while the caller does
+	 * other work (e.g. assembling the next batch).
+	 */
+	pgaio_submit_staged();
 
 	error_context_stack = errcallback.previous;
 }
@@ -5674,14 +5718,18 @@ FlushUnlockedBuffer(BufferDesc *buf, SMgrRelation reln,
 }
 
 /*
- * Given a previously initialized batch with buffers that have already been
- * flushed, terminate the IO on each buffer and then unlock and unpin them.
- * This assumes all the buffers were locked and pinned. wb_context will be
- * modified.
+ * Wait for a batch's AIO write (submitted by StartWriteBuffers()) to complete,
+ * then release the initiator's own pins and schedule writeback.
+ *
+ * Must be called before the batch's buffers are reused or evicted.  The write's
+ * completion callback already ended the IO (TerminateBufferIO with
+ * release_aio=true), cleared dirty, released the disowned SHARE_EXCLUSIVE
+ * content lock, dropped the AIO subsystem's pin, and registered the segment for
+ * fsync.  All that remains here is to account the IO time, release the
+ * initiator's own pin from batch assembly, and schedule writeback.
  */
 static void
-CompleteWriteBuffers(WriteBuffersOperation *batch,
-					 WritebackContext *wb_context)
+WaitWriteBuffers(WriteBuffersOperation *batch, WritebackContext *wb_context)
 {
 	BufferTag	tag;
 	ErrorContextCallback errcallback =
@@ -5691,6 +5739,12 @@ CompleteWriteBuffers(WriteBuffersOperation *batch,
 	};
 
 	error_context_stack = &errcallback;
+
+	pgaio_wref_wait(&batch->io_wref);
+
+	pgstat_count_io_op_time(IOOBJECT_RELATION, batch->io_context, IOOP_WRITE,
+							batch->io_start, 1, batch->n * BLCKSZ);
+
 	pgBufferUsage.shared_blks_written += batch->n;
 
 	/* Snapshot the tag before unpinning the buffer */
@@ -5702,9 +5756,8 @@ CompleteWriteBuffers(WriteBuffersOperation *batch,
 
 		errcallback.arg = GetBufferDescriptor(buffer - 1);
 
-		/* Mark the buffer as clean and end the BM_IO_IN_PROGRESS state. */
-		TerminateBufferIO(GetBufferDescriptor(buffer - 1), true, 0, true, false);
-		UnlockReleaseBuffer(buffer);
+		/* The completion callback already ended the IO and released the lock. */
+		ReleaseBuffer(buffer);
 	}
 
 	TRACE_POSTGRESQL_BUFFERS_FLUSH_DONE(batch->forkno,
@@ -8606,7 +8659,7 @@ shared_buffer_write_error_callback(void *arg)
 
 /*
  * Error context callback for errors occurring during a combined write of
- * multiple shared buffers (see WriteBuffers()).
+ * multiple shared buffers (see StartWriteBuffers()).
  */
 static void
 shared_buffers_write_error_callback(void *arg)
