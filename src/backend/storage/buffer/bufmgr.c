@@ -7062,6 +7062,8 @@ BufferLockAcquire(Buffer buffer, BufferDesc *buf_hdr, BufferLockMode mode)
 	{
 		uint32		wait_event = 0; /* initialized to avoid compiler warning */
 		bool		mustwait;
+		uint64		buf_state;
+		PgAioWaitRef iow;
 
 		/*
 		 * Try to grab the lock the first time, we're not in the waitqueue
@@ -7072,6 +7074,42 @@ BufferLockAcquire(Buffer buffer, BufferDesc *buf_hdr, BufferLockMode mode)
 		if (likely(!mustwait))
 		{
 			break;
+		}
+
+		/*
+		 * We could not take the lock.  A write disowned to the AIO subsystem
+		 * retains the buffer's content lock (BUFFER_LOCK_SHARE_EXCLUSIVE) until
+		 * its completion callback runs, so an in-flight write is one reason the
+		 * lock may be unavailable (e.g. we want EXCLUSIVE, which conflicts).
+		 *
+		 * In that case we must make the write complete rather than blocking on
+		 * MyProc->sem below: the write may have been issued by this very
+		 * backend, and even a foreign write's completion -- which is what
+		 * releases the disowned lock and wakes lock waiters -- is only
+		 * guaranteed to run if some backend reaps the IO.  Blocking on the
+		 * semaphore without reaping could therefore hang forever.  Waiting on
+		 * the buffer's io_wref both submits any still-staged IO and reaps the
+		 * completion, after which we retry the lock.  This mirrors WaitIO() and
+		 * is the buffer-lock analogue of the "don't wait for another backend
+		 * while there is unsubmitted IO" rule documented in aio.c.
+		 *
+		 * Only conflicting lock modes reach here (BufferLockAttempt() failed),
+		 * so this does not serialize compatible acquisitions -- e.g. a SHARE
+		 * lock, which is compatible with a write's SHARE_EXCLUSIVE, does not
+		 * wait for the write.
+		 *
+		 * Read io_wref under the header spinlock to avoid a torn read racing a
+		 * concurrent TerminateBufferIO() that clears it.
+		 */
+		buf_state = LockBufHdr(buf_hdr);
+		iow = buf_hdr->io_wref;
+		UnlockBufHdr(buf_hdr);
+
+		if ((buf_state & BM_IO_IN_PROGRESS) && pgaio_wref_valid(&iow))
+		{
+			pgaio_submit_staged();
+			pgaio_wref_wait(&iow);
+			continue;
 		}
 
 		/*
@@ -7843,10 +7881,18 @@ LockBufferForCleanup(Buffer buffer)
 	CheckBufferIsPinnedOnce(buffer);
 
 	/*
-	 * We do not yet need to be worried about in-progress AIOs holding a pin,
-	 * as we, so far, only support doing reads via AIO and this function can
-	 * only be called once the buffer is valid (i.e. no read can be in
-	 * flight).
+	 * An AIO write may hold a pin on this buffer (disowned to the AIO
+	 * subsystem) until its completion callback runs.  Two things make this
+	 * safe here.  First, taking the EXCLUSIVE lock below goes through
+	 * BufferLockAcquire(), which reaps any in-flight write holding the buffer's
+	 * (conflicting) content lock before waiting, so we do not block forever on
+	 * a write's disowned SHARE_EXCLUSIVE lock.  Second, once we are waiting for
+	 * the pin count to drop to one, the write's completion drops the AIO pin in
+	 * TerminateBufferIO() and calls WakePinCountWaiter(), so we are woken when
+	 * the write's pin is released.
+	 *
+	 * A read cannot be in flight here: this function requires the buffer to be
+	 * valid, and a buffer with an in-flight read is not yet valid.
 	 */
 
 	/* Nobody else to wait for */
