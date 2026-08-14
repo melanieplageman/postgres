@@ -10833,3 +10833,29 @@ const PgAioHandleCallbacks aio_local_buffer_writev_cb = {
 	.stage = local_buffer_writev_stage,
 	.complete_local = local_buffer_writev_complete,
 };
+
+/*
+ * TODO / open items for the AIO buffer-write path (StartWriteBuffers() etc):
+ *
+ * - fsync in a critical section: register_dirty_segment_aio() (md.c) runs in
+ *   the write completion callback, which executes in a critical section, and
+ *   RegisterSyncRequest()'s full-queue fallback can allocate.  We currently
+ *   assume the request is accepted; this needs the fsync-request queue to be
+ *   made safe to use from a critical section (see the XXX in md.c).
+ *
+ * - error/abort path is unverified: if the issuing backend errors out (or is
+ *   FATAL'd) while a write batch is staged or in flight -- including mid
+ *   partial-write retry -- the disowned pin/lock/BM_IO_IN_PROGRESS are meant to
+ *   be reclaimed by whichever backend reaps the IO's completion.  The mechanism
+ *   mirrors the read path, but has not been exercised under fault injection.
+ *
+ * - local (temp) buffer AIO writes are not implemented
+ *   (local_buffer_writev_stage() elog(ERROR)s); temp buffers still flush
+ *   synchronously.  Likewise FlushBuffer()/FlushRelationBuffers()/
+ *   FlushDatabaseBuffers()/FlushOneBuffer() still write synchronously.
+ *
+ * - no partial-write retry for an operation whose pins were released early:
+ *   there is no such caller today, but if one is added, a short write on it
+ *   cannot be retried (the buffers are no longer pin-protected) and the tail
+ *   must be left dirty.
+ */
