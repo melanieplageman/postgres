@@ -739,6 +739,7 @@ static void BufferLockQueueSelf(BufferDesc *buf_hdr, BufferLockMode mode);
 static void BufferLockDequeueSelf(BufferDesc *buf_hdr);
 static void BufferLockWakeup(BufferDesc *buf_hdr, bool wake_exclusive);
 static void BufferLockProcessRelease(BufferDesc *buf_hdr, BufferLockMode mode, uint64 lockstate);
+static void BufferLockReleaseDisowned(BufferDesc *buf_hdr, BufferLockMode mode);
 static inline uint64 BufferLockReleaseSub(BufferLockMode mode);
 
 
@@ -7121,6 +7122,29 @@ BufferLockUnlock(Buffer buffer, BufferDesc *buf_hdr)
 	RESUME_INTERRUPTS();
 }
 
+/*
+ * Release a content lock whose ownership was previously disowned (via
+ * BufferLockDisown()), for example a lock handed off to the AIO subsystem for
+ * the duration of a write.
+ *
+ * Unlike BufferLockUnlock(), this does NOT untrack per-backend ownership
+ * (there is none -- it was disowned), and may run in a different process than
+ * the one that acquired the lock.  The caller must pass the mode the lock was
+ * held in when it was disowned.
+ */
+static void
+BufferLockReleaseDisowned(BufferDesc *buf_hdr, BufferLockMode mode)
+{
+	uint64		oldstate;
+	uint64		sub;
+
+	sub = BufferLockReleaseSub(mode);
+
+	oldstate = pg_atomic_sub_fetch_u64(&buf_hdr->state, sub);
+
+	BufferLockProcessRelease(buf_hdr, mode, oldstate);
+}
+
 
 /*
  * Acquire the content lock for the buffer, but only if we don't have to wait.
@@ -10033,6 +10057,86 @@ buffer_readv_report(PgAioResult result, const PgAioTargetData *td,
 			affected_count > 1 ? errhint_internal(hint_mult, affected_count - 1) : 0);
 }
 
+/*
+ * Helper for AIO writev completion, for one buffer of a (possibly multi-page)
+ * write.  Shared between shared and temp buffers.
+ *
+ * Ends the buffer's IO (clearing dirty on success, flagging BM_IO_ERROR on
+ * failure) and, for shared buffers, releases the SHARE_EXCLUSIVE content lock
+ * that was disowned to the AIO subsystem at staging time.
+ */
+static pg_always_inline void
+buffer_writev_complete_one(uint8 buf_off, Buffer buffer, uint8 flags,
+						   bool failed, bool is_temp)
+{
+	BufferDesc *buf_hdr = is_temp ?
+		GetLocalBufferDescriptor(-buffer - 1)
+		: GetBufferDescriptor(buffer - 1);
+	bool		clear_dirty = !failed;
+	uint32		set_flag_bits = failed ? BM_IO_ERROR : 0;
+
+	/*
+	 * End the IO.  release_aio=true drops the pin the AIO subsystem held and
+	 * clears the wait reference (and wakes any cleanup-lock waiter).
+	 */
+	if (is_temp)
+		TerminateLocalBufferIO(buf_hdr, clear_dirty, set_flag_bits, true);
+	else
+		TerminateBufferIO(buf_hdr, clear_dirty, set_flag_bits, false, true);
+
+	/*
+	 * The content lock was disowned to the AIO subsystem in
+	 * buffer_stage_common() (writes only, shared buffers only); release it
+	 * now.  Temp buffers take no content lock.
+	 */
+	if (!is_temp)
+		BufferLockReleaseDisowned(buf_hdr, BUFFER_LOCK_SHARE_EXCLUSIVE);
+}
+
+/*
+ * Completion of a single AIO write, possibly covering multiple buffers.
+ * Shared between shared and temp buffers.
+ */
+static pg_always_inline PgAioResult
+buffer_writev_complete(PgAioHandle *ioh, PgAioResult prior_result,
+					   uint8 cb_data, bool is_temp)
+{
+	PgAioResult result = prior_result;
+	PgAioTargetData *td PG_USED_FOR_ASSERTS_ONLY = pgaio_io_get_target_data(ioh);
+	uint64	   *io_data;
+	uint8		handle_data_len;
+
+	if (is_temp)
+	{
+		Assert(td->smgr.is_temp);
+		Assert(pgaio_io_get_owner(ioh) == MyProcNumber);
+	}
+	else
+		Assert(!td->smgr.is_temp);
+
+	io_data = pgaio_io_get_handle_data(ioh, &handle_data_len);
+	for (uint8 buf_off = 0; buf_off < handle_data_len; buf_off++)
+	{
+		Buffer		buf = io_data[buf_off];
+		bool		failed;
+
+		Assert(BufferIsValid(buf));
+
+		/*
+		 * If the entire IO failed at a lower level, each buffer needs to be
+		 * marked failed.  In case of a partial write, the first few buffers
+		 * may be ok.
+		 */
+		failed =
+			prior_result.status == PGAIO_RS_ERROR
+			|| prior_result.result <= buf_off;
+
+		buffer_writev_complete_one(buf_off, buf, cb_data, failed, is_temp);
+	}
+
+	return result;
+}
+
 static void
 shared_buffer_readv_stage(PgAioHandle *ioh, uint8 cb_data)
 {
@@ -10097,6 +10201,37 @@ local_buffer_readv_complete(PgAioHandle *ioh, PgAioResult prior_result,
 	return buffer_readv_complete(ioh, prior_result, cb_data, true);
 }
 
+static void
+shared_buffer_writev_stage(PgAioHandle *ioh, uint8 cb_data)
+{
+	buffer_stage_common(ioh, true, false);
+}
+
+static PgAioResult
+shared_buffer_writev_complete(PgAioHandle *ioh, PgAioResult prior_result,
+							  uint8 cb_data)
+{
+	return buffer_writev_complete(ioh, prior_result, cb_data, false);
+}
+
+static void
+local_buffer_writev_stage(PgAioHandle *ioh, uint8 cb_data)
+{
+	/*
+	 * Local (temp) buffer AIO writes are not yet issued by anything -- the
+	 * checkpointer/bgwriter/strategy flush paths that will use AIO writes
+	 * don't touch local buffers.  Kept for symmetry with the readv callbacks.
+	 */
+	elog(ERROR, "AIO writes on local buffers are not implemented");
+}
+
+static PgAioResult
+local_buffer_writev_complete(PgAioHandle *ioh, PgAioResult prior_result,
+							 uint8 cb_data)
+{
+	return buffer_writev_complete(ioh, prior_result, cb_data, true);
+}
+
 /* readv callback is passed READ_BUFFERS_* flags as callback data */
 const PgAioHandleCallbacks aio_shared_buffer_readv_cb = {
 	.stage = shared_buffer_readv_stage,
@@ -10118,4 +10253,19 @@ const PgAioHandleCallbacks aio_local_buffer_readv_cb = {
 	 */
 	.complete_local = local_buffer_readv_complete,
 	.report = buffer_readv_report,
+};
+
+const PgAioHandleCallbacks aio_shared_buffer_writev_cb = {
+	.stage = shared_buffer_writev_stage,
+	.complete_shared = shared_buffer_writev_complete,
+	/*
+	 * No buffer-level report callback: write errors carry no buffer-specific
+	 * decoding (unlike read checksum/zeroing), and md_writev_report() already
+	 * emits the "could not write blocks" message at the smgr level.
+	 */
+};
+
+const PgAioHandleCallbacks aio_local_buffer_writev_cb = {
+	.stage = local_buffer_writev_stage,
+	.complete_local = local_buffer_writev_complete,
 };
