@@ -166,6 +166,45 @@ typedef struct WriteBuffersOperation
 	instr_time	io_start;
 } WriteBuffersOperation;
 
+/*
+ * A WriteStream keeps a bounded window of WriteBuffersOperations in flight, so
+ * a caller can submit writes and continue producing more without waiting on
+ * each one, while never exceeding max_inflight concurrent AIO writes.
+ *
+ * Usage:
+ *   stream = WriteStreamBegin(io_context, wb_context, finished_cb, cb_arg);
+ *   for each run of dirty buffers to write:
+ *       op = WriteStreamGetOp(stream);   // frees a slot, draining oldest if full
+ *       ... fill op (InitForwardWriteBuffersOperation / inline assembly / etc) ...
+ *       WriteStreamSubmit(stream);        // StartWriteBuffers() + advance
+ *   WriteStreamFinishAll(stream);         // wait for all still in flight
+ *   WriteStreamEnd(stream);
+ *
+ * finished_cb, if not NULL, is invoked (with cb_arg) for each operation as it
+ * is drained/finished -- used e.g. by the checkpointer to account written
+ * buffers.  The window is one AIO handle per operation, bounded by
+ * io_max_concurrency; the pin budget is a second, usually tighter, bound
+ * applied when the caller sizes each operation.
+ */
+typedef void (*WriteStreamFinishedCB) (WriteBuffersOperation *op, void *arg);
+
+typedef struct WriteStream
+{
+	IOContext	io_context;
+	WritebackContext *wb_context;
+	WriteStreamFinishedCB finished_cb;
+	void	   *finished_cb_arg;
+
+	uint32		max_inflight;	/* max concurrent in-flight operations */
+	uint32		head;			/* oldest in-flight op (drain from here) */
+	uint32		tail;			/* op currently being filled (submit from here) */
+	uint32		n_inflight;
+
+	/* ring of max_inflight + 1 operations (extra slot so tail != head) */
+	WriteBuffersOperation *ops;
+} WriteStream;
+
+
 #define SH_PREFIX refcount
 #define SH_ELEMENT_TYPE PrivateRefCountEntry
 #define SH_KEY_TYPE Buffer
@@ -721,6 +760,12 @@ static BufferDesc *PrepareOrRejectEagerWriteBuffer(Buffer bufnum,
 static void StartWriteBuffers(WriteBuffersOperation *batch);
 static bool AsyncWriteBuffers(WriteBuffersOperation *batch);
 static uint32 ProcessWriteBuffersResult(WriteBuffersOperation *batch);
+static WriteStream *WriteStreamBegin(IOContext io_context, WritebackContext *wb_context,
+									 WriteStreamFinishedCB finished_cb, void *finished_cb_arg);
+static WriteBuffersOperation *WriteStreamGetOp(WriteStream *stream);
+static void WriteStreamSubmit(WriteStream *stream);
+static void WriteStreamFinishAll(WriteStream *stream);
+static void WriteStreamEnd(WriteStream *stream);
 static void ExtendWriteBuffersOperationFromRing(BufferAccessStrategy strategy, Buffer sweep_end,
 												uint32 batch_limit,
 												bool allow_pending_wal,
@@ -2641,6 +2686,7 @@ WriteBufferAndRing(BufferAccessStrategy strategy, Buffer bufnum,
 	Buffer		next_bufnum = bufnum;
 	Buffer		sweep_end = bufnum;
 	int			cursor = StrategyGetCurrentIndex(strategy);
+	WriteStream *stream;
 
 	/* Start IO on the first buffer */
 	if ((status = StartBufferIO(bufnum, false, true, NULL)) !=
@@ -2677,6 +2723,15 @@ WriteBufferAndRing(BufferAccessStrategy strategy, Buffer bufnum,
 	IncrBufferRefCount(bufnum);
 
 	/*
+	 * A WriteStream keeps a bounded window of these eager-flush writes in
+	 * flight; when it is full, submitting another first waits for and finishes
+	 * the oldest.  The strategy backend must not return to foreground work with
+	 * its writes still in flight, so we finish the whole stream before
+	 * returning (WriteStreamFinishAll() below).
+	 */
+	stream = WriteStreamBegin(io_context, &BackendWritebackContext, NULL, NULL);
+
+	/*
 	 * Flush the victim buffer and then loop around strategy ring one time
 	 * eagerly flushing all of the eligible buffers.
 	 */
@@ -2686,7 +2741,7 @@ WriteBufferAndRing(BufferAccessStrategy strategy, Buffer bufnum,
 
 		if (next_bufhdr)
 		{
-			WriteBuffersOperation batch;
+			WriteBuffersOperation *batch = WriteStreamGetOp(stream);
 			uint32		limit;
 
 			/*
@@ -2700,14 +2755,13 @@ WriteBufferAndRing(BufferAccessStrategy strategy, Buffer bufnum,
 			 * pointing to it so that the outer loop can consider it as the
 			 * start of a new batch.
 			 */
-			limit = InitForwardWriteBuffersOperation(strategy, next_bufhdr, io_context, &batch);
+			limit = InitForwardWriteBuffersOperation(strategy, next_bufhdr, io_context, batch);
 			if (limit > 1)
 				ExtendWriteBuffersOperationFromRing(strategy, sweep_end,
 													limit, allow_pending_wal,
-													&batch, &cursor);
-			StartWriteBuffers(&batch);
-			/* Pins and locks released inside WaitWriteBuffers */
-			WaitWriteBuffers(&batch, &BackendWritebackContext);
+													batch, &cursor);
+			/* submit only; leave it in flight and move on */
+			WriteStreamSubmit(stream);
 
 			/* Only the victim's batch may take on pending WAL */
 			allow_pending_wal = false;
@@ -2743,6 +2797,16 @@ WriteBufferAndRing(BufferAccessStrategy strategy, Buffer bufnum,
 													  allow_pending_wal,
 													  &next_buf_lsn);
 	}
+
+	/*
+	 * Finish all remaining in-flight writes before returning.  The victim
+	 * buffer's batch is among these (or was finished earlier to free a slot);
+	 * either way the victim remains pinned via the extra IncrBufferRefCount()
+	 * above, so it is returned clean and pinned to the caller once all writes
+	 * have landed.
+	 */
+	WriteStreamFinishAll(stream);
+	WriteStreamEnd(stream);
 }
 
 /*
@@ -3860,13 +3924,26 @@ TrackNewBufferPin(Buffer buf)
  * Note: temporary relations do not participate in checkpoints, so they don't
  * need to be flushed.
  */
+/*
+ * WriteStream finished-callback for the checkpointer: account each write as it
+ * completes (at drain time, not submit time).
+ */
+static void
+checkpoint_write_finished(WriteBuffersOperation *op, void *arg)
+{
+	int		   *num_written = (int *) arg;
+
+	TRACE_POSTGRESQL_BUFFERS_SYNC_WRITTEN(op->n);
+	PendingCheckpointerStats.buffers_written += op->n;
+	*num_written += op->n;
+}
+
 void
 CheckPointBuffers(int flags)
 {
 	int			num_to_scan;
 	int			num_spaces;
 	int			num_processed;
-	int			num_written;
 	CkptTsStatus *per_ts_stat = NULL;
 	Oid			last_tsid;
 	binaryheap *ts_heap;
@@ -3874,7 +3951,9 @@ CheckPointBuffers(int flags)
 	uint64		mask = BM_DIRTY;
 	WritebackContext wb_context;
 	uint32		max_batch_size;
-	WriteBuffersOperation batch;
+	WriteStream *stream;
+	int			stream_num_written = 0;
+	WriteBuffersOperation *batch;
 
 	/*
 	 * Unless this is a shutdown checkpoint or we have been explicitly told,
@@ -3946,6 +4025,14 @@ CheckPointBuffers(int flags)
 		return;					/* nothing to do */
 
 	WritebackContextInit(&wb_context, &checkpoint_flush_after);
+
+	/*
+	 * Keep a bounded window of write batches in flight via a WriteStream, so
+	 * the device stays busy while the next batch is assembled.  Buffers are
+	 * accounted (checkpoint_write_finished) as each batch is drained.
+	 */
+	stream = WriteStreamBegin(IOCONTEXT_NORMAL, &wb_context,
+							  checkpoint_write_finished, &stream_num_written);
 
 	TRACE_POSTGRESQL_BUFFER_SYNC_START(NBuffers, num_to_scan);
 
@@ -4052,7 +4139,6 @@ CheckPointBuffers(int flags)
 	 * receiving writes at a time, making inefficient use of the hardware.
 	 */
 	num_processed = 0;
-	num_written = 0;
 	max_batch_size = MaxWriteBuffers(NULL);
 	while (!binaryheap_empty(ts_heap))
 	{
@@ -4063,12 +4149,11 @@ CheckPointBuffers(int flags)
 		int			ts_end = ts_stat->index - ts_stat->num_scanned + ts_stat->num_to_scan;
 		int			processed = 0;
 
-		batch.io_context = IOCONTEXT_NORMAL;
-		batch.max_lsn = InvalidXLogRecPtr;
-		batch.n = 0;
-		batch.nblocks_done = 0;
+		batch = WriteStreamGetOp(stream);
+		batch->max_lsn = InvalidXLogRecPtr;
+		batch->n = 0;
 
-		while (batch.n < batch_limit)
+		while (batch->n < batch_limit)
 		{
 			BufferDesc *bufHdr = NULL;
 			uint64		buf_state;
@@ -4101,11 +4186,11 @@ CheckPointBuffers(int flags)
 					.relNumber = item.relNumber
 				};
 
-				Assert(batch.max_lsn == InvalidXLogRecPtr && batch.n == 0);
-				batch.forkno = item.forkNum;
+				Assert(batch->max_lsn == InvalidXLogRecPtr && batch->n == 0);
+				batch->forkno = item.forkNum;
 				batch_start = item.blockNum;
-				batch.reln = smgropen(rlocator, INVALID_PROC_NUMBER);
-				batch_limit = smgrmaxcombine(batch.reln, batch.forkno, batch_start);
+				batch->reln = smgropen(rlocator, INVALID_PROC_NUMBER);
+				batch_limit = smgrmaxcombine(batch->reln, batch->forkno, batch_start);
 				batch_limit = Min(max_batch_size, batch_limit);
 				batch_limit = Min(GetAdditionalPinLimit(), batch_limit);
 				/* Guarantee progress even if at max pins */
@@ -4118,12 +4203,12 @@ CheckPointBuffers(int flags)
 			 * so far. It is important that we don't increment processed
 			 * because we want to start the next IO with this item.
 			 */
-			if (item.dbId != batch.reln->smgr_rlocator.locator.dbOid ||
-				item.relNumber != batch.reln->smgr_rlocator.locator.relNumber ||
-				item.forkNum != batch.forkno)
+			if (item.dbId != batch->reln->smgr_rlocator.locator.dbOid ||
+				item.relNumber != batch->reln->smgr_rlocator.locator.relNumber ||
+				item.forkNum != batch->forkno)
 				break;
 
-			Assert(item.tsId == batch.reln->smgr_rlocator.locator.spcOid);
+			Assert(item.tsId == batch->reln->smgr_rlocator.locator.spcOid);
 
 			/*
 			 * If the next block is not contiguous, we can't include it in the
@@ -4131,7 +4216,7 @@ CheckPointBuffers(int flags)
 			 * so far. Do not count this item as processed -- otherwise we
 			 * will end up skipping it.
 			 */
-			if (item.blockNum != batch_start + batch.n)
+			if (item.blockNum != batch_start + batch->n)
 				break;
 
 			/*
@@ -4180,9 +4265,9 @@ CheckPointBuffers(int flags)
 			 * read them.
 			 */
 			if (!BufTagMatchesRelFileLocator(&bufHdr->tag,
-											 &batch.reln->smgr_rlocator.locator) ||
-				BufTagGetForkNum(&bufHdr->tag) != batch.forkno ||
-				bufHdr->tag.blockNum != batch_start + batch.n)
+											 &batch->reln->smgr_rlocator.locator) ||
+				BufTagGetForkNum(&bufHdr->tag) != batch->forkno ||
+				bufHdr->tag.blockNum != batch_start + batch->n)
 			{
 				UnpinBuffer(bufHdr);
 				processed++;
@@ -4197,7 +4282,7 @@ CheckPointBuffers(int flags)
 			 * need to. It doesn't seem worth guarding against this, though.
 			 *
 			 * We are willing to wait for the content lock on the first IO in
-			 * the batch. However, for subsequent IOs, waiting could lead to
+			 * the batch-> However, for subsequent IOs, waiting could lead to
 			 * deadlock. We have to eventually flush all eligible buffers,
 			 * though. So, if we fail to acquire the lock on a subsequent
 			 * buffer, we break out and issue the IO we've built up so far.
@@ -4205,7 +4290,7 @@ CheckPointBuffers(int flags)
 			 * starting buffer. As such, we must not count the item as
 			 * processed if we end up failing to acquire the content lock.
 			 */
-			if (batch.n == 0)
+			if (batch->n == 0)
 				BufferLockAcquire(bufnum, bufHdr, BUFFER_LOCK_SHARE_EXCLUSIVE);
 			else if (!BufferLockConditional(bufnum, bufHdr, BUFFER_LOCK_SHARE_EXCLUSIVE))
 			{
@@ -4237,11 +4322,11 @@ CheckPointBuffers(int flags)
 			{
 				XLogRecPtr	lsn = BufferGetLSN(bufHdr);
 
-				if (lsn > batch.max_lsn)
-					batch.max_lsn = lsn;
+				if (lsn > batch->max_lsn)
+					batch->max_lsn = lsn;
 			}
 
-			batch.buffers[batch.n++] = bufnum;
+			batch->buffers[batch->n++] = bufnum;
 			processed++;
 		}
 
@@ -4255,21 +4340,11 @@ CheckPointBuffers(int flags)
 		ts_stat->index += processed;
 
 		/*
-		 * If we built up an IO, issue it. There's a chance we didn't find any
-		 * items referencing buffers that needed flushing this time, but we
-		 * still want to check if we should update the heap if we examined and
-		 * processed the items.
+		 * If we built up an IO, submit it and leave it in flight.  Buffers are
+		 * accounted when the batch is later drained (checkpoint_write_finished).
 		 */
-		if (batch.n > 0)
-		{
-			StartWriteBuffers(&batch);
-			WaitWriteBuffers(&batch, &wb_context);
-
-			TRACE_POSTGRESQL_BUFFERS_SYNC_WRITTEN(batch.n);
-			PendingCheckpointerStats.buffers_written += batch.n;
-			num_written += batch.n;
-			batch.n = 0;
-		}
+		if (batch->n > 0)
+			WriteStreamSubmit(stream);
 
 		/* Have all the buffers from the tablespace been processed? */
 		if (ts_stat->num_scanned == ts_stat->num_to_scan)
@@ -4286,11 +4361,20 @@ CheckPointBuffers(int flags)
 		 * Sleep to throttle our I/O rate.
 		 *
 		 * (This will check for barrier events even if it doesn't sleep.)
+		 *
+		 * In-flight batches are intentionally left in flight across the
+		 * throttle sleep: their writes were submitted at the paced rate, and
+		 * letting them complete during the sleep simply overlaps IO with the
+		 * nap.  The window stays bounded by the drain-oldest logic in
+		 * WriteStreamGetOp().
 		 */
-		Assert(batch.n == 0);
 		CheckpointWriteDelay(flags, (double) num_processed / num_to_scan,
 							 processed);
 	}
+
+	/* Finish any remaining in-flight batches before issuing writebacks. */
+	WriteStreamFinishAll(stream);
+	WriteStreamEnd(stream);
 
 	/*
 	 * Issue all pending flushes. Only the checkpointer calls
@@ -4306,9 +4390,9 @@ CheckPointBuffers(int flags)
 	 * Update checkpoint statistics. As noted above, this doesn't include
 	 * buffers written by other backends or bgwriter scan.
 	 */
-	CheckpointStats.ckpt_bufs_written += num_written;
+	CheckpointStats.ckpt_bufs_written += stream_num_written;
 
-	TRACE_POSTGRESQL_BUFFER_SYNC_DONE(NBuffers, num_written, num_to_scan);
+	TRACE_POSTGRESQL_BUFFER_SYNC_DONE(NBuffers, stream_num_written, num_to_scan);
 }
 
 /*
@@ -4337,6 +4421,14 @@ BgwriterWriteBuffers(int lru_maxpages, WritebackContext *wb_context,
 	uint32		passes = *next_passes;
 	int			reusable = *reusable_buffers;
 
+	/*
+	 * The bgwriter keeps a bounded window of write batches in flight via a
+	 * WriteStream, finishing each one when the window fills and at the end,
+	 * both to bound in-flight IO and to submit writeback.
+	 */
+	WriteStream *stream = WriteStreamBegin(IOCONTEXT_NORMAL, wb_context,
+										   NULL, NULL);
+
 	*maxwritten_clean = false;
 
 	/* Execute the LRU scan */
@@ -4346,7 +4438,7 @@ BgwriterWriteBuffers(int lru_maxpages, WritebackContext *wb_context,
 		StartBufferIOResult status;
 		BufferDesc *bufHdr;
 		Buffer		bufnum;
-		WriteBuffersOperation batch;
+		WriteBuffersOperation *batch;
 
 		if (reusable >= upcoming_alloc_est)
 			break;
@@ -4405,10 +4497,10 @@ BgwriterWriteBuffers(int lru_maxpages, WritebackContext *wb_context,
 		 * well would overestimate the number of reusable buffers (and could
 		 * even count buffers behind the clock hand that we won't hand out).
 		 */
-		GatherContiguousDirtyBuffers(bufHdr, IOCONTEXT_NORMAL, &batch);
-		StartWriteBuffers(&batch);
-		WaitWriteBuffers(&batch, wb_context);
-		num_written += batch.n;
+		batch = WriteStreamGetOp(stream);
+		GatherContiguousDirtyBuffers(bufHdr, IOCONTEXT_NORMAL, batch);
+		WriteStreamSubmit(stream);
+		num_written += batch->n;
 
 		if (num_written >= lru_maxpages)
 		{
@@ -4416,6 +4508,10 @@ BgwriterWriteBuffers(int lru_maxpages, WritebackContext *wb_context,
 			break;
 		}
 	}
+
+	/* Finish the remaining in-flight batches. */
+	WriteStreamFinishAll(stream);
+	WriteStreamEnd(stream);
 
 	/* Write back the updated scan state for the caller */
 	*num_to_scan = to_scan;
@@ -5935,6 +6031,100 @@ WaitWriteBuffers(WriteBuffersOperation *batch, WritebackContext *wb_context)
 											 GetBufferDescriptor(batch->buffers[0] - 1)->tag.blockNum);
 
 	error_context_stack = errcallback.previous;
+}
+
+/*
+ * Begin a WriteStream.  See the WriteStream struct comment.
+ */
+static WriteStream *
+WriteStreamBegin(IOContext io_context, WritebackContext *wb_context,
+				 WriteStreamFinishedCB finished_cb, void *finished_cb_arg)
+{
+	WriteStream *stream = palloc0_object(WriteStream);
+
+	stream->io_context = io_context;
+	stream->wb_context = wb_context;
+	stream->finished_cb = finished_cb;
+	stream->finished_cb_arg = finished_cb_arg;
+	stream->max_inflight = Max(io_max_concurrency, 1);
+	stream->ops = palloc0_array(WriteBuffersOperation, stream->max_inflight + 1);
+
+	return stream;
+}
+
+/*
+ * Wait for and finish the oldest in-flight operation, freeing its slot.
+ */
+static void
+WriteStreamFinishOldest(WriteStream *stream)
+{
+	WriteBuffersOperation *op = &stream->ops[stream->head];
+
+	Assert(stream->n_inflight > 0);
+
+	WaitWriteBuffers(op, stream->wb_context);
+
+	if (stream->finished_cb)
+		stream->finished_cb(op, stream->finished_cb_arg);
+
+	stream->head = (stream->head + 1) % (stream->max_inflight + 1);
+	stream->n_inflight--;
+}
+
+/*
+ * Return a free WriteBuffersOperation for the caller to fill and then submit
+ * with WriteStreamSubmit().  If the in-flight window is full, the oldest
+ * operation is waited for and finished first (this is also how a caller that
+ * needs a free operation obtains one).
+ */
+static WriteBuffersOperation *
+WriteStreamGetOp(WriteStream *stream)
+{
+	WriteBuffersOperation *op;
+
+	if (stream->n_inflight == stream->max_inflight)
+		WriteStreamFinishOldest(stream);
+
+	op = &stream->ops[stream->tail];
+	op->io_context = stream->io_context;
+	op->nblocks_done = 0;
+	return op;
+}
+
+/*
+ * Submit the operation most recently returned by WriteStreamGetOp() (which the
+ * caller has now filled), leaving it in flight.
+ */
+static void
+WriteStreamSubmit(WriteStream *stream)
+{
+	WriteBuffersOperation *op = &stream->ops[stream->tail];
+
+	StartWriteBuffers(op);
+	stream->tail = (stream->tail + 1) % (stream->max_inflight + 1);
+	stream->n_inflight++;
+}
+
+/*
+ * Wait for and finish all still-in-flight operations.
+ */
+static void
+WriteStreamFinishAll(WriteStream *stream)
+{
+	while (stream->n_inflight > 0)
+		WriteStreamFinishOldest(stream);
+}
+
+/*
+ * Free a WriteStream.  All operations must already have been finished with
+ * WriteStreamFinishAll().
+ */
+static void
+WriteStreamEnd(WriteStream *stream)
+{
+	Assert(stream->n_inflight == 0);
+	pfree(stream->ops);
+	pfree(stream);
 }
 
 /*
