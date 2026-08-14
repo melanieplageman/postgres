@@ -118,6 +118,11 @@ typedef struct f_smgr
 								BlockNumber blocknum,
 								const void **buffers, BlockNumber nblocks,
 								bool skipFsync);
+	void		(*smgr_startwritev) (PgAioHandle *ioh,
+									 SMgrRelation reln, ForkNumber forknum,
+									 BlockNumber blocknum,
+									 const void **buffers, BlockNumber nblocks,
+									 bool skipFsync);
 	void		(*smgr_writeback) (SMgrRelation reln, ForkNumber forknum,
 								   BlockNumber blocknum, BlockNumber nblocks);
 	BlockNumber (*smgr_nblocks) (SMgrRelation reln, ForkNumber forknum);
@@ -146,6 +151,7 @@ static const f_smgr smgrsw[] = {
 		.smgr_readv = mdreadv,
 		.smgr_startreadv = mdstartreadv,
 		.smgr_writev = mdwritev,
+		.smgr_startwritev = mdstartwritev,
 		.smgr_writeback = mdwriteback,
 		.smgr_nblocks = mdnblocks,
 		.smgr_truncate = mdtruncate,
@@ -815,6 +821,34 @@ smgrwritev(SMgrRelation reln, ForkNumber forknum, BlockNumber blocknum,
 	HOLD_INTERRUPTS();
 	smgrsw[reln->smgr_which].smgr_writev(reln, forknum, blocknum,
 										 buffers, nblocks, skipFsync);
+	RESUME_INTERRUPTS();
+}
+
+/*
+ * smgrstartwritev() -- asynchronous version of smgrwritev()
+ *
+ * This starts an asynchronous writev IO using the IO handle `ioh`.  Other than
+ * `ioh` all parameters are the same as smgrwritev().
+ *
+ * Like smgrstartreadv(), more responsibilities fall on the caller than with
+ * the synchronous smgrwritev():
+ * - Partial writes need to be handled by the caller re-issuing IO for the
+ *   unwritten blocks.
+ * - smgr will ereport(LOG_SERVER_ONLY) some problems, but higher layers are
+ *   responsible for pgaio_result_report() to mirror that to the user (on
+ *   PGAIO_RS_WARNING) or abort the (sub)transaction (on PGAIO_RS_ERROR).
+ * - The caller must keep the source buffers valid (pinned) until the IO
+ *   completes.
+ */
+void
+smgrstartwritev(PgAioHandle *ioh,
+				SMgrRelation reln, ForkNumber forknum, BlockNumber blocknum,
+				const void **buffers, BlockNumber nblocks, bool skipFsync)
+{
+	HOLD_INTERRUPTS();
+	smgrsw[reln->smgr_which].smgr_startwritev(ioh,
+											  reln, forknum, blocknum, buffers,
+											  nblocks, skipFsync);
 	RESUME_INTERRUPTS();
 }
 

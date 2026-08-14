@@ -165,10 +165,17 @@ static BlockNumber _mdnblocks(SMgrRelation reln, ForkNumber forknum,
 
 static PgAioResult md_readv_complete(PgAioHandle *ioh, PgAioResult prior_result, uint8 cb_data);
 static void md_readv_report(PgAioResult result, const PgAioTargetData *td, int elevel);
+static PgAioResult md_writev_complete(PgAioHandle *ioh, PgAioResult prior_result, uint8 cb_data);
+static void md_writev_report(PgAioResult result, const PgAioTargetData *td, int elevel);
 
 const PgAioHandleCallbacks aio_md_readv_cb = {
 	.complete_shared = md_readv_complete,
 	.report = md_readv_report,
+};
+
+const PgAioHandleCallbacks aio_md_writev_cb = {
+	.complete_shared = md_writev_complete,
+	.report = md_writev_report,
 };
 
 
@@ -1084,6 +1091,81 @@ mdstartreadv(PgAioHandle *ioh,
 }
 
 /*
+ * mdstartwritev() -- Asynchronous version of mdwritev().
+ *
+ * Mirrors mdstartreadv(), but for writes.  Like mdwritev(), when !skipFsync
+ * (and not a temp rel) the segment is registered for fsync at the next
+ * checkpoint.  We can do that here at submission time because
+ * register_dirty_segment() only enqueues a sync request; it does not require
+ * the write to have completed.
+ */
+void
+mdstartwritev(PgAioHandle *ioh,
+			  SMgrRelation reln, ForkNumber forknum, BlockNumber blocknum,
+			  const void **buffers, BlockNumber nblocks, bool skipFsync)
+{
+	pgoff_t		seekpos;
+	MdfdVec    *v;
+	BlockNumber nblocks_this_segment;
+	struct iovec *iov;
+	int			iovcnt;
+	int			ret;
+
+	v = _mdfd_getseg(reln, forknum, blocknum, skipFsync,
+					 EXTENSION_FAIL | EXTENSION_CREATE_RECOVERY);
+
+	seekpos = (pgoff_t) BLCKSZ * (blocknum % ((BlockNumber) RELSEG_SIZE));
+
+	Assert(seekpos < (pgoff_t) BLCKSZ * RELSEG_SIZE);
+
+	nblocks_this_segment =
+		Min(nblocks,
+			RELSEG_SIZE - (blocknum % ((BlockNumber) RELSEG_SIZE)));
+
+	if (nblocks_this_segment != nblocks)
+		elog(ERROR, "write crossing segment boundary");
+
+	iovcnt = pgaio_io_get_iovec(ioh, &iov);
+
+	Assert(nblocks <= iovcnt);
+
+	iovcnt = buffers_to_iovec(iov, (void **) buffers, nblocks_this_segment);
+
+	Assert(iovcnt <= nblocks_this_segment);
+
+	if (!(io_direct_flags & IO_DIRECT_DATA))
+		pgaio_io_set_flag(ioh, PGAIO_HF_BUFFERED);
+
+	pgaio_io_set_target_smgr(ioh,
+							 reln,
+							 forknum,
+							 blocknum,
+							 nblocks,
+							 skipFsync);
+	pgaio_io_register_callbacks(ioh, PGAIO_HCB_MD_WRITEV, 0);
+
+	ret = FileStartWriteV(ioh, v->mdfd_vfd, iovcnt, seekpos, WAIT_EVENT_DATA_FILE_WRITE);
+	if (ret != 0)
+		ereport(ERROR,
+				(errcode_for_file_access(),
+				 errmsg("could not start writing blocks %u..%u in file \"%s\": %m",
+						blocknum,
+						blocknum + nblocks_this_segment - 1,
+						FilePathName(v->mdfd_vfd))));
+
+	/*
+	 * The segment's fsync request must NOT be registered here at submission
+	 * time: the write has not completed (it may still be queued in
+	 * io_uring/a worker), so registering now would allow a concurrent
+	 * checkpoint to fsync the file before the data is on disk, breaking
+	 * durability.  Registration happens in md_writev_complete() instead, after
+	 * the write has actually landed.  skip_fsync is passed through the smgr
+	 * target data (pgaio_io_set_target_smgr() above) so the callback can see
+	 * it.
+	 */
+}
+
+/*
  * mdwritev() -- Write the supplied blocks at the appropriate location.
  *
  * This is to be used only for updating already-existing blocks of a
@@ -1577,6 +1659,38 @@ register_dirty_segment(SMgrRelation reln, ForkNumber forknum, MdfdVec *seg)
 		pgstat_count_io_op_time(IOOBJECT_RELATION, IOCONTEXT_NORMAL,
 								IOOP_FSYNC, io_start, 1, 0);
 	}
+}
+
+/*
+ * register_dirty_segment_aio() -- register a segment for fsync from an AIO
+ *		write completion.
+ *
+ * Like register_dirty_segment(), but callable from md_writev_complete(), which
+ * has no live MdfdVec and may run in a process other than the one that issued
+ * the write.  The segment is identified from the AIO target data
+ * (rlocator/forknum/segno) rather than an MdfdVec.
+ *
+ * As in register_dirty_segment(), retryOnError is false: we must never block
+ * waiting for the checkpointer to accept the request, because the checkpointer
+ * may itself be waiting for this very IO to complete (if it was offloaded to
+ * an IO worker) -- blocking here could deadlock.
+ *
+ * XXX: This runs in a critical section (all AIO completion callbacks do), and
+ * RegisterSyncRequest()'s full-queue fallback path can allocate
+ * (CompactCheckpointerRequestQueue(), or the inline mdsyncfiletag() fallback).
+ * For now we assume the request is accepted without needing that fallback; a
+ * forthcoming change to make the fsync-request queue safe to use from a
+ * critical section will remove this assumption.
+ */
+static void
+register_dirty_segment_aio(RelFileLocator rlocator, ForkNumber forknum,
+						   BlockNumber segno)
+{
+	FileTag		tag;
+
+	INIT_MD_FILETAG(tag, rlocator, forknum, segno);
+
+	RegisterSyncRequest(&tag, SYNC_REQUEST, false /* retryOnError */ );
 }
 
 /*
@@ -2110,6 +2224,117 @@ md_readv_report(PgAioResult result, const PgAioTargetData *td, int elevel)
 		ereport(elevel,
 				errcode(ERRCODE_DATA_CORRUPTED),
 				errmsg("could not read blocks %u..%u in file \"%s\": read only %zu of %zu bytes",
+					   td->smgr.blockNum,
+					   td->smgr.blockNum + td->smgr.nblocks - 1,
+					   path.str,
+					   result.result * (size_t) BLCKSZ,
+					   td->smgr.nblocks * (size_t) BLCKSZ));
+	}
+}
+
+/*
+ * AIO completion callback for mdstartwritev().
+ *
+ * Mirror of md_readv_complete(): translate a byte count into blocks, flag
+ * hard errors and partial writes.  Partial writes are reported as
+ * PGAIO_RS_PARTIAL and must be retried by an upper layer.
+ */
+static PgAioResult
+md_writev_complete(PgAioHandle *ioh, PgAioResult prior_result, uint8 cb_data)
+{
+	PgAioTargetData *td = pgaio_io_get_target_data(ioh);
+	PgAioResult result = prior_result;
+
+	if (prior_result.result < 0)
+	{
+		result.status = PGAIO_RS_ERROR;
+		result.id = PGAIO_HCB_MD_WRITEV;
+		/* For "hard" errors, track the error number in error_data */
+		result.error_data = -prior_result.result;
+		result.result = 0;
+
+		pgaio_result_report(result, td, LOG_SERVER_ONLY);
+
+		return result;
+	}
+
+	/* smgr operates on blocks, not bytes; convert. */
+	result.result /= BLCKSZ;
+
+	Assert(result.result <= td->smgr.nblocks);
+
+	if (result.result == 0)
+	{
+		/* consider 0 blocks written a failure */
+		result.status = PGAIO_RS_ERROR;
+		result.id = PGAIO_HCB_MD_WRITEV;
+		result.error_data = 0;
+
+		pgaio_result_report(result, td, LOG_SERVER_ONLY);
+
+		return result;
+	}
+
+	if (result.status != PGAIO_RS_ERROR &&
+		result.result < td->smgr.nblocks)
+	{
+		/* partial writes should be retried at upper level */
+		result.status = PGAIO_RS_PARTIAL;
+		result.id = PGAIO_HCB_MD_WRITEV;
+	}
+
+	/*
+	 * The write landed (fully or partially), so it is now safe to register the
+	 * segment for fsync at the next checkpoint -- this is the AIO equivalent of
+	 * register_dirty_segment() at the end of the synchronous mdwritev().  Doing
+	 * it here rather than at submission time is what preserves the durability
+	 * invariant: no fsync request exists for a segment until its data is on
+	 * disk.
+	 *
+	 * A batch never crosses a segment boundary (enforced in mdstartwritev()),
+	 * so even a partial write touched exactly one segment; registering that
+	 * segment is correct.
+	 */
+	if (!td->smgr.skip_fsync)
+		register_dirty_segment_aio(td->smgr.rlocator, td->smgr.forkNum,
+								   td->smgr.blockNum / ((BlockNumber) RELSEG_SIZE));
+
+	return result;
+}
+
+/*
+ * AIO error reporting callback for mdstartwritev().
+ *
+ * Errors are encoded as follows:
+ * - PgAioResult.error_data != 0 encodes IO that failed with that errno
+ * - PgAioResult.error_data == 0 encodes IO that didn't write all data
+ */
+static void
+md_writev_report(PgAioResult result, const PgAioTargetData *td, int elevel)
+{
+	RelPathStr	path;
+
+	path = relpathbackend(td->smgr.rlocator,
+						  td->smgr.is_temp ? MyProcNumber : INVALID_PROC_NUMBER,
+						  td->smgr.forkNum);
+
+	if (result.error_data != 0)
+	{
+		/* for errcode_for_file_access() and %m */
+		errno = result.error_data;
+
+		ereport(elevel,
+				errcode_for_file_access(),
+				errmsg("could not write blocks %u..%u in file \"%s\": %m",
+					   td->smgr.blockNum,
+					   td->smgr.blockNum + td->smgr.nblocks - 1,
+					   path.str));
+	}
+	else
+	{
+		ereport(elevel,
+				errcode(ERRCODE_DATA_CORRUPTED),
+				errmsg("could not write blocks %u..%u in file \"%s\": wrote only %zu of %zu bytes",
 					   td->smgr.blockNum,
 					   td->smgr.blockNum + td->smgr.nblocks - 1,
 					   path.str,

@@ -2227,6 +2227,32 @@ FileStartReadV(PgAioHandle *ioh, File file,
 	return 0;
 }
 
+int
+FileStartWriteV(PgAioHandle *ioh, File file,
+				int iovcnt, pgoff_t offset,
+				uint32 wait_event_info)
+{
+	int			returnCode;
+	Vfd		   *vfdP;
+
+	Assert(FileIsValid(file));
+
+	DO_DB(elog(LOG, "FileStartWriteV: %d (%s) " INT64_FORMAT " %d",
+			   file, VfdCache[file].fileName,
+			   (int64) offset,
+			   iovcnt));
+
+	returnCode = FileAccess(file);
+	if (returnCode < 0)
+		return returnCode;
+
+	vfdP = &VfdCache[file];
+
+	pgaio_io_start_writev(ioh, vfdP->fd, iovcnt, offset);
+
+	return 0;
+}
+
 ssize_t
 FileWriteV(File file, const struct iovec *iov, int iovcnt, pgoff_t offset,
 		   uint32 wait_event_info)
