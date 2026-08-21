@@ -3640,7 +3640,6 @@ typedef struct IndexStmt
 	List	   *options;		/* WITH clause options: a list of DefElem */
 	Node	   *whereClause;	/* qualification (partial-index predicate) */
 	List	   *excludeOpNames; /* exclusion operator names, or NIL if none */
-	char	   *idxcomment;		/* comment to apply to index, or NULL */
 	Oid			indexOid;		/* OID of an existing index, if any */
 	RelFileNumber oldNumber;	/* relfilenumber of existing storage, if any */
 	SubTransactionId oldCreateSubid;	/* rd_createSubid of oldNumber */
@@ -3658,6 +3657,16 @@ typedef struct IndexStmt
 	bool		if_not_exists;	/* just do nothing if index already exists? */
 	bool		reset_default_tblspc;	/* reset default_tablespace prior to
 										 * executing */
+
+	/*
+	 * When doing an operation on the index that causes it to be dropped and
+	 * recreated, these properties are not automatically cloned from the old
+	 * index to the new and must be explicitly saved before dropping the old
+	 * index and restored after creating the new index.
+	 */
+	char	   *idxcomment;		/* comment to apply to index, or NULL */
+	List	   *idxstattargets; /* per-column statistics targets: a list of
+								 * int, one per index column, -1 for default */
 } IndexStmt;
 
 /* ----------------------

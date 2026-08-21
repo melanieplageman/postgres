@@ -1531,6 +1531,20 @@ select conname, obj_description(oid, 'pg_constraint') as desc
 -- Don't remove this DROP, it exposes bug #15672
 drop table at_partitioned;
 
+-- Per-column statistics targets should still exist after an ALTER COLUMN TYPE
+create table at_reb_plain (id int not null, val int not null);
+create index at_reb_plain_expr on at_reb_plain ((val + 1));
+create unique index at_reb_plain_u on at_reb_plain ((id + 0), (val + 0));
+alter index at_reb_plain_expr alter column 1 set statistics 321;
+alter index at_reb_plain_u alter column 1 set statistics 111;
+alter index at_reb_plain_u alter column 2 set statistics 222;
+alter table at_reb_plain alter column val type bigint;
+select c.relname, a.attnum, a.attstattarget
+  from pg_attribute a join pg_class c on c.oid = a.attrelid
+  where c.relname in ('at_reb_plain_expr', 'at_reb_plain_u') and a.attnum > 0
+  order by c.relname, a.attnum;
+drop table at_reb_plain;
+
 -- disallow recursive containment of row types
 create temp table recur1 (f1 int);
 alter table recur1 add column f2 recur1; -- fails

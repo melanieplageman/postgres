@@ -83,6 +83,7 @@ typedef struct CIEN_context
 /* non-export function prototypes */
 static bool CompareOpclassOptions(const Datum *opts1, const Datum *opts2, int natts);
 static void CheckPredicate(Expr *predicate);
+static void SetIndexStatTargets(Oid indexRelationId, List *stattargets);
 static void ComputeIndexAttrs(ParseState *pstate,
 							  IndexInfo *indexInfo,
 							  Oid *typeOids,
@@ -507,6 +508,57 @@ WaitForOlderSnapshots(TransactionId limitXmin, bool progress)
 		if (progress)
 			pgstat_progress_update_param(PROGRESS_WAITFOR_DONE, i + 1);
 	}
+}
+
+
+/*
+ * Update the required catalog entries to restore the per-column statistics
+ * targets to the index passed in as indexRelationId.  stattargets is a list of
+ * integers, one per index column in column order, with -1 meaning the column
+ * uses the default target (and so needs no update).
+ */
+static void
+SetIndexStatTargets(Oid indexRelationId, List *stattargets)
+{
+	Relation	attrelation = table_open(AttributeRelationId, RowExclusiveLock);
+	AttrNumber	attnum = 0;
+	ListCell   *lc;
+
+	foreach(lc, stattargets)
+	{
+		int			target = lfirst_int(lc);
+		HeapTuple	attup;
+		HeapTuple	newtuple;
+		Datum		repl_val[Natts_pg_attribute];
+		bool		repl_null[Natts_pg_attribute];
+		bool		repl_repl[Natts_pg_attribute];
+
+		attnum++;
+
+		/* -1 means the default target, which is the state after recreation */
+		if (target == -1)
+			continue;
+
+		attup = SearchSysCacheCopy2(ATTNUM,
+									ObjectIdGetDatum(indexRelationId),
+									Int16GetDatum(attnum));
+		if (!HeapTupleIsValid(attup))
+			elog(ERROR, "cache lookup failed for attribute %d of index %u",
+				 attnum, indexRelationId);
+		memset(repl_null, false, sizeof(repl_null));
+		memset(repl_repl, false, sizeof(repl_repl));
+		repl_val[Anum_pg_attribute_attstattarget - 1] =
+			Int16GetDatum(target);
+		repl_repl[Anum_pg_attribute_attstattarget - 1] = true;
+		newtuple = heap_modify_tuple(attup,
+									 RelationGetDescr(attrelation),
+									 repl_val, repl_null, repl_repl);
+		CatalogTupleUpdate(attrelation, &newtuple->t_self, newtuple);
+		heap_freetuple(newtuple);
+		heap_freetuple(attup);
+	}
+
+	table_close(attrelation, RowExclusiveLock);
 }
 
 
@@ -1319,10 +1371,17 @@ DefineIndex(ParseState *pstate,
 	root_save_nestlevel = NewGUCNestLevel();
 	RestrictSearchPath();
 
-	/* Add any requested comment */
+	/*
+	 * Restore index properties that were not able to be recreated as part of
+	 * CREATE INDEX. These were saved in the IndexStmt so we could restore
+	 * them now by updating the correct catalog tables.
+	 */
 	if (stmt->idxcomment != NULL)
 		CreateComments(indexRelationId, RelationRelationId, 0,
 					   stmt->idxcomment);
+
+	if (stmt->idxstattargets != NIL)
+		SetIndexStatTargets(indexRelationId, stmt->idxstattargets);
 
 	if (partitioned)
 	{
