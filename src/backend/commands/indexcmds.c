@@ -106,6 +106,8 @@ static char *ChooseIndexName(const char *tabname, Oid namespaceId,
 							 const List *colnames, const List *exclusionOpNames,
 							 bool primary, bool isconstraint);
 static char *ChooseIndexNameAddition(const List *colnames);
+static void TransferPartitionIndexProps(const IndexStmt *stmt, Oid childRelid,
+										IndexStmt *childStmt);
 static List *ChooseIndexColumnNames(Relation rel, const List *indexElems);
 static char *ChooseIndexExpressionName(Relation rel, Node *indexExpr);
 static bool ChooseIndexExpressionName_walker(Node *node,
@@ -559,6 +561,54 @@ SetIndexStatTargets(Oid indexRelationId, List *stattargets)
 	}
 
 	table_close(attrelation, RowExclusiveLock);
+}
+
+
+/*
+ * Copy this partition's saved index properties from the list of all leaf
+ * partitions' properties into the correct fields in the newly created
+ * IndexStmt for the child partition index as part of an ALTER COLUMN TYPE (or
+ * SET EXPRESSION) operation.
+ *
+ * Two kinds of property need this.  The comment, replica identity, cluster-on
+ * marking, and per-column stats targets cannot be expressed in CREATE INDEX,
+ * so the clone does not reproduce them at all.  The name and reloptions can be
+ * expressed in CREATE INDEX, but the clone still does not preserve the leaf's:
+ * the name is deliberately cleared by generateClonedIndexStmt() (so a fresh
+ * default is chosen, avoiding collisions), and the reloptions are copied from
+ * the parent index, overwriting any set independently on the leaf.  Here we
+ * put the leaf's own name and reloptions back.
+ *
+ * These were saved in a list before dropping the index in an earlier phase.
+ * After we create the child partition index, we'll update the catalog table
+ * entries according to these values.
+ */
+static void
+TransferPartitionIndexProps(const IndexStmt *stmt, Oid childRelid,
+							IndexStmt *childStmt)
+{
+	foreach_node(PartitionIndexProps, props, stmt->oldPartIndexProps)
+	{
+		/*
+		 * Match entries by the partition table's OID (stable), since the old
+		 * index's OID is gone.
+		 */
+		if (props->partrelid != childRelid)
+			continue;
+
+		childStmt->idxname = pstrdup(props->idxname);
+		childStmt->idxcomment = props->idxcomment;
+		childStmt->idxisreplident = props->isreplident;
+		childStmt->idxisclustered = props->isclustered;
+		childStmt->idxstattargets = props->stattargets;
+
+		/*
+		 * Override the parent's reloptions with the leaf's own, so
+		 * independently-set leaf options survive.
+		 */
+		childStmt->options = props->reloptions;
+		return;
+	}
 }
 
 
@@ -1383,6 +1433,58 @@ DefineIndex(ParseState *pstate,
 	if (stmt->idxstattargets != NIL)
 		SetIndexStatTargets(indexRelationId, stmt->idxstattargets);
 
+	/*
+	 * We set indisclustered/indisreplident with a direct single-row pg_index
+	 * update, not mark_index_clustered()/relation_mark_replica_identity()
+	 * because those clear the flag on sibling indexes which are mid-drop
+	 * here. That's safe to skip because at most one index per table carries
+	 * each flag and it is this newly-created one.
+	 */
+	if (stmt->idxisclustered || stmt->idxisreplident)
+	{
+		Relation	pg_index;
+		HeapTuple	idxtuple;
+		Form_pg_index indexForm;
+
+		pg_index = table_open(IndexRelationId, RowExclusiveLock);
+		idxtuple = SearchSysCacheCopy1(INDEXRELID,
+									   ObjectIdGetDatum(indexRelationId));
+		if (!HeapTupleIsValid(idxtuple))
+			elog(ERROR, "cache lookup failed for index %u", indexRelationId);
+		indexForm = (Form_pg_index) GETSTRUCT(idxtuple);
+
+		if (stmt->idxisclustered)
+			indexForm->indisclustered = true;
+		if (stmt->idxisreplident)
+			indexForm->indisreplident = true;
+
+		CatalogTupleUpdate(pg_index, &idxtuple->t_self, idxtuple);
+		heap_freetuple(idxtuple);
+		table_close(pg_index, RowExclusiveLock);
+	}
+
+	/* Replica identity also marks the owning table's relreplident. */
+	if (stmt->idxisreplident)
+	{
+		Relation	pg_class;
+		Oid			heapId = IndexGetRelation(indexRelationId, false);
+		HeapTuple	ctup;
+		Form_pg_class classForm;
+
+		pg_class = table_open(RelationRelationId, RowExclusiveLock);
+		ctup = SearchSysCacheCopy1(RELOID, ObjectIdGetDatum(heapId));
+		if (!HeapTupleIsValid(ctup))
+			elog(ERROR, "cache lookup failed for relation %u", heapId);
+		classForm = (Form_pg_class) GETSTRUCT(ctup);
+		if (classForm->relreplident != REPLICA_IDENTITY_INDEX)
+		{
+			classForm->relreplident = REPLICA_IDENTITY_INDEX;
+			CatalogTupleUpdate(pg_class, &ctup->t_self, ctup);
+		}
+		heap_freetuple(ctup);
+		table_close(pg_class, RowExclusiveLock);
+	}
+
 	if (partitioned)
 	{
 		PartitionDesc partdesc;
@@ -1604,6 +1706,19 @@ DefineIndex(ParseState *pstate,
 														parentIndex,
 														attmap,
 														NULL);
+
+					/*
+					 * generateClonedIndexStmt() reproduces only what CREATE
+					 * INDEX can express, and even then it clears the name and
+					 * takes reloptions from the parent index rather than the
+					 * leaf, so transfer the old leaf index's saved properties
+					 * into the child IndexStmt. The child also needs a pointer
+					 * to the list in case it is an intermediate partitioned
+					 * index and needs its own children to be able to find
+					 * their entries upon recursing.
+					 */
+					childStmt->oldPartIndexProps = stmt->oldPartIndexProps;
+					TransferPartitionIndexProps(stmt, childRelid, childStmt);
 
 					/*
 					 * Recurse as the starting user ID.  Callee will use that

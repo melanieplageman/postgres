@@ -2304,13 +2304,13 @@ select relname,
   from pg_class c left join old_oids using (relname)
   where relname like 'at_partitioned%'
   order by relname;
-           relname            | orig_oid | storage |     desc     
-------------------------------+----------+---------+--------------
+           relname            | orig_oid | storage |     desc      
+------------------------------+----------+---------+---------------
  at_partitioned               | t        | none    | 
  at_partitioned_0             | t        | own     | 
- at_partitioned_0_id_name_key | f        | own     | 
+ at_partitioned_0_id_name_key | f        | own     | child 0 index
  at_partitioned_1             | t        | own     | 
- at_partitioned_1_id_name_key | f        | own     | 
+ at_partitioned_1_id_name_key | f        | own     | child 1 index
  at_partitioned_id_name_key   | f        | none    | parent index
 (6 rows)
 
@@ -2346,6 +2346,73 @@ select c.relname, a.attnum, a.attstattarget
 (3 rows)
 
 drop table at_reb_plain;
+-- Partitioned tables' leaf partitions should all preserve their properties
+-- across an ALTER COLUMN TYPE-triggered rebuild.
+create table at_reb (id int not null, val int not null) partition by range (id);
+create table at_reb_1 partition of at_reb for values from (0) to (100);
+create index at_reb_expr on at_reb ((val + 1)) with (fillfactor = 71);
+create unique index at_reb_uniq on at_reb (id, val);
+-- give the leaf indexes stable, custom names (also exercises name preservation)
+alter index at_reb_1_val_1_idx rename to at_reb_expr_leaf;
+alter index at_reb_1_id_val_idx rename to at_reb_uniq_leaf;
+-- load the leaf indexes with every property the rebuild would otherwise lose
+comment on index at_reb_expr_leaf is 'leaf expr index comment';
+alter index at_reb_expr_leaf alter column 1 set statistics 543;
+alter index at_reb_expr_leaf set (fillfactor = 55);
+alter table at_reb_1 replica identity using index at_reb_uniq_leaf;
+alter table at_reb_1 cluster on at_reb_expr_leaf;
+-- Snapshot each catalog row describing the two leaf indexes as jsonb. Remove
+-- the columns that legitimately differ across the rebuild: the physical
+-- identity (oid, relfilenode, and their indexrelid/indrelid/attrelid echoes),
+-- and the size estimates (relpages, reltuples, relallvisible, relallfrozen),
+-- which are recomputed by the fresh index build rather than carried over. Any
+-- other difference fails the test.
+create function at_reb_snapshot() returns table(cat text, disc text, body jsonb)
+language sql stable as $$
+  select 'pg_class', c.relname,
+         to_jsonb(c) - '{oid,relfilenode,relpages,reltuples,relallvisible,
+                         relallfrozen}'::text[]
+  from pg_class c
+  where c.relname in ('at_reb_expr_leaf', 'at_reb_uniq_leaf')
+  union all
+  select 'pg_index', c.relname,
+         to_jsonb(i) - '{indexrelid,indrelid}'::text[]
+  from pg_index i join pg_class c on c.oid = i.indexrelid
+  where c.relname in ('at_reb_expr_leaf', 'at_reb_uniq_leaf')
+  union all
+  select 'pg_attribute', c.relname || '.' || a.attnum,
+         to_jsonb(a) - '{attrelid}'::text[]
+  from pg_attribute a join pg_class c on c.oid = a.attrelid
+  where c.relname in ('at_reb_expr_leaf', 'at_reb_uniq_leaf')
+    and a.attnum > 0
+  union all
+  select 'comment', c.relname, to_jsonb(obj_description(c.oid, 'pg_class'))
+  from pg_class c
+  where c.relname in ('at_reb_expr_leaf', 'at_reb_uniq_leaf')
+  union all
+  -- owning table row, for relreplident (replica identity is recorded here too)
+  select 'pg_class_owner', tc.relname, to_jsonb(tc.relreplident)
+  from pg_index i join pg_class c on c.oid = i.indexrelid
+    join pg_class tc on tc.oid = i.indrelid
+  where c.relname in ('at_reb_expr_leaf', 'at_reb_uniq_leaf');
+$$;
+create temp table at_reb_before as select * from at_reb_snapshot();
+-- No-op type change: same type, but still rebuilds the leaf indexes.
+alter table at_reb alter column val type int;
+create temp table at_reb_after as select * from at_reb_snapshot();
+-- Both directions must be empty: nothing lost, nothing unexpectedly changed.
+select 'lost/changed' as dir, cat, disc from (
+  select * from at_reb_before except select * from at_reb_after) d
+union all
+select 'appeared/changed', cat, disc from (
+  select * from at_reb_after except select * from at_reb_before) d
+order by 1, 2, 3;
+ dir | cat | disc 
+-----+-----+------
+(0 rows)
+
+drop function at_reb_snapshot();
+drop table at_reb;
 -- disallow recursive containment of row types
 create temp table recur1 (f1 int);
 alter table recur1 add column f2 recur1; -- fails
