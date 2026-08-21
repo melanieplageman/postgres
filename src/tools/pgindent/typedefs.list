@@ -2218,6 +2218,7 @@ PartitionDispatch
 PartitionElem
 PartitionHashBound
 PartitionIndexExtDepEntry
+PartitionIndexProps
 PartitionKey
 PartitionListValue
 PartitionMap

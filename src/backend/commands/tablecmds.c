@@ -707,6 +707,7 @@ static void RebuildConstraintComment(AlteredTableInfo *tab, AlterTablePass pass,
 									 Oid objid, Relation rel, List *domname,
 									 const char *conname);
 static void TryReuseIndex(Oid oldId, IndexStmt *stmt);
+static void RememberPartitionIndexProps(Oid indoid, IndexStmt *stmt);
 static List *GetIndexStatTargets(Oid indexOid);
 static void TryReuseForeignKey(Oid oldId, Constraint *con);
 static ObjectAddress ATExecAlterColumnGenericOptions(Relation rel, const char *colName,
@@ -15981,6 +15982,13 @@ RememberWholeRowDependentForRebuilding(AlteredTableInfo *tab, AlterTableType sub
 /*
  * Subroutine for ATExecAlterColumnType: remember that a replica identity
  * needs to be reset.
+ *
+ * We save the index by name and restore it later via an AT_ReplicaIdentity
+ * subcommand (see ATPostAlterTypeCleanup), rather than stamping
+ * indisreplident at creation like the partition-leaf path. The top-level
+ * index may not be rebuilt at all, or may have live siblings whose flag must
+ * be cleared, so it needs the relation-wide relation_mark_replica_identity()
+ * run after the rebuild.
  */
 static void
 RememberReplicaIdentityForRebuilding(Oid indoid, AlteredTableInfo *tab)
@@ -16435,6 +16443,8 @@ ATPostAlterTypeParse(Oid oldId, Oid oldRelId, Oid refRelId, Oid ownerId,
 			IndexStmt  *stmt = (IndexStmt *) stm;
 			AlterTableCmd *newcmd;
 
+			/* capture leaf indexes' properties before they're dropped */
+			RememberPartitionIndexProps(oldId, stmt);
 			if (!rewrite)
 				TryReuseIndex(oldId, stmt);
 			stmt->reset_default_tblspc = true;
@@ -16466,6 +16476,7 @@ ATPostAlterTypeParse(Oid oldId, Oid oldRelId, Oid refRelId, Oid ownerId,
 					indstmt = castNode(IndexStmt, cmd->def);
 					indoid = get_constraint_index(oldId);
 
+					RememberPartitionIndexProps(indoid, indstmt);
 					if (!rewrite)
 						TryReuseIndex(indoid, indstmt);
 					/* keep any comment on the index */
@@ -16618,6 +16629,90 @@ RebuildConstraintComment(AlteredTableInfo *tab, AlterTablePass pass, Oid objid,
 	newcmd->subtype = AT_ReAddComment;
 	newcmd->def = (Node *) cmd;
 	tab->subcmds[pass] = lappend(tab->subcmds[pass], newcmd);
+}
+
+/*
+ * Before a partitioned index is dropped and rebuilt as part of an ALTER
+ * COLUMN TYPE (or SET EXPRESSION), capture each of its leaf partition indexes'
+ * properties (name, comment, replica identity, cluster-on, per-column stat
+ * targets, reloptions) into a list saved on the parent index's IndexStmt.
+ *
+ * These are lost for two reasons.  The comment, replica identity, cluster-on
+ * marking, and stat targets cannot be expressed in CREATE INDEX, so recreating
+ * the leaf index does not reproduce them.  The name and reloptions can be
+ * expressed in CREATE INDEX, but the leaf is recreated by cloning the parent
+ * index, which clears the name (a fresh default is chosen) and takes the
+ * reloptions from the parent, so a name or reloptions set independently on the
+ * leaf is lost.  Either way the leaf's value would be lost without capturing
+ * it here.
+ *
+ * Must run before the drop, while the old leaf indexes still exist.
+ */
+static void
+RememberPartitionIndexProps(Oid indoid, IndexStmt *stmt)
+{
+	List	   *indexOids;
+
+	if (get_rel_relkind(indoid) != RELKIND_PARTITIONED_INDEX)
+		return;
+
+	indexOids = find_all_inheritors(indoid, NoLock, NULL);
+	foreach_oid(leafIndexOid, indexOids)
+	{
+		PartitionIndexProps *props;
+		HeapTuple	idxtup;
+		HeapTuple	classtup;
+		Form_pg_index idxform;
+		Form_pg_class classform;
+		Datum		reloptions;
+		bool		rel_isnull;
+
+		if (leafIndexOid == indoid)
+			continue;
+
+		idxtup = SearchSysCache1(INDEXRELID, ObjectIdGetDatum(leafIndexOid));
+		if (!HeapTupleIsValid(idxtup))
+			continue;
+		idxform = (Form_pg_index) GETSTRUCT(idxtup);
+
+		classtup = SearchSysCache1(RELOID, ObjectIdGetDatum(leafIndexOid));
+		if (!HeapTupleIsValid(classtup))
+		{
+			ReleaseSysCache(idxtup);
+			continue;
+		}
+		classform = (Form_pg_class) GETSTRUCT(classtup);
+
+		/* only direct/indirect leaf (storage) indexes carry these props */
+		if (classform->relkind == RELKIND_PARTITIONED_INDEX)
+		{
+			ReleaseSysCache(classtup);
+			ReleaseSysCache(idxtup);
+			continue;
+		}
+
+		props = makeNode(PartitionIndexProps);
+		props->partrelid = idxform->indrelid;
+		props->idxname = pstrdup(NameStr(classform->relname));
+		props->idxcomment = GetComment(leafIndexOid, RelationRelationId, 0);
+		props->isreplident = idxform->indisreplident;
+		props->isclustered = idxform->indisclustered;
+		props->stattargets = NIL;
+		props->reloptions = NIL;
+
+		reloptions = SysCacheGetAttr(RELOID, classtup,
+									 Anum_pg_class_reloptions, &rel_isnull);
+		if (!rel_isnull)
+			props->reloptions = untransformRelOptions(reloptions);
+
+		ReleaseSysCache(classtup);
+		ReleaseSysCache(idxtup);
+
+		props->stattargets = GetIndexStatTargets(leafIndexOid);
+
+		stmt->oldPartIndexProps = lappend(stmt->oldPartIndexProps, props);
+	}
+	list_free(indexOids);
 }
 
 /*

@@ -3664,8 +3664,21 @@ typedef struct IndexStmt
 	 * index to the new and must be explicitly saved before dropping the old
 	 * index and restored after creating the new index.
 	 */
+	bool		idxisreplident; /* restore this index as REPLICA IDENTITY */
+	bool		idxisclustered; /* restore CLUSTER ON this index */
 	char	   *idxcomment;		/* comment to apply to index, or NULL */
 	List	   *idxstattargets; /* list of IndexStatTarget to restore */
+
+	/*
+	 * For a partitioned index, oldPartIndexProps holds one entry per old leaf
+	 * index (across all partition levels). The whole list is propagated to
+	 * every IndexStmt in DefineIndex()'s recursion so that intermediate
+	 * levels can still find deeper leaves' entries. Each stmt then copies its
+	 * own matching entry into the corresponding scalar fields in the
+	 * IndexStmt (see TransferPartitionIndexProps).
+	 */
+	List	   *oldPartIndexProps;	/* list of PartitionIndexProps
+									 * (partitioned index rebuild only) */
 } IndexStmt;
 
 /* one per-column statistics target carried across an index rebuild */
@@ -3677,6 +3690,30 @@ typedef struct IndexStatTarget
 	int			attnum;			/* index column number (1-based) */
 	int			stattarget;		/* attstattarget value to restore */
 } IndexStatTarget;
+
+/*
+ * Properties of one old leaf partition index, captured before it is dropped
+ * during ALTER COLUMN TYPE or SET EXPRESSION so they can be re-applied to the
+ * rebuilt child index.  These are the properties that recreating the leaf index
+ * would not preserve: some cannot be expressed in CREATE INDEX (comment,
+ * replica identity, cluster-on, stat targets), and the rest can be but are
+ * still not carried over from the leaf (the name is cleared and re-derived, and
+ * the reloptions are taken from the parent index).
+ */
+typedef struct PartitionIndexProps
+{
+	pg_node_attr(no_equal, no_query_jumble)
+
+	NodeTag		type;
+	Oid			partrelid;		/* partition table owning this index */
+	char	   *idxname;		/* index name to restore */
+	char	   *idxcomment;		/* comment, or NULL */
+	bool		isreplident;	/* was replica identity */
+	bool		isclustered;	/* was clustered on */
+	List	   *stattargets;	/* list of IndexStatTarget */
+	List	   *reloptions;		/* index's own reloptions (untransformed
+								 * DefElem list), or NIL */
+} PartitionIndexProps;
 
 /* ----------------------
  *		Create Statistics Statement
