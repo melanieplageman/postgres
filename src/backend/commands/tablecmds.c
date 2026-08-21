@@ -707,6 +707,7 @@ static void RebuildConstraintComment(AlteredTableInfo *tab, AlterTablePass pass,
 									 Oid objid, Relation rel, List *domname,
 									 const char *conname);
 static void TryReuseIndex(Oid oldId, IndexStmt *stmt);
+static List *GetIndexStatTargets(Oid indexOid);
 static void TryReuseForeignKey(Oid oldId, Constraint *con);
 static ObjectAddress ATExecAlterColumnGenericOptions(Relation rel, const char *colName,
 													 List *options, LOCKMODE lockmode);
@@ -16439,6 +16440,8 @@ ATPostAlterTypeParse(Oid oldId, Oid oldRelId, Oid refRelId, Oid ownerId,
 			stmt->reset_default_tblspc = true;
 			/* keep the index's comment */
 			stmt->idxcomment = GetComment(oldId, RelationRelationId, 0);
+			/* keep the index's per-column statistics targets */
+			stmt->idxstattargets = GetIndexStatTargets(oldId);
 
 			newcmd = makeNode(AlterTableCmd);
 			newcmd->subtype = AT_ReAddIndex;
@@ -16468,6 +16471,8 @@ ATPostAlterTypeParse(Oid oldId, Oid oldRelId, Oid refRelId, Oid ownerId,
 					/* keep any comment on the index */
 					indstmt->idxcomment = GetComment(indoid,
 													 RelationRelationId, 0);
+					/* keep the index's per-column statistics targets */
+					indstmt->idxstattargets = GetIndexStatTargets(indoid);
 					indstmt->reset_default_tblspc = true;
 
 					cmd->subtype = AT_ReAddIndex;
@@ -16613,6 +16618,44 @@ RebuildConstraintComment(AlteredTableInfo *tab, AlterTablePass pass, Oid objid,
 	newcmd->subtype = AT_ReAddComment;
 	newcmd->def = (Node *) cmd;
 	tab->subcmds[pass] = lappend(tab->subcmds[pass], newcmd);
+}
+
+/*
+ * Collect the per-column statistics targets of an index into a list of
+ * IndexStatTarget nodes. Returns NIL if none are set.
+ */
+static List *
+GetIndexStatTargets(Oid indexOid)
+{
+	List	   *result = NIL;
+	Relation	irel;
+
+	irel = index_open(indexOid, AccessShareLock);
+	for (int i = 1; i <= IndexRelationGetNumberOfAttributes(irel); i++)
+	{
+		HeapTuple	atup;
+		Datum		d;
+		bool		isnull;
+
+		atup = SearchSysCache2(ATTNUM, ObjectIdGetDatum(indexOid),
+							   Int16GetDatum(i));
+		if (!HeapTupleIsValid(atup))
+			continue;
+		d = SysCacheGetAttr(ATTNUM, atup,
+							Anum_pg_attribute_attstattarget, &isnull);
+		if (!isnull)
+		{
+			IndexStatTarget *st = makeNode(IndexStatTarget);
+
+			st->attnum = i;
+			st->stattarget = DatumGetInt16(d);
+			result = lappend(result, st);
+		}
+		ReleaseSysCache(atup);
+	}
+	index_close(irel, AccessShareLock);
+
+	return result;
 }
 
 /*
