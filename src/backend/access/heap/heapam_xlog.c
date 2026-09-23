@@ -23,6 +23,33 @@
 #include "storage/standby.h"
 
 /*
+ * Clear visibility map bits for a heap block when the WAL record clearing it
+ * did not register the VM block. This handles cases where the VM is
+ * out-of-sync between the primary and standby (for instance, CREATE DATABASE
+ * STRATEGY WAL_LOG historically could cause this).
+ *
+ * This is not fully resilient: the VM page is modified without a full-page
+ * image, so a torn write during a crash could leave it inconsistent until the
+ * page is next repaired. That is considered acceptable since the VM is zeroed
+ * on error when reading it.
+ */
+static void
+heap_xlog_vm_clear_unregistered(Relation reln, BlockNumber heap_blkno,
+								uint8 flags)
+{
+	Buffer		vmbuffer = InvalidBuffer;
+
+	if (visibilitymap_get_status(reln, heap_blkno, &vmbuffer) & flags)
+	{
+		LockBuffer(vmbuffer, BUFFER_LOCK_EXCLUSIVE);
+		visibilitymap_clear(reln, heap_blkno, vmbuffer, flags);
+		UnlockReleaseBuffer(vmbuffer);
+	}
+	else if (BufferIsValid(vmbuffer))
+		ReleaseBuffer(vmbuffer);
+}
+
+/*
  * Clear visibility map bits for a single heap block during heap redo.
  *
  * Used by records that modify one heap block and, at most, its corresponding
@@ -46,22 +73,26 @@ heap_xlog_vm_clear(XLogReaderState *record,
 	Relation	reln = CreateFakeRelcacheEntry(target_locator);
 	Buffer		vmbuffer = InvalidBuffer;
 
+	if (!XLogRecHasBlockRef(record, wal_vm_block_id))
+	{
+		heap_xlog_vm_clear_unregistered(reln, heap_blkno, flags);
+		FreeFakeRelcacheEntry(reln);
+		return;
+	}
+
 	/*
 	 * If the vmbuffer was registered, use the recovery-specific routines to
 	 * read it. These will either apply an FPI or indicate that we should
 	 * clear the requested bits ourselves.
 	 */
-	if (XLogRecHasBlockRef(record, wal_vm_block_id))
+	if (XLogReadBufferForRedo(record, wal_vm_block_id,
+							  &vmbuffer) == BLK_NEEDS_REDO)
 	{
-		if (XLogReadBufferForRedo(record, wal_vm_block_id,
-								  &vmbuffer) == BLK_NEEDS_REDO)
-		{
-			if (visibilitymap_clear(reln, heap_blkno, vmbuffer, flags))
-				PageSetLSN(BufferGetPage(vmbuffer), lsn);
-		}
-		if (BufferIsValid(vmbuffer))
-			UnlockReleaseBuffer(vmbuffer);
+		if (visibilitymap_clear(reln, heap_blkno, vmbuffer, flags))
+			PageSetLSN(BufferGetPage(vmbuffer), lsn);
 	}
+	if (BufferIsValid(vmbuffer))
+		UnlockReleaseBuffer(vmbuffer);
 
 	FreeFakeRelcacheEntry(reln);
 }
