@@ -1315,6 +1315,8 @@ heap_page_prune_and_freeze(PruneFreezeParams *params,
 
 	if (do_prune || do_freeze || do_set_vm)
 	{
+		bool		heap_modified = do_prune || do_freeze;
+
 		/* Apply the planned item changes and repair page fragmentation. */
 		if (do_prune)
 		{
@@ -1335,21 +1337,28 @@ heap_page_prune_and_freeze(PruneFreezeParams *params,
 			 * corresponding VM bit is clear, we strongly prefer to keep them
 			 * in sync.
 			 *
-			 * The heap buffer must be marked dirty before adding it to the
-			 * WAL chain when setting the VM. We don't worry about
-			 * unnecessarily dirtying the heap buffer if PD_ALL_VISIBLE is
-			 * already set, though. It is extremely rare to have a clean heap
-			 * buffer with PD_ALL_VISIBLE already set and the VM bits clear,
-			 * so there is no point in optimizing it.
+			 * Only touch (and therefore dirty) the heap page when
+			 * PD_ALL_VISIBLE is not already set.  If it is already set -- for
+			 * example the VM was truncated or diverged and we are only
+			 * re-establishing the VM bit -- re-dirtying the heap page would
+			 * force a full-page image of every such page under
+			 * checksums/wal_log_hints, even though the heap page does not
+			 * actually change.
 			 */
-			PageSetAllVisible(prstate.page);
-			PageClearPrunable(prstate.page);
+			if (!PageIsAllVisible(prstate.page))
+			{
+				PageSetAllVisible(prstate.page);
+				PageClearPrunable(prstate.page);
+				heap_modified = true;
+			}
 			(void) visibilitymap_set(prstate.block, prstate.vmbuffer,
 									 prstate.new_vmbits,
 									 prstate.relation->rd_locator);
 		}
 
-		MarkBufferDirty(prstate.buffer);
+		/* Only dirty the heap buffer if we actually modified it. */
+		if (heap_modified)
+			MarkBufferDirty(prstate.buffer);
 
 		/*
 		 * Emit a WAL XLOG_HEAP2_PRUNE* record showing what we did
@@ -2663,6 +2672,17 @@ log_heap_prune_and_freeze(Relation relation, Buffer buffer,
 	 */
 	if (!XLogRecPtrIsValid(PageGetLSN(heap_page)))
 		regbuf_flags_heap |= REGBUF_FORCE_IMAGE;
+	else if (!BufferIsDirty(buffer))
+	{
+		/*
+		 * The heap page was not modified: we are only (re-)establishing the
+		 * VM on a page whose PD_ALL_VISIBLE was already set.  Register it
+		 * clean so redo can still ensure PD_ALL_VISIBLE on a divergent
+		 * standby, but emit no FPI and (below) do not stamp its LSN.
+		 */
+		regbuf_flags_heap |= REGBUF_NO_CHANGE | REGBUF_NO_IMAGE;
+		heap_fpi_allowed = false;
+	}
 	else if (!do_prune && nfrozen == 0 && (!do_set_vm || !XLogHintBitIsNeeded()))
 	{
 		regbuf_flags_heap |= REGBUF_NO_IMAGE;

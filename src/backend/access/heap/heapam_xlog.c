@@ -145,6 +145,7 @@ heap_xlog_prune_freeze(XLogReaderState *record)
 		OffsetNumber *frz_offsets;
 		char	   *dataptr = XLogRecGetBlockData(record, 0, &datalen);
 		bool		do_prune;
+		bool		heap_was_all_visible = false;
 
 		heap_xlog_deserialize_prune_and_freeze(dataptr, xlrec.flags,
 											   &nplans, &plans, &frz_offsets,
@@ -206,19 +207,32 @@ heap_xlog_prune_freeze(XLogReaderState *record)
 		 */
 		if (vmflags & VISIBILITYMAP_VALID_BITS)
 		{
-			PageSetAllVisible(page);
-			PageClearPrunable(page);
+			heap_was_all_visible = PageIsAllVisible(page);
+			if (!heap_was_all_visible)
+			{
+				PageSetAllVisible(page);
+				PageClearPrunable(page);
+			}
 		}
 
-		MarkBufferDirty(buffer);
-
 		/*
-		 * See log_heap_prune_and_freeze() for commentary on when we set the
-		 * heap page LSN.
+		 * Mirror log_heap_prune_and_freeze(): only dirty and stamp the heap
+		 * page when we actually changed it.  If the only intent was to set
+		 * the VM and PD_ALL_VISIBLE was already set, the heap page is
+		 * untouched (the primary registered it REGBUF_NO_CHANGE).
 		 */
-		if (do_prune || nplans > 0 ||
-			((vmflags & VISIBILITYMAP_VALID_BITS) && XLogHintBitIsNeeded()))
-			PageSetLSN(page, lsn);
+		if (do_prune || nplans > 0 || !heap_was_all_visible)
+		{
+			MarkBufferDirty(buffer);
+
+			/*
+			 * See log_heap_prune_and_freeze() for commentary on when we set
+			 * the heap page LSN.
+			 */
+			if (do_prune || nplans > 0 ||
+				((vmflags & VISIBILITYMAP_VALID_BITS) && XLogHintBitIsNeeded()))
+				PageSetLSN(page, lsn);
+		}
 
 		/*
 		 * Note: we don't worry about updating the page's prunability hints.
