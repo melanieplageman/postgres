@@ -22,6 +22,7 @@
 #include "access/visibilitymap.h"
 #include "access/xlog.h"
 #include "access/xloginsert.h"
+#include "catalog/pg_control.h"
 #include "commands/vacuum.h"
 #include "executor/instrument.h"
 #include "miscadmin.h"
@@ -967,21 +968,62 @@ heap_page_fix_vm_corruption(PruneState *prstate, OffsetNumber offnum,
 
 	Assert(do_clear_heap || do_clear_vm);
 
-	/* Avoid marking the buffer dirty if PD_ALL_VISIBLE is already clear */
+	if (do_clear_vm)
+		LockBuffer(prstate->vmbuffer, BUFFER_LOCK_EXCLUSIVE);
+
+	START_CRIT_SECTION();
+
 	if (do_clear_heap)
 	{
 		Assert(PageIsAllVisible(prstate->page));
 		PageClearAllVisible(prstate->page);
-		MarkBufferDirtyHint(prstate->buffer, true);
+		MarkBufferDirty(prstate->buffer);
 	}
 
 	if (do_clear_vm)
 	{
-		LockBuffer(prstate->vmbuffer, BUFFER_LOCK_EXCLUSIVE);
-		/* This VM clear is not WAL-logged, so its return value is not needed. */
+		/*
+		 * The return value is not needed: we only get here because at least
+		 * one of the bits was set.
+		 */
 		(void) visibilitymap_clear(prstate->relation->rd_locator,
 								   prstate->block, prstate->vmbuffer,
 								   VISIBILITYMAP_VALID_BITS);
+	}
+
+	/*
+	 * WAL-log the repair so that standbys and crash recovery apply the same
+	 * fix and the VM stays in sync across a cluster.
+	 *
+	 * Rather than inventing a dedicated record type, just log full-page
+	 * images of the pages we changed. VM corruption is rare, so the extra WAL
+	 * does not matter.
+	 */
+	if (RelationNeedsWAL(prstate->relation))
+	{
+		XLogRecPtr	recptr;
+		uint8		block_id = 0;
+
+		XLogBeginInsert();
+		if (do_clear_heap)
+			XLogRegisterBuffer(block_id++, prstate->buffer,
+							   REGBUF_FORCE_IMAGE | REGBUF_STANDARD);
+		if (do_clear_vm)
+			XLogRegisterBuffer(block_id++, prstate->vmbuffer,
+							   REGBUF_FORCE_IMAGE);
+
+		recptr = XLogInsert(RM_XLOG_ID, XLOG_FPI);
+
+		if (do_clear_heap)
+			PageSetLSN(prstate->page, recptr);
+		if (do_clear_vm)
+			PageSetLSN(BufferGetPage(prstate->vmbuffer), recptr);
+	}
+
+	END_CRIT_SECTION();
+
+	if (do_clear_vm)
+	{
 		LockBuffer(prstate->vmbuffer, BUFFER_LOCK_UNLOCK);
 		prstate->old_vmbits = 0;
 	}
