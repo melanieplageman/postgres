@@ -339,7 +339,7 @@ brin_redo(XLogReaderState *record)
  * Mask a BRIN page before doing consistency checks.
  */
 void
-brin_mask(char *pagedata, BlockNumber blkno)
+brin_mask(char *pagedata, ForkNumber forknum, BlockNumber blkno)
 {
 	Page		page = (Page) pagedata;
 	PageHeader	pagehdr = (PageHeader) page;

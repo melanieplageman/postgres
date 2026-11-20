@@ -332,6 +332,11 @@ CREATE FUNCTION test_relpath()
     LANGUAGE C;
 SELECT test_relpath();
 
+-- WAL consistency masks for visibility map pages
+CREATE FUNCTION test_vm_mask() RETURNS void
+    AS :'regresslib' LANGUAGE C;
+SELECT test_vm_mask();
+
 -- pg_replication_origin.roname limit
 SELECT pg_replication_origin_create('regress_' || repeat('a', 505));
 

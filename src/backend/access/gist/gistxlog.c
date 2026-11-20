@@ -442,7 +442,7 @@ gist_xlog_cleanup(void)
  * Mask a Gist page before running consistency checks on it.
  */
 void
-gist_mask(char *pagedata, BlockNumber blkno)
+gist_mask(char *pagedata, ForkNumber forknum, BlockNumber blkno)
 {
 	Page		page = (Page) pagedata;
 

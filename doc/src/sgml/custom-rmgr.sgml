@@ -34,8 +34,9 @@
  * "VACUUM". rm_desc can then be called to obtain additional detail for the
  * record, if available (e.g. the last block).
  *
- * rm_mask takes as input a page modified by the resource manager and masks
- * out bits that shouldn't be flagged by wal_consistency_checking.
+ * rm_mask takes a page modified by the resource manager, its fork number and
+ * block number, and masks out bits that shouldn't be flagged by
+ * wal_consistency_checking.
  *
  * RmgrTable[] is indexed by RmgrId values (see rmgrlist.h). If rm_name is
  * NULL, the corresponding RmgrTable entry is considered invalid.
@@ -48,7 +49,7 @@ typedef struct RmgrData
     const char *(*rm_identify) (uint8 info);
     void        (*rm_startup) (void);
     void        (*rm_cleanup) (void);
-    void        (*rm_mask) (char *pagedata, BlockNumber blkno);
+    void        (*rm_mask) (char *pagedata, ForkNumber forknum, BlockNumber blkno);
     void        (*rm_decode) (struct LogicalDecodingContext *ctx,
                               struct XLogRecordBuffer *buf);
 } RmgrData;

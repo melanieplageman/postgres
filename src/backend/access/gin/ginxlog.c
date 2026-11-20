@@ -788,7 +788,7 @@ gin_xlog_cleanup(void)
  * Mask a GIN page before running consistency checks on it.
  */
 void
-gin_mask(char *pagedata, BlockNumber blkno)
+gin_mask(char *pagedata, ForkNumber forknum, BlockNumber blkno)
 {
 	Page		page = (Page) pagedata;
 	PageHeader	pagehdr = (PageHeader) page;

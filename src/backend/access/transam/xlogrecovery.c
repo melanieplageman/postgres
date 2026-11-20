@@ -2551,8 +2551,8 @@ verifyBackupPageConsistency(XLogReaderState *record)
 		 */
 		if (rmgr.rm_mask != NULL)
 		{
-			rmgr.rm_mask(replay_image_masked, blkno);
-			rmgr.rm_mask(primary_image_masked, blkno);
+			rmgr.rm_mask(replay_image_masked, forknum, blkno);
+			rmgr.rm_mask(primary_image_masked, forknum, blkno);
 		}
 
 		/* Time to compare the primary and replay images. */

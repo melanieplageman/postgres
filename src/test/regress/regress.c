@@ -21,6 +21,8 @@
 
 #include "access/detoast.h"
 #include "access/htup_details.h"
+#include "access/visibilitymapdefs.h"
+#include "access/xlog_internal.h"
 #include "catalog/catalog.h"
 #include "catalog/namespace.h"
 #include "catalog/pg_operator.h"
@@ -1391,6 +1393,38 @@ binary_coercible(PG_FUNCTION_ARGS)
 	Oid			targettype = PG_GETARG_OID(1);
 
 	PG_RETURN_BOOL(IsBinaryCoercible(srctype, targettype));
+}
+
+/* Check the WAL consistency masks for visibility map pages. */
+PG_FUNCTION_INFO_V1(test_vm_mask);
+Datum
+test_vm_mask(PG_FUNCTION_ARGS)
+{
+	const RmgrId rmids[] = {RM_HEAP_ID, RM_HEAP2_ID};
+	Page		primary = palloc(BLCKSZ);
+	Page		replay = palloc(BLCKSZ);
+
+	for (int i = 0; i < lengthof(rmids); i++)
+	{
+		RmgrData	rmgr = GetRmgr(rmids[i]);
+
+		PageInit(primary, BLCKSZ, 0);
+		*PageGetContents(primary) = VISIBILITYMAP_ALL_VISIBLE;
+		memcpy(replay, primary, BLCKSZ);
+		PageSetLSN(replay, 1);
+		((PageHeader) replay)->pd_checksum = 1;
+
+		rmgr.rm_mask(primary, VISIBILITYMAP_FORKNUM, 0);
+		rmgr.rm_mask(replay, VISIBILITYMAP_FORKNUM, 0);
+		if (memcmp(primary, replay, BLCKSZ) != 0)
+			elog(ERROR, "%s mask retained VM page LSN or checksum", rmgr.rm_name);
+
+		*PageGetContents(replay) |= VISIBILITYMAP_ALL_FROZEN;
+		rmgr.rm_mask(replay, VISIBILITYMAP_FORKNUM, 0);
+		if (memcmp(primary, replay, BLCKSZ) == 0)
+			elog(ERROR, "%s mask hid a VM bitmap difference", rmgr.rm_name);
+	}
+	PG_RETURN_VOID();
 }
 
 /*

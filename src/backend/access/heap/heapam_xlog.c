@@ -1369,12 +1369,16 @@ heap2_redo(XLogReaderState *record)
  * Mask a heap page before performing consistency checks on it.
  */
 void
-heap_mask(char *pagedata, BlockNumber blkno)
+heap_mask(char *pagedata, ForkNumber forknum, BlockNumber blkno)
 {
 	Page		page = (Page) pagedata;
 	OffsetNumber off;
 
 	mask_page_lsn_and_checksum(page);
+
+	/* On VM pages the apparent free space contains the visibility bitmap. */
+	if (forknum == VISIBILITYMAP_FORKNUM)
+		return;
 
 	mask_page_hint_bits(page);
 	mask_unused_space(page);
