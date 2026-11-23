@@ -467,9 +467,8 @@ XLogReadBufferForRedoExtended(XLogReaderState *record,
  * In RBM_ZERO_* modes, if the page doesn't exist, the relation is extended
  * with all-zeroes pages up to the given block number.
  *
- * In RBM_NORMAL_NO_LOG mode, we return InvalidBuffer if the page doesn't
- * exist, and we don't check for all-zeroes.  Thus, no log entry is made
- * to imply that the page should be dropped or truncated later.
+ * RBM_NORMAL_NO_LOG also returns InvalidBuffer for a missing or uninitialized
+ * page, but does not record an invalid-page reference.
  *
  * Optionally, recent_buffer can be used to provide a hint about the location
  * of the page in the buffer pool; it does not have to be correct, but avoids
@@ -544,7 +543,7 @@ XLogReadBufferExtended(RelFileLocator rlocator, ForkNumber forknum,
 	}
 
 recent_buffer_fast_path:
-	if (mode == RBM_NORMAL)
+	if (mode == RBM_NORMAL || mode == RBM_NORMAL_NO_LOG)
 	{
 		/* check that page has been initialized */
 		Page		page = BufferGetPage(buffer);
@@ -557,7 +556,8 @@ recent_buffer_fast_path:
 		if (PageIsNew(page))
 		{
 			ReleaseBuffer(buffer);
-			log_invalid_page(rlocator, forknum, blkno, true);
+			if (mode == RBM_NORMAL)
+				log_invalid_page(rlocator, forknum, blkno, true);
 			return InvalidBuffer;
 		}
 	}

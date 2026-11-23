@@ -133,4 +133,34 @@ is( $node->safe_psql(
 $node->safe_psql('postgres', 'DROP TABLE truncme');
 
 
+# Test WAL consistency checking when a truncated heap block is reused. The
+# DELETE must have a consistency image but no image to apply during redo.
+# Keep the background writer from flushing the re-inserted tuple before the
+# crash, so that redo of the DELETE finds the zero page left by extension.
+$node->append_conf(
+	'postgresql.conf', qq[
+full_page_writes = off
+bgwriter_lru_maxpages = 0
+]);
+$node->reload();
+
+is( $node->safe_psql(
+		'postgres', q[
+CREATE TABLE truncme(i int);
+INSERT INTO truncme VALUES (1);
+CHECKPOINT;
+SET wal_consistency_checking = 'heap';
+DELETE FROM truncme;
+VACUUM (TRUNCATE TRUE) truncme;
+SELECT pg_relation_size('truncme');
+]),
+	'0', 'VACUUM truncated the heap to zero blocks');
+
+$node->safe_psql('postgres', 'INSERT INTO truncme VALUES (2)');
+$node->stop('immediate');
+$node->start();
+
+is($node->safe_psql('postgres', 'TABLE truncme'),
+	'2', 'WAL consistency checking skips the uninitialized heap block');
+
 done_testing();
