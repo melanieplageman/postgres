@@ -510,6 +510,8 @@ hash_xlog_move_page_contents(XLogReaderState *record)
 			 */
 			(void) XLogReadBufferForRedoExtended(record, 0, RBM_NORMAL, true, &bucketbuf);
 		}
+		else
+			XLogSkipBlockForRedo(record, 0);
 
 		action = XLogReadBufferForRedo(record, 1, &writebuf);
 	}
@@ -648,6 +650,8 @@ hash_xlog_squeeze_page(XLogReaderState *record)
 			 */
 			(void) XLogReadBufferForRedoExtended(record, 0, RBM_NORMAL, true, &bucketbuf);
 		}
+		else
+			XLogSkipBlockForRedo(record, 0);
 
 		if (xldata->ntups > 0 || xldata->is_prev_bucket_same_wrt)
 			action = XLogReadBufferForRedo(record, 1, &writebuf);
@@ -890,6 +894,8 @@ hash_xlog_delete(XLogReaderState *record)
 			 */
 			(void) XLogReadBufferForRedoExtended(record, 0, RBM_NORMAL, true, &bucketbuf);
 		}
+		else
+			XLogSkipBlockForRedo(record, 0);
 
 		action = XLogReadBufferForRedo(record, 1, &deletebuf);
 	}

@@ -94,6 +94,18 @@ extern XLogRedoAction XLogReadBufferForRedoExtended(XLogReaderState *record,
 													ReadBufferMode mode, bool get_cleanup_lock,
 													Buffer *buf);
 
+/* Account for a block reference that redo deliberately need not read. */
+static inline void
+XLogSkipBlockForRedo(XLogReaderState *record, uint8 block_id)
+{
+#ifdef USE_ASSERT_CHECKING
+	Assert(XLogRecHasBlockRef(record, block_id));
+	Assert(!XLogRecBlockImageApply(record, block_id));
+	Assert(!XLogRecHasBlockData(record, block_id));
+	XLogRecGetBlock(record, block_id)->handled = true;
+#endif
+}
+
 extern Buffer XLogReadBufferExtended(RelFileLocator rlocator, ForkNumber forknum,
 									 BlockNumber blkno, ReadBufferMode mode,
 									 Buffer recent_buffer);

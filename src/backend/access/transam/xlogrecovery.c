@@ -1988,9 +1988,9 @@ ApplyWalRecord(XLogReaderState *xlogreader, XLogRecord *record, TimeLineID *repl
 	GetRmgr(record->xl_rmid).rm_redo(xlogreader);
 
 	/*
-	 * Verify that redo accounted for every block reference. Skipping a call
-	 * to XLogReadBufferForRedoExtended() can leave a required full-page image
-	 * unrestored or a relation shorter than it should be.
+	 * Verify that redo accounted for every block reference. Ignoring a block
+	 * reference can leave a full-page image unrestored or a relation shorter
+	 * than it should be.
 	 */
 #ifdef USE_ASSERT_CHECKING
 	for (int block_id = 0; block_id <= xlogreader->record->max_block_id; block_id++)

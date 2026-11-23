@@ -382,9 +382,7 @@ XLogReadBufferForRedoExtended(XLogReaderState *record,
 	}
 
 #ifdef USE_ASSERT_CHECKING
-	/* Shouldn't have multiple read references to block */
-	Assert(!record->record->blocks[block_id].handled);
-	record->record->blocks[block_id].handled = true;
+	XLogRecGetBlock(record, block_id)->handled = true;
 #endif
 
 	/*
